@@ -23,8 +23,12 @@ use crate::session::peer_message::peer_messaging_enabled;
 pub(crate) enum PeerInboxStatus {
     /// No session has registered yet (or the host shut down): nothing was attempted.
     NotStarted,
-    Available { host_id: HostId },
-    Unavailable { reason: Disabled },
+    Available {
+        host_id: HostId,
+    },
+    Unavailable {
+        reason: Disabled,
+    },
 }
 
 /// The fixed display name offered for a main session. Titles are not offered until packet 9.
@@ -92,7 +96,11 @@ pub(crate) struct PeerHost {
 impl PeerHost {
     pub(crate) fn new() -> Self {
         Self {
-            state: Mutex::new(State { home: None, phase: Phase::NotStarted, desired: HashMap::new() }),
+            state: Mutex::new(State {
+                home: None,
+                phase: Phase::NotStarted,
+                desired: HashMap::new(),
+            }),
             start_done: tokio::sync::Notify::new(),
             retry_gap: RETRY_GAP,
             #[cfg(all(test, any(unix, windows)))]
@@ -137,20 +145,34 @@ impl PeerHost {
     }
 
     /// A main session registered (insert_resident). Subagents never come here.
-    pub(crate) fn session_started(self: &Arc<Self>, session_id: &str, handle: MessageDeliveryHandle) {
+    pub(crate) fn session_started(
+        self: &Arc<Self>,
+        session_id: &str,
+        handle: MessageDeliveryHandle,
+    ) {
         if !self.enabled() {
             return;
         }
         let mut g = self.lock();
         let Some(home) = g.home.clone() else { return };
-        g.desired.insert(session_id.to_owned(), Desired { handle: handle.clone(), name: SESSION_NAME });
+        g.desired.insert(
+            session_id.to_owned(),
+            Desired {
+                handle: handle.clone(),
+                name: SESSION_NAME,
+            },
+        );
         match &g.phase {
             // Registering again raises the incarnation: an address of the replaced session is stale.
             Phase::Running(inbox) => {
-                let _ = inbox.directory().register(session_id, handle, SESSION_NAME, session_id);
+                let _ = inbox
+                    .directory()
+                    .register(session_id, handle, SESSION_NAME, session_id);
             }
             Phase::NotStarted => {
-                let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+                let Ok(rt) = tokio::runtime::Handle::try_current() else {
+                    return;
+                };
                 g.phase = Phase::Starting;
                 let me = self.clone();
                 drop(g);
@@ -158,7 +180,9 @@ impl PeerHost {
             }
             // A full locator (or a busy lock) may clear: one new attempt per retry gap, never a loop.
             Phase::Failed(reason, at) if retryable(*reason) && at.elapsed() >= self.retry_gap => {
-                let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+                let Ok(rt) = tokio::runtime::Handle::try_current() else {
+                    return;
+                };
                 g.phase = Phase::Starting;
                 let me = self.clone();
                 drop(g);
@@ -170,7 +194,10 @@ impl PeerHost {
 
     async fn run_start(self: Arc<Self>, home: PathBuf) {
         // A panic below leaves no stuck `Starting`: the guard stores a fixed reason while unwinding.
-        let mut panic_guard = StartPanicGuard { host: self.clone(), done: false };
+        let mut panic_guard = StartPanicGuard {
+            host: self.clone(),
+            done: false,
+        };
         #[cfg(all(test, any(unix, windows)))]
         let started = match &self.force {
             Some(o) => PeerInbox::start_with(&home, o.clone()).await,
@@ -244,10 +271,14 @@ impl PeerHost {
 
     pub(crate) fn status(&self) -> PeerInboxStatus {
         if !self.enabled() {
-            return PeerInboxStatus::Unavailable { reason: Disabled::FeatureOff };
+            return PeerInboxStatus::Unavailable {
+                reason: Disabled::FeatureOff,
+            };
         }
         match &self.lock().phase {
-            Phase::Running(i) => PeerInboxStatus::Available { host_id: i.host_id().clone() },
+            Phase::Running(i) => PeerInboxStatus::Available {
+                host_id: i.host_id().clone(),
+            },
             Phase::Failed(reason, _) => PeerInboxStatus::Unavailable { reason: *reason },
             Phase::NotStarted | Phase::Starting | Phase::Closed => PeerInboxStatus::NotStarted,
         }
@@ -333,7 +364,9 @@ pub(crate) fn reason_message(reason: Disabled) -> String {
 fn shell_safe_path(home: &str) -> bool {
     !home.is_empty()
         && !home.starts_with('-')
-        && home.chars().all(|c| c.is_ascii_alphanumeric() || "_./~+@:-".contains(c))
+        && home
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./~+@:-".contains(c))
 }
 
 pub(crate) fn reason_message_for(reason: Disabled, home: Option<&std::path::Path>) -> String {
@@ -360,10 +393,14 @@ pub(crate) fn reason_message_for(reason: Disabled, home: Option<&std::path::Path
 pub(crate) fn peer_inbox_status() -> PeerInboxStatus {
     // With the flag off the process global is never created.
     if !peer_messaging_enabled() {
-        return PeerInboxStatus::Unavailable { reason: Disabled::FeatureOff };
+        return PeerInboxStatus::Unavailable {
+            reason: Disabled::FeatureOff,
+        };
     }
     if super::driver::remote_attached() {
-        return PeerInboxStatus::Unavailable { reason: Disabled::RemoteClientAttached };
+        return PeerInboxStatus::Unavailable {
+            reason: Disabled::RemoteClientAttached,
+        };
     }
     global().status()
 }

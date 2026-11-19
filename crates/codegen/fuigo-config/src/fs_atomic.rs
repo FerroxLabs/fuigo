@@ -241,8 +241,11 @@ fn create_staged_temp(
             Ok(file) => {
                 // From here the temp is ours: the staged value removes it on every failure.
                 #[allow(unused_mut)] // a handle is attached on unix only
-                let mut staged =
-                    StagedReplacement::new_unbound(tmp, final_path.to_path_buf(), dir.to_path_buf());
+                let mut staged = StagedReplacement::new_unbound(
+                    tmp,
+                    final_path.to_path_buf(),
+                    dir.to_path_buf(),
+                );
                 #[cfg(unix)]
                 if let Some(h) = handle.take() {
                     staged = staged.with_dir_handle(h);
@@ -301,9 +304,8 @@ impl DirHandle {
         let mut last = None;
         for access in modes {
             // SAFETY: a NUL-terminated path; the descriptor is owned by the File.
-            let fd = unsafe {
-                libc::open(c_dir.as_ptr(), access | libc::O_DIRECTORY | libc::O_CLOEXEC)
-            };
+            let fd =
+                unsafe { libc::open(c_dir.as_ptr(), access | libc::O_DIRECTORY | libc::O_CLOEXEC) };
             if fd >= 0 {
                 // SAFETY: `fd` is a fresh descriptor nobody else owns.
                 return Ok(Self(unsafe { std::fs::File::from_raw_fd(fd) }));
@@ -796,7 +798,10 @@ fn write_in_place(target: &Path, contents: &[u8]) -> std::io::Result<()> {
                 .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
                 .open(target)
             {
-                Err(e) if e.raw_os_error() == Some(libc::ENXIO) && std::time::Instant::now() < give_up => {
+                Err(e)
+                    if e.raw_os_error() == Some(libc::ENXIO)
+                        && std::time::Instant::now() < give_up =>
+                {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 other => break other?,
@@ -1581,7 +1586,11 @@ fn lock_at_within_behind(
         }
     };
     // Stage 1.
-    let moved: Option<&dyn Fn()> = if outer.is_some() { Some(&pass_on) } else { None };
+    let moved: Option<&dyn Fn()> = if outer.is_some() {
+        Some(&pass_on)
+    } else {
+        None
+    };
     let turn = turn::wait(turn::key_for(&lock_path), stall, moved).ok_or_else(timed_out)?;
     // Stage 2.
     let ticket = match xq::register(&lock_path) {
@@ -1845,8 +1854,8 @@ mod turn {
     /// turn holder, or release it at once when nobody is waiting any more.
     fn helper(key: &Path, lock_path: &Path) {
         use fs2::FileExt as _;
-        let result = super::open_lock_file(lock_path)
-            .and_then(|file| file.lock_exclusive().map(|()| file));
+        let result =
+            super::open_lock_file(lock_path).and_then(|file| file.lock_exclusive().map(|()| file));
         let mut guard = queues();
         if let Some(map) = guard.as_mut()
             && let Some(queue) = map.get_mut(key)
@@ -1877,7 +1886,10 @@ mod turn {
     /// there.
     pub(super) fn wait(key: PathBuf, stall: Duration, moved: Option<&dyn Fn()>) -> Option<Turn> {
         let mut guard = queues();
-        let queue = guard.get_or_insert_with(HashMap::new).entry(key.clone()).or_default();
+        let queue = guard
+            .get_or_insert_with(HashMap::new)
+            .entry(key.clone())
+            .or_default();
         let ticket = queue.next;
         queue.next += 1;
         let mut seen = (queue.serving, queue.progress);
@@ -2695,10 +2707,9 @@ pub fn sweep_stale_temps(path: &Path, min_age: Duration) -> Vec<PathBuf> {
                             // Only that same dead writer's temps, each old
                             // enough itself (writing a file does not touch
                             // its directory's mtime).
-                            let is_ours = inner_name
-                                .to_str()
-                                .and_then(|n| temp_owner_pid(n, &name))
-                                == Some(pid);
+                            let is_ours =
+                                inner_name.to_str().and_then(|n| temp_owner_pid(n, &name))
+                                    == Some(pid);
                             let inner_path = staging.join(&inner_name);
                             if is_ours
                                 && std::fs::symlink_metadata(&inner_path).is_ok_and(|m| {
@@ -3119,7 +3130,10 @@ mod tests {
     fn spin_until(what: &str, mut cond: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !cond() {
-            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
             std::thread::yield_now();
         }
     }
@@ -3308,7 +3322,10 @@ mod tests {
 
     /// Stops and joins the forking thread also when an assertion panics.
     #[cfg(target_os = "linux")]
-    struct Forker(std::sync::Arc<std::sync::atomic::AtomicBool>, Option<std::thread::JoinHandle<()>>);
+    struct Forker(
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        Option<std::thread::JoinHandle<()>>,
+    );
 
     #[cfg(target_os = "linux")]
     impl Drop for Forker {
@@ -3356,9 +3373,9 @@ mod tests {
             std::fs::write(&path, b"").unwrap();
             let watcher = std::fs::File::open(&path).unwrap();
             assert!(!xq::is_live(&path), "nobody holds the ticket");
-            watcher
-                .try_lock_exclusive()
-                .expect("the probe's shared lock must be released, not outlive it in a forked child");
+            watcher.try_lock_exclusive().expect(
+                "the probe's shared lock must be released, not outlive it in a forked child",
+            );
             fs2::FileExt::unlock(&watcher).unwrap();
         }
     }
@@ -3442,7 +3459,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(staged_unlocked, Some(true), "staging must not hold the lock");
+        assert_eq!(
+            staged_unlocked,
+            Some(true),
+            "staging must not hold the lock"
+        );
         assert_eq!(lines(&path), ["a", "b"]);
     }
 
@@ -3826,7 +3847,11 @@ mod tests {
         // SAFETY: valid NUL-terminated path.
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
         // A reader that holds the pipe open and never reads.
-        let reader = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let target = fifo.clone();
         std::thread::spawn(move || {
@@ -3834,8 +3859,12 @@ mod tests {
         });
         let outcome = rx.recv_timeout(std::time::Duration::from_secs(25));
         drop(reader); // frees a writer the assertion below found still blocked
-        let result = outcome.expect("write_in_place must not block on a reader that stopped reading");
-        assert_eq!(result.expect_err("the stalled write fails").kind(), std::io::ErrorKind::TimedOut);
+        let result =
+            outcome.expect("write_in_place must not block on a reader that stopped reading");
+        assert_eq!(
+            result.expect_err("the stalled write fails").kind(),
+            std::io::ErrorKind::TimedOut
+        );
     }
 
     /// Review L17: a reader that does read still gets everything, even when the data is larger than the pipe.
@@ -3851,7 +3880,10 @@ mod tests {
         let path = fifo.clone();
         let reader = std::thread::spawn(move || {
             let mut data = Vec::new();
-            std::fs::File::open(&path).unwrap().read_to_end(&mut data).unwrap();
+            std::fs::File::open(&path)
+                .unwrap()
+                .read_to_end(&mut data)
+                .unwrap();
             data
         });
         let payload = vec![b'y'; 1024 * 1024];
@@ -3863,7 +3895,9 @@ mod tests {
     #[test]
     fn concurrent_edits_lose_no_update() {
         // Not alongside the P61 multi-process tests (see `HEAVY_IO`).
-        let _alone = HEAVY_IO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _alone = HEAVY_IO
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         const THREADS: usize = 8;
         const EACH: usize = 25;
         let dir = tempfile::tempdir().unwrap();
@@ -4009,7 +4043,11 @@ fn p150_config_lock_file_is_owner_only() {
     let config = dir.path().join("config.toml");
     let lock = config_lock_path(&config);
     drop(lock_config_for_write(&config).unwrap());
-    assert_eq!(mode(&lock), 0o600, "a new config.toml.lock must be owner-only");
+    assert_eq!(
+        mode(&lock),
+        0o600,
+        "a new config.toml.lock must be owner-only"
+    );
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
     drop(lock_config_for_write(&config).unwrap());
     assert_eq!(mode(&lock), 0o600, "a looser config.toml.lock is tightened");

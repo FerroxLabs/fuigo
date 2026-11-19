@@ -627,8 +627,8 @@ pub async fn run_setup() -> SetupOutcome {
 mod p47_wire_tests {
     use super::*;
     use crate::auth::p47_service_wire_tests::{
-        assert_delivered, assert_nothing_sent, assert_refusal_text, hostile_bases, preconditions,
-        session_auth, TRUSTED,
+        TRUSTED, assert_delivered, assert_nothing_sent, assert_refusal_text, hostile_bases,
+        preconditions, session_auth,
     };
     use crate::test_support::session_wire::SessionWire;
 
@@ -651,7 +651,10 @@ mod p47_wire_tests {
             let set_url = |base: &str| {
                 // SAFETY: fresh single-test process; the URL is resolved from the environment per fetch.
                 unsafe {
-                    std::env::set_var("FUIGO_MANAGED_CONFIG_URL", format!("{base}/deployment/config"));
+                    std::env::set_var(
+                        "FUIGO_MANAGED_CONFIG_URL",
+                        format!("{base}/deployment/config"),
+                    );
                     std::env::remove_var("FUIGO_DEPLOYMENT_KEY");
                 }
             };
@@ -661,7 +664,10 @@ mod p47_wire_tests {
                     .await
                     .err()
                     .expect("refused");
-                assert!(matches!(err, ManagedConfigError::SessionDestinationRefused(_)), "{err}");
+                assert!(
+                    matches!(err, ManagedConfigError::SessionDestinationRefused(_)),
+                    "{err}"
+                );
                 assert!(!err.is_retryable());
                 assert_refusal_text(&err.to_string(), "managed_config");
             }

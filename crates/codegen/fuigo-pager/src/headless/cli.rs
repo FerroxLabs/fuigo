@@ -216,7 +216,10 @@ pub(crate) fn resolve_agent_arg(agent: &str) -> ResolvedAgent {
     resolve_agent_arg_with(agent, |p| p.is_file())
 }
 
-fn resolve_agent_arg_with(agent: &str, is_file: impl Fn(&std::path::Path) -> bool) -> ResolvedAgent {
+fn resolve_agent_arg_with(
+    agent: &str,
+    is_file: impl Fn(&std::path::Path) -> bool,
+) -> ResolvedAgent {
     let path = std::path::Path::new(agent);
     // A separator or a `.md` suffix, nothing else: a qualified plugin name (`plug:reviewer`) is not a valid bare
     // name but is still a name, so a repo file literally called `plug:reviewer` never becomes the profile.
@@ -274,7 +277,11 @@ mod bom_tests {
 
     #[test]
     fn a_leading_byte_order_mark_is_dropped_from_a_text_prompt() {
-        for raw in [format!("{BOM}hello"), format!("{BOM}{BOM}  hello  \n"), format!("  {BOM}hello")] {
+        for raw in [
+            format!("{BOM}hello"),
+            format!("{BOM}{BOM}  hello  \n"),
+            format!("  {BOM}hello"),
+        ] {
             match HeadlessPrompt::from_args(Some(&raw), None, None).unwrap() {
                 Some(HeadlessPrompt::Text(t)) => assert_eq!(t, "hello", "{raw:?}"),
                 other => panic!("expected text, got {other:?}"),
@@ -315,7 +322,11 @@ mod bom_tests {
             other => panic!("expected text, got {other:?}"),
         }
         let json = dir.path().join("p.json");
-        std::fs::write(&json, format!("{BOM}[{{\"type\":\"text\",\"text\":\"x\"}}]")).unwrap();
+        std::fs::write(
+            &json,
+            format!("{BOM}[{{\"type\":\"text\",\"text\":\"x\"}}]"),
+        )
+        .unwrap();
         assert!(matches!(
             HeadlessPrompt::from_file(&json).unwrap(),
             HeadlessPrompt::Blocks(_)
@@ -340,7 +351,10 @@ mod u35_agent_arg_tests {
         }
         for path in ["mine.md", "./explore", "agents/codex", "/abs/fuigo-build"] {
             assert!(
-                matches!(resolve_agent_arg_with(path, every_path_is_a_file), ResolvedAgent::FilePath(_)),
+                matches!(
+                    resolve_agent_arg_with(path, every_path_is_a_file),
+                    ResolvedAgent::FilePath(_)
+                ),
                 "{path} reads as a file"
             );
         }

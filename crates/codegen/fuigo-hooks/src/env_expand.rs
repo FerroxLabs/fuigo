@@ -134,7 +134,10 @@ fn mask_modifier_forms_with(input: &str, sentinel: &str, dollar_sentinel: &str) 
         // Modifier-form braced ref: replace leading `${` with sentinel and emit the body (including closing `}`) as-is
         if r.braced && r.has_modifier {
             out.push_str(sentinel);
-            out.push_str(&protect_kept_runs(&input[r.start + 2..r.end], dollar_sentinel));
+            out.push_str(&protect_kept_runs(
+                &input[r.start + 2..r.end],
+                dollar_sentinel,
+            ));
         } else {
             // Plain `${NAME}`, bare `$NAME`, or invalid form: pass through verbatim so shellexpand can resolve (or leave unresolved)
             out.push_str(&input[r.start..r.end]);
@@ -180,7 +183,10 @@ fn restore_kept_runs(expanded: String, sentinel: &str) -> String {
         out.push_str(&rest[..at]);
         let tail = &rest[at + marker.len()..];
         let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
-        match (tail[..digits].parse::<usize>(), tail[digits..].strip_prefix('.')) {
+        match (
+            tail[..digits].parse::<usize>(),
+            tail[digits..].strip_prefix('.'),
+        ) {
             (Ok(n), Some(after)) if n <= 4096 => {
                 out.push_str(&"$".repeat(n));
                 rest = after;
@@ -327,7 +333,14 @@ pub(crate) fn references_first_party_key(input: &str) -> bool {
                 // The `$`-run that opens the reference must be odd: `$$` is an escape (for the expanders) and the
                 // PID (for a shell), so `$${FUIGO_API_KEY}` is text and `$$${FUIGO_API_KEY}` a reference (Astra f4 #1,
                 // f7 #2).
-                before.ends_with(p) && before[..before.len() - p.len() + 1].bytes().rev().take_while(|b| *b == b'$').count() % 2 == 1
+                before.ends_with(p)
+                    && before[..before.len() - p.len() + 1]
+                        .bytes()
+                        .rev()
+                        .take_while(|b| *b == b'$')
+                        .count()
+                        % 2
+                        == 1
             })
     })
 }
@@ -365,7 +378,9 @@ pub(crate) fn hook_child_env<'a>(
     }
     let mut env = extra_env.clone();
     for value in env.values_mut() {
-        if let std::borrow::Cow::Owned(read) = fuigo_config::read_first_party_key_references(value, key.as_deref()) {
+        if let std::borrow::Cow::Owned(read) =
+            fuigo_config::read_first_party_key_references(value, key.as_deref())
+        {
             *value = read;
         }
     }

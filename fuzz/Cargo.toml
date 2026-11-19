@@ -1,0 +1,59 @@
+[package]
+name = "fuigo-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Own workspace: kept out of the main workspace (see `exclude` in the root Cargo.toml) so normal builds are unaffected.
+[workspace]
+members = ["."]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+http = "1"
+url = "2"
+regex = "1"
+hyper-util = { version = "0.1.20", default-features = false, features = ["client-proxy"] }
+futures = "0.3"
+agent-client-protocol = { version = "0.10.4", features = ["unstable"] }
+
+[dependencies.fuigo-secrets]
+path = "../crates/codegen/fuigo-secrets"
+
+[dependencies.fuigo-acp-lib]
+path = "../crates/codegen/fuigo-acp-lib"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "tool_json_split"
+path = "fuzz_targets/tool_json_split.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "acp_reader"
+path = "fuzz_targets/acp_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sanitizer"
+path = "fuzz_targets/sanitizer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "no_proxy"
+path = "fuzz_targets/no_proxy.rs"
+test = false
+doc = false
+bench = false

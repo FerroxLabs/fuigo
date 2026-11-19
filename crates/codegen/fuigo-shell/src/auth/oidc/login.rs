@@ -28,6 +28,10 @@ use super::protocol::{
 /// 10 minutes is long enough for users who step away briefly during login.
 const AUTH_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How long a sign-in error redirect that carries no `state` is held. A redirect with the valid state that arrives in
+/// that window wins; otherwise the held error is shown (review Fable 9). Valid-state callbacks are never delayed.
+const STATELESS_ERROR_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Parse user-pasted input into `(code, state)`.
 ///
 /// Accepts two formats:
@@ -47,7 +51,9 @@ fn parse_pasted_input(input: &str) -> Result<Callback, OidcError> {
                 .get("state")
                 .filter(|s| !s.is_empty())
                 .cloned()
-                .ok_or_else(|| OidcError::InvalidPastedInput("URL has no 'state' query parameter".into()))?;
+                .ok_or_else(|| {
+                    OidcError::InvalidPastedInput("URL has no 'state' query parameter".into())
+                })?;
             return Ok(Callback {
                 code: code.clone(),
                 state,
@@ -121,6 +127,7 @@ pub(crate) fn callback_page(title: &str, message: &str, is_success: bool) -> Str
 fn build_callback_router(
     tx: tokio::sync::mpsc::Sender<CallbackResult>,
     expected_state: &str,
+    stateless_error_grace: std::time::Duration,
 ) -> Router {
     let cors =
         crate::auth::config::accounts_app_cors_layer(Method::GET).allow_private_network(true);
@@ -131,6 +138,7 @@ fn build_callback_router(
         .with_state(CallbackState {
             tx,
             expected_state: expected_state.into(),
+            stateless_error_grace,
         })
 }
 
@@ -139,10 +147,15 @@ fn build_callback_router(
 struct CallbackState {
     tx: tokio::sync::mpsc::Sender<CallbackResult>,
     expected_state: std::sync::Arc<str>,
+    stateless_error_grace: std::time::Duration,
 }
 
 async fn handle_callback(
-    State(CallbackState { tx, expected_state }): State<CallbackState>,
+    State(CallbackState {
+        tx,
+        expected_state,
+        stateless_error_grace,
+    }): State<CallbackState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> (StatusCode, Html<String>) {
     // Any local process or web page can send a request to this port. Only the redirect that carries the state this
@@ -151,11 +164,19 @@ async fn handle_callback(
         // A provider error redirect that carries no state at all (some providers omit it) ends the wait with the
         // provider's error rather than a 400 and a CLI left waiting (review L22). A WRONG state is still ignored.
         if !params.contains_key("state") && params.contains_key("error") {
-            let result: CallbackResult = Err(sanitize_provider_error(&parse_provider_error(&params)));
+            let result: CallbackResult =
+                Err(sanitize_provider_error(&parse_provider_error(&params)));
             let response = callback_response(&result);
-            if let Err(e) = tx.try_send(result) {
-                tracing::error!(?e, "OIDC: callback channel send failed; auth will time out");
-            }
+            // Hold the error for a short grace period: a callback with the valid state that arrives meanwhile wins
+            // (the receiver is gone by then and this send fails harmlessly) (review Fable 9).
+            tokio::spawn(async move {
+                tokio::time::sleep(stateless_error_grace).await;
+                if tx.try_send(result).is_err() {
+                    tracing::debug!(
+                        "OIDC: held stateless error not delivered; sign-in already ended"
+                    );
+                }
+            });
             return response;
         }
         tracing::warn!("OIDC: ignored a loopback callback with a missing or wrong state");
@@ -174,7 +195,11 @@ async fn handle_callback(
 fn parse_provider_error(params: &HashMap<String, String>) -> String {
     let error = params.get("error").cloned().unwrap_or_default();
     let desc = params.get("error_description").cloned().unwrap_or_default();
-    if desc.is_empty() { error } else { format!("{error}: {desc}") }
+    if desc.is_empty() {
+        error
+    } else {
+        format!("{error}: {desc}")
+    }
 }
 
 /// Provider text reaches the terminal, and a stateless redirect can come from any local process: drop control
@@ -298,12 +323,13 @@ async fn race_callback_and_client_ui(
     listener: TcpListener,
     code_rx: &mut tokio::sync::mpsc::Receiver<String>,
     expected_state: &str,
+    stateless_error_grace: std::time::Duration,
 ) -> anyhow::Result<Callback> {
     tracing::debug!("OIDC: waiting for auth code (loopback + client paste)");
     let (tx, mut rx) = tokio::sync::mpsc::channel::<CallbackResult>(1);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let app = build_callback_router(tx.clone(), expected_state);
+    let app = build_callback_router(tx.clone(), expected_state, stateless_error_grace);
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async {
@@ -353,6 +379,7 @@ async fn race_callback_and_stdin(
     listener: TcpListener,
     enable_stdin: bool,
     expected_state: &str,
+    stateless_error_grace: std::time::Duration,
 ) -> anyhow::Result<Callback> {
     tracing::debug!(
         enable_stdin = enable_stdin,
@@ -361,7 +388,7 @@ async fn race_callback_and_stdin(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<CallbackResult>(1);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let app = build_callback_router(tx.clone(), expected_state);
+    let app = build_callback_router(tx.clone(), expected_state, stateless_error_grace);
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async {
@@ -516,10 +543,10 @@ pub async fn run_login_flow_with_config(
         state: received_state,
     } = if let Some(mut rx) = code_rx {
         // Client UI: race loopback against manual paste via code_rx.
-        race_callback_and_client_ui(listener, &mut rx, &state).await?
+        race_callback_and_client_ui(listener, &mut rx, &state, STATELESS_ERROR_GRACE).await?
     } else {
         // No client UI: race loopback against stdin paste.
-        race_callback_and_stdin(listener, use_stdin, &state).await?
+        race_callback_and_stdin(listener, use_stdin, &state, STATELESS_ERROR_GRACE).await?
     };
 
     // Validate state (skip for bare code paste where state is empty)
@@ -625,6 +652,10 @@ struct Callback {
 type CallbackResult = Result<Callback, String>;
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test fixture files in a tempdir, never inside a session folder"
+)]
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
@@ -1181,14 +1212,17 @@ mod tests {
         let Callback {
             code,
             state: received_state,
-        } = tokio::join!(race_callback_and_stdin(listener, false, &state), async {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            reqwest::get(format!(
-                "http://127.0.0.1:{port}/callback?code=mock-auth-code&state={state}"
-            ))
-            .await
-            .unwrap();
-        })
+        } = tokio::join!(
+            race_callback_and_stdin(listener, false, &state, STATELESS_ERROR_GRACE),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                reqwest::get(format!(
+                    "http://127.0.0.1:{port}/callback?code=mock-auth-code&state={state}"
+                ))
+                .await
+                .unwrap();
+            }
+        )
         .0
         .unwrap();
 
@@ -1393,20 +1427,31 @@ mod s1_f5_callback_state_tests {
     async fn loopback_error_redirect_without_state_ends_the_signin_with_the_provider_error() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let race = tokio::spawn(race_callback_and_stdin(listener, false, "issued-state"));
+        let race = tokio::spawn(race_callback_and_stdin(
+            listener,
+            false,
+            "issued-state",
+            std::time::Duration::from_millis(200),
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let response = reqwest::get(format!(
             "http://127.0.0.1:{port}/callback?error=access_denied&error_description=user%20said%20no"
         ))
         .await
         .unwrap();
-        assert!(response.status().is_success(), "the provider's error is shown, not a 400");
+        assert!(
+            response.status().is_success(),
+            "the provider's error is shown, not a 400"
+        );
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), race)
             .await
             .expect("the sign-in must stop waiting")
             .unwrap();
         let message = format!("{:#}", outcome.unwrap_err());
-        assert!(message.contains("access_denied") && message.contains("user said no"), "{message}");
+        assert!(
+            message.contains("access_denied") && message.contains("user said no"),
+            "{message}"
+        );
     }
 
     /// Review L22: an error redirect carrying a WRONG state is still ignored (a stray request cannot end the sign-in),
@@ -1415,23 +1460,38 @@ mod s1_f5_callback_state_tests {
     async fn loopback_error_redirect_with_a_wrong_state_is_ignored_and_error_text_is_clean() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let race = tokio::spawn(race_callback_and_stdin(listener, false, "issued-state"));
+        let race = tokio::spawn(race_callback_and_stdin(
+            listener,
+            false,
+            "issued-state",
+            std::time::Duration::from_millis(200),
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let response = reqwest::get(format!("http://127.0.0.1:{port}/callback?error=access_denied&state=wrong"))
-            .await
-            .unwrap();
+        let response = reqwest::get(format!(
+            "http://127.0.0.1:{port}/callback?error=access_denied&state=wrong"
+        ))
+        .await
+        .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(!race.is_finished(), "a wrong state must not end the sign-in");
-        reqwest::get(format!("http://127.0.0.1:{port}/callback?error=bad%1B%5B31mred"))
-            .await
-            .unwrap();
+        assert!(
+            !race.is_finished(),
+            "a wrong state must not end the sign-in"
+        );
+        reqwest::get(format!(
+            "http://127.0.0.1:{port}/callback?error=bad%1B%5B31mred"
+        ))
+        .await
+        .unwrap();
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), race)
             .await
             .expect("the sign-in must stop waiting")
             .unwrap();
         let message = format!("{:#}", outcome.unwrap_err());
-        assert!(message.contains("bad") && !message.contains('\u{1b}'), "{message:?}");
+        assert!(
+            message.contains("bad") && !message.contains('\u{1b}'),
+            "{message:?}"
+        );
     }
 
     /// Audit S1-F5: a loopback request with no `state` (and no provider error), or the wrong one, is answered with an
@@ -1440,13 +1500,22 @@ mod s1_f5_callback_state_tests {
     async fn loopback_callback_without_matching_state_does_not_end_the_signin() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let race = tokio::spawn(race_callback_and_stdin(listener, false, "issued-state"));
+        let race = tokio::spawn(race_callback_and_stdin(
+            listener,
+            false,
+            "issued-state",
+            std::time::Duration::from_millis(200),
+        ));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         for query in ["code=x", "code=x&state=wrong", ""] {
             let response = reqwest::get(format!("http://127.0.0.1:{port}/callback?{query}"))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST, "query {query:?}");
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::BAD_REQUEST,
+                "query {query:?}"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             assert!(!race.is_finished(), "query {query:?} ended the sign-in");
         }
@@ -1458,6 +1527,94 @@ mod s1_f5_callback_state_tests {
         assert!(response.status().is_success());
         let callback = race.await.unwrap().unwrap();
         assert_eq!(callback.code, "real-code");
+    }
+
+    /// Review Fable 9: a stateless error redirect is held for the grace period; a valid-state callback that arrives
+    /// inside it wins.
+    #[tokio::test]
+    async fn valid_callback_during_the_grace_period_beats_a_stateless_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let race = tokio::spawn(race_callback_and_stdin(
+            listener,
+            false,
+            "issued-state",
+            std::time::Duration::from_millis(1500),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        reqwest::get(format!(
+            "http://127.0.0.1:{port}/callback?error=access_denied"
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!race.is_finished(), "the stateless error must be held");
+        reqwest::get(format!(
+            "http://127.0.0.1:{port}/callback?code=real-code&state=issued-state"
+        ))
+        .await
+        .unwrap();
+        let callback = race.await.unwrap().expect("the valid callback wins");
+        assert_eq!(callback.code, "real-code");
+        // Outlive the grace period: the held error must not surface anywhere.
+        tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+    }
+
+    /// Review Fable 9: a stateless error with nothing else behind it still surfaces, but only after the grace period.
+    #[tokio::test]
+    async fn stateless_error_alone_surfaces_after_the_grace_period() {
+        let grace = std::time::Duration::from_millis(800);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let race = tokio::spawn(race_callback_and_stdin(
+            listener,
+            false,
+            "issued-state",
+            grace,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let sent = std::time::Instant::now();
+        reqwest::get(format!(
+            "http://127.0.0.1:{port}/callback?error=access_denied"
+        ))
+        .await
+        .unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), race)
+            .await
+            .expect("the sign-in must stop waiting")
+            .unwrap();
+        assert!(
+            sent.elapsed() >= grace,
+            "error surfaced before the grace period"
+        );
+        assert!(format!("{:#}", outcome.unwrap_err()).contains("access_denied"));
+    }
+
+    /// Review Fable 9: a valid-state callback (success or error) is handled at once, whatever the grace period.
+    #[tokio::test]
+    async fn valid_state_callbacks_are_not_delayed_by_the_grace_period() {
+        for query in [
+            "code=real-code&state=issued-state",
+            "error=access_denied&state=issued-state",
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let race = tokio::spawn(race_callback_and_stdin(
+                listener,
+                false,
+                "issued-state",
+                std::time::Duration::from_secs(30),
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            reqwest::get(format!("http://127.0.0.1:{port}/callback?{query}"))
+                .await
+                .unwrap();
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), race)
+                .await
+                .unwrap_or_else(|_| panic!("query {query:?} was delayed"))
+                .unwrap();
+            assert_eq!(outcome.is_ok(), query.starts_with("code="), "{query}");
+        }
     }
 }
 
@@ -1472,7 +1629,9 @@ mod s1_f5_paste_tests {
         assert!(parse_pasted_input("http://127.0.0.1:54321/callback?code=abc&state=").is_err());
         assert_eq!(parse_pasted_input("abc").unwrap().state, "");
         assert_eq!(
-            parse_pasted_input("http://127.0.0.1:54321/callback?code=abc&state=s").unwrap().state,
+            parse_pasted_input("http://127.0.0.1:54321/callback?code=abc&state=s")
+                .unwrap()
+                .state,
             "s"
         );
     }

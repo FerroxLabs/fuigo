@@ -287,14 +287,13 @@ mod tests {
         )
         .unwrap();
 
-        let (specs, warnings) =
-            parse_plugin_hooks_contained(
-                &hooks_file,
-                &fuigo_dirs::contained::PinnedRoot::pin(hooks_file.parent().unwrap()).unwrap(),
-                "my-plugin",
-                "/path/to/plugin",
-                "/path/to/data",
-            );
+        let (specs, warnings) = parse_plugin_hooks_contained(
+            &hooks_file,
+            &fuigo_dirs::contained::PinnedRoot::pin(hooks_file.parent().unwrap()).unwrap(),
+            "my-plugin",
+            "/path/to/plugin",
+            "/path/to/data",
+        );
 
         // One spec from SessionStart; FutureEvent was filtered
         assert_eq!(specs.len(), 1);

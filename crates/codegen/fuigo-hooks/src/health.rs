@@ -75,7 +75,9 @@ fn with_session<R>(session_id: &str, f: impl FnOnce(&mut SessionBoard) -> R) -> 
 /// Record a CONFIG failure. Returns whether it is new for this session, i.e. whether it still needs its one notice.
 pub fn record_config_failure(session_id: &str, hook_name: &str, detail: &str) -> bool {
     with_session(session_id, |b| {
-        b.config.insert(hook_name.to_string(), detail.to_string()).is_none()
+        b.config
+            .insert(hook_name.to_string(), detail.to_string())
+            .is_none()
     })
 }
 
@@ -160,7 +162,9 @@ pub fn config_fix_hint(detail: &str) -> String {
         );
     }
     if detail.starts_with("command not found: ") || detail.contains(" not found on PATH") {
-        let name = short_reason(detail).trim_end_matches(" not found").to_string();
+        let name = short_reason(detail)
+            .trim_end_matches(" not found")
+            .to_string();
         return format!("Install {name} or add it to PATH, then reload hooks. {DISABLE}");
     }
     format!("Fix the hook's command, then reload hooks. {DISABLE}")
@@ -191,10 +195,15 @@ pub fn validate_registry(
     let disabled = DisabledHooks::load();
     let mut problems = Vec::new();
     for spec in registry.all_hooks() {
-        if !matches!(spec.handler_type, HandlerType::Command) || !spec.enabled || disabled.skip_reason(spec).is_some() {
+        if !matches!(spec.handler_type, HandlerType::Command)
+            || !spec.enabled
+            || disabled.skip_reason(spec).is_some()
+        {
             continue;
         }
-        let Err(detail) = crate::runner::command::validate_command_spec(spec, workspace_root, session_id) else {
+        let Err(detail) =
+            crate::runner::command::validate_command_spec(spec, workspace_root, session_id)
+        else {
             continue;
         };
         if record_config_failure(session_id, &spec.name, &detail) {
@@ -276,7 +285,10 @@ pub fn diagnose(
     };
     match disabled.skip_reason(spec) {
         Some(HookSkipReason::UserDisabled) => {
-            return skipped("disabled".to_string(), "Enable it again in /hooks.".to_string());
+            return skipped(
+                "disabled".to_string(),
+                "Enable it again in /hooks.".to_string(),
+            );
         }
         Some(HookSkipReason::ManagedOnly) => {
             let why = if disabled.managed_only_by_env() {
@@ -331,7 +343,9 @@ mod tests {
 
     #[test]
     fn config_failures_are_told_apart_from_runtime_failures_by_their_prefix() {
-        assert!(is_config_failure(&config_failure("command not found: node")));
+        assert!(is_config_failure(&config_failure(
+            "command not found: node"
+        )));
         assert!(!is_config_failure("exit 1: boom"));
         assert!(!is_config_failure("timed out after 5000ms"));
         assert_eq!(config_failure_detail(&config_failure("x")), "x");
@@ -339,9 +353,18 @@ mod tests {
 
     #[test]
     fn short_reasons_are_a_few_words() {
-        assert_eq!(short_reason("required env var(s) not set: ${A}, ${B}"), "needs A, B");
-        assert_eq!(short_reason("command not found: node (not on PATH)"), "node not found");
-        assert_eq!(short_reason("command not found: /plug/hooks/run.sh"), "run.sh not found");
+        assert_eq!(
+            short_reason("required env var(s) not set: ${A}, ${B}"),
+            "needs A, B"
+        );
+        assert_eq!(
+            short_reason("command not found: node (not on PATH)"),
+            "node not found"
+        );
+        assert_eq!(
+            short_reason("command not found: /plug/hooks/run.sh"),
+            "run.sh not found"
+        );
     }
 
     #[test]
@@ -357,14 +380,23 @@ mod tests {
             "3 plugin hooks can't run: claude-mem (needs X), stripe (node not found). /hooks for details."
         );
         let mixed = grouped_notice(&[problem("global", false, "command not found: lint")]).unwrap();
-        assert_eq!(mixed, "1 hook can't run: global (lint not found). /hooks for details.");
+        assert_eq!(
+            mixed,
+            "1 hook can't run: global (lint not found). /hooks for details."
+        );
         assert_eq!(grouped_notice(&[]), None);
     }
 
     #[test]
     fn hook_source_is_the_plugin_name_or_the_tier() {
-        assert_eq!(hook_source("plugin/stripe/hooks:session_start[0].hooks[0]"), "stripe");
-        assert_eq!(hook_source("global/lint:pre_tool_use[0].hooks[0]"), "global");
+        assert_eq!(
+            hook_source("plugin/stripe/hooks:session_start[0].hooks[0]"),
+            "stripe"
+        );
+        assert_eq!(
+            hook_source("global/lint:pre_tool_use[0].hooks[0]"),
+            "global"
+        );
         assert_eq!(hook_source("project/x:stop[0].hooks[1]"), "project");
     }
 
@@ -373,11 +405,24 @@ mod tests {
         let session = "health-board-unit";
         let config = HookRunnerResult::Failed(config_failure("command not found: node"));
         note_result(session, "plugin/p/a", &config);
-        assert_eq!(config_failure_for(session, "plugin/p/a").as_deref(), Some("command not found: node"));
-        assert!(!record_config_failure(session, "plugin/p/a", "command not found: node"), "already recorded");
+        assert_eq!(
+            config_failure_for(session, "plugin/p/a").as_deref(),
+            Some("command not found: node")
+        );
+        assert!(
+            !record_config_failure(session, "plugin/p/a", "command not found: node"),
+            "already recorded"
+        );
 
-        note_result(session, "plugin/p/b", &HookRunnerResult::Failed("exit 2: bad".into()));
-        assert_eq!(runtime_failure_for(session, "plugin/p/b").as_deref(), Some("exit 2: bad"));
+        note_result(
+            session,
+            "plugin/p/b",
+            &HookRunnerResult::Failed("exit 2: bad".into()),
+        );
+        assert_eq!(
+            runtime_failure_for(session, "plugin/p/b").as_deref(),
+            Some("exit 2: bad")
+        );
         assert!(config_failure_for(session, "plugin/p/b").is_none());
         note_result(session, "plugin/p/b", &HookRunnerResult::Success);
         assert!(runtime_failure_for(session, "plugin/p/b").is_none());

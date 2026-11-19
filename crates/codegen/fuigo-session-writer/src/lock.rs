@@ -18,7 +18,10 @@
 //! session folder can reach it through [`crate::SessionWriter`]. Only visibility changed. The ACP error conversion
 //! (`into_acp_error`, `held_elsewhere_error`) and `session_open_elsewhere`, which resolves an id to a folder, stay in
 //! `fuigo-shell`, whose old module path re-exports this one.
-#![allow(clippy::disallowed_methods, reason = "the choke point: the session_writer.lock the writer holds for its folder (design F5 5.2)")]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "the choke point: the session_writer.lock the writer holds for its folder (design F5 5.2)"
+)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -41,10 +44,13 @@ pub(crate) const CONTENDED_POLL: Duration = Duration::from_millis(10);
 const MAX_TRANSIENT_FAILURES: u32 = 8;
 
 /// Consecutive passing lock errors, by session directory.
-static TRANSIENT: LazyLock<Mutex<HashMap<PathBuf, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static TRANSIENT: LazyLock<Mutex<HashMap<PathBuf, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn transient_failures() -> MutexGuard<'static, HashMap<PathBuf, u32>> {
-    TRANSIENT.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    TRANSIENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 struct Held {
@@ -56,7 +62,8 @@ struct Held {
 static HELD: LazyLock<Mutex<HashMap<PathBuf, Held>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn held() -> MutexGuard<'static, HashMap<PathBuf, Held>> {
-    HELD.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    HELD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// This process's hold on one session; the session is released when the last hold for it drops.
@@ -69,7 +76,9 @@ pub struct SessionWriterLock {
 impl Drop for SessionWriterLock {
     fn drop(&mut self) {
         let mut held = held();
-        let Some(entry) = held.get_mut(&self.key) else { return };
+        let Some(entry) = held.get_mut(&self.key) else {
+            return;
+        };
         entry.holders = entry.holders.saturating_sub(1);
         if entry.holders == 0
             && let Some(entry) = held.remove(&self.key)
@@ -106,7 +115,11 @@ fn open_lock_file(session_dir: &Path) -> std::io::Result<std::fs::File> {
     }
     // Owner-only like every session file: a lock file other users can open is a lock they can hold.
     crate::owner_only::open(
-        std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false),
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
         &session_dir.join(SESSION_WRITER_LOCK_FILE),
     )
 }
@@ -160,7 +173,9 @@ fn locking_unsupported(error: &std::io::Error) -> bool {
     const UNSUPPORTED: &[i32] = &[1];
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     const UNSUPPORTED: &[i32] = &[];
-    error.raw_os_error().is_some_and(|code| UNSUPPORTED.contains(&code))
+    error
+        .raw_os_error()
+        .is_some_and(|code| UNSUPPORTED.contains(&code))
 }
 
 fn classify(session_dir: &Path, key: &Path, error: &std::io::Error) -> Attempt {
@@ -183,7 +198,9 @@ pub(crate) fn try_acquire(session_dir: &Path, key: &Path) -> Attempt {
     let mut held = held();
     if let Some(entry) = held.get_mut(key) {
         entry.holders += 1;
-        return Attempt::Held(SessionWriterLock { key: key.to_path_buf() });
+        return Attempt::Held(SessionWriterLock {
+            key: key.to_path_buf(),
+        });
     }
     let file = match open_lock_file(session_dir) {
         Ok(file) => file,
@@ -193,7 +210,9 @@ pub(crate) fn try_acquire(session_dir: &Path, key: &Path) -> Attempt {
         Ok(()) => {
             transient_failures().remove(key);
             held.insert(key.to_path_buf(), Held { file, holders: 1 });
-            Attempt::Held(SessionWriterLock { key: key.to_path_buf() })
+            Attempt::Held(SessionWriterLock {
+                key: key.to_path_buf(),
+            })
         }
         Err(std::fs::TryLockError::WouldBlock) => Attempt::Contended,
         Err(std::fs::TryLockError::Error(error)) => classify(session_dir, key, &error),
@@ -224,7 +243,11 @@ pub fn dir_open_elsewhere(session_dir: &Path) -> bool {
     if held.contains_key(&key_for(session_dir)) {
         return false;
     }
-    let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) else {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+    else {
         return false;
     };
     match file.try_lock() {
@@ -237,7 +260,10 @@ pub fn dir_open_elsewhere(session_dir: &Path) -> bool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "lock_tests.rs"]
 mod tests;

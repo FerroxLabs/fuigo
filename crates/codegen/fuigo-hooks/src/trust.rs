@@ -160,7 +160,8 @@ impl DisabledHooks {
         if self.managed_only {
             return Some(HookSkipReason::ManagedOnly);
         }
-        (!spec.enabled || self.unreadable || self.names_disable(spec)).then_some(HookSkipReason::UserDisabled)
+        (!spec.enabled || self.unreadable || self.names_disable(spec))
+            .then_some(HookSkipReason::UserDisabled)
     }
 
     /// The file disables `spec`: its own per-repo line, or (project hooks only) a legacy bare `project/<name>` line,
@@ -246,7 +247,9 @@ fn disable_hook_with_file(hook_name: &str, file: &Path) -> Result<(), String> {
 /// place, so a reader never sees it empty and runs a hook the user disabled.
 fn edit_disabled_hooks<T>(
     file: &Path,
-    edit: impl FnMut(fuigo_config::fs_atomic::Current<'_>) -> Result<fuigo_config::fs_atomic::Edit<T>, String>,
+    edit: impl FnMut(
+        fuigo_config::fs_atomic::Current<'_>,
+    ) -> Result<fuigo_config::fs_atomic::Edit<T>, String>,
 ) -> Result<T, String> {
     use fuigo_config::fs_atomic::EditError;
     use fuigo_config::write_through::{NewFileMode, stage_file_atomically_with};
@@ -279,8 +282,9 @@ fn enable_hook_with_file(hook_name: &str, file: &Path) -> Result<bool, String> {
     edit_disabled_hooks(file, |current| {
         let content = match current {
             Ok(None) => return Ok(Edit::Keep(false)),
-            Ok(Some(bytes)) => std::str::from_utf8(bytes)
-                .map_err(|_| "failed to read disabled-hooks file: stream did not contain valid UTF-8".to_owned())?,
+            Ok(Some(bytes)) => std::str::from_utf8(bytes).map_err(|_| {
+                "failed to read disabled-hooks file: stream did not contain valid UTF-8".to_owned()
+            })?,
             Err(e) => return Err(format!("failed to read disabled-hooks file: {e}")),
         };
         // Enabling a project hook in a repo also drops the legacy bare `project/<name>` line (see `disable_key`).
@@ -461,7 +465,10 @@ mod tests {
     #[test]
     fn missing_disabled_file_disables_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!is_hook_disabled_with_file("any-hook", &dir.path().join("disabled-hooks")));
+        assert!(!is_hook_disabled_with_file(
+            "any-hook",
+            &dir.path().join("disabled-hooks")
+        ));
     }
 }
 

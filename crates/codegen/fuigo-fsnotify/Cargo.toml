@@ -15,12 +15,12 @@ tokio = { workspace = true, features = ["sync", "time", "rt"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-serial_test = "3"
+serial_test = "4"
 criterion = { workspace = true }
 fuigo-tracing-macros = { path = "../fuigo-tracing-macros" }
 

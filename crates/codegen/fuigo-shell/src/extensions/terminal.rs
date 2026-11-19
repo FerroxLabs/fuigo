@@ -19,10 +19,7 @@ pub struct EnvVar {
 /// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
 impl std::fmt::Debug for EnvVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            name,
-            value,
-        } = self;
+        let Self { name, value } = self;
         f.debug_struct("EnvVar")
             .field("name", name)
             .field("value", &"<redacted>")
@@ -59,7 +56,12 @@ impl std::fmt::Debug for CreateTerminalRequest {
             .field("session_id", session_id)
             .field("command", command)
             .field("args", &format_args!("<{} args redacted>", args.len()))
-            .field("env", &env.iter().map(|v| (&v.name, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "env",
+                &env.iter()
+                    .map(|v| (&v.name, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("cwd", cwd)
             .field("output_byte_limit", output_byte_limit)
             .finish()
@@ -114,7 +116,12 @@ impl std::fmt::Debug for PtyCreateRequest {
             .field("shell", shell)
             .field("cwd", cwd)
             .field("session_id", session_id)
-            .field("env", &env.iter().map(|v| (&v.name, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "env",
+                &env.iter()
+                    .map(|v| (&v.name, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("rows", rows)
             .field("cols", cols)
             .field("name", name)

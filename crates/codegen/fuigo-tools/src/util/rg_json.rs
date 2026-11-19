@@ -109,10 +109,17 @@ pub fn is_own_error(exit_code: i32, stdout_empty: bool, stderr: &[u8]) -> bool {
     if exit_code != 2 || !stdout_empty {
         return false;
     }
-    let first = stderr.split(|b| *b == b'\n').find(|l| !l.is_empty()).unwrap_or(b"");
-    [&b"rg: regex parse error:"[..], b"rg: error parsing flag", b"rg: error parsing regex"]
-        .iter()
-        .any(|p| first.starts_with(p))
+    let first = stderr
+        .split(|b| *b == b'\n')
+        .find(|l| !l.is_empty())
+        .unwrap_or(b"");
+    [
+        &b"rg: regex parse error:"[..],
+        b"rg: error parsing flag",
+        b"rg: error parsing regex",
+    ]
+    .iter()
+    .any(|p| first.starts_with(p))
 }
 
 fn decode_path(v: &Value) -> Option<Vec<u8>> {
@@ -178,7 +185,13 @@ impl RgJsonStream {
     /// `path NUL count \n` records. A path holds no NUL, so the first NUL ends the path (even if the path has a newline).
     fn feed_count_null(&mut self, out: &mut Vec<u8>) {
         while let Some(z) = self.buf.iter().position(|b| *b == 0) {
-            let Some(nl) = self.buf[z..].iter().position(|b| *b == b'\n').map(|i| z + i) else { return };
+            let Some(nl) = self.buf[z..]
+                .iter()
+                .position(|b| *b == b'\n')
+                .map(|i| z + i)
+            else {
+                return;
+            };
             let rec: Vec<u8> = self.buf.drain(..=nl).collect();
             if !self.results.denies_bytes(&rec[..z]) {
                 out.extend_from_slice(&rec[..z]);
@@ -215,35 +228,49 @@ impl RgJsonStream {
             self.next_seq += 1;
             self.files.insert(
                 path.to_vec(),
-                FileState { seq, path: path.to_vec(), allowed, lines: Vec::new(), bytes: 0, any_line: false, matched_seen: 0 },
+                FileState {
+                    seq,
+                    path: path.to_vec(),
+                    allowed,
+                    lines: Vec::new(),
+                    bytes: 0,
+                    any_line: false,
+                    matched_seen: 0,
+                },
             );
         }
     }
 
     fn record(&mut self, v: &Value, out: &mut Vec<u8>) {
-        let (Some(kind), Some(data)) = (v.get("type").and_then(Value::as_str), v.get("data")) else {
+        let (Some(kind), Some(data)) = (v.get("type").and_then(Value::as_str), v.get("data"))
+        else {
             return;
         };
         if !matches!(kind, "begin" | "match" | "context" | "end") {
             return;
         }
         // Every record names its own file; a record whose path cannot be decoded is dropped (fail closed).
-        let Some(path) = data.get("path").and_then(decode_path) else { return };
+        let Some(path) = data.get("path").and_then(decode_path) else {
+            return;
+        };
         self.ensure(&path);
         match kind {
             "begin" => {}
             "match" | "context" => {
                 let st = self.files.get_mut(&path).expect("ensured");
-                let (Some(text), Some(number)) =
-                    (data.get("lines").and_then(decode_lines), data.get("line_number").and_then(Value::as_u64))
-                else {
+                let (Some(text), Some(number)) = (
+                    data.get("lines").and_then(decode_lines),
+                    data.get("line_number").and_then(Value::as_u64),
+                ) else {
                     return;
                 };
                 let is_match = kind == "match";
                 if is_match {
                     st.matched_seen += text.split_inclusive(|b| *b == b'\n').count() as u64;
                 }
-                if !st.allowed || !matches!(self.mode, RgJsonMode::Heading { .. } | RgJsonMode::Pipe) {
+                if !st.allowed
+                    || !matches!(self.mode, RgJsonMode::Heading { .. } | RgJsonMode::Pipe)
+                {
                     return;
                 }
                 if !is_match && matches!(self.mode, RgJsonMode::Pipe) {
@@ -257,7 +284,9 @@ impl RgJsonStream {
                     st.any_line = true;
                     // The bound is applied here, while buffering.
                     let cost = raw.len() + 24;
-                    if st.bytes + cost > MAX_FILE_BUFFER_BYTES || self.total_bytes + cost > MAX_TOTAL_BUFFER_BYTES {
+                    if st.bytes + cost > MAX_FILE_BUFFER_BYTES
+                        || self.total_bytes + cost > MAX_TOTAL_BUFFER_BYTES
+                    {
                         continue;
                     }
                     st.bytes += cost;
@@ -269,7 +298,11 @@ impl RgJsonStream {
                     if !text.ends_with(b"\n") {
                         text.push(b'\n');
                     }
-                    st.lines.push(BufLine { n: number + k as u64, is_match, text });
+                    st.lines.push(BufLine {
+                        n: number + k as u64,
+                        is_match,
+                        text,
+                    });
                 }
             }
             _ => {
@@ -280,7 +313,10 @@ impl RgJsonStream {
                     return;
                 }
                 let stats = data.get("stats");
-                let matched = stats.and_then(|s| s.get("matched_lines")).and_then(Value::as_u64).unwrap_or(0);
+                let matched = stats
+                    .and_then(|s| s.get("matched_lines"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 let binary = data.get("binary_offset").and_then(Value::as_u64);
                 self.render(st, matched, binary, out);
             }
@@ -323,7 +359,9 @@ impl RgJsonStream {
                             } else if context && last_line.is_some_and(|p| l.n != p + 1) {
                                 block.extend_from_slice(b"--\n");
                             }
-                            block.extend_from_slice(format!("{}{}", l.n, if l.is_match { ':' } else { '-' }).as_bytes());
+                            block.extend_from_slice(
+                                format!("{}{}", l.n, if l.is_match { ':' } else { '-' }).as_bytes(),
+                            );
                         }
                         _ => {
                             block.extend_from_slice(&st.path);
@@ -336,7 +374,9 @@ impl RgJsonStream {
                 if let Some(off) = binary {
                     let heading = matches!(self.mode, RgJsonMode::Heading { .. });
                     let notice = if st.any_line {
-                        format!(": WARNING: stopped searching binary file after match (found \"\\0\" byte around offset {off})\n")
+                        format!(
+                            ": WARNING: stopped searching binary file after match (found \"\\0\" byte around offset {off})\n"
+                        )
                     } else {
                         format!(": binary file matches (found \"\\0\" byte around offset {off})\n")
                     };

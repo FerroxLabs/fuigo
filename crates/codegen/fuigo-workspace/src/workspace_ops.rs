@@ -18,11 +18,6 @@ use crate::file_system::ContentSearchRequest;
 use crate::handle::WorkspaceHandle;
 use crate::worktree::{ApplyWorktreeRequest, CreateWorktreeRequest, RemoveWorktreeRequest};
 use async_trait::async_trait;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use fuigo_computer_hub_sdk::ToolHarness;
 use fuigo_tools::types::output::ToolRunResult;
 use fuigo_workspace_client::{WorkspaceClient, is_transport_fatal};
@@ -71,6 +66,11 @@ pub use fuigo_workspace_types::rpc::worktree::{
     WorktreeGcReq, WorktreeListReq, WorktreeSalvageReq, WorktreeShowReq,
 };
 pub use fuigo_workspace_types::rpc::{RpcActivityClass, WorkspaceRpc};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 /// Implements [`WorkspaceRpc`] for request types whose responses reference crate-internal types and so cannot live in the types crate.
 /// The activity class is a required argument for the same reason the trait const has no default: every method's author must decide.
 macro_rules! workspace_rpc {
@@ -1069,7 +1069,10 @@ fn wire_to_hook_registry(
 fn warn_fail_closed_not_enforced() {
     static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        tracing::warn!("{}", fuigo_workspace_types::rpc::hooks::FAIL_CLOSED_NOT_ENFORCED_WARNING);
+        tracing::warn!(
+            "{}",
+            fuigo_workspace_types::rpc::hooks::FAIL_CLOSED_NOT_ENFORCED_WARNING
+        );
     }
 }
 #[async_trait]
@@ -1473,7 +1476,10 @@ pub enum WorkspaceOps {
 /// the fresh flag it was created with. That is sound only because every tool call is judged by the shell-side permission
 /// handle (which holds THE flag) before it is sent to the hub (`fuigo-shell` `tool_calls.rs`, `permissions.request`, whose
 /// `peer_guard_denial_for` runs before `AllowAll`). Returns whether the session was already influenced at bind (logged).
-fn proxy_note_peer_influence(session_id: &str, peer_influence: &crate::permission::PeerInfluence) -> bool {
+fn proxy_note_peer_influence(
+    session_id: &str,
+    peer_influence: &crate::permission::PeerInfluence,
+) -> bool {
     let influenced = peer_influence.is_set();
     if influenced {
         tracing::warn!(%session_id, "peer-influenced session bound to a remote hub: the hub-side guard cannot see the flag; the shell-side guard judges its edits");
@@ -1540,7 +1546,15 @@ impl WorkspaceOps {
         viewer_ctx: Option<fuigo_tool_runtime::WorkspaceViewerContext>,
         peer_influence: crate::permission::PeerInfluence,
     ) -> WorkspaceResult<()> {
-        self.bind_local_session_governed(session_id, cwd, hunk_tracker, toolset, viewer_ctx, peer_influence, false)
+        self.bind_local_session_governed(
+            session_id,
+            cwd,
+            hunk_tracker,
+            toolset,
+            viewer_ctx,
+            peer_influence,
+            false,
+        )
     }
     /// [`Self::bind_local_session`] for a session a launch policy may govern (1.0.36 item a): when `launch_policy`, the
     /// hub session is marked governed before the toolset is bound, so no hub call reaches it first.
@@ -1772,7 +1786,10 @@ impl WorkspaceOps {
                         ),
                     )
                 })?;
-                session.toolset().call_approved(name, args, call_id, approved_without_grant).await
+                session
+                    .toolset()
+                    .call_approved(name, args, call_id, approved_without_grant)
+                    .await
             }
             Self::Proxy { client } => {
                 if !client.is_connected() {
@@ -1835,7 +1852,10 @@ mod tests {
         let flag = crate::permission::PeerInfluence::new();
         assert!(!super::proxy_note_peer_influence("p6a-proxy-1", &flag));
         flag.set(true);
-        assert!(super::proxy_note_peer_influence("p6a-proxy-1", &flag), "reports an influenced session");
+        assert!(
+            super::proxy_note_peer_influence("p6a-proxy-1", &flag),
+            "reports an influenced session"
+        );
         assert!(flag.is_set(), "the bind leaves the flag as it was");
     }
     use super::*;
@@ -2088,9 +2108,8 @@ mod tests {
             unreachable!("for_test builds a local handle");
         };
         let sid = "sess-teardown";
-        let toolset = std::sync::Arc::new(
-            fuigo_tools::registry::types::FinalizedToolset::empty_for_test(),
-        );
+        let toolset =
+            std::sync::Arc::new(fuigo_tools::registry::types::FinalizedToolset::empty_for_test());
         let weak = std::sync::Arc::downgrade(&toolset);
         ops.bind_local_session(
             sid,
@@ -2204,9 +2223,9 @@ mod tests {
     /// A `SessionSummary` (with a turn carrying a hunk) mirrors identically.
     #[test]
     fn session_summary_to_wire_serializes_identically() {
-        use std::sync::Arc;
         use fuigo_hunk_tracker::SessionSummary;
         use fuigo_hunk_tracker::types::{Hunk, HunkSource, TurnSummary};
+        use std::sync::Arc;
         let hunk = Hunk::file_created(
             std::path::PathBuf::from("/repo/a.rs"),
             "x\n".to_string(),
@@ -2281,7 +2300,8 @@ mod tests {
         };
         let old: HookRegistryWire = serde_json::from_value(json(None)).unwrap();
         assert!(old.gate_hooks_without_fail_closed());
-        let registry = wire_to_hook_registry(&old).expect("an older server's registry still decodes");
+        let registry =
+            wire_to_hook_registry(&old).expect("an older server's registry still decodes");
         assert!(!registry.hooks_for(fuigo_hooks::event::HookEventName::PreToolUse)[0].fail_closed);
         let new: HookRegistryWire = serde_json::from_value(json(Some(true))).unwrap();
         assert!(!new.gate_hooks_without_fail_closed());

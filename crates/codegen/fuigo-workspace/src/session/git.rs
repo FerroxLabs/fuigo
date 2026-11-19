@@ -2,13 +2,6 @@
 #![allow(dead_code)]
 pub use crate::restore_fetch::git_object_exists;
 use anyhow::Result;
-use git2::{DiffOptions, Reference, Repository, StatusOptions};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use tokio::process::Command;
-use tokio::sync::Mutex;
-use url::Url;
 pub use fuigo_workspace_types::rpc::git::{
     ChangeType, CheckoutCommitResponse, CommitData, CommitOutcome, CommitResult, DiscardScope,
     GitBranchEntry, GitBranchListData, GitCommitReq, GitDiffsData, GitEnsureBindingResult,
@@ -16,6 +9,13 @@ pub use fuigo_workspace_types::rpc::git::{
     GitPushResult, GitReadFile, GitReadFilesData, GitStatusData, GitSyncBaseOutcome,
     GitSyncBaseResult, PushStatus, StageData, VcsKind,
 };
+use git2::{DiffOptions, Reference, Repository, StatusOptions};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use tokio::process::Command;
+use tokio::sync::Mutex;
+use url::Url;
 pub const ERROR_CODE_DIFF_SIZE_EXCEEDED: &str = "DIFF_SIZE_EXCEEDED";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -328,9 +328,9 @@ pub fn resolve_normalized_remote_urls(cwd: &Path) -> Vec<String> {
     };
     let mut urls = Vec::new();
     if let Ok(names) = repo.remotes() {
-        for name in names.iter().flatten() {
+        for name in names.iter().flatten().flatten() {
             if let Ok(remote) = repo.find_remote(name)
-                && let Some(raw) = remote.url()
+                && let Some(raw) = remote.url().ok()
                 && let Some(n) = normalize_repo_url(raw)
             {
                 urls.push(n);
@@ -369,9 +369,9 @@ pub fn resolve_persisted_session_git_metadata_sync(cwd: &Path) -> PersistedGitMe
     };
     let mut remotes = BTreeSet::new();
     if let Ok(remote_names) = repo.remotes() {
-        for name in remote_names.iter().flatten() {
+        for name in remote_names.iter().flatten().flatten() {
             if let Ok(remote) = repo.find_remote(name)
-                && let Some(url) = remote.url()
+                && let Some(url) = remote.url().ok()
             {
                 remotes.insert(strip_url_credentials(url));
             }
@@ -382,9 +382,12 @@ pub fn resolve_persisted_session_git_metadata_sync(cwd: &Path) -> PersistedGitMe
         .as_ref()
         .and_then(|h| h.target())
         .map(|oid| oid.to_string());
-    let head_branch = head_ref
-        .as_ref()
-        .and_then(|h| h.shorthand().filter(|s| *s != "HEAD").map(str::to_owned));
+    let head_branch = head_ref.as_ref().and_then(|h| {
+        h.shorthand()
+            .ok()
+            .filter(|s| *s != "HEAD")
+            .map(str::to_owned)
+    });
     PersistedGitMetadata {
         git_root_dir: Some(git_root.to_string_lossy().to_string()),
         git_remotes: remotes.into_iter().collect(),
@@ -472,9 +475,17 @@ fn gitlink_checkout(start: &Path, repo: &Repository) -> Option<PathBuf> {
             return None;
         }
         let mut text = String::new();
-        std::fs::File::open(&link).ok()?.take(4096).read_to_string(&mut text).ok()?;
+        std::fs::File::open(&link)
+            .ok()?
+            .take(4096)
+            .read_to_string(&mut text)
+            .ok()?;
         let target = Path::new(text.lines().next()?.strip_prefix("gitdir:")?.trim());
-        let target = if target.is_relative() { dir.join(target) } else { target.to_path_buf() };
+        let target = if target.is_relative() {
+            dir.join(target)
+        } else {
+            target.to_path_buf()
+        };
         return (dunce::canonicalize(target).ok()? == git_dir).then(|| dir.to_path_buf());
     }
     None
@@ -670,7 +681,7 @@ async fn get_remote_url(cwd: &Path) -> Option<String> {
 fn compute_ahead_behind(repo: &Repository) -> Option<(usize, usize)> {
     let head = repo.head().ok()?;
     let local_oid = head.target()?;
-    let branch_name = head.shorthand()?;
+    let branch_name = head.shorthand().ok()?;
     let local_branch = repo
         .find_branch(branch_name, git2::BranchType::Local)
         .ok()?;
@@ -959,12 +970,12 @@ pub async fn git_info(cwd: &Path) -> Result<GitInfoData> {
         let current_branch = repo
             .head()
             .ok()
-            .and_then(|h| h.shorthand().map(String::from));
+            .and_then(|h| h.shorthand().ok().map(String::from));
         let mut remotes_set = BTreeSet::new();
         if let Ok(remote_names) = repo.remotes() {
-            for name in remote_names.iter().flatten() {
+            for name in remote_names.iter().flatten().flatten() {
                 if let Ok(remote) = repo.find_remote(name)
-                    && let Some(url) = remote.url()
+                    && let Some(url) = remote.url().ok()
                 {
                     remotes_set.insert(url.to_string());
                 }
@@ -1003,12 +1014,14 @@ fn detect_remote_default_branch(repo: &Repository) -> Option<String> {
     let reference = repo.find_reference("refs/remotes/origin/HEAD").ok()?;
     let prefix = "refs/remotes/origin/";
     if let Ok(resolved) = reference.resolve()
-        && let Some(branch) = resolved.name().and_then(|n| n.strip_prefix(prefix))
+        && let Some(branch) = resolved.name().ok().and_then(|n| n.strip_prefix(prefix))
     {
         return Some(branch.to_string());
     }
     reference
         .symbolic_target()
+        .ok()
+        .flatten()
         .and_then(|t| t.strip_prefix(prefix))
         .map(|b| b.to_string())
 }
@@ -1023,14 +1036,16 @@ pub async fn list_branches(git_root: &Path) -> Result<GitBranchListData> {
         let current_branch = repo
             .head()
             .ok()
-            .and_then(|h| h.shorthand().map(String::from));
+            .and_then(|h| h.shorthand().ok().map(String::from));
         let mut branches = Vec::new();
         for result in repo.branches(None)? {
             let (branch, branch_type) = result?;
             let Some(name) = branch.name()?.map(String::from) else {
                 continue;
             };
-            if branch.get().symbolic_target().is_some() && branch_type == git2::BranchType::Remote {
+            if branch.get().symbolic_target().ok().flatten().is_some()
+                && branch_type == git2::BranchType::Remote
+            {
                 continue;
             }
             let is_remote = branch_type == git2::BranchType::Remote;
@@ -1848,9 +1863,8 @@ async fn add_all_keeping_uninitialised_gitlinks(git_root: &Path) -> Result<Strin
     if before.is_empty() {
         return Ok(out);
     }
-    let after = fuigo_fast_worktree::parse_gitlinks(
-        &git_cli(git_root, &["ls-files", "-s", "-z"]).await?,
-    );
+    let after =
+        fuigo_fast_worktree::parse_gitlinks(&git_cli(git_root, &["ls-files", "-s", "-z"]).await?);
     for (commit, path) in
         fuigo_fast_worktree::dropped_uninitialised_gitlinks(git_root, &before, &after)
     {
@@ -2109,7 +2123,8 @@ pub async fn checkout_session_commit(
     stash_if_dirty: bool,
     session_id: &str,
 ) -> CheckoutSessionOutcome {
-    let mut outcome = checkout_session_commit_inner(git_root, target_sha, stash_if_dirty, session_id).await;
+    let mut outcome =
+        checkout_session_commit_inner(git_root, target_sha, stash_if_dirty, session_id).await;
     if outcome.checked_out {
         return outcome;
     }
@@ -3817,7 +3832,17 @@ mod p120_tests {
         let out = dir.join("hook-env.txt");
         git_cli(&dir, &["init", "-q"]).await.unwrap();
         probe::write_env_dump_script(&dir.join(".git/hooks/pre-commit"), &out);
-        let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "x"];
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "x",
+        ];
         for label in ["git_cli", "git_cli_raw", "git_cli_status"] {
             let _ = std::fs::remove_file(&out);
             match label {
@@ -3849,7 +3874,10 @@ mod a45_workdir_tests {
         let nested = parent.join("nested");
         std::fs::create_dir(&nested).unwrap();
         let repo = git2::Repository::init(&nested).unwrap();
-        repo.config().unwrap().set_str("core.worktree", parent.to_str().unwrap()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("core.worktree", parent.to_str().unwrap())
+            .unwrap();
         let repo = git2::Repository::discover(&nested).unwrap();
         assert_eq!(super::repo_workdir(&repo, &nested), Some(nested.clone()));
     }
@@ -3861,7 +3889,10 @@ mod a45_workdir_tests {
         std::fs::create_dir(&nested).unwrap();
         std::fs::create_dir(&sibling).unwrap();
         let repo = git2::Repository::init(&nested).unwrap();
-        repo.config().unwrap().set_str("core.worktree", sibling.to_str().unwrap()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("core.worktree", sibling.to_str().unwrap())
+            .unwrap();
         let repo = git2::Repository::discover(&nested).unwrap();
         assert_eq!(super::repo_workdir(&repo, &nested), Some(nested.clone()));
     }
@@ -3872,7 +3903,10 @@ mod a45_workdir_tests {
         let nested = parent.join("nested");
         std::fs::create_dir(&nested).unwrap();
         let repo = git2::Repository::init(&nested).unwrap();
-        repo.config().unwrap().set_str("core.worktree", parent.to_str().unwrap()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("core.worktree", parent.to_str().unwrap())
+            .unwrap();
         let repo = git2::Repository::discover(&nested).unwrap();
         assert_eq!(super::repo_workdir(&repo, &nested), Some(nested.clone()));
     }

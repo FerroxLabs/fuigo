@@ -67,11 +67,26 @@ pub(crate) fn preconditions() {
     crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
     crate::agent::config::Config::install_test_trusted_origins();
     use crate::auth::session_delivery::session_may_reach_service as reach;
-    assert!(reach(TRUSTED, None).is_ok(), "fixture: FluxRouter is admitted");
-    assert!(reach("http://api.fluxrouter.ai/v1", None).is_err(), "fixture: cleartext refused");
-    assert!(reach("http://127.0.0.1:9/v1", Some("http://127.0.0.1:9/v1")).is_err(), "fixture: loopback refused");
-    assert!(reach("https://api.fluxrouter.ai:8443/v1", None).is_err(), "fixture: other port refused");
-    assert!(reach("https://unconfigured.example/v1", None).is_err(), "fixture: unconfigured refused");
+    assert!(
+        reach(TRUSTED, None).is_ok(),
+        "fixture: FluxRouter is admitted"
+    );
+    assert!(
+        reach("http://api.fluxrouter.ai/v1", None).is_err(),
+        "fixture: cleartext refused"
+    );
+    assert!(
+        reach("http://127.0.0.1:9/v1", Some("http://127.0.0.1:9/v1")).is_err(),
+        "fixture: loopback refused"
+    );
+    assert!(
+        reach("https://api.fluxrouter.ai:8443/v1", None).is_err(),
+        "fixture: other port refused"
+    );
+    assert!(
+        reach("https://unconfigured.example/v1", None).is_err(),
+        "fixture: unconfigured refused"
+    );
 }
 
 /// Nothing reached the harness while the hostile destinations were tried.
@@ -88,14 +103,22 @@ pub(crate) fn assert_delivered(seen: &[Observed], client: &str) {
     assert!(
         seen.iter()
             .any(|o| o.target.starts_with("https://api.fluxrouter.ai")
-                && o.authorization.as_deref().is_some_and(|a| a.contains(TOKEN))),
+                && o.authorization
+                    .as_deref()
+                    .is_some_and(|a| a.contains(TOKEN))),
         "{client}: the configured origin did not receive the session token: {seen:?}"
     );
 }
 
 pub(crate) fn assert_refusal_text(text: &str, client: &str) {
-    assert!(text.contains(REFUSED), "{client}: not a P47 refusal: {text}");
-    assert!(!text.contains(TOKEN), "{client}: the refusal leaked the token: {text}");
+    assert!(
+        text.contains(REFUSED),
+        "{client}: not a P47 refusal: {text}"
+    );
+    assert!(
+        !text.contains(TOKEN),
+        "{client}: the refusal leaked the token: {text}"
+    );
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -116,11 +139,15 @@ fn p47_wire_subscription_check() {
         preconditions();
         let (_dir, am) = session_manager();
         for base in hostile_bases(&wire) {
-            let r = crate::agent::subscription_check::single_check(am.clone(), &base, None, "p47-user").await;
+            let r =
+                crate::agent::subscription_check::single_check(am.clone(), &base, None, "p47-user")
+                    .await;
             assert!(r.is_none(), "{base}");
         }
         assert_nothing_sent(&wire.observed().await, "subscription_check");
-        let _ = crate::agent::subscription_check::single_check(am.clone(), TRUSTED, None, "p47-user").await;
+        let _ =
+            crate::agent::subscription_check::single_check(am.clone(), TRUSTED, None, "p47-user")
+                .await;
         assert_delivered(&wire.observed().await, "subscription_check");
     });
 }
@@ -136,12 +163,14 @@ fn p47_wire_auth_enrichment() {
         preconditions();
         let dir = tempfile::tempdir().unwrap();
         for base in hostile_bases(&wire) {
-            let am = AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(&base);
+            let am =
+                AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(&base);
             let mut auth = session_auth();
             am.enrich_auth_inline(&mut auth).await;
         }
         assert_nothing_sent(&wire.observed().await, "auth_enrichment");
-        let am = AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(TRUSTED);
+        let am =
+            AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(TRUSTED);
         let mut auth = session_auth();
         am.enrich_auth_inline(&mut auth).await;
         assert_delivered(&wire.observed().await, "auth_enrichment");
@@ -164,7 +193,9 @@ fn p47_wire_remote_settings() {
             .await
             .unwrap();
             let crate::remote::SettingsFetch::DestinationRefused(text) = fetched else {
-                panic!("a refused settings URL must be DestinationRefused, not a 401-shaped Rejected");
+                panic!(
+                    "a refused settings URL must be DestinationRefused, not a 401-shaped Rejected"
+                );
             };
             assert_refusal_text(&text, "remote_settings");
         }
@@ -222,7 +253,13 @@ fn p47_wire_backend_client() {
                 .list_sessions()
                 .await
                 .unwrap_err();
-            assert!(matches!(err, crate::remote::BackendError::SessionDestinationRefused(_)), "{err}");
+            assert!(
+                matches!(
+                    err,
+                    crate::remote::BackendError::SessionDestinationRefused(_)
+                ),
+                "{err}"
+            );
             assert_refusal_text(&err.to_string(), "code_backend");
         }
         assert_nothing_sent(&wire.observed().await, "code_backend");
@@ -290,29 +327,54 @@ fn p47_wire_env_configured_rest_clients() {
                 .try_list_catalog("en")
                 .await
                 .unwrap_err();
-            assert!(matches!(skills, crate::remote::SkillsError::SessionDestinationRefused(_)), "{skills}");
+            assert!(
+                matches!(
+                    skills,
+                    crate::remote::SkillsError::SessionDestinationRefused(_)
+                ),
+                "{skills}"
+            );
             let ws = crate::remote::WorkspacesClient::new(am.clone())
                 .list_workspaces(&crate::remote::WsQuery::default())
                 .await
                 .unwrap_err();
-            assert!(matches!(ws, crate::remote::WsError::SessionDestinationRefused(_)), "{ws}");
+            assert!(
+                matches!(ws, crate::remote::WsError::SessionDestinationRefused(_)),
+                "{ws}"
+            );
             let conv = crate::remote::ConversationsClient::new(am.clone())
                 .list_conversations(&crate::remote::ConvQuery::default())
                 .await
                 .unwrap_err();
-            assert!(matches!(conv, crate::remote::ConvError::SessionDestinationRefused(_)), "{conv}");
+            assert!(
+                matches!(conv, crate::remote::ConvError::SessionDestinationRefused(_)),
+                "{conv}"
+            );
             let modes = crate::remote::ChatModelsClient::new(am.clone())
                 .list_modes("en")
                 .await
                 .unwrap_err();
-            assert!(matches!(modes, crate::remote::ChatModelsError::SessionDestinationRefused(_)), "{modes}");
-            for text in [skills.to_string(), ws.to_string(), conv.to_string(), modes.to_string()] {
+            assert!(
+                matches!(
+                    modes,
+                    crate::remote::ChatModelsError::SessionDestinationRefused(_)
+                ),
+                "{modes}"
+            );
+            for text in [
+                skills.to_string(),
+                ws.to_string(),
+                conv.to_string(),
+                modes.to_string(),
+            ] {
                 assert_refusal_text(&text, "env_rest");
             }
         }
         assert_nothing_sent(&wire.observed().await, "env_rest");
         set_bases(TRUSTED);
-        let _ = crate::remote::SkillsClient::new(am.clone()).try_list_catalog("en").await;
+        let _ = crate::remote::SkillsClient::new(am.clone())
+            .try_list_catalog("en")
+            .await;
         assert_delivered(&wire.observed().await, "skills");
         let _ = crate::remote::WorkspacesClient::new(am.clone())
             .list_workspaces(&crate::remote::WsQuery::default())
@@ -322,7 +384,9 @@ fn p47_wire_env_configured_rest_clients() {
             .list_conversations(&crate::remote::ConvQuery::default())
             .await;
         assert_delivered(&wire.observed().await, "conversations");
-        let _ = crate::remote::ChatModelsClient::new(am.clone()).list_modes("en").await;
+        let _ = crate::remote::ChatModelsClient::new(am.clone())
+            .list_modes("en")
+            .await;
         assert_delivered(&wire.observed().await, "chat_models");
     });
 }
@@ -338,11 +402,12 @@ fn p47_wire_session_registry() {
         preconditions();
         let (_dir, am) = session_manager();
         for base in hostile_bases(&wire) {
-            let err = crate::agent::session_registry_client::SessionRegistryClient::new(base, TOKEN)
-                .with_auth(am.clone())
-                .search(None, 1)
-                .await
-                .unwrap_err();
+            let err =
+                crate::agent::session_registry_client::SessionRegistryClient::new(base, TOKEN)
+                    .with_auth(am.clone())
+                    .search(None, 1)
+                    .await
+                    .unwrap_err();
             assert_refusal_text(&format!("{err:#}"), "session_registry");
         }
         assert_nothing_sent(&wire.observed().await, "session_registry");
@@ -384,7 +449,9 @@ fn p47_wire_feedback_client() {
             .get_feedback_config()
             .await;
         assert_delivered(&wire.observed().await, "feedback live");
-        let _ = FeedbackClient::new(TRUSTED, Some(TOKEN.into())).get_feedback_config().await;
+        let _ = FeedbackClient::new(TRUSTED, Some(TOKEN.into()))
+            .get_feedback_config()
+            .await;
         assert_delivered(&wire.observed().await, "feedback static");
     });
 }
@@ -428,8 +495,30 @@ fn p47_wire_storage_proxy() {
         };
         for base in hostile_bases(&wire) {
             for (label, client) in [
-                ("live", build_storage_client_for_proxy(&base, None, None, Some(am.clone()), None, None, "fuigo-shell")),
-                ("static", build_storage_client_for_proxy(&base, None, None, None, Some(TOKEN.into()), None, "fuigo-shell")),
+                (
+                    "live",
+                    build_storage_client_for_proxy(
+                        &base,
+                        None,
+                        None,
+                        Some(am.clone()),
+                        None,
+                        None,
+                        "fuigo-shell",
+                    ),
+                ),
+                (
+                    "static",
+                    build_storage_client_for_proxy(
+                        &base,
+                        None,
+                        None,
+                        None,
+                        Some(TOKEN.into()),
+                        None,
+                        "fuigo-shell",
+                    ),
+                ),
                 ("trace", trace_client(&base)),
             ] {
                 let err = client.get_upload_limits().await.unwrap_err();
@@ -437,13 +526,29 @@ fn p47_wire_storage_proxy() {
             }
         }
         assert_nothing_sent(&wire.observed().await, "storage");
-        let _ = build_storage_client_for_proxy(TRUSTED, None, None, Some(am.clone()), None, None, "fuigo-shell")
-            .get_upload_limits()
-            .await;
+        let _ = build_storage_client_for_proxy(
+            TRUSTED,
+            None,
+            None,
+            Some(am.clone()),
+            None,
+            None,
+            "fuigo-shell",
+        )
+        .get_upload_limits()
+        .await;
         assert_delivered(&wire.observed().await, "storage live");
-        let _ = build_storage_client_for_proxy(TRUSTED, None, None, None, Some(TOKEN.into()), None, "fuigo-shell")
-            .get_upload_limits()
-            .await;
+        let _ = build_storage_client_for_proxy(
+            TRUSTED,
+            None,
+            None,
+            None,
+            Some(TOKEN.into()),
+            None,
+            "fuigo-shell",
+        )
+        .get_upload_limits()
+        .await;
         assert_delivered(&wire.observed().await, "storage static");
         let _ = trace_client(TRUSTED).get_upload_limits().await;
         assert_delivered(&wire.observed().await, "trace upload");
@@ -481,11 +586,22 @@ fn p47_wire_agent_extensions() {
             let agent = &agent;
             async move {
                 vec![
-                    crate::extensions::billing::handle(agent, &request("fuigo/billing", serde_json::json!({}))).await,
-                    crate::extensions::billing::handle(agent, &request("fuigo/auto-topup-rule", serde_json::json!({}))).await,
+                    crate::extensions::billing::handle(
+                        agent,
+                        &request("fuigo/billing", serde_json::json!({})),
+                    )
+                    .await,
+                    crate::extensions::billing::handle(
+                        agent,
+                        &request("fuigo/auto-topup-rule", serde_json::json!({})),
+                    )
+                    .await,
                     crate::extensions::consent::handle(
                         agent,
-                        &request("fuigo/consent/record", serde_json::json!({ "noticeId": "n1", "version": 1 })),
+                        &request(
+                            "fuigo/consent/record",
+                            serde_json::json!({ "noticeId": "n1", "version": 1 }),
+                        ),
                     )
                     .await,
                     crate::extensions::privacy::handle(
@@ -509,10 +625,17 @@ fn p47_wire_agent_extensions() {
         assert_nothing_sent(&wire.observed().await, "agent extensions");
         let _ = call_all(TRUSTED.to_string()).await;
         let seen = wire.observed().await;
-        for path in ["/billing", "/auto-topup-rule", "/consent/accept", "/privacy/coding-data-retention"] {
+        for path in [
+            "/billing",
+            "/auto-topup-rule",
+            "/consent/accept",
+            "/privacy/coding-data-retention",
+        ] {
             assert!(
                 seen.iter().any(|o| o.target.contains(path)
-                    && o.authorization.as_deref().is_some_and(|a| a.contains(TOKEN))),
+                    && o.authorization
+                        .as_deref()
+                        .is_some_and(|a| a.contains(TOKEN))),
                 "{path} did not receive the token at the configured origin: {seen:?}"
             );
         }
@@ -567,10 +690,17 @@ fn p47_provider_rule_is_decided_on_the_stamped_value() {
         .bearer_may_reach(&refused, &snapshot)
         .expect_err("the session value captured before the switch is still a session token");
     assert_refusal_text(&err.0, "interleaving");
-    assert!(provider.bearer_may_reach(&refused, "p47-static-api-key").is_ok());
+    assert!(
+        provider
+            .bearer_may_reach(&refused, "p47-static-api-key")
+            .is_ok()
+    );
     let otel = crate::auth::credential_provider::OtelAuthCredentialProvider::for_test(am.clone());
     assert!(otel.bearer_may_reach(&refused, &snapshot).is_err());
-    assert!(otel.bearer_may_reach(&refused, "p47-static-api-key").is_ok());
+    assert!(
+        otel.bearer_may_reach(&refused, "p47-static-api-key")
+            .is_ok()
+    );
     let deployment = crate::auth::credential_provider::ShellAuthCredentialProvider::new(
         am,
         Some("p47-deployment-key".into()),
@@ -578,7 +708,11 @@ fn p47_provider_rule_is_decided_on_the_stamped_value() {
         None,
         "test",
     );
-    assert!(deployment.bearer_may_reach(&refused, "p47-deployment-key").is_ok());
+    assert!(
+        deployment
+            .bearer_may_reach(&refused, "p47-deployment-key")
+            .is_ok()
+    );
     assert!(deployment.bearer_may_reach(&refused, &snapshot).is_err());
 }
 
@@ -606,7 +740,9 @@ fn p47_upload_method_checks_only_session_credentials() {
         ..FuigoAuth::test_default()
     };
     match endpoints.resolve_upload_method_for_auth(Some(&api_key)) {
-        Some(UploadMethod::Proxy { user_token, .. }) => assert_eq!(user_token, "p47-static-api-key"),
+        Some(UploadMethod::Proxy { user_token, .. }) => {
+            assert_eq!(user_token, "p47-static-api-key")
+        }
         other => panic!("a static API key keeps its own rules: {other:?}"),
     }
 }
@@ -641,17 +777,27 @@ async fn p47_classified_trace_upload_keeps_the_credential_kind() {
     };
     let session = session_auth();
     let refused = crate::upload::gcs::ClassifiedProxyUpload::new(config(), Some(&session));
-    let err = fuigo_file_utils::gcs::upload_bytes(&refused, "s/trace.tar.gz", b"x", "application/gzip")
-        .await
-        .unwrap_err();
+    let err =
+        fuigo_file_utils::gcs::upload_bytes(&refused, "s/trace.tar.gz", b"x", "application/gzip")
+            .await
+            .unwrap_err();
     assert!(crate::upload::gcs::is_destination_refusal(&err), "{err:#}");
-    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "the session upload was sent");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the session upload was sent"
+    );
     let api_key = FuigoAuth {
         key: "p47-static-api-key".into(),
         auth_mode: AuthMode::ApiKey,
         ..FuigoAuth::test_default()
     };
     let admitted = crate::upload::gcs::ClassifiedProxyUpload::new(config(), Some(&api_key));
-    let _ = fuigo_file_utils::gcs::upload_bytes(&admitted, "s/trace.tar.gz", b"x", "application/gzip").await;
-    assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "the static API key upload must be sent");
+    let _ =
+        fuigo_file_utils::gcs::upload_bytes(&admitted, "s/trace.tar.gz", b"x", "application/gzip")
+            .await;
+    assert!(
+        hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the static API key upload must be sent"
+    );
 }

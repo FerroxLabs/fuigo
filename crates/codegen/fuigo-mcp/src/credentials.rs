@@ -141,11 +141,7 @@ impl McpCredentialStore {
     /// An unparsable file is copied aside (see [`copy_corrupt_aside`]) and then treated as empty,
     /// so a damaged store never silently overwrites tokens and never blocks sign-in.
     /// If the lock cannot be taken the write fails; there is no unlocked fallback.
-    fn locked_mutate_and_save_at(
-        &mut self,
-        path: &Path,
-        mutate: &dyn Fn(&mut Self),
-    ) -> Result<()> {
+    fn locked_mutate_and_save_at(&mut self, path: &Path, mutate: &dyn Fn(&mut Self)) -> Result<()> {
         use fuigo_config::fs_atomic::{Edit, EditError, edit_under_lock, stage_atomically};
 
         // The edit closure runs exactly once, under the lock (`edit_under_lock`): the aside copy it makes is a side
@@ -367,7 +363,9 @@ fn copy_corrupt_aside(path: &Path, bytes: &[u8], reason: &str) -> Result<()> {
     prune_aside_copies(path, &aside, KEEP_ASIDE_COPIES);
     fuigo_config::mcp_bearer_file::record_note(format!(
         "the saved MCP sign-in file could not be read, so MCP servers will ask you to sign in again. A copy of the damaged file was kept next to it as {}",
-        aside.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        aside
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
     ));
     tracing::warn!(
         path = %path.display(),
@@ -486,7 +484,9 @@ impl std::fmt::Debug for ObservedAccessToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self(observed) = self;
         let observed = observed.lock().as_ref().map(|_| "<redacted>");
-        f.debug_tuple("ObservedAccessToken").field(&observed).finish()
+        f.debug_tuple("ObservedAccessToken")
+            .field(&observed)
+            .finish()
     }
 }
 
@@ -624,8 +624,14 @@ mod tests {
         let store: McpCredentialStore = serde_json::from_str(fixture).unwrap();
         let url = Url::parse("https://mcp.example.com/mcp").unwrap();
         record_sent_tokens(store.get("srv", &url));
-        for token in ["s11f4-oauth-access-FAKE-0001", "s11f4-oauth-refresh-FAKE-0002"] {
-            assert!(!scrub(&format!("upstream echoed {token}")).contains(token), "{token}");
+        for token in [
+            "s11f4-oauth-access-FAKE-0001",
+            "s11f4-oauth-refresh-FAKE-0002",
+        ] {
+            assert!(
+                !scrub(&format!("upstream echoed {token}")).contains(token),
+                "{token}"
+            );
         }
     }
 
@@ -903,9 +909,15 @@ mod tests {
     #[test]
     fn safe_summary_never_holds_store_contents() {
         let e = McpCredentialError::Json(
-            serde_json::from_str::<McpCredentialStore>(r#"{"srv:https://h.invalid/mcp":"SECRET-C703-TOKEN"}"#).unwrap_err(),
+            serde_json::from_str::<McpCredentialStore>(
+                r#"{"srv:https://h.invalid/mcp":"SECRET-C703-TOKEN"}"#,
+            )
+            .unwrap_err(),
         );
-        assert!(e.to_string().contains("SECRET-C703-TOKEN"), "premise: the raw text quotes the value");
+        assert!(
+            e.to_string().contains("SECRET-C703-TOKEN"),
+            "premise: the raw text quotes the value"
+        );
         assert!(!e.safe_summary().contains("SECRET-C703-TOKEN"));
     }
 
@@ -914,12 +926,18 @@ mod tests {
     fn prune_keeps_the_just_written_copy_and_the_newest_of_the_rest() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CREDENTIALS_FILENAME);
-        let aside = |stamp: u32| dir.path().join(format!("{CREDENTIALS_FILENAME}.corrupt-{stamp}"));
+        let aside = |stamp: u32| {
+            dir.path()
+                .join(format!("{CREDENTIALS_FILENAME}.corrupt-{stamp}"))
+        };
         for stamp in [1, 5, 6, 7] {
             std::fs::write(aside(stamp), b"x").unwrap();
         }
         prune_aside_copies(&path, &aside(1), KEEP_ASIDE_COPIES);
-        let left: Vec<u32> = [1, 5, 6, 7].into_iter().filter(|s| aside(*s).exists()).collect();
+        let left: Vec<u32> = [1, 5, 6, 7]
+            .into_iter()
+            .filter(|s| aside(*s).exists())
+            .collect();
         assert_eq!(left, vec![1, 7]);
     }
 
@@ -982,10 +1000,18 @@ mod tests {
         store.locked_mutate_and_save_at(&path, &|_| {}).unwrap();
 
         assert_eq!(std::fs::read(&target).unwrap(), b"{ broken");
-        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o644);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
         let asides = aside_files(dir.path());
         assert_eq!(asides.len(), 1);
-        assert!(!std::fs::symlink_metadata(&asides[0]).unwrap().file_type().is_symlink());
+        assert!(
+            !std::fs::symlink_metadata(&asides[0])
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read(&asides[0]).unwrap(), b"{ broken");
     }
 
@@ -1009,12 +1035,17 @@ mod tests {
             })
             .unwrap();
 
-        let removed = snapshot.remove_by_server_name_and_save_at(&path, "a").unwrap();
+        let removed = snapshot
+            .remove_by_server_name_and_save_at(&path, "a")
+            .unwrap();
         assert_eq!(removed, 1);
         let loaded = McpCredentialStore::load_from(&path).unwrap();
         assert!(!loaded.has_credentials("a", &url));
         assert!(loaded.has_credentials("b", &url));
-        assert!(loaded.has_credentials("c", &url), "a concurrent write must not be rolled back");
+        assert!(
+            loaded.has_credentials("c", &url),
+            "a concurrent write must not be rolled back"
+        );
     }
 
     /// Removing a server that has no entry writes nothing (no empty store is created).
@@ -1023,7 +1054,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CREDENTIALS_FILENAME);
         let mut store = McpCredentialStore::default();
-        assert_eq!(store.remove_by_server_name_and_save_at(&path, "a").unwrap(), 0);
+        assert_eq!(
+            store.remove_by_server_name_and_save_at(&path, "a").unwrap(),
+            0
+        );
         assert!(!path.exists());
     }
 
@@ -1064,7 +1098,10 @@ mod tests {
         let url = Url::parse("https://example.com/mcp").unwrap();
         let adapter = McpCredentialStoreAdapter::new("srv".into(), url);
         assert!(adapter.clear().await.is_err(), "clear must error");
-        assert!(adapter.save(test_stored_creds("c")).await.is_err(), "save must error");
+        assert!(
+            adapter.save(test_stored_creds("c")).await.is_err(),
+            "save must error"
+        );
         assert_eq!(
             std::fs::read_link(&path).unwrap(),
             path,
@@ -1087,7 +1124,9 @@ mod tests {
             .unwrap()
         };
         let echoed = |token: &str| format!("401 from upstream: invalid token {token}");
-        let recorded = |token: &str| fuigo_telemetry::sent_credentials::scrub(&echoed(token)).as_ref() != echoed(token);
+        let recorded = |token: &str| {
+            fuigo_telemetry::sent_credentials::scrub(&echoed(token)).as_ref() != echoed(token)
+        };
 
         let url = Url::parse("https://s11f4.example.com/mcp").unwrap();
         let adapter = McpCredentialStoreAdapter::new("s11f4".into(), url);
@@ -1099,7 +1138,11 @@ mod tests {
         const LOADED: &str = "s11f4-oauth-loaded-FAKE-0002";
         let mut store = McpCredentialStore::default();
         store
-            .insert_and_save("s11f4", &Url::parse("https://s11f4.example.com/mcp").unwrap(), creds(LOADED))
+            .insert_and_save(
+                "s11f4",
+                &Url::parse("https://s11f4.example.com/mcp").unwrap(),
+                creds(LOADED),
+            )
             .unwrap();
         assert!(!recorded(LOADED));
         assert!(adapter.load().await.unwrap().is_some());

@@ -184,20 +184,22 @@ fn spawn_url_opener(url: &str) -> bool {
 /// instead of opened, so a modifier-click on a painted path never executes repo content.
 fn opens_by_launching(path: &std::path::Path) -> bool {
     const LAUNCHER_EXTENSIONS: &[&str] = &[
-        "command", "tool", "terminal", "app", "pkg", "mpkg", "dmg", "scpt", "scptd", "workflow", "action", "webloc",
-        "inetloc", "jar", "desktop", "appimage", "run", "exe", "bat", "cmd", "com", "msi", "ps1", "vbs", "lnk",
+        "command", "tool", "terminal", "app", "pkg", "mpkg", "dmg", "scpt", "scptd", "workflow",
+        "action", "webloc", "inetloc", "jar", "desktop", "appimage", "run", "exe", "bat", "cmd",
+        "com", "msi", "ps1", "vbs", "lnk",
     ];
-    if path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| LAUNCHER_EXTENSIONS.iter().any(|k| e.eq_ignore_ascii_case(k)))
-    {
+    if path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        LAUNCHER_EXTENSIONS
+            .iter()
+            .any(|k| e.eq_ignore_ascii_case(k))
+    }) {
         return true;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0) {
+        if std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        {
             return true;
         }
     }
@@ -386,7 +388,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fuigo-open-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let args_of = |p: &std::path::Path| -> Vec<std::ffi::OsString> {
-            build_open_path_command(p).get_args().map(|a| a.to_os_string()).collect()
+            build_open_path_command(p)
+                .get_args()
+                .map(|a| a.to_os_string())
+                .collect()
         };
         let revealed = |p: &std::path::Path| -> Vec<std::ffi::OsString> {
             #[cfg(target_os = "macos")]
@@ -416,7 +421,11 @@ mod tests {
         for name in ["main.rs", "shot.png"] {
             let p = dir.join(name);
             std::fs::write(&p, "x").unwrap();
-            assert_eq!(args_of(&p), vec![p.as_os_str().to_os_string()], "{name} still opens");
+            assert_eq!(
+                args_of(&p),
+                vec![p.as_os_str().to_os_string()],
+                "{name} still opens"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

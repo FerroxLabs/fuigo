@@ -189,9 +189,9 @@ mod session;
 mod shell_completion;
 #[cfg(test)]
 mod task_status_tests;
+mod viewer;
 #[cfg(test)]
 mod vim_prompt_tests;
-mod viewer;
 mod workflows_overlay;
 use super::actions;
 use super::dispatch;

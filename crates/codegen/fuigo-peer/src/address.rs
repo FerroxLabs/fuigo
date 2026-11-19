@@ -36,7 +36,9 @@ impl fmt::Display for AddressError {
             Self::BadHostId => "host id must be 32 lowercase hex characters",
             Self::BadSessionId => "session id is empty, too long, or has a disallowed character",
             Self::BadIncarnation => "incarnation must be a decimal number",
-            Self::WrongPartCount => "address must be `fuigo-peer:<host-id>/<session-id>/<incarnation>`",
+            Self::WrongPartCount => {
+                "address must be `fuigo-peer:<host-id>/<session-id>/<incarnation>`"
+            }
             Self::InvalidName => "name is not a valid display name",
         })
     }
@@ -55,13 +57,16 @@ pub struct Address {
 fn valid_session_id(s: &str) -> bool {
     !s.is_empty()
         && s.chars().count() <= MAX_ADDRESS_SESSION_ID_CHARS
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 impl Address {
     pub fn new(host_id: &str, session_id: &str, incarnation: u64) -> Result<Self, AddressError> {
         if host_id.len() != HOST_ID_LEN
-            || !host_id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            || !host_id
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         {
             return Err(AddressError::BadHostId);
         }
@@ -90,7 +95,11 @@ impl Address {
 
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{ADDRESS_PREFIX}{}/{}/{}", self.host_id, self.session_id, self.incarnation)
+        write!(
+            f,
+            "{ADDRESS_PREFIX}{}/{}/{}",
+            self.host_id, self.session_id, self.incarnation
+        )
     }
 }
 
@@ -98,7 +107,9 @@ impl FromStr for Address {
     type Err = AddressError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let rest = s.strip_prefix(ADDRESS_PREFIX).ok_or(AddressError::MissingPrefix)?;
+        let rest = s
+            .strip_prefix(ADDRESS_PREFIX)
+            .ok_or(AddressError::MissingPrefix)?;
         let parts: Vec<&str> = rest.split('/').collect();
         let [host, session, incarnation] = parts.as_slice() else {
             return Err(AddressError::WrongPartCount);
@@ -107,7 +118,9 @@ impl FromStr for Address {
         if incarnation.is_empty() || !incarnation.bytes().all(|b| b.is_ascii_digit()) {
             return Err(AddressError::BadIncarnation);
         }
-        let incarnation = incarnation.parse::<u64>().map_err(|_| AddressError::BadIncarnation)?;
+        let incarnation = incarnation
+            .parse::<u64>()
+            .map_err(|_| AddressError::BadIncarnation)?;
         let addr = Self::new(host, session, incarnation)?;
         // Canonical form only, so one session has one spelling (`007` is refused).
         if addr.to_string() != s {
@@ -151,9 +164,9 @@ pub fn is_valid_display_name(name: &str) -> bool {
     name.chars().count() <= MAX_NAME_CHARS
         && !has_address_prefix_any_case(name)
         && name.parse::<Address>().is_err()
-        && !name
-            .chars()
-            .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}' || BIDI_CONTROLS.contains(&c))
+        && !name.chars().any(|c| {
+            c.is_control() || c == '\u{2028}' || c == '\u{2029}' || BIDI_CONTROLS.contains(&c)
+        })
 }
 
 /// `Name [ref]`: the form `list_agents` shows. Only a trailing `[ref]` counts; brackets anywhere
@@ -181,7 +194,9 @@ pub fn parse_name_ref(s: &str) -> Option<NameRef<'_>> {
     let reference = &inner[open + 1..];
     let name = inner[..open].strip_suffix(' ')?;
     let ok_ref = REF_LEN_RANGE.contains(&reference.len())
-        && reference.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        && reference
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
     if name.trim().is_empty() || !ok_ref {
         return None;
     }

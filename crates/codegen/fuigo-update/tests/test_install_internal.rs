@@ -736,7 +736,10 @@ async fn s8_f9_digest_mismatch_is_refused_before_the_binary_runs() {
         format!("{err:#}").contains("does not match"),
         "expected a digest mismatch, got: {err:#}"
     );
-    assert!(!marker.exists(), "the unverified binary must never be executed");
+    assert!(
+        !marker.exists(),
+        "the unverified binary must never be executed"
+    );
     assert!(
         !test_home()
             .join("downloads")
@@ -793,7 +796,7 @@ async fn s8_f12_version_cache_does_not_use_a_fixed_temp_name() {
     let _ = test_home();
     reset_home();
     let home = test_home();
-    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(home).unwrap();
     let victim = home.join("s8f12-victim");
     std::fs::write(&victim, b"keep me").unwrap();
     std::os::unix::fs::symlink(&victim, home.join("version.json.tmp")).unwrap();

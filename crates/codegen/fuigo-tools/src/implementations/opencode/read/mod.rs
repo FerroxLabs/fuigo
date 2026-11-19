@@ -517,7 +517,10 @@ async fn not_found_with_suggestions(path: &std::path::Path) -> ReadFileOutput {
 
 // ─── Tests ──────────────────────────────────────────────────────────
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1401,16 +1404,23 @@ mod tests {
             offset: None,
             limit: None,
         };
-        let denied = fuigo_tool_runtime::Tool::run(&ReadTool, test_ctx(shared()), input("secret/key.txt"))
-            .await
-            .unwrap();
+        let denied =
+            fuigo_tool_runtime::Tool::run(&ReadTool, test_ctx(shared()), input("secret/key.txt"))
+                .await
+                .unwrap();
         match denied {
-            ReadFileOutput::FileReadError(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            ReadFileOutput::FileReadError(msg) => {
+                assert!(msg.contains("ignored by .gitignore"), "{msg}")
+            }
             other => panic!("expected the gitignore denial, got {other:?}"),
         }
-        let allowed = fuigo_tool_runtime::Tool::run(&ReadTool, test_ctx(shared()), input("open.txt"))
-            .await
-            .unwrap();
-        assert!(matches!(allowed, ReadFileOutput::FileContent(_)), "{allowed:?}");
+        let allowed =
+            fuigo_tool_runtime::Tool::run(&ReadTool, test_ctx(shared()), input("open.txt"))
+                .await
+                .unwrap();
+        assert!(
+            matches!(allowed, ReadFileOutput::FileContent(_)),
+            "{allowed:?}"
+        );
     }
 }

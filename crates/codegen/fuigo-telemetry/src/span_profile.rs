@@ -221,7 +221,9 @@ pub(crate) mod test_support {
             dropped_paths: AtomicU64::new(0),
         }));
         let subscriber = tracing_subscriber::registry().with(SpanProfileLayer { profile });
+        let _second = crate::hold_second_dispatcher();
         let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
         f();
         let folded = profile
             .folded

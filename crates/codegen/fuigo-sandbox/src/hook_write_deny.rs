@@ -147,8 +147,8 @@ pub fn revalidate_path_identity(id: &PathIdentity) -> Result<(), HookWriteDenyEr
 
 #[cfg(unix)]
 fn reject_hardlinked_files(sources: &[GlobalHookSource]) -> Result<(), HookWriteDenyError> {
-    use std::os::unix::fs::MetadataExt;
     use fuigo_config::GlobalHookSourceKind;
+    use std::os::unix::fs::MetadataExt;
     for s in sources {
         let is_file_slot = matches!(
             s.kind,
@@ -345,7 +345,10 @@ pub(crate) fn git_bind_targets(
     entries: &[GitProtectedPath],
     write_roots: &[PathBuf],
 ) -> Result<Vec<(PathBuf, GitPathKind)>, HookWriteDenyError> {
-    let roots: Vec<PathBuf> = write_roots.iter().map(|root| canonical_path(root)).collect();
+    let roots: Vec<PathBuf> = write_roots
+        .iter()
+        .map(|root| canonical_path(root))
+        .collect();
     let within = |path: &Path| roots.iter().any(|root| is_within(path, root));
     // A link inside a tree bound read-only cannot be re-pointed (a symlinked hook in `hooks/`)
     let trees: Vec<PathBuf> = entries
@@ -381,9 +384,13 @@ pub(crate) fn git_bind_targets(
         }
         // A link that never resolves (a loop) under a tree bound read-only names no writable
         // file and cannot be re-pointed: that bind already covers it
-        let unresolved = std::fs::symlink_metadata(&canonical)
-            .is_ok_and(|meta| meta.file_type().is_symlink());
-        if unresolved && trees.iter().any(|tree| canonical != *tree && is_within(&canonical, tree)) {
+        let unresolved =
+            std::fs::symlink_metadata(&canonical).is_ok_and(|meta| meta.file_type().is_symlink());
+        if unresolved
+            && trees
+                .iter()
+                .any(|tree| canonical != *tree && is_within(&canonical, tree))
+        {
             continue;
         }
         out.push((canonical, entry.kind));
@@ -450,7 +457,8 @@ pub fn add_git_leaves_to_plan(
         .map(|l| l.path.clone())
         .collect();
     plan.ancestor_rw_binds.retain(|a| !leaf_paths.contains(a));
-    plan.ancestor_rw_binds.sort_by_key(|p| p.components().count());
+    plan.ancestor_rw_binds
+        .sort_by_key(|p| p.components().count());
     Ok(())
 }
 
@@ -458,7 +466,10 @@ pub fn add_git_leaves_to_plan(
 /// not exist yet; cargo's `registry/` and lock files, so a first build can use them). `false`
 /// when it is not a directory.
 #[cfg(target_os = "linux")]
-fn prepare_pinned_dir(dir: &Path, entries: &[GitProtectedPath]) -> Result<bool, HookWriteDenyError> {
+fn prepare_pinned_dir(
+    dir: &Path,
+    entries: &[GitProtectedPath],
+) -> Result<bool, HookWriteDenyError> {
     let io = |path: &Path, e: std::io::Error| HookWriteDenyError::VerifyIo {
         path: path.to_path_buf(),
         detail: e.to_string(),
@@ -530,7 +541,9 @@ fn add_pinned_dir(
                 && entry.kind.is_dir()
                 && is_within(child, &at);
             at == child || covers || is_within(&at, child)
-        }) || targets.iter().any(|(target, _)| target.as_path() != dir && target == child)
+        }) || targets
+            .iter()
+            .any(|(target, _)| target.as_path() != dir && target == child)
     };
     let children = std::fs::read_dir(dir).map_err(|e| io(dir, e))?;
     let mut rebinds = Vec::new();
@@ -627,8 +640,8 @@ pub fn verify_git_write_deny_enforced(
     let resolved = profile
         .resolve_profile(workspace, &config)
         .map_err(|e| e.to_string())?;
-    let targets =
-        git_bind_targets(&resolved.git_write_deny, &resolved.read_write).map_err(|e| e.to_string())?;
+    let targets = git_bind_targets(&resolved.git_write_deny, &resolved.read_write)
+        .map_err(|e| e.to_string())?;
     let mut paths = Vec::new();
     for (path, kind) in targets {
         if std::fs::symlink_metadata(&path).is_err() {

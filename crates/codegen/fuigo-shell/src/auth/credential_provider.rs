@@ -754,8 +754,13 @@ mod tests {
         let _guard = EarlyInvalidationGuard::pin_to_default();
         let dir = tempfile::tempdir().unwrap();
         let mgr = make_manager(&dir, None);
-        let provider =
-            ShellAuthCredentialProvider::new(mgr, Some("deployment-key".to_string()), None, None, "test");
+        let provider = ShellAuthCredentialProvider::new(
+            mgr,
+            Some("deployment-key".to_string()),
+            None,
+            None,
+            "test",
+        );
         assert!(!provider.refresh_after_unauthorized().await);
     }
     #[test]
@@ -782,8 +787,14 @@ mod tests {
             expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
             ..FuigoAuth::test_default()
         };
-        let api = ShellAuthCredentialProvider::new(make_manager(&dir, Some(api_auth)), None, None, None, "test")
-            .snapshot();
+        let api = ShellAuthCredentialProvider::new(
+            make_manager(&dir, Some(api_auth)),
+            None,
+            None,
+            None,
+            "test",
+        )
+        .snapshot();
         assert_eq!(
             api.api_key_id.as_deref(),
             Some(deployment_id_from_key("sk-apikey-xyz").as_str())
@@ -1011,8 +1022,13 @@ mod tests {
             &dir,
             Some(make_auth("user-token", ChronoDuration::hours(1))),
         );
-        let provider =
-            ShellAuthCredentialProvider::new(mgr, Some("deployment-key-12345".to_string()), None, None, "test");
+        let provider = ShellAuthCredentialProvider::new(
+            mgr,
+            Some("deployment-key-12345".to_string()),
+            None,
+            None,
+            "test",
+        );
         let snap = provider.snapshot();
         assert_eq!(snap.token.as_deref(), Some("deployment-key-12345"));
         assert!(snap.user_id.is_none());
@@ -1020,7 +1036,10 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures use test-owned temp dirs")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures use test-owned temp dirs"
+)]
 mod x1_f5_sent_credential_tests {
     use super::*;
     use fuigo_telemetry::sent_credentials::scrub;
@@ -1032,9 +1051,16 @@ mod x1_f5_sent_credential_tests {
         const KEY: &str = "x1f5-deployment-key-FAKE-0001";
         let dir = tempfile::tempdir().unwrap();
         let mgr = std::sync::Arc::new(AuthManager::new(dir.path(), Default::default()));
-        let provider = ShellAuthCredentialProvider::new(mgr, Some(KEY.to_owned()), None, None, "test");
-        let _ = provider.apply(reqwest::Client::new().get("https://api.example/x"), "https://api.example");
+        let provider =
+            ShellAuthCredentialProvider::new(mgr, Some(KEY.to_owned()), None, None, "test");
+        let _ = provider.apply(
+            reqwest::Client::new().get("https://api.example/x"),
+            "https://api.example",
+        );
         let echoed = format!("upstream said: bad key {KEY}");
-        assert!(!scrub(&echoed).contains(KEY), "the deployment key was not recorded");
+        assert!(
+            !scrub(&echoed).contains(KEY),
+            "the deployment key was not recorded"
+        );
     }
 }

@@ -1867,8 +1867,9 @@ fn patch_initialize_response_applies_to_real_acp_wire_shape() {
     })
     .as_object()
     .cloned();
-    let resp = agent_client_protocol::InitializeResponse::new(agent_client_protocol::ProtocolVersion::V1)
-        .meta(meta);
+    let resp =
+        agent_client_protocol::InitializeResponse::new(agent_client_protocol::ProtocolVersion::V1)
+            .meta(meta);
     let result = serde_json::to_value(&resp).expect("serialize InitializeResponse");
     assert!(
         result.get("_meta").is_some() && result.get("meta").is_none(),
@@ -1909,9 +1910,8 @@ fn patch_initialize_response_noop_when_default_not_available() {
     ));
     assert_eq!(json, before);
     // Missing catalog is also a no-op.
-    let mut json = pv(
-        r#"{"jsonrpc":"2.0","id":1,"result":{"_meta":{"modelState":{"currentModelId":"a"}}}}"#,
-    );
+    let mut json =
+        pv(r#"{"jsonrpc":"2.0","id":1,"result":{"_meta":{"modelState":{"currentModelId":"a"}}}}"#);
     let before = json.clone();
     assert!(!patch_initialize_response_model(
         &mut json,
@@ -1967,9 +1967,7 @@ fn take_initialize_patch_matches_explicit_null_id() {
 #[test]
 fn initialize_error_response_disarms_patch_and_is_untouched() {
     let mut pending = Some(serde_json::json!(7));
-    let mut resp = pv(
-        r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32603,"message":"boom"}}"#,
-    );
+    let mut resp = pv(r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32603,"message":"boom"}}"#);
     let before = resp.clone();
     // Mirrors the leader's response path: disarm on id match, then patch.
     if take_initialize_patch_if_matches(&mut pending, &resp) {
@@ -2310,7 +2308,10 @@ fn client_supplied_leader_client_id_is_overwritten_with_real_connection_id() {
             r#"{{"jsonrpc":"2.0","method":"{method}","id":1,"params":{{"sessionId":"sess-1","_meta":{{"fuigo/leaderClientId":7}}}}}}"#
         );
         let mut json = pv(&payload);
-        assert!(stamp_connection_id_into_session_request(&mut json, ClientId(42)));
+        assert!(stamp_connection_id_into_session_request(
+            &mut json,
+            ClientId(42)
+        ));
         inject_session_request_context(
             &mut json,
             &ClientCapabilities::default(),
@@ -2397,7 +2398,11 @@ fn yolo_notification_overwrites_client_supplied_identity() {
         assert_eq!(json["params"]["fuigo/leaderConnectionId"], 9);
         assert_eq!(json["params"]["clientIdentifier"], "attacker");
         assert!(json["params"]["_meta"].get("clientIdentifier").is_none());
-        assert!(json["params"]["_meta"].get("fuigo/leaderConnectionId").is_none());
+        assert!(
+            json["params"]["_meta"]
+                .get("fuigo/leaderConnectionId")
+                .is_none()
+        );
     }
 }
 
@@ -2422,7 +2427,10 @@ fn two_connections_claiming_one_product_get_distinct_stamps() {
     let mut b = pv(raw);
     inject_client_identity_into_yolo_notification(&mut a, "fuigo-pager", ClientId(1));
     inject_client_identity_into_yolo_notification(&mut b, "fuigo-pager", ClientId(2));
-    assert_eq!(a["params"]["clientIdentifier"], b["params"]["clientIdentifier"]);
+    assert_eq!(
+        a["params"]["clientIdentifier"],
+        b["params"]["clientIdentifier"]
+    );
     assert_ne!(
         a["params"]["fuigo/leaderConnectionId"],
         b["params"]["fuigo/leaderConnectionId"]
@@ -2435,11 +2443,17 @@ fn session_requests_get_leader_connection_id_overwriting_client_value() {
         let mut json = pv(&format!(
             r#"{{"jsonrpc":"2.0","method":"{method}","id":1,"params":{{"_meta":{{"fuigo/leaderConnectionId":1}}}}}}"#
         ));
-        assert!(stamp_connection_id_into_session_request(&mut json, ClientId(6)));
+        assert!(stamp_connection_id_into_session_request(
+            &mut json,
+            ClientId(6)
+        ));
         assert_eq!(json["params"]["_meta"]["fuigo/leaderConnectionId"], 6);
     }
     let mut other = pv(r#"{"jsonrpc":"2.0","method":"session/prompt","id":1,"params":{}}"#);
-    assert!(!stamp_connection_id_into_session_request(&mut other, ClientId(6)));
+    assert!(!stamp_connection_id_into_session_request(
+        &mut other,
+        ClientId(6)
+    ));
 }
 
 #[test]
@@ -3684,7 +3698,11 @@ async fn load_session(writer: &mut tokio::io::WriteHalf<LeaderStream>, session_i
 }
 
 /// As [`load_session`], presenting the reconnect token the leader issued to this session's owner (a reconnecting pager does).
-async fn load_session_with_token(writer: &mut tokio::io::WriteHalf<LeaderStream>, session_id: &str, token: &str) {
+async fn load_session_with_token(
+    writer: &mut tokio::io::WriteHalf<LeaderStream>,
+    session_id: &str,
+    token: &str,
+) {
     let msg = format!(
         r#"{{"jsonrpc":"2.0","method":"session/load","id":1,"params":{{"sessionId":"{session_id}","_meta":{{"fuigo/leaderReconnectToken":"{token}"}}}}}}"#
     );
@@ -3893,20 +3911,44 @@ async fn session_requests_go_to_the_owner_only_and_only_its_answer_counts() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let requests = [
-        (501, "request_permission", r#"{"jsonrpc":"2.0","id":501,"method":"session/request_permission","params":{"sessionId":"sess-int","toolCall":{"toolCallId":"tc-p"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}"#),
-        (502, "ask_user_question", r#"{"jsonrpc":"2.0","id":502,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-q","questions":[]}}}"#),
-        (503, "exit_plan_mode", r#"{"jsonrpc":"2.0","id":503,"method":"_fuigo/exit_plan_mode","params":{"method":"fuigo/exit_plan_mode","params":{"sessionId":"sess-int","toolCallId":"tc-x"}}}"#),
-        (504, "mcp/elicit", r#"{"jsonrpc":"2.0","id":504,"method":"_fuigo/mcp/elicit","params":{"method":"fuigo/mcp/elicit","params":{"sessionId":"sess-int","message":"token?"}}}"#),
-        (505, "read_text_file", r#"{"jsonrpc":"2.0","id":505,"method":"fs/read_text_file","params":{"sessionId":"sess-int","path":"/tmp/x"}}"#),
+        (
+            501,
+            "request_permission",
+            r#"{"jsonrpc":"2.0","id":501,"method":"session/request_permission","params":{"sessionId":"sess-int","toolCall":{"toolCallId":"tc-p"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}"#,
+        ),
+        (
+            502,
+            "ask_user_question",
+            r#"{"jsonrpc":"2.0","id":502,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-q","questions":[]}}}"#,
+        ),
+        (
+            503,
+            "exit_plan_mode",
+            r#"{"jsonrpc":"2.0","id":503,"method":"_fuigo/exit_plan_mode","params":{"method":"fuigo/exit_plan_mode","params":{"sessionId":"sess-int","toolCallId":"tc-x"}}}"#,
+        ),
+        (
+            504,
+            "mcp/elicit",
+            r#"{"jsonrpc":"2.0","id":504,"method":"_fuigo/mcp/elicit","params":{"method":"fuigo/mcp/elicit","params":{"sessionId":"sess-int","message":"token?"}}}"#,
+        ),
+        (
+            505,
+            "read_text_file",
+            r#"{"jsonrpc":"2.0","id":505,"method":"fs/read_text_file","params":{"sessionId":"sess-int","path":"/tmp/x"}}"#,
+        ),
     ];
     for (id, needle, req) in requests {
         response_tx.send(req.to_string()).unwrap();
         assert!(
-            next_acp_payload_matching(&mut reader_a, needle).await.is_some(),
+            next_acp_payload_matching(&mut reader_a, needle)
+                .await
+                .is_some(),
             "the owner A must receive {needle}"
         );
         assert!(
-            next_acp_payload_matching(&mut reader_b, needle).await.is_none(),
+            next_acp_payload_matching(&mut reader_b, needle)
+                .await
+                .is_none(),
             "non-owner B must NOT receive {needle}"
         );
         // B answers anyway (an always-approve window would): dropped, never reaches the agent.
@@ -3928,12 +3970,19 @@ async fn session_requests_go_to_the_owner_only_and_only_its_answer_counts() {
 
 /// Answer the agent's request `id` from a client, with `marker` in the result.
 async fn send_answer(writer: &mut tokio::io::WriteHalf<LeaderStream>, id: u64, marker: &str) {
-    let msg = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"outcome":{{"outcome":"selected","optionId":"allow"}},"marker":"{marker}"}}}}"#);
-    write_message(writer, &ClientMessage::Acp { payload: msg }).await.unwrap();
+    let msg = format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"result":{{"outcome":{{"outcome":"selected","optionId":"allow"}},"marker":"{marker}"}}}}"#
+    );
+    write_message(writer, &ClientMessage::Acp { payload: msg })
+        .await
+        .unwrap();
 }
 
 /// The next line the leader forwarded to the agent that contains `needle`, within a short deadline.
-async fn forwarded_matching(acp_rx: &mut mpsc::UnboundedReceiver<String>, needle: &str) -> Option<String> {
+async fn forwarded_matching(
+    acp_rx: &mut mpsc::UnboundedReceiver<String>,
+    needle: &str,
+) -> Option<String> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -3956,7 +4005,9 @@ async fn pending_interaction_replayed_to_the_owner_only() {
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let a_reply = next_acp_payload(&mut reader_a).await.expect("A's load response");
+    let a_reply = next_acp_payload(&mut reader_a)
+        .await
+        .expect("A's load response");
     let a_token = reconnect_token_in(&a_reply);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
@@ -3970,7 +4021,9 @@ async fn pending_interaction_replayed_to_the_owner_only() {
     load_session(&mut writer_b, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
     assert!(
-        next_acp_payload_matching(&mut reader_b, "request_permission").await.is_none(),
+        next_acp_payload_matching(&mut reader_b, "request_permission")
+            .await
+            .is_none(),
         "a non-owner late joiner must not receive the pending permission request"
     );
     send_answer(&mut writer_b, 601, "B-ANSWER").await;
@@ -3980,7 +4033,9 @@ async fn pending_interaction_replayed_to_the_owner_only() {
     load_session_with_token(&mut writer_a, "sess-int", &a_token).await;
     complete_load(&mut acp_rx, &response_tx).await;
     assert!(
-        next_acp_payload_matching(&mut reader_a, "request_permission").await.is_some(),
+        next_acp_payload_matching(&mut reader_a, "request_permission")
+            .await
+            .is_some(),
         "the owner's reload must replay the still-pending modal"
     );
     send_answer(&mut writer_a, 601, "A-ANSWER").await;
@@ -4031,7 +4086,9 @@ async fn reattached_client_backfilled_into_child_routes() {
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-sub").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let a_reply = next_acp_payload(&mut reader_a).await.expect("A's load response");
+    let a_reply = next_acp_payload(&mut reader_a)
+        .await
+        .expect("A's load response");
     let a_token = reconnect_token_in(&a_reply);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
@@ -4657,7 +4714,9 @@ async fn pending_interaction_survives_disconnect_and_replays_on_reconnect() {
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let a_reply = next_acp_payload(&mut reader_a).await.expect("A's load response");
+    let a_reply = next_acp_payload(&mut reader_a)
+        .await
+        .expect("A's load response");
     let a_token = reconnect_token_in(&a_reply);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
@@ -4676,14 +4735,20 @@ async fn pending_interaction_survives_disconnect_and_replays_on_reconnect() {
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    assert!(next_acp_payload_matching(&mut reader_b, "ask_user_question").await.is_none());
+    assert!(
+        next_acp_payload_matching(&mut reader_b, "ask_user_question")
+            .await
+            .is_none()
+    );
 
     // The owner reconnects with its token: the still-pending interaction replays on its load, and its answer counts.
     let (mut reader_a2, mut writer_a2) = connect_and_register(&sock_path, "client-a").await;
     load_session_with_token(&mut writer_a2, "sess-int", &a_token).await;
     complete_load(&mut acp_rx, &response_tx).await;
     assert!(
-        next_acp_payload_matching(&mut reader_a2, "ask_user_question").await.is_some(),
+        next_acp_payload_matching(&mut reader_a2, "ask_user_question")
+            .await
+            .is_some(),
         "a still-pending interaction must survive a full disconnect and replay on the owner's reconnect"
     );
     send_answer(&mut writer_b, 801, "B-ANSWER").await;
@@ -4706,7 +4771,11 @@ async fn permission_request_during_grace_is_held_for_the_owner() {
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-g").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let a_token = reconnect_token_in(&next_acp_payload(&mut reader_a).await.expect("A's load response"));
+    let a_token = reconnect_token_in(
+        &next_acp_payload(&mut reader_a)
+            .await
+            .expect("A's load response"),
+    );
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-g").await;
     complete_load(&mut acp_rx, &response_tx).await;
@@ -4719,7 +4788,12 @@ async fn permission_request_during_grace_is_held_for_the_owner() {
     let uncached = r#"{"jsonrpc":"2.0","id":902,"method":"session/request_permission","params":{"sessionId":"sess-g","options":[]}}"#;
     response_tx.send(cached.to_string()).unwrap();
     response_tx.send(uncached.to_string()).unwrap();
-    assert!(next_acp_payload_matching(&mut reader_b, "request_permission").await.is_none(), "B is not the owner");
+    assert!(
+        next_acp_payload_matching(&mut reader_b, "request_permission")
+            .await
+            .is_none(),
+        "B is not the owner"
+    );
     send_answer(&mut writer_b, 901, "B-ANSWER").await;
     send_answer(&mut writer_b, 902, "B-ANSWER").await;
     assert!(forwarded_matching(&mut acp_rx, "B-ANSWER").await.is_none());
@@ -4729,14 +4803,30 @@ async fn permission_request_during_grace_is_held_for_the_owner() {
     complete_load(&mut acp_rx, &response_tx).await;
     let mut got = Vec::new();
     while let Some(p) = next_acp_payload_matching(&mut reader_a2, "request_permission").await {
-        got.push(serde_json::from_str::<serde_json::Value>(&p).unwrap()["id"].as_u64().unwrap());
+        got.push(
+            serde_json::from_str::<serde_json::Value>(&p).unwrap()["id"]
+                .as_u64()
+                .unwrap(),
+        );
     }
     got.sort();
-    assert_eq!(got, vec![901, 902], "each held request reaches the reclaiming owner exactly once");
+    assert_eq!(
+        got,
+        vec![901, 902],
+        "each held request reaches the reclaiming owner exactly once"
+    );
     send_answer(&mut writer_a2, 901, "A-ANSWER-1").await;
     send_answer(&mut writer_a2, 902, "A-ANSWER-2").await;
-    assert!(forwarded_matching(&mut acp_rx, "A-ANSWER-1").await.is_some());
-    assert!(forwarded_matching(&mut acp_rx, "A-ANSWER-2").await.is_some());
+    assert!(
+        forwarded_matching(&mut acp_rx, "A-ANSWER-1")
+            .await
+            .is_some()
+    );
+    assert!(
+        forwarded_matching(&mut acp_rx, "A-ANSWER-2")
+            .await
+            .is_some()
+    );
 
     cancel.cancel();
 }
@@ -4750,7 +4840,8 @@ async fn pending_permission_request_goes_to_the_promoted_owner() {
     let (acp_tx, mut acp_rx) = mpsc::unbounded_channel();
     let (response_tx, response_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
-    let control_state = default_test_control_state(&sock_path).with_driver_grace(Duration::from_millis(300));
+    let control_state =
+        default_test_control_state(&sock_path).with_driver_grace(Duration::from_millis(300));
     let (sock_clone, cancel_clone) = (sock_path.clone(), cancel.clone());
     tokio::spawn(async move {
         let _ = run_leader_server(
@@ -4783,18 +4874,31 @@ async fn pending_permission_request_goes_to_the_promoted_owner() {
 
     let req = r#"{"jsonrpc":"2.0","id":951,"method":"session/request_permission","params":{"sessionId":"sess-p","toolCall":{"toolCallId":"tc-promo"},"options":[]}}"#;
     response_tx.send(req.to_string()).unwrap();
-    assert!(next_acp_payload_matching(&mut reader_a, "request_permission").await.is_some());
-    assert!(next_acp_payload_matching(&mut reader_b, "request_permission").await.is_none());
+    assert!(
+        next_acp_payload_matching(&mut reader_a, "request_permission")
+            .await
+            .is_some()
+    );
+    assert!(
+        next_acp_payload_matching(&mut reader_b, "request_permission")
+            .await
+            .is_none()
+    );
     drop(reader_a);
     drop(writer_a);
 
     // Grace ends: B is promoted and gets the pending request.
     assert!(
-        next_acp_payload_matching(&mut reader_b, "request_permission").await.is_some(),
+        next_acp_payload_matching(&mut reader_b, "request_permission")
+            .await
+            .is_some(),
         "the promoted owner must be handed the pending permission request"
     );
     send_answer(&mut writer_b, 951, "B-ANSWER").await;
-    assert!(forwarded_matching(&mut acp_rx, "B-ANSWER").await.is_some(), "the new owner's answer counts");
+    assert!(
+        forwarded_matching(&mut acp_rx, "B-ANSWER").await.is_some(),
+        "the new owner's answer counts"
+    );
 
     cancel.cancel();
 }
@@ -4805,18 +4909,39 @@ async fn pending_permission_request_goes_to_the_promoted_owner() {
 fn relay_answers_count_only_for_requests_the_relay_was_given() {
     let board = super::super::drivers::OwnerBoard::default();
     let _ = board.claim("local", super::super::drivers::Claimer::Client(ClientId(1)));
-    note_agent_request(r#"{"jsonrpc":"2.0","id":11,"method":"session/request_permission","params":{"sessionId":"local"}}"#, &board);
+    note_agent_request(
+        r#"{"jsonrpc":"2.0","id":11,"method":"session/request_permission","params":{"sessionId":"local"}}"#,
+        &board,
+    );
     let answer = r#"{"jsonrpc":"2.0","id":11,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}}"#;
-    assert!(filter_relay_answers(answer, &board).is_none(), "a local owner's request is not the relay's to answer");
+    assert!(
+        filter_relay_answers(answer, &board).is_none(),
+        "a local owner's request is not the relay's to answer"
+    );
     let batch = r#"[{"jsonrpc":"2.0","id":11,"result":{}},{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"local"}}]"#;
-    let kept: serde_json::Value = serde_json::from_str(&filter_relay_answers(batch, &board).unwrap()).unwrap();
-    assert_eq!(kept.as_array().unwrap().len(), 1, "only the refused answer is removed from a batch");
+    let kept: serde_json::Value =
+        serde_json::from_str(&filter_relay_answers(batch, &board).unwrap()).unwrap();
+    assert_eq!(
+        kept.as_array().unwrap().len(),
+        1,
+        "only the refused answer is removed from a batch"
+    );
     assert!(board.claim_new_for_relay("remote"));
-    note_agent_request(r#"{"jsonrpc":"2.0","id":12,"method":"session/request_permission","params":{"sessionId":"remote"}}"#, &board);
+    note_agent_request(
+        r#"{"jsonrpc":"2.0","id":12,"method":"session/request_permission","params":{"sessionId":"remote"}}"#,
+        &board,
+    );
     let answer = r#"{"jsonrpc":"2.0","id":12,"result":{}}"#;
-    assert_eq!(filter_relay_answers(answer, &board).as_deref(), Some(answer));
-    let prompt = r#"{"jsonrpc":"2.0","id":13,"method":"session/prompt","params":{"sessionId":"local"}}"#;
-    assert_eq!(filter_relay_answers(prompt, &board).as_deref(), Some(prompt));
+    assert_eq!(
+        filter_relay_answers(answer, &board).as_deref(),
+        Some(answer)
+    );
+    let prompt =
+        r#"{"jsonrpc":"2.0","id":13,"method":"session/prompt","params":{"sessionId":"local"}}"#;
+    assert_eq!(
+        filter_relay_answers(prompt, &board).as_deref(),
+        Some(prompt)
+    );
 }
 
 /// An interaction raised while the session has NO subscriber must still be cached, so the FIRST client to attach gets the modal replayed.
@@ -5638,7 +5763,10 @@ async fn p47_workspace_start_refuses_a_hub_the_service_trust_class_refuses() {
 fn p47_hub_destination_guard_decides_each_connect_by_value() {
     crate::agent::config::Config::install_test_trusted_origins();
     let dir = tempfile::tempdir().unwrap();
-    let am = Arc::new(AuthManager::new(dir.path(), crate::auth::FuigoComConfig::default()));
+    let am = Arc::new(AuthManager::new(
+        dir.path(),
+        crate::auth::FuigoComConfig::default(),
+    ));
     am.hot_swap(crate::auth::FuigoAuth {
         key: "p47-static-api-key".into(),
         auth_mode: crate::auth::AuthMode::ApiKey,
@@ -5655,7 +5783,12 @@ fn p47_hub_destination_guard_decides_each_connect_by_value() {
     };
     let loopback = url::Url::parse("ws://127.0.0.1:9/ws").unwrap();
     let configured = url::Url::parse("wss://hub.example.test/other").unwrap();
-    assert!(guard.destination_permits(&loopback, &guard.current()).is_ok(), "static API key: its own rules");
+    assert!(
+        guard
+            .destination_permits(&loopback, &guard.current())
+            .is_ok(),
+        "static API key: its own rules"
+    );
     am.hot_swap(crate::auth::FuigoAuth {
         key: "p47-session-token".into(),
         auth_mode: crate::auth::AuthMode::Oidc,
@@ -5668,7 +5801,10 @@ fn p47_hub_destination_guard_decides_each_connect_by_value() {
         .expect_err("the session token may not go to a loopback ws:// hub");
     assert!(refused.contains("The request was not made"), "{refused}");
     assert!(!refused.contains("p47-session-token"), "{refused}");
-    assert!(guard.destination_permits(&configured, &session).is_ok(), "the configured hub admits it");
+    assert!(
+        guard.destination_permits(&configured, &session).is_ok(),
+        "the configured hub admits it"
+    );
 }
 
 /// P77: what the hub learns at registration depends on who operates it. FluxRouter-operated (`wss` to the FluxRouter
@@ -5699,10 +5835,17 @@ fn p77_registration_identity_is_gated_by_hub_operator() {
     ] {
         assert_eq!(host_derived_server_id(name), id, "{name:?}");
     }
-    let (id, meta) = hub_registration_identity("wss://api.fluxrouter.ai/v1/tools", cwd, "--Edge--.");
-    assert_eq!((id.as_str(), &meta["hostname"]), ("edge", &serde_json::json!("--Edge--.")));
+    let (id, meta) =
+        hub_registration_identity("wss://api.fluxrouter.ai/v1/tools", cwd, "--Edge--.");
+    assert_eq!(
+        (id.as_str(), &meta["hostname"]),
+        ("edge", &serde_json::json!("--Edge--."))
+    );
     // FluxRouter-operated hub: unchanged.
-    for url in ["wss://api.fluxrouter.ai/v1/tools", "WSS://API.FLUXROUTER.AI./hub"] {
+    for url in [
+        "wss://api.fluxrouter.ai/v1/tools",
+        "WSS://API.FLUXROUTER.AI./hub",
+    ] {
         let (id, meta) = hub_registration_identity(url, cwd, host);
         assert_eq!(id, host_id, "{url}");
         assert_eq!(meta["hostname"], host, "{url}");
@@ -5727,18 +5870,38 @@ fn p77_registration_identity_is_gated_by_hub_operator() {
     ] {
         let (id, meta) = hub_registration_identity(url, cwd, host);
         assert!(meta.get("hostname").is_none(), "{url}: {meta}");
-        assert_eq!(meta.to_string(), r#"{"source":"fuigo-workspace","cwd":"/work/proj"}"#, "{url}");
+        assert_eq!(
+            meta.to_string(),
+            r#"{"source":"fuigo-workspace","cwd":"/work/proj"}"#,
+            "{url}"
+        );
         assert_ne!(id, host_id, "{url}");
         assert_eq!(id, destination_pseudonym(url, host_id), "{url}");
-        assert!(!meta.to_string().to_lowercase().contains("laptop"), "{url}: {meta}");
+        assert!(
+            !meta.to_string().to_lowercase().contains("laptop"),
+            "{url}: {meta}"
+        );
         assert!(!id.contains("laptop"), "{url}: {id}");
-        assert_eq!(id.len(), 36, "{url}: UUID-shaped so the hub's id parser accepts it");
+        assert_eq!(
+            id.len(),
+            36,
+            "{url}: UUID-shaped so the hub's id parser accepts it"
+        );
     }
     // Stable per machine at one origin (reconnect and dedupe keep working), unlinkable across origins and machines.
     let at = |url: &str, h: &str| hub_registration_identity(url, cwd, h).0;
-    assert_eq!(at("wss://hub-a.test/x", host), at("wss://hub-a.test/other", host));
-    assert_ne!(at("wss://hub-a.test/x", host), at("wss://hub-b.test/x", host));
-    assert_ne!(at("wss://hub-a.test/x", host), at("wss://hub-a.test/x", "other-box"));
+    assert_eq!(
+        at("wss://hub-a.test/x", host),
+        at("wss://hub-a.test/other", host)
+    );
+    assert_ne!(
+        at("wss://hub-a.test/x", host),
+        at("wss://hub-b.test/x", host)
+    );
+    assert_ne!(
+        at("wss://hub-a.test/x", host),
+        at("wss://hub-a.test/x", "other-box")
+    );
 }
 
 /// P77, on the wire: a mock hub (loopback `ws://`, which is not FluxRouter-operated) receives the registration from
@@ -5780,7 +5943,9 @@ async fn p77_mock_hub_receives_no_hostname_and_the_pseudonymous_server_id() {
         while let Ok((sock, _)) = listener.accept().await {
             let tx = tx.clone();
             tokio::spawn(async move {
-                let Ok(mut ws) = tokio_tungstenite::accept_async(sock).await else { return };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(sock).await else {
+                    return;
+                };
                 while let Some(Ok(msg)) = ws.next().await {
                     let Ok(text) = msg.into_text() else { continue };
                     let text = text.to_string();
@@ -5795,7 +5960,9 @@ async fn p77_mock_hub_receives_no_hostname_and_the_pseudonymous_server_id() {
                             "supported_protocol_versions": [fuigo_tool_protocol::PROTOCOL_VERSION],
                         });
                         let _ = ws
-                            .send(tokio_tungstenite::tungstenite::Message::Text(ack.to_string().into()))
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                ack.to_string().into(),
+                            ))
                             .await;
                     }
                 }
@@ -5804,7 +5971,10 @@ async fn p77_mock_hub_receives_no_hostname_and_the_pseudonymous_server_id() {
     });
     let dir = tempfile::tempdir().unwrap();
     // The store path is given explicitly: `AuthManager::new` would follow an inherited `FUIGO_AUTH_PATH`.
-    let am = Arc::new(AuthManager::new_at_path(auth_path, crate::auth::FuigoComConfig::default()));
+    let am = Arc::new(AuthManager::new_at_path(
+        auth_path,
+        crate::auth::FuigoComConfig::default(),
+    ));
     am.hot_swap(crate::auth::FuigoAuth {
         key: "p77-static-api-key".into(),
         auth_mode: crate::auth::AuthMode::ApiKey,
@@ -5817,14 +5987,21 @@ async fn p77_mock_hub_receives_no_hostname_and_the_pseudonymous_server_id() {
     let cwd = dir.path().display().to_string();
     tokio::time::timeout(
         Duration::from_secs(20),
-        handle_workspace_start(state.clone(), Some(hub_url.clone()), cwd.clone(), CancellationToken::new()),
+        handle_workspace_start(
+            state.clone(),
+            Some(hub_url.clone()),
+            cwd.clone(),
+            CancellationToken::new(),
+        ),
     )
     .await
     .expect("start completes against the acknowledging mock hub")
     .expect("start succeeds");
     // Reconnect: pause drops the socket, resume registers again.
     handle_workspace_pause(state.clone()).await.expect("pause");
-    handle_workspace_resume(state.clone()).await.expect("resume");
+    handle_workspace_resume(state.clone())
+        .await
+        .expect("resume");
     // Both hellos are already queued: the mock records a hello before it acknowledges it, and start and resume each
     // return only after their acknowledgement.
     let host_id = host_derived_server_id(&hostname);
@@ -5850,8 +6027,16 @@ async fn p77_mock_hub_receives_no_hostname_and_the_pseudonymous_server_id() {
                 Some(serde_json::json!(fuigo_tool_protocol::PROTOCOL_VERSION)),
                 "{f}"
             );
-            assert_eq!(hello.remove("kind"), Some(serde_json::json!("tool_server")), "{f}");
-            assert_eq!(hello.remove("server_id"), Some(serde_json::json!(pseudonym)), "{f}");
+            assert_eq!(
+                hello.remove("kind"),
+                Some(serde_json::json!("tool_server")),
+                "{f}"
+            );
+            assert_eq!(
+                hello.remove("server_id"),
+                Some(serde_json::json!(pseudonym)),
+                "{f}"
+            );
             assert_eq!(
                 hello.remove("metadata"),
                 Some(serde_json::json!({ "source": "fuigo-workspace", "cwd": cwd })),
@@ -5862,7 +6047,10 @@ async fn p77_mock_hub_receives_no_hostname_and_the_pseudonymous_server_id() {
         }
         rest.push(v);
     }
-    assert!(hellos >= 2, "positive control: start and resume each registered: {all}");
+    assert!(
+        hellos >= 2,
+        "positive control: start and resume each registered: {all}"
+    );
     // Everything else on the wire (today: nothing but what is left of the hellos), structurally: no `hostname` key at
     // any depth, and no key or string value that is the host name or the host-derived id, or, for a secret long
     // enough not to occur by chance, that contains it. (`fuigo-workspace` is the id's fallback for an empty host name
@@ -5890,7 +6078,10 @@ async fn p77_mock_hub_receives_no_hostname_and_the_pseudonymous_server_id() {
     for secret in &secrets {
         for seen in keys.iter().chain(&strings) {
             assert_ne!(seen, secret, "{secret:?} is on the wire: {all}");
-            assert!(secret.len() < 8 || !seen.contains(secret.as_str()), "{secret:?} leaked on the wire: {all}");
+            assert!(
+                secret.len() < 8 || !seen.contains(secret.as_str()),
+                "{secret:?} leaked on the wire: {all}"
+            );
         }
     }
 }
@@ -5901,8 +6092,16 @@ async fn p77_mock_hub_receives_no_hostname_and_the_pseudonymous_server_id() {
 fn p77_registration_identity_has_one_source() {
     let src = include_str!("server.rs");
     let prod = src.split("\n#[cfg(test)]").next().unwrap();
-    assert_eq!(prod.matches("\"hostname\"").count(), 2, "the field and its removal; another would bypass the gate");
-    assert_eq!(prod.matches("host_derived_server_id(").count(), 2, "definition + the one gated use");
+    assert_eq!(
+        prod.matches("\"hostname\"").count(),
+        2,
+        "the field and its removal; another would bypass the gate"
+    );
+    assert_eq!(
+        prod.matches("host_derived_server_id(").count(),
+        2,
+        "definition + the one gated use"
+    );
     assert_eq!(prod.matches("server_id: Some(").count(), 1);
     // The call, whole: the gate is asked about the URL that is parsed and connected to, and gets the host name as the
     // OS reports it (a FluxRouter hub must keep receiving it unchanged); its two results are what is registered.
@@ -5916,7 +6115,11 @@ fn p77_registration_identity_has_one_source() {
     ] {
         assert!(flat.contains(pinned), "{pinned}");
     }
-    assert_eq!(prod.matches("gethostname::gethostname()").count(), 1, "only the call that feeds the gate");
+    assert_eq!(
+        prod.matches("gethostname::gethostname()").count(),
+        1,
+        "only the call that feeds the gate"
+    );
 }
 
 /// P125: a client that registers after the leader refused a relay is told at once (which relay, why, how to trust it);
@@ -5941,20 +6144,32 @@ async fn p125_interactive_clients_are_told_the_leaders_relay_refusal() {
     let (mut early, _early_w) =
         connect_and_register_with_mode(&sock_path, "fuigo-tui", ClientMode::Stdio).await;
     board.publish(Some(line.clone()));
-    let msg = tokio::time::timeout(Duration::from_secs(2), read_message::<_, ServerMessage>(&mut early))
-        .await
-        .expect("an attached interactive client is told of the refusal")
-        .unwrap();
-    assert!(matches!(&msg, ServerMessage::Acp { payload } if payload == &line), "{msg:?}");
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut early),
+    )
+    .await
+    .expect("an attached interactive client is told of the refusal")
+    .unwrap();
+    assert!(
+        matches!(&msg, ServerMessage::Acp { payload } if payload == &line),
+        "{msg:?}"
+    );
 
     // Registering after the refusal: told at once.
     let (mut late, _late_w) =
         connect_and_register_with_mode(&sock_path, "fuigo-ide", ClientMode::Stdio).await;
-    let msg = tokio::time::timeout(Duration::from_secs(2), read_message::<_, ServerMessage>(&mut late))
-        .await
-        .expect("a client that registers later is told of the refusal")
-        .unwrap();
-    assert!(matches!(&msg, ServerMessage::Acp { payload } if payload == &line), "{msg:?}");
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut late),
+    )
+    .await
+    .expect("a client that registers later is told of the refusal")
+    .unwrap();
+    assert!(
+        matches!(&msg, ServerMessage::Acp { payload } if payload == &line),
+        "{msg:?}"
+    );
 
     // The same refusal again tells nobody again.
     board.publish(Some(line.clone()));
@@ -5963,15 +6178,21 @@ async fn p125_interactive_clients_are_told_the_leaders_relay_refusal() {
         read_message::<_, ServerMessage>(&mut early),
     )
     .await;
-    assert!(again.is_err(), "a repeated refusal was sent again: {again:?}");
+    assert!(
+        again.is_err(),
+        "a repeated refusal was sent again: {again:?}"
+    );
 
     // The user opts in: every interactive client is told the refusal is over.
     board.publish(None);
     for (who, reader) in [("early", &mut early), ("late", &mut late)] {
-        let msg = tokio::time::timeout(Duration::from_secs(2), read_message::<_, ServerMessage>(reader))
-            .await
-            .unwrap_or_else(|_| panic!("the {who} client is told the refusal is over"))
-            .unwrap();
+        let msg = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_message::<_, ServerMessage>(reader),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the {who} client is told the refusal is over"))
+        .unwrap();
         assert!(
             matches!(&msg, ServerMessage::Acp { payload } if payload.contains("_fuigo/relay/refusal_cleared")),
             "{who}: {msg:?}"
@@ -5984,7 +6205,10 @@ async fn p125_interactive_clients_are_told_the_leaders_relay_refusal() {
         read_message::<_, ServerMessage>(&mut headless),
     )
     .await;
-    assert!(none.is_err(), "a headless client was sent the refusal: {none:?}");
+    assert!(
+        none.is_err(),
+        "a headless client was sent the refusal: {none:?}"
+    );
     handle.cancel.cancel();
 }
 
@@ -6030,10 +6254,13 @@ async fn p125_a_registering_client_that_asks_is_told_the_refusal_state() {
     .await
     .unwrap();
     let _: ServerMessage = read_message(&mut reader).await.unwrap();
-    let msg = tokio::time::timeout(Duration::from_secs(2), read_message::<_, ServerMessage>(&mut reader))
-        .await
-        .expect("the client is told the refusal state")
-        .unwrap();
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut reader),
+    )
+    .await
+    .expect("the client is told the refusal state")
+    .unwrap();
     assert!(
         matches!(&msg, ServerMessage::Acp { payload } if payload.contains("_fuigo/relay/refusal_cleared")),
         "{msg:?}"
@@ -6084,7 +6311,10 @@ async fn p142_notices_of(
         if let ServerMessage::Acp { payload } = msg {
             let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
             if json["method"] == "_fuigo/leader/notice" && json["params"]["message"] == text {
-                assert!(json.get("id").is_none(), "a notification, not a request: {payload}");
+                assert!(
+                    json.get("id").is_none(),
+                    "a notification, not a request: {payload}"
+                );
                 seen += 1;
             }
         }
@@ -6105,10 +6335,19 @@ async fn p142_a_notice_recorded_before_a_client_attaches_goes_to_the_first_one_o
 
     // A client that does not show notices (a raw ACP client, an older Fuigo) is sent none and does not use them up.
     let (mut raw, _raw_w) = p142_register(&sock_path, "fuigo-ide", false).await;
-    let while_raw = format!("p142 held while a raw client is attached {}", uuid::Uuid::new_v4());
+    let while_raw = format!(
+        "p142 held while a raw client is attached {}",
+        uuid::Uuid::new_v4()
+    );
     fuigo_file_utils::destination_gate::announce_notice(&while_raw);
-    assert_eq!(p142_notices_of(&mut raw, &before_start, Duration::from_millis(300)).await, 0);
-    assert_eq!(p142_notices_of(&mut raw, &while_raw, Duration::from_millis(300)).await, 0);
+    assert_eq!(
+        p142_notices_of(&mut raw, &before_start, Duration::from_millis(300)).await,
+        0
+    );
+    assert_eq!(
+        p142_notices_of(&mut raw, &while_raw, Duration::from_millis(300)).await,
+        0
+    );
 
     let (mut first, _first_w) = p142_register(&sock_path, "fuigo-tui", true).await;
     let (mut held_a, mut held_b) = (0, 0);
@@ -6127,8 +6366,16 @@ async fn p142_a_notice_recorded_before_a_client_attaches_goes_to_the_first_one_o
             break;
         }
     }
-    assert_eq!((held_a, held_b), (1, 1), "both held notices reach the first client that shows notices, once");
-    assert_eq!(p142_notices_of(&mut first, &before_start, Duration::from_millis(300)).await, 0, "not twice");
+    assert_eq!(
+        (held_a, held_b),
+        (1, 1),
+        "both held notices reach the first client that shows notices, once"
+    );
+    assert_eq!(
+        p142_notices_of(&mut first, &before_start, Duration::from_millis(300)).await,
+        0,
+        "not twice"
+    );
 
     let (mut second, _second_w) = p142_register(&sock_path, "fuigo-tui", true).await;
     assert_eq!(
@@ -6136,7 +6383,10 @@ async fn p142_a_notice_recorded_before_a_client_attaches_goes_to_the_first_one_o
         0,
         "a notice is replayed once overall, not once per client"
     );
-    assert_eq!(p142_notices_of(&mut raw, &while_raw, Duration::from_millis(100)).await, 0);
+    assert_eq!(
+        p142_notices_of(&mut raw, &while_raw, Duration::from_millis(100)).await,
+        0
+    );
     handle.cancel.cancel();
 }
 
@@ -6154,12 +6404,24 @@ async fn p142_a_notice_recorded_while_clients_are_attached_reaches_them_at_once(
 
     let live = format!("p142 live {}", uuid::Uuid::new_v4());
     fuigo_file_utils::destination_gate::announce_notice(&live);
-    assert_eq!(p142_notices_of(&mut tui_a, &live, Duration::from_secs(1)).await, 1);
-    assert_eq!(p142_notices_of(&mut tui_b, &live, Duration::from_millis(300)).await, 1);
-    assert_eq!(p142_notices_of(&mut raw, &live, Duration::from_millis(300)).await, 0);
+    assert_eq!(
+        p142_notices_of(&mut tui_a, &live, Duration::from_secs(1)).await,
+        1
+    );
+    assert_eq!(
+        p142_notices_of(&mut tui_b, &live, Duration::from_millis(300)).await,
+        1
+    );
+    assert_eq!(
+        p142_notices_of(&mut raw, &live, Duration::from_millis(300)).await,
+        0
+    );
 
     let (mut late, _late_w) = p142_register(&sock_path, "fuigo-tui", true).await;
-    assert_eq!(p142_notices_of(&mut late, &live, Duration::from_millis(500)).await, 0);
+    assert_eq!(
+        p142_notices_of(&mut late, &live, Duration::from_millis(500)).await,
+        0
+    );
     handle.cancel.cancel();
 }
 
@@ -6171,7 +6433,10 @@ async fn p142_the_withheld_upload_notice_reaches_an_attached_client() {
     let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (mut tui, _w) = p142_register(&sock_path, "fuigo-tui", true).await;
-    let _ = fuigo_file_utils::destination_gate::gate_proxy_url("https://third.example/v1", "p142/a.tar.gz");
+    let _ = fuigo_file_utils::destination_gate::gate_proxy_url(
+        "https://third.example/v1",
+        "p142/a.tar.gz",
+    );
     // At most once per process: another test may have printed it first, and then this server's cursor (from 0)
     // still sends it to this client, which is the first one of this server that shows notices.
     assert_eq!(
@@ -6250,7 +6515,9 @@ async fn p161_inbound_frame_survives_an_outbound_write_winning_the_session_selec
     // Finish the interrupted Ping and send a second one: both must be answered.
     writer.write_all(tail).await.unwrap();
     writer.flush().await.unwrap();
-    write_message(&mut writer, &ClientMessage::Ping).await.unwrap();
+    write_message(&mut writer, &ClientMessage::Ping)
+        .await
+        .unwrap();
     let mut pongs = 0;
     while pongs < 2 {
         let msg = tokio::time::timeout_at(deadline, read_message::<_, ServerMessage>(&mut reader))
@@ -6332,11 +6599,15 @@ fn yolo_notification_recognised_in_both_wire_forms_top_level_only() {
         let raw = format!(r#"{{"jsonrpc":"2.0","method":"{m}","params":{{"yolo_mode":true}}}}"#);
         assert_eq!(extract_yolo_mode_change(&pv(&raw)), Some(true), "{m}");
         let mut json = pv(&raw);
-        assert!(inject_client_identity_into_yolo_notification(&mut json, "fuigo-tui", ClientId(5)), "{m}");
+        assert!(
+            inject_client_identity_into_yolo_notification(&mut json, "fuigo-tui", ClientId(5)),
+            "{m}"
+        );
         assert_eq!(json["params"]["fuigo/leaderConnectionId"], 5);
     }
     // The agent strips exactly one `_`; a double prefix is a different method to it.
-    let double = r#"{"jsonrpc":"2.0","method":"__fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#;
+    let double =
+        r#"{"jsonrpc":"2.0","method":"__fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#;
     assert_eq!(extract_yolo_mode_change(&pv(double)), None);
     // params.method never decides: the agent ignores it.
     let evade = r#"{"jsonrpc":"2.0","method":"_fuigo/yolo_mode_changed","params":{"method":"other","yolo_mode":true,"fuigo/leaderConnectionId":1,"_meta":{"fuigo/leaderConnectionId":1}}}"#;
@@ -6344,7 +6615,11 @@ fn yolo_notification_recognised_in_both_wire_forms_top_level_only() {
     assert_eq!(extract_yolo_mode_change(&json), Some(true));
     assert!(stamp_inbound_client_identity(&mut json, "", ClientId(9)));
     assert_eq!(json["params"]["fuigo/leaderConnectionId"], 9);
-    assert!(json["params"]["_meta"].get("fuigo/leaderConnectionId").is_none());
+    assert!(
+        json["params"]["_meta"]
+            .get("fuigo/leaderConnectionId")
+            .is_none()
+    );
     // Reverse evasion: params.method claims yolo but the top-level method is something else.
     let other = r#"{"jsonrpc":"2.0","method":"_fuigo/other","params":{"method":"fuigo/yolo_mode_changed","yolo_mode":true}}"#;
     assert_eq!(extract_yolo_mode_change(&pv(other)), None);
@@ -6357,22 +6632,35 @@ fn connection_id_is_stripped_from_every_inbound_method() {
     );
     assert!(stamp_inbound_client_identity(&mut json, "x", ClientId(3)));
     assert!(json["params"].get("fuigo/leaderConnectionId").is_none());
-    assert!(json["params"]["_meta"].get("fuigo/leaderConnectionId").is_none());
+    assert!(
+        json["params"]["_meta"]
+            .get("fuigo/leaderConnectionId")
+            .is_none()
+    );
     assert_eq!(json["params"]["_meta"]["keep"], true);
 }
 
 #[test]
 fn relay_messages_get_the_reserved_connection_id_and_forged_ids_are_dropped() {
     let new = r#"{"jsonrpc":"2.0","method":"session/new","id":1,"params":{"_meta":{"fuigo/leaderConnectionId":1,"fuigo/leaderClientId":1}}}"#;
-    let out: serde_json::Value = serde_json::from_str(&stamp_relay_connection_identity(new)).unwrap();
-    assert_eq!(out["params"]["_meta"]["fuigo/leaderConnectionId"], RELAY_CONNECTION_ID);
+    let out: serde_json::Value =
+        serde_json::from_str(&stamp_relay_connection_identity(new)).unwrap();
+    assert_eq!(
+        out["params"]["_meta"]["fuigo/leaderConnectionId"],
+        RELAY_CONNECTION_ID
+    );
     assert!(out["params"]["_meta"].get("fuigo/leaderClientId").is_none());
     let yolo = r#"{"jsonrpc":"2.0","method":"_fuigo/yolo_mode_changed","params":{"yolo_mode":true,"fuigo/leaderConnectionId":1,"clientIdentifier":"fuigo-pager"}}"#;
-    let out: serde_json::Value = serde_json::from_str(&stamp_relay_connection_identity(yolo)).unwrap();
-    assert_eq!(out["params"]["fuigo/leaderConnectionId"], RELAY_CONNECTION_ID);
+    let out: serde_json::Value =
+        serde_json::from_str(&stamp_relay_connection_identity(yolo)).unwrap();
+    assert_eq!(
+        out["params"]["fuigo/leaderConnectionId"],
+        RELAY_CONNECTION_ID
+    );
     assert!(out["params"].get("clientIdentifier").is_none());
     let prompt = r#"{"jsonrpc":"2.0","method":"session/prompt","id":2,"params":{"fuigo/leaderConnectionId":1}}"#;
-    let out: serde_json::Value = serde_json::from_str(&stamp_relay_connection_identity(prompt)).unwrap();
+    let out: serde_json::Value =
+        serde_json::from_str(&stamp_relay_connection_identity(prompt)).unwrap();
     assert!(out["params"].get("fuigo/leaderConnectionId").is_none());
     assert_eq!(stamp_relay_connection_identity("not json"), "not json");
 }
@@ -6390,7 +6678,9 @@ fn reopen_notice_line(session_id: &str) -> String {
 
 fn initialize_line(reopen_notice: Option<bool>) -> String {
     let folder_trust = match reopen_notice {
-        Some(opted_in) => serde_json::json!({"interactive": true, "v2": true, "reopenNotice": opted_in}),
+        Some(opted_in) => {
+            serde_json::json!({"interactive": true, "v2": true, "reopenNotice": opted_in})
+        }
         None => serde_json::json!({"interactive": true, "v2": true}),
     };
     serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": 1,
@@ -6400,13 +6690,29 @@ fn initialize_line(reopen_notice: Option<bool>) -> String {
 
 #[test]
 fn reopen_notice_opt_in_is_read_from_a_clients_own_initialize_only() {
-    assert_eq!(initialize_folder_trust_reopen_notice(&pv(&initialize_line(Some(true)))), Some(true));
-    assert_eq!(initialize_folder_trust_reopen_notice(&pv(&initialize_line(Some(false)))), Some(false));
-    assert_eq!(initialize_folder_trust_reopen_notice(&pv(&initialize_line(None))), Some(false));
+    assert_eq!(
+        initialize_folder_trust_reopen_notice(&pv(&initialize_line(Some(true)))),
+        Some(true)
+    );
+    assert_eq!(
+        initialize_folder_trust_reopen_notice(&pv(&initialize_line(Some(false)))),
+        Some(false)
+    );
+    assert_eq!(
+        initialize_folder_trust_reopen_notice(&pv(&initialize_line(None))),
+        Some(false)
+    );
     let stringly = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"clientCapabilities":{"_meta":{"fuigo/folderTrust":{"reopenNotice":"true"}}}}}"#;
-    assert_eq!(initialize_folder_trust_reopen_notice(&pv(stringly)), Some(false));
+    assert_eq!(
+        initialize_folder_trust_reopen_notice(&pv(stringly)),
+        Some(false)
+    );
     let load = r#"{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s","clientCapabilities":{"_meta":{"fuigo/folderTrust":{"reopenNotice":true}}}}}"#;
-    assert_eq!(initialize_folder_trust_reopen_notice(&pv(load)), None, "only an initialize sets the opt-in");
+    assert_eq!(
+        initialize_folder_trust_reopen_notice(&pv(load)),
+        None,
+        "only an initialize sets the opt-in"
+    );
 }
 
 #[test]
@@ -6418,7 +6724,10 @@ fn reopen_notice_is_recognised_only_by_its_exact_config_notice() {
         "update": {"sessionUpdate": "config_notice", "message": crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE}}});
     assert!(is_folder_trust_reopen_notice(&direct));
     // Any other config notice, or the same text in another update, is ordinary session output.
-    let other = wrapped.replace(crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE, "MCP server x was refused.");
+    let other = wrapped.replace(
+        crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE,
+        "MCP server x was refused.",
+    );
     assert!(!is_folder_trust_reopen_notice_line(&other));
     let chunk = wrapped.replace("config_notice", "agent_message_chunk");
     assert!(!is_folder_trust_reopen_notice_line(&chunk));
@@ -6447,7 +6756,13 @@ async fn frames_until(reader: &mut tokio::io::ReadHalf<LeaderStream>, marker: &s
 async fn spawn_reopen_leader(
     temp: &TempDir,
     grace: Duration,
-) -> (PathBuf, CancellationToken, mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>, super::super::drivers::OwnerBoard) {
+) -> (
+    PathBuf,
+    CancellationToken,
+    mpsc::UnboundedSender<String>,
+    mpsc::UnboundedReceiver<String>,
+    super::super::drivers::OwnerBoard,
+) {
     let sock_path = temp.path().join("test.sock");
     let (acp_tx, acp_rx) = mpsc::unbounded_channel();
     let (response_tx, response_rx) = mpsc::unbounded_channel();
@@ -6478,7 +6793,11 @@ async fn spawn_reopen_leader(
 }
 
 /// An agent line as `app.rs` hands it on: its request is noted on the board before the fan-out, then the server loop gets it.
-fn agent_line(board: &super::super::drivers::OwnerBoard, response_tx: &mpsc::UnboundedSender<String>, line: &str) {
+fn agent_line(
+    board: &super::super::drivers::OwnerBoard,
+    response_tx: &mpsc::UnboundedSender<String>,
+    line: &str,
+) {
     note_agent_request(line, board);
     response_tx.send(line.to_string()).unwrap();
 }
@@ -6492,19 +6811,37 @@ fn folder_trust_request_line(id: u64) -> String {
 /// On one leader, A (the session's owner) and B attach the same session, each with its own `initialize` opt-in. The
 /// agent asks A to trust the folder, A answers, the agent emits the reopen notice, then an ordinary update. Returns
 /// the frames each client received from the trust request on.
-async fn reopen_notice_frames(a_opted_in: Option<bool>, b_opted_in: Option<bool>) -> (Vec<String>, Vec<String>) {
+async fn reopen_notice_frames(
+    a_opted_in: Option<bool>,
+    b_opted_in: Option<bool>,
+) -> (Vec<String>, Vec<String>) {
     let temp = TempDir::new().unwrap();
-    let (sock_path, cancel, response_tx, mut acp_rx, board) = spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
+    let (sock_path, cancel, response_tx, mut acp_rx, board) =
+        spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
 
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
-    write_message(&mut writer_a, &ClientMessage::Acp { payload: initialize_line(a_opted_in) }).await.unwrap();
+    write_message(
+        &mut writer_a,
+        &ClientMessage::Acp {
+            payload: initialize_line(a_opted_in),
+        },
+    )
+    .await
+    .unwrap();
     load_session(&mut writer_a, "sess-ft").await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
-    write_message(&mut writer_b, &ClientMessage::Acp { payload: initialize_line(b_opted_in) }).await.unwrap();
+    write_message(
+        &mut writer_b,
+        &ClientMessage::Acp {
+            payload: initialize_line(b_opted_in),
+        },
+    )
+    .await
+    .unwrap();
     load_session(&mut writer_b, "sess-ft").await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_b).await;
@@ -6512,10 +6849,23 @@ async fn reopen_notice_frames(a_opted_in: Option<bool>, b_opted_in: Option<bool>
 
     // The trust request goes to the owner A only, and A's answer is the one that reaches the agent.
     agent_line(&board, &response_tx, &folder_trust_request_line(601));
-    assert!(next_acp_payload_matching(&mut reader_a, "folder_trust/request").await.is_some(), "owner A is asked");
-    assert!(next_acp_payload_matching(&mut reader_b, "folder_trust/request").await.is_none(), "B is never asked");
+    assert!(
+        next_acp_payload_matching(&mut reader_a, "folder_trust/request")
+            .await
+            .is_some(),
+        "owner A is asked"
+    );
+    assert!(
+        next_acp_payload_matching(&mut reader_b, "folder_trust/request")
+            .await
+            .is_none(),
+        "B is never asked"
+    );
     send_answer(&mut writer_a, 601, "A-TRUSTS").await;
-    assert!(forwarded_matching(&mut acp_rx, "A-TRUSTS").await.is_some(), "A's answer reaches the agent");
+    assert!(
+        forwarded_matching(&mut acp_rx, "A-TRUSTS").await.is_some(),
+        "A's answer reaches the agent"
+    );
 
     response_tx.send(reopen_notice_line("sess-ft")).unwrap();
     let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-notice"}]}}"#;
@@ -6528,16 +6878,30 @@ async fn reopen_notice_frames(a_opted_in: Option<bool>, b_opted_in: Option<bool>
 }
 
 fn notices(frames: &[String]) -> usize {
-    frames.iter().filter(|f| f.contains(crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE)).count()
+    frames
+        .iter()
+        .filter(|f| f.contains(crate::agent::mvp_agent::FOLDER_TRUST_REOPEN_NOTICE))
+        .count()
 }
 
 #[tokio::test]
 async fn reopen_notice_reaches_only_the_opted_in_client_that_answered() {
     let (a, b) = reopen_notice_frames(Some(true), None).await;
-    assert_eq!(notices(&a), 1, "opted-in A answered the trust request: it gets the notice once, got {a:?}");
-    assert!(a.last().is_some_and(|f| f.contains("after-notice")), "{a:?}");
+    assert_eq!(
+        notices(&a),
+        1,
+        "opted-in A answered the trust request: it gets the notice once, got {a:?}"
+    );
+    assert!(
+        a.last().is_some_and(|f| f.contains("after-notice")),
+        "{a:?}"
+    );
     // B did not opt in: exactly the frames it had before the notice existed (the ordinary update only).
-    assert_eq!(b.len(), 1, "non-opted-in B's frames are unchanged, got {b:?}");
+    assert_eq!(
+        b.len(),
+        1,
+        "non-opted-in B's frames are unchanged, got {b:?}"
+    );
     assert!(b[0].contains("after-notice"), "{b:?}");
 }
 
@@ -6547,14 +6911,22 @@ async fn reopen_notice_never_goes_to_an_opted_in_client_that_was_not_asked() {
     let (a, b) = reopen_notice_frames(Some(false), Some(true)).await;
     assert_eq!(notices(&a), 0, "{a:?}");
     assert_eq!(notices(&b), 0, "{b:?}");
-    assert_eq!((a.len(), b.len()), (1, 1), "both see only the ordinary update: a={a:?} b={b:?}");
+    assert_eq!(
+        (a.len(), b.len()),
+        (1, 1),
+        "both see only the ordinary update: a={a:?} b={b:?}"
+    );
 }
 
 #[tokio::test]
 async fn reopen_notice_with_two_opted_in_clients_goes_to_the_answering_one_only() {
     let (a, b) = reopen_notice_frames(Some(true), Some(true)).await;
     assert_eq!(notices(&a), 1, "{a:?}");
-    assert_eq!(notices(&b), 0, "the notice is never broadcast, even to an opted-in subscriber: {b:?}");
+    assert_eq!(
+        notices(&b),
+        0,
+        "the notice is never broadcast, even to an opted-in subscriber: {b:?}"
+    );
 }
 
 /// Astra re-review: the notice goes to the connection whose trust answer the agent accepted, never to whoever owns the
@@ -6563,25 +6935,48 @@ async fn reopen_notice_with_two_opted_in_clients_goes_to_the_answering_one_only(
 #[tokio::test]
 async fn reopen_notice_is_dropped_when_the_answerer_left_and_another_client_was_promoted() {
     let temp = TempDir::new().unwrap();
-    let (sock_path, cancel, response_tx, mut acp_rx, board) = spawn_reopen_leader(&temp, Duration::from_millis(300)).await;
+    let (sock_path, cancel, response_tx, mut acp_rx, board) =
+        spawn_reopen_leader(&temp, Duration::from_millis(300)).await;
 
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
-    write_message(&mut writer_a, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    write_message(
+        &mut writer_a,
+        &ClientMessage::Acp {
+            payload: initialize_line(Some(true)),
+        },
+    )
+    .await
+    .unwrap();
     load_session(&mut writer_a, "sess-ft").await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
-    write_message(&mut writer_b, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    write_message(
+        &mut writer_b,
+        &ClientMessage::Acp {
+            payload: initialize_line(Some(true)),
+        },
+    )
+    .await
+    .unwrap();
     load_session(&mut writer_b, "sess-ft").await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_b).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     agent_line(&board, &response_tx, &folder_trust_request_line(602));
-    assert!(next_acp_payload_matching(&mut reader_a, "folder_trust/request").await.is_some(), "owner A is asked");
+    assert!(
+        next_acp_payload_matching(&mut reader_a, "folder_trust/request")
+            .await
+            .is_some(),
+        "owner A is asked"
+    );
     send_answer(&mut writer_a, 602, "A-TRUSTS").await;
-    assert!(forwarded_matching(&mut acp_rx, "A-TRUSTS").await.is_some(), "A's answer reaches the agent");
+    assert!(
+        forwarded_matching(&mut acp_rx, "A-TRUSTS").await.is_some(),
+        "A's answer reaches the agent"
+    );
     drop(reader_a);
     drop(writer_a);
 
@@ -6589,15 +6984,27 @@ async fn reopen_notice_is_dropped_when_the_answerer_left_and_another_client_was_
     tokio::time::sleep(Duration::from_millis(600)).await;
     let req = r#"{"jsonrpc":"2.0","id":953,"method":"session/request_permission","params":{"sessionId":"sess-ft","toolCall":{"toolCallId":"tc-ft"},"options":[]}}"#;
     response_tx.send(req.to_string()).unwrap();
-    assert!(next_acp_payload_matching(&mut reader_b, "request_permission").await.is_some(), "B is the owner now");
+    assert!(
+        next_acp_payload_matching(&mut reader_b, "request_permission")
+            .await
+            .is_some(),
+        "B is the owner now"
+    );
 
     response_tx.send(reopen_notice_line("sess-ft")).unwrap();
     let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-notice"}]}}"#;
     response_tx.send(after.to_string()).unwrap();
     let b = frames_until(&mut reader_b, "after-notice").await;
     cancel.cancel();
-    assert_eq!(notices(&b), 0, "the promoted owner never answered the trust request: {b:?}");
-    assert!(b.last().is_some_and(|f| f.contains("after-notice")), "{b:?}");
+    assert_eq!(
+        notices(&b),
+        0,
+        "the promoted owner never answered the trust request: {b:?}"
+    );
+    assert!(
+        b.last().is_some_and(|f| f.contains("after-notice")),
+        "{b:?}"
+    );
     drop(writer_b);
 }
 
@@ -6605,12 +7012,21 @@ async fn reopen_notice_is_dropped_when_the_answerer_left_and_another_client_was_
 /// disconnects. Opted-in B, queued behind the relay, is promoted, is handed the request and answers it late. The answer the
 /// agent accepted first was the relay's, so nobody gets the notice (B never gave the grant).
 #[tokio::test]
-async fn reopen_notice_is_dropped_when_the_relay_answered_first_and_a_promoted_client_answers_late() {
+async fn reopen_notice_is_dropped_when_the_relay_answered_first_and_a_promoted_client_answers_late()
+{
     let temp = TempDir::new().unwrap();
-    let (sock_path, cancel, response_tx, mut acp_rx, board) = spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
+    let (sock_path, cancel, response_tx, mut acp_rx, board) =
+        spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
     assert!(board.claim_new_for_relay("sess-ft"));
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
-    write_message(&mut writer_b, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    write_message(
+        &mut writer_b,
+        &ClientMessage::Acp {
+            payload: initialize_line(Some(true)),
+        },
+    )
+    .await
+    .unwrap();
     load_session(&mut writer_b, "sess-ft").await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_b).await;
@@ -6620,21 +7036,39 @@ async fn reopen_notice_is_dropped_when_the_relay_answered_first_and_a_promoted_c
     let request = folder_trust_request_line(603);
     note_agent_request(&request, &board);
     let relay_answer = r#"{"jsonrpc":"2.0","id":603,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}}"#;
-    assert!(filter_relay_answers(relay_answer, &board).is_some(), "the relay owns the session: its answer counts");
+    assert!(
+        filter_relay_answers(relay_answer, &board).is_some(),
+        "the relay owns the session: its answer counts"
+    );
     let _ = stamp_relay_connection_identity_with(relay_answer, &board);
     board.relay_dropped();
     response_tx.send(request).unwrap();
-    assert!(next_acp_payload_matching(&mut reader_b, "folder_trust/request").await.is_some(), "promoted B is handed the request");
+    assert!(
+        next_acp_payload_matching(&mut reader_b, "folder_trust/request")
+            .await
+            .is_some(),
+        "promoted B is handed the request"
+    );
     send_answer(&mut writer_b, 603, "B-LATE").await;
-    assert!(forwarded_matching(&mut acp_rx, "B-LATE").await.is_some(), "B's late answer reaches the agent");
+    assert!(
+        forwarded_matching(&mut acp_rx, "B-LATE").await.is_some(),
+        "B's late answer reaches the agent"
+    );
 
     response_tx.send(reopen_notice_line("sess-ft")).unwrap();
     let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-notice"}]}}"#;
     response_tx.send(after.to_string()).unwrap();
     let b = frames_until(&mut reader_b, "after-notice").await;
     cancel.cancel();
-    assert_eq!(notices(&b), 0, "the relay answered first; B's late answer is not the grant: {b:?}");
-    assert!(b.last().is_some_and(|f| f.contains("after-notice")), "{b:?}");
+    assert_eq!(
+        notices(&b),
+        0,
+        "the relay answered first; B's late answer is not the grant: {b:?}"
+    );
+    assert!(
+        b.last().is_some_and(|f| f.contains("after-notice")),
+        "{b:?}"
+    );
     drop(writer_b);
 }
 
@@ -6643,30 +7077,60 @@ async fn reopen_notice_is_dropped_when_the_relay_answered_first_and_a_promoted_c
 /// gets nothing. (Distinct answerers for the two ids: the board test
 /// `a_late_answer_to_an_older_folder_trust_request_never_overwrites_the_latest`.)
 #[tokio::test]
-async fn reopen_notice_follows_the_latest_requests_answerer_despite_a_late_answer_to_an_older_one() {
+async fn reopen_notice_follows_the_latest_requests_answerer_despite_a_late_answer_to_an_older_one()
+{
     let temp = TempDir::new().unwrap();
-    let (sock_path, cancel, response_tx, mut acp_rx, board) = spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
+    let (sock_path, cancel, response_tx, mut acp_rx, board) =
+        spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
-    write_message(&mut writer_a, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    write_message(
+        &mut writer_a,
+        &ClientMessage::Acp {
+            payload: initialize_line(Some(true)),
+        },
+    )
+    .await
+    .unwrap();
     load_session(&mut writer_a, "sess-ft").await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
-    write_message(&mut writer_b, &ClientMessage::Acp { payload: initialize_line(Some(true)) }).await.unwrap();
+    write_message(
+        &mut writer_b,
+        &ClientMessage::Acp {
+            payload: initialize_line(Some(true)),
+        },
+    )
+    .await
+    .unwrap();
     load_session(&mut writer_b, "sess-ft").await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_b).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     agent_line(&board, &response_tx, &folder_trust_request_line(611));
-    assert!(next_acp_payload_matching(&mut reader_a, "\"id\":611").await.is_some(), "owner A is asked request 1");
+    assert!(
+        next_acp_payload_matching(&mut reader_a, "\"id\":611")
+            .await
+            .is_some(),
+        "owner A is asked request 1"
+    );
     agent_line(&board, &response_tx, &folder_trust_request_line(612));
-    assert!(next_acp_payload_matching(&mut reader_a, "\"id\":612").await.is_some(), "owner A is asked request 2");
+    assert!(
+        next_acp_payload_matching(&mut reader_a, "\"id\":612")
+            .await
+            .is_some(),
+        "owner A is asked request 2"
+    );
     send_answer(&mut writer_a, 612, "A-TWO").await;
     assert!(forwarded_matching(&mut acp_rx, "A-TWO").await.is_some());
     send_answer(&mut writer_a, 611, "A-ONE-LATE").await;
-    assert!(forwarded_matching(&mut acp_rx, "A-ONE-LATE").await.is_some());
+    assert!(
+        forwarded_matching(&mut acp_rx, "A-ONE-LATE")
+            .await
+            .is_some()
+    );
 
     response_tx.send(reopen_notice_line("sess-ft")).unwrap();
     let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-notice"}]}}"#;
@@ -6674,7 +7138,11 @@ async fn reopen_notice_follows_the_latest_requests_answerer_despite_a_late_answe
     let a = frames_until(&mut reader_a, "after-notice").await;
     let b = frames_until(&mut reader_b, "after-notice").await;
     cancel.cancel();
-    assert_eq!(notices(&a), 1, "request 2's answerer gets the notice once: {a:?}");
+    assert_eq!(
+        notices(&a),
+        1,
+        "request 2's answerer gets the notice once: {a:?}"
+    );
     assert_eq!(notices(&b), 0, "{b:?}");
     drop((writer_a, writer_b));
 }
@@ -6702,7 +7170,8 @@ async fn f5n_answer(
             .expect("agent channel closed");
         let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
         if json.get("method").and_then(|m| m.as_str()) == Some(method) {
-            let response = serde_json::json!({"jsonrpc": "2.0", "id": json["id"].clone(), "result": result});
+            let response =
+                serde_json::json!({"jsonrpc": "2.0", "id": json["id"].clone(), "result": result});
             response_tx.send(response.to_string()).unwrap();
             return;
         }
@@ -6715,9 +7184,15 @@ async fn f5n_drain(reader: &mut tokio::io::ReadHalf<LeaderStream>) -> Vec<String
     let mut frames = Vec::new();
     while let Some(frame) = next_acp_payload(reader).await {
         let mut json = pv(&frame);
-        match json.pointer_mut("/result/_meta").and_then(|m| m.as_object_mut()) {
+        match json
+            .pointer_mut("/result/_meta")
+            .and_then(|m| m.as_object_mut())
+        {
             Some(meta) if meta.contains_key(super::super::protocol::LEADER_RECONNECT_TOKEN_KEY) => {
-                meta.insert(super::super::protocol::LEADER_RECONNECT_TOKEN_KEY.to_owned(), serde_json::json!("<token>"));
+                meta.insert(
+                    super::super::protocol::LEADER_RECONNECT_TOKEN_KEY.to_owned(),
+                    serde_json::json!("<token>"),
+                );
                 frames.push(json.to_string());
             }
             _ => frames.push(frame),
@@ -6729,9 +7204,14 @@ async fn f5n_drain(reader: &mut tokio::io::ReadHalf<LeaderStream>) -> Vec<String
 /// A (the session's owner) and B attach `sess-ft`, each with its own `fuigo/folderTrust` capabilities; then A closes it.
 /// With `f5n` the agent does what F5-N adds (load responses owe a reload, it emits `folder_trust_reload`, close answers
 /// `timeout`); without, what 1.0.40 did. Returns every frame each client received.
-async fn f5n_frames(a_caps: serde_json::Value, b_caps: serde_json::Value, f5n: bool) -> (Vec<String>, Vec<String>) {
+async fn f5n_frames(
+    a_caps: serde_json::Value,
+    b_caps: serde_json::Value,
+    f5n: bool,
+) -> (Vec<String>, Vec<String>) {
     let temp = TempDir::new().unwrap();
-    let (sock_path, cancel, response_tx, mut acp_rx, _board) = spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
+    let (sock_path, cancel, response_tx, mut acp_rx, _board) =
+        spawn_reopen_leader(&temp, Duration::from_secs(30)).await;
     let load_result = if f5n {
         serde_json::json!({"models": [], "_meta": {"sessionId": "sess-ft", "fuigo/folderTrustReload": {"owed": true}}})
     } else {
@@ -6740,12 +7220,32 @@ async fn f5n_frames(a_caps: serde_json::Value, b_caps: serde_json::Value, f5n: b
     let close_result = serde_json::json!({"_meta": {"fuigo/closeOutcome": if f5n { "timeout" } else { "closed" }}});
 
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
-    write_message(&mut writer_a, &ClientMessage::Acp { payload: f5n_initialize_line(a_caps) }).await.unwrap();
+    write_message(
+        &mut writer_a,
+        &ClientMessage::Acp {
+            payload: f5n_initialize_line(a_caps),
+        },
+    )
+    .await
+    .unwrap();
     load_session(&mut writer_a, "sess-ft").await;
-    f5n_answer(&mut acp_rx, &response_tx, "session/load", load_result.clone()).await;
+    f5n_answer(
+        &mut acp_rx,
+        &response_tx,
+        "session/load",
+        load_result.clone(),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(30)).await;
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
-    write_message(&mut writer_b, &ClientMessage::Acp { payload: f5n_initialize_line(b_caps) }).await.unwrap();
+    write_message(
+        &mut writer_b,
+        &ClientMessage::Acp {
+            payload: f5n_initialize_line(b_caps),
+        },
+    )
+    .await
+    .unwrap();
     load_session(&mut writer_b, "sess-ft").await;
     f5n_answer(&mut acp_rx, &response_tx, "session/load", load_result).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -6759,8 +7259,16 @@ async fn f5n_frames(a_caps: serde_json::Value, b_caps: serde_json::Value, f5n: b
     let after = r#"{"jsonrpc":"2.0","method":"session/notification","params":{"sessionId":"sess-ft","updates":[{"type":"message_start","message_id":"after-reload"}]}}"#;
     response_tx.send(after.to_string()).unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let close = r#"{"jsonrpc":"2.0","method":"session/close","id":7,"params":{"sessionId":"sess-ft"}}"#;
-    write_message(&mut writer_a, &ClientMessage::Acp { payload: close.to_string() }).await.unwrap();
+    let close =
+        r#"{"jsonrpc":"2.0","method":"session/close","id":7,"params":{"sessionId":"sess-ft"}}"#;
+    write_message(
+        &mut writer_a,
+        &ClientMessage::Acp {
+            payload: close.to_string(),
+        },
+    )
+    .await
+    .unwrap();
     f5n_answer(&mut acp_rx, &response_tx, "session/close", close_result).await;
 
     let a = f5n_drain(&mut reader_a).await;
@@ -6782,29 +7290,66 @@ async fn f5n_a_client_without_reload_or_v2_sees_byte_identical_frames_to_1_0_40(
     let opted = serde_json::json!({"interactive": true, "v2": true, "reload": true});
     let (a_new, b_new) = f5n_frames(plain.clone(), opted.clone(), true).await;
     let (a_old, _) = f5n_frames(plain.clone(), opted.clone(), false).await;
-    assert!(a_old.len() >= 3, "premise: load, update and close frames: {a_old:?}");
-    assert_eq!(a_new, a_old, "owner A without reload or v2 must see 1.0.40's frames");
-    assert_eq!(f5n_count(&b_new, "folder_trust_reload"), 0, "the reload goes to the session's owner only: {b_new:?}");
-    assert_eq!(f5n_count(&b_new, "folderTrustReload"), 1, "B's own load response owes it: {b_new:?}");
+    assert!(
+        a_old.len() >= 3,
+        "premise: load, update and close frames: {a_old:?}"
+    );
+    assert_eq!(
+        a_new, a_old,
+        "owner A without reload or v2 must see 1.0.40's frames"
+    );
+    assert_eq!(
+        f5n_count(&b_new, "folder_trust_reload"),
+        0,
+        "the reload goes to the session's owner only: {b_new:?}"
+    );
+    assert_eq!(
+        f5n_count(&b_new, "folderTrustReload"),
+        1,
+        "B's own load response owes it: {b_new:?}"
+    );
 
     // The owner A opted in; B advertised nothing.
     let (a_new, b_new) = f5n_frames(opted.clone(), serde_json::json!({}), true).await;
     let (_, b_old) = f5n_frames(opted, serde_json::json!({}), false).await;
-    assert!(b_old.len() >= 2, "premise: load and update frames: {b_old:?}");
-    assert_eq!(b_new, b_old, "B without reload or v2 must see 1.0.40's frames");
-    assert_eq!(f5n_count(&a_new, "folder_trust_reload"), 1, "the opted-in owner gets the reload once: {a_new:?}");
+    assert!(
+        b_old.len() >= 2,
+        "premise: load and update frames: {b_old:?}"
+    );
+    assert_eq!(
+        b_new, b_old,
+        "B without reload or v2 must see 1.0.40's frames"
+    );
+    assert_eq!(
+        f5n_count(&a_new, "folder_trust_reload"),
+        1,
+        "the opted-in owner gets the reload once: {a_new:?}"
+    );
     assert_eq!(f5n_count(&a_new, "folderTrustReload"), 1, "{a_new:?}");
-    assert_eq!(f5n_count(&a_new, r#""fuigo/closeOutcome":"timeout""#), 1, "{a_new:?}");
+    assert_eq!(
+        f5n_count(&a_new, r#""fuigo/closeOutcome":"timeout""#),
+        1,
+        "{a_new:?}"
+    );
 }
 
 /// F5-N (design F5 §4.1 A1): a `v2` client without `reload` is answered close's `timeout`, and is sent neither the reload
 /// nor the owed `_meta`.
 #[tokio::test]
 async fn f5n_a_v2_client_without_reload_sees_timeout_but_no_reload() {
-    let (a, _) = f5n_frames(serde_json::json!({"interactive": true, "v2": true}), serde_json::json!({}), true).await;
+    let (a, _) = f5n_frames(
+        serde_json::json!({"interactive": true, "v2": true}),
+        serde_json::json!({}),
+        true,
+    )
+    .await;
     assert_eq!(f5n_count(&a, "folder_trust_reload"), 0, "{a:?}");
     assert_eq!(f5n_count(&a, "folderTrustReload"), 0, "{a:?}");
-    assert_eq!(f5n_count(&a, r#""fuigo/closeOutcome":"timeout""#), 1, "{a:?}");
+    assert_eq!(
+        f5n_count(&a, r#""fuigo/closeOutcome":"timeout""#),
+        1,
+        "{a:?}"
+    );
 }
 
 /// F5-N: the relay opts in to no F5-N field: an agent line carrying one is fitted, any other line passes as the same bytes.
@@ -6814,9 +7359,16 @@ fn f5n_relay_lines_are_fitted_and_never_carry_the_reload() {
     assert!(is_folder_trust_reload_line(reload));
     assert!(!is_folder_trust_reload_line(&reopen_notice_line("s")));
     let close = r#"{"jsonrpc":"2.0","id":3,"result":{"_meta":{"fuigo/closeOutcome":"timeout"}}}"#;
-    assert_eq!(pv(&fit_folder_trust_line_for_relay(close.to_string()))["result"]["_meta"]["fuigo/closeOutcome"], "closed");
+    assert_eq!(
+        pv(&fit_folder_trust_line_for_relay(close.to_string()))["result"]["_meta"]["fuigo/closeOutcome"],
+        "closed"
+    );
     let load = r#"{"jsonrpc":"2.0","id":4,"result":{"_meta":{"sessionId":"s","fuigo/folderTrustReload":{"owed":true}}}}"#;
-    assert!(pv(&fit_folder_trust_line_for_relay(load.to_string()))["result"]["_meta"].get("fuigo/folderTrustReload").is_none());
+    assert!(
+        pv(&fit_folder_trust_line_for_relay(load.to_string()))["result"]["_meta"]
+            .get("fuigo/folderTrustReload")
+            .is_none()
+    );
     let other = r#"{"jsonrpc":"2.0","id":5,"result":{"text":"a \"timeout\" here"}}"#;
     assert_eq!(fit_folder_trust_line_for_relay(other.to_string()), other);
 }
@@ -6830,7 +7382,9 @@ async fn client_events_apply_back_pressure() {
         let event_tx = event_tx.clone();
         async move {
             handle_client_inbound_message(
-                Ok(ClientMessage::Acp { payload: format!("frame {n}") }),
+                Ok(ClientMessage::Acp {
+                    payload: format!("frame {n}"),
+                }),
                 ClientId(1),
                 &event_tx,
                 &mut tokio::io::sink(),
@@ -6841,12 +7395,17 @@ async fn client_events_apply_back_pressure() {
     assert!(send_one(1).await.is_ok());
     assert!(send_one(2).await.is_ok());
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), send_one(3)).await.is_err(),
+        tokio::time::timeout(Duration::from_millis(200), send_one(3))
+            .await
+            .is_err(),
         "the third frame must wait for the server loop"
     );
     assert_eq!(event_rx.len(), 2, "queue depth stays at its bound");
     assert!(event_rx.recv().await.is_some());
-    assert!(send_one(4).await.is_ok(), "room again once the loop took an event");
+    assert!(
+        send_one(4).await.is_ok(),
+        "room again once the loop took an event"
+    );
 }
 
 /// Start a leader server whose agent queue is a tracked [`acp_channel_with_cap`] queue, returning the sink (to read its depth) and the receiver (a test that never reads it is a stalled agent).
@@ -6887,7 +7446,7 @@ async fn setup_capped_server(
 }
 
 async fn send_acp_payload(writer: &mut tokio::io::WriteHalf<LeaderStream>, payload: String) {
-    write_message(writer, &ClientMessage::Acp { payload: payload.into() })
+    write_message(writer, &ClientMessage::Acp { payload })
         .await
         .unwrap();
 }
@@ -6911,22 +7470,41 @@ async fn full_agent_queue_sheds_requests_with_busy_and_keeps_cancel() {
         send_acp_payload(&mut writer, req.to_string()).await;
     }
     for i in 0..excess {
-        let msg: ServerMessage = tokio::time::timeout(Duration::from_secs(5), read_message(&mut reader))
-            .await
-            .expect("timed out waiting for a busy error")
-            .unwrap();
-        let ServerMessage::Acp { payload } = msg else { panic!("expected an Acp error, got another message") };
+        let msg: ServerMessage =
+            tokio::time::timeout(Duration::from_secs(5), read_message(&mut reader))
+                .await
+                .expect("timed out waiting for a busy error")
+                .unwrap();
+        let ServerMessage::Acp { payload } = msg else {
+            panic!("expected an Acp error, got another message")
+        };
         let v: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
         assert_eq!(v["id"], 1000 + i, "the busy error answers the shed request");
         assert_eq!(v["error"], busy_error_body(), "the full busy error shape");
     }
-    assert_eq!(sink.depth(), cap, "depth stays at the cap while the consumer is stalled");
+    assert_eq!(
+        sink.depth(),
+        cap,
+        "depth stays at the cap while the consumer is stalled"
+    );
 
     // A droppable notification is shed; a cancel always queues.
-    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"_fuigo/progress","params":{}}"#.into()).await;
-    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#.into()).await;
+    send_acp_payload(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","method":"_fuigo/progress","params":{}}"#.into(),
+    )
+    .await;
+    send_acp_payload(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#.into(),
+    )
+    .await;
     wait_depth(&sink, cap + 1).await;
-    assert_eq!(sink.depth(), cap + 1, "only the cancel was queued past the cap");
+    assert_eq!(
+        sink.depth(),
+        cap + 1,
+        "only the cancel was queued past the cap"
+    );
 
     // The consumer waking drains everything that was accepted, in order, ending with the cancel.
     let mut got = Vec::new();
@@ -6947,7 +7525,9 @@ async fn agent_queue_has_a_hard_cap_only_cancels_pass() {
     let cap = 2;
     let (sock_path, cancel, sink, mut acp_rx) = setup_capped_server(&temp, cap).await;
     let (mut reader, mut writer) = connect_and_register(&sock_path, "test").await;
-    let cancel_for = |n: usize| format!(r#"{{"jsonrpc":"2.0","method":"session/cancel","params":{{"sessionId":"s{n}"}}}}"#);
+    let cancel_for = |n: usize| {
+        format!(r#"{{"jsonrpc":"2.0","method":"session/cancel","params":{{"sessionId":"s{n}"}}}}"#)
+    };
 
     for i in 0..cap {
         let req = serde_json::json!({"jsonrpc":"2.0","id":i,"method":"session/prompt","params":{}});
@@ -6957,20 +7537,36 @@ async fn agent_queue_has_a_hard_cap_only_cancels_pass() {
         send_acp_payload(&mut writer, cancel_for(n)).await;
     }
     wait_depth(&sink, cap * 4).await;
-    assert_eq!(sink.depth(), cap * 4, "distinct cancels queue up to the hard cap");
+    assert_eq!(
+        sink.depth(),
+        cap * 4,
+        "distinct cancels queue up to the hard cap"
+    );
 
-    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#.into()).await;
+    send_acp_payload(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#
+            .into(),
+    )
+    .await;
     for n in 100..130 {
         send_acp_payload(&mut writer, cancel_for(n)).await;
     }
     wait_depth(&sink, cap * 5).await;
     settle(&mut reader, &mut writer).await;
-    assert_eq!(sink.depth(), cap * 5, "past the hard cap only a cap of cancels, then nothing");
+    assert_eq!(
+        sink.depth(),
+        cap * 5,
+        "past the hard cap only a cap of cancels, then nothing"
+    );
     let mut got = Vec::new();
     while let Ok(m) = acp_rx.try_recv() {
         got.push(m);
     }
-    assert!(!got.iter().any(|m| m.contains("yolo_mode_changed")), "the mode change was shed at the hard cap");
+    assert!(
+        !got.iter().any(|m| m.contains("yolo_mode_changed")),
+        "the mode change was shed at the hard cap"
+    );
     cancel.cancel();
 }
 
@@ -6992,26 +7588,35 @@ async fn disconnect_evicts_coalesce_to_one_pending_notice() {
         connections.push((reader, writer));
     }
     for (reader, mut writer) in connections {
-        write_message(&mut writer, &ClientMessage::Disconnect).await.unwrap();
+        write_message(&mut writer, &ClientMessage::Disconnect)
+            .await
+            .unwrap();
         drop(reader);
         drop(writer);
     }
     // Every disconnect is handled once the waiting notice carries all the sessions; wait for that, bounded.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let AcpTx::Tracked(_, state) = &sink.tx else { unreachable!("a tracked sink") };
+        let AcpTx::Tracked(_, state) = &sink.tx else {
+            unreachable!("a tracked sink")
+        };
         let carried = state.pending_evicts.lock().lists.back().map_or(0, Vec::len);
         if carried == clients {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "the notice carries {carried} of {clients} sessions");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the notice carries {carried} of {clients} sessions"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let got = drain_acp(&mut acp_rx);
     let mut evicted = std::collections::HashSet::new();
     let mut evicts = 0;
     for v in &got {
-        if v["method"].as_str().and_then(|m| m.strip_prefix('_')) == Some(InternalMethod::EvictSessions.name()) {
+        if v["method"].as_str().and_then(|m| m.strip_prefix('_'))
+            == Some(InternalMethod::EvictSessions.name())
+        {
             evicts += 1;
             for id in v["params"]["sessionIds"].as_array().unwrap() {
                 evicted.insert(id.as_str().unwrap().to_owned());
@@ -7021,11 +7626,17 @@ async fn disconnect_evicts_coalesce_to_one_pending_notice() {
     assert_eq!(evicts, 1, "one coalesced evict notice");
     assert_eq!(got.len(), clients + 1, "the loads and one notice");
     assert!(
-        got.last().unwrap()["method"].as_str().unwrap().contains(InternalMethod::EvictSessions.name()),
+        got.last().unwrap()["method"]
+            .as_str()
+            .unwrap()
+            .contains(InternalMethod::EvictSessions.name()),
         "the notice follows the loads"
     );
     for i in 0..clients {
-        assert!(evicted.contains(&format!("sess-{i}")), "sess-{i} must still be evicted");
+        assert!(
+            evicted.contains(&format!("sess-{i}")),
+            "sess-{i} must still be evicted"
+        );
     }
     cancel.cancel();
 }
@@ -7037,18 +7648,34 @@ fn evict_notice_does_not_overtake_later_queued_messages() {
     let (sink, mut acp_rx) = acp_channel_with_cap(1000);
     sink.send_evict(&["s1".to_owned()]).unwrap();
     sink.send_evict(&["s1b".to_owned()]).unwrap();
-    sink.send_always(r#"{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s2"}}"#.into()).unwrap();
+    sink.send_always(
+        r#"{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s2"}}"#.into(),
+    )
+    .unwrap();
     sink.send_evict(&["s2".to_owned()]).unwrap();
     sink.send_evict(&["s2b".to_owned()]).unwrap();
     assert_eq!(sink.depth(), 3, "two notices and the load");
     let got = drain_acp(&mut acp_rx);
     let ids = |m: &serde_json::Value| -> Vec<String> {
-        m["params"]["sessionIds"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect()
+        m["params"]["sessionIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect()
     };
     assert_eq!(got.len(), 3);
-    assert_eq!(ids(&got[0]), ["s1", "s1b"], "ids queued back to back share one notice");
+    assert_eq!(
+        ids(&got[0]),
+        ["s1", "s1b"],
+        "ids queued back to back share one notice"
+    );
     assert_eq!(got[1]["method"], "session/load", "the load keeps its place");
-    assert_eq!(ids(&got[2]), ["s2", "s2b"], "the later evict queues behind the load, never ahead of it");
+    assert_eq!(
+        ids(&got[2]),
+        ["s2", "s2b"],
+        "the later evict queues behind the load, never ahead of it"
+    );
     assert_eq!(sink.depth(), 0);
 }
 
@@ -7056,25 +7683,40 @@ fn evict_notice_does_not_overtake_later_queued_messages() {
 async fn wait_depth(sink: &AcpSink, want: usize) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while sink.depth() != want {
-        assert!(tokio::time::Instant::now() < deadline, "queue depth stuck at {}, wanted {want}", sink.depth());
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "queue depth stuck at {}, wanted {want}",
+            sink.depth()
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 
 /// Barrier for a test whose queue is over its cap: the leader handles one client's messages in order, so once the
 /// `busy` answer to this extra request arrives, everything sent before it has been handled (queued or shed).
-async fn settle(reader: &mut tokio::io::ReadHalf<LeaderStream>, writer: &mut tokio::io::WriteHalf<LeaderStream>) {
-    let req = serde_json::json!({"jsonrpc":"2.0","id":424_242,"method":"session/prompt","params":{}});
+async fn settle(
+    reader: &mut tokio::io::ReadHalf<LeaderStream>,
+    writer: &mut tokio::io::WriteHalf<LeaderStream>,
+) {
+    let req =
+        serde_json::json!({"jsonrpc":"2.0","id":424_242,"method":"session/prompt","params":{}});
     send_acp_payload(writer, req.to_string()).await;
     loop {
-        let msg: ServerMessage = tokio::time::timeout(Duration::from_secs(10), read_message(reader))
-            .await
-            .expect("timed out waiting for the barrier reply")
-            .unwrap();
-        let ServerMessage::Acp { payload } = msg else { continue };
+        let msg: ServerMessage =
+            tokio::time::timeout(Duration::from_secs(10), read_message(reader))
+                .await
+                .expect("timed out waiting for the barrier reply")
+                .unwrap();
+        let ServerMessage::Acp { payload } = msg else {
+            continue;
+        };
         let v: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
         if v["id"] == 424_242 {
-            assert_eq!(v["error"], busy_error_body(), "the barrier request is shed while over the cap");
+            assert_eq!(
+                v["error"],
+                busy_error_body(),
+                "the barrier request is shed while over the cap"
+            );
             return;
         }
     }
@@ -7098,12 +7740,17 @@ fn busy_reply_for_a_batch_has_the_same_shape_per_element() {
         {"jsonrpc":"2.0","method":"_fuigo/progress","params":{}},
         {"jsonrpc":"2.0","id":"two","method":"session/prompt","params":{}}
     ]);
-    let AcpOverflow::Busy(payload) = classify_acp_overflow(Some(&batch), AcpOverLevel::Soft, &acp_channel_with_cap(8).0) else {
+    let AcpOverflow::Busy(payload) =
+        classify_acp_overflow(Some(&batch), AcpOverLevel::Soft, &acp_channel_with_cap(8).0)
+    else {
         panic!("a batch with requests over the cap is answered busy");
     };
     let replies: Vec<serde_json::Value> = serde_json::from_str(&payload).unwrap();
     assert_eq!(replies.len(), 2);
-    for (reply, id) in replies.iter().zip([serde_json::json!(1), serde_json::json!("two")]) {
+    for (reply, id) in replies
+        .iter()
+        .zip([serde_json::json!(1), serde_json::json!("two")])
+    {
         assert_eq!(reply["id"], id);
         assert_eq!(reply["error"], busy_error_body());
     }
@@ -7134,11 +7781,23 @@ async fn agent_queue_counts_batch_elements_and_coalesces_controls() {
     assert_eq!(sink.depth(), cap, "notifications stop at the cap");
 
     // Past the cap a method merely containing "cancel" is dropped; identical cancels coalesce.
-    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"_fuigo/cancel_spam","params":{}}"#.into()).await;
+    send_acp_payload(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","method":"_fuigo/cancel_spam","params":{}}"#.into(),
+    )
+    .await;
     for _ in 0..10 {
-        send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#.into()).await;
+        send_acp_payload(
+            &mut writer,
+            r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#.into(),
+        )
+        .await;
     }
-    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s2"}}"#.into()).await;
+    send_acp_payload(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s2"}}"#.into(),
+    )
+    .await;
     wait_depth(&sink, cap + 2).await;
     assert_eq!(sink.depth(), cap + 2, "one cancel per session past the cap");
 
@@ -7146,13 +7805,21 @@ async fn agent_queue_counts_batch_elements_and_coalesces_controls() {
     while let Ok(m) = acp_rx.try_recv() {
         got.push(m);
     }
-    assert_eq!(sink.depth(), 0, "the receiver lowers the depth by each message's weight");
+    assert_eq!(
+        sink.depth(),
+        0,
+        "the receiver lowers the depth by each message's weight"
+    );
     assert!(!got.iter().any(|m| m.contains("cancel_spam")));
     // Taken, a cancel may be queued again.
     for _ in 0..cap {
         send_acp_payload(&mut writer, note.to_string()).await;
     }
-    send_acp_payload(&mut writer, r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#.into()).await;
+    send_acp_payload(
+        &mut writer,
+        r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#.into(),
+    )
+    .await;
     wait_depth(&sink, cap + 1).await;
     assert_eq!(sink.depth(), cap + 1);
     cancel.cancel();
@@ -7179,17 +7846,17 @@ async fn cancel_requests_with_an_id_queue_over_the_soft_and_hard_cap() {
         let req = serde_json::json!({"jsonrpc":"2.0","id":i,"method":"session/prompt","params":{}});
         send_acp_payload(&mut writer, req.to_string()).await;
     }
-    let subagent = |id: usize, n: usize| {
-        serde_json::json!({"jsonrpc":"2.0","id":id,"method":"_fuigo/subagent/cancel","params":{"sessionId":"s","subagentId":format!("a{n}")}})
-    };
-    let btw = |id: usize, n: usize| {
-        serde_json::json!({"jsonrpc":"2.0","id":id,"method":"fuigo/btw/cancel","params":{"sessionId":"s","requestId":format!("r{n}")}})
-    };
+    let subagent = |id: usize, n: usize| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"_fuigo/subagent/cancel","params":{"sessionId":"s","subagentId":format!("a{n}")}});
+    let btw = |id: usize, n: usize| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"fuigo/btw/cancel","params":{"sessionId":"s","requestId":format!("r{n}")}});
     // Soft: one of each.
     send_acp_payload(&mut writer, subagent(100, 0).to_string()).await;
     send_acp_payload(&mut writer, btw(101, 0).to_string()).await;
     wait_depth(&sink, cap + 2).await;
-    assert_eq!(sink.depth(), cap + 2, "cancel requests queue over the soft cap");
+    assert_eq!(
+        sink.depth(),
+        cap + 2,
+        "cancel requests queue over the soft cap"
+    );
     // Fill to the hard cap with filler cancels, then send request cancels past it.
     for n in 0..(cap * 4 - cap - 2) {
         let note = serde_json::json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":format!("f{n}")}});
@@ -7200,16 +7867,31 @@ async fn cancel_requests_with_an_id_queue_over_the_soft_and_hard_cap() {
     send_acp_payload(&mut writer, subagent(200, 1).to_string()).await;
     send_acp_payload(&mut writer, btw(201, 1).to_string()).await;
     wait_depth(&sink, cap * 4 + 2).await;
-    assert_eq!(sink.depth(), cap * 4 + 2, "cancel requests queue over the hard cap");
+    assert_eq!(
+        sink.depth(),
+        cap * 4 + 2,
+        "cancel requests queue over the hard cap"
+    );
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), read_message::<_, ServerMessage>(&mut reader)).await.is_err(),
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            read_message::<_, ServerMessage>(&mut reader)
+        )
+        .await
+        .is_err(),
         "no busy reply for a cancel request"
     );
     let got = drain_acp(&mut acp_rx);
     // The leader renames request ids on the way to the agent, so match on the target.
-    for target in [("a0", "subagentId"), ("r0", "requestId"), ("a1", "subagentId"), ("r1", "requestId")] {
+    for target in [
+        ("a0", "subagentId"),
+        ("r0", "requestId"),
+        ("a1", "subagentId"),
+        ("r1", "requestId"),
+    ] {
         assert!(
-            got.iter().any(|m| m["params"][target.1] == target.0 && m.get("id").is_some()),
+            got.iter()
+                .any(|m| m["params"][target.1] == target.0 && m.get("id").is_some()),
             "cancel request for {} reached the agent",
             target.0
         );
@@ -7236,7 +7918,11 @@ async fn mode_changes_over_the_cap_keep_their_order() {
     assert_eq!(sink.depth(), cap + 3, "every mode change queued");
     let modes: Vec<bool> = drain_acp(&mut acp_rx)
         .iter()
-        .filter(|m| m["method"].as_str().is_some_and(|x| x.contains("yolo_mode_changed")))
+        .filter(|m| {
+            m["method"]
+                .as_str()
+                .is_some_and(|x| x.contains("yolo_mode_changed"))
+        })
         .map(|m| m["params"]["yolo_mode"].as_bool().unwrap())
         .collect();
     assert_eq!(modes, [false, true, false], "in order, ending off");
@@ -7260,8 +7946,14 @@ async fn mixed_batch_keeps_its_cancel_and_sheds_the_rest() {
         {"jsonrpc":"2.0","method":"_fuigo/progress","params":{}}
     ]);
     send_acp_payload(&mut writer, batch.to_string()).await;
-    let msg: ServerMessage = tokio::time::timeout(Duration::from_secs(5), read_message(&mut reader)).await.unwrap().unwrap();
-    let ServerMessage::Acp { payload } = msg else { panic!("expected an Acp reply") };
+    let msg: ServerMessage =
+        tokio::time::timeout(Duration::from_secs(5), read_message(&mut reader))
+            .await
+            .unwrap()
+            .unwrap();
+    let ServerMessage::Acp { payload } = msg else {
+        panic!("expected an Acp reply")
+    };
     let replies: serde_json::Value = serde_json::from_str(&payload.to_string()).unwrap();
     assert_eq!(replies[0]["id"], 77);
     assert_eq!(replies[0]["error"], busy_error_body());
@@ -7292,9 +7984,17 @@ async fn duplicate_cancels_do_not_exhaust_the_reserve_at_the_final_cap() {
     wait_depth(&sink, cap * 4).await;
     assert_eq!(sink.depth(), cap * 4);
     // Past the hard cap: a batch repeating one target must use one place of the reserve, not its length.
-    send_acp_payload(&mut writer, serde_json::Value::Array(vec![cancel_for(1000); 2]).to_string()).await;
+    send_acp_payload(
+        &mut writer,
+        serde_json::Value::Array(vec![cancel_for(1000); 2]).to_string(),
+    )
+    .await;
     wait_depth(&sink, cap * 4 + 1).await;
-    assert_eq!(sink.depth(), cap * 4 + 1, "a batch of duplicates coalesces to one");
+    assert_eq!(
+        sink.depth(),
+        cap * 4 + 1,
+        "a batch of duplicates coalesces to one"
+    );
     for _ in 0..20 {
         send_acp_payload(&mut writer, cancel_for(1000).to_string()).await;
     }

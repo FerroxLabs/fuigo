@@ -261,7 +261,11 @@ async fn serve_claims_pid(
             message = read_message(&mut reader) => message,
         };
         let Ok(message) = message else { return };
-        if let ClientMessage::Control { request_id, command: ControlCommand::GetLeaderInfo } = message {
+        if let ClientMessage::Control {
+            request_id,
+            command: ControlCommand::GetLeaderInfo,
+        } = message
+        {
             let info = ControlPayload::LeaderInfo {
                 pid: claimed_pid,
                 socket_path: PathBuf::new(),
@@ -276,7 +280,10 @@ async fn serve_claims_pid(
                 profile_started_at: None,
                 profile_formats: Vec::new(),
             };
-            let reply = ServerMessage::ControlResult { request_id, result: Ok(info) };
+            let reply = ServerMessage::ControlResult {
+                request_id,
+                result: Ok(info),
+            };
             if write_message(&mut writer, &reply).await.is_err() {
                 return;
             }

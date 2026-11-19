@@ -626,7 +626,9 @@ mod tests {
     #[test]
     fn p188_chunks_of_two_attempts_never_merge() {
         let in_stream = |text: &str, stream: i64| {
-            let SessionNotification::Acp(mut n) = SessionNotification::from(msg_chunk("s", 1, text)) else {
+            let SessionNotification::Acp(mut n) =
+                SessionNotification::from(msg_chunk("s", 1, text))
+            else {
                 unreachable!()
             };
             n.meta
@@ -636,7 +638,10 @@ mod tests {
         };
         let mut buf = ReplayBuffer::new(Some(settings(100, 1_000_000)));
         assert!(buf.consume_chunk(in_stream("A", 10)).is_none());
-        assert!(buf.consume_chunk(in_stream("1", 10)).is_none(), "one attempt still merges");
+        assert!(
+            buf.consume_chunk(in_stream("1", 10)).is_none(),
+            "one attempt still merges"
+        );
         let Some((first, Some(second))) = buf.consume_chunk(in_stream("A3", 20)) else {
             panic!("the two attempts' chunks go out separately, in order");
         };
@@ -650,7 +655,10 @@ mod tests {
             },
             SessionNotification::Fuigo(_) => String::new(),
         };
-        assert_eq!((text(&first), text(&second)), ("A1".to_string(), "A3".to_string()));
+        assert_eq!(
+            (text(&first), text(&second)),
+            ("A1".to_string(), "A3".to_string())
+        );
     }
 
     #[test]

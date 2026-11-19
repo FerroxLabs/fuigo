@@ -106,7 +106,13 @@ impl std::fmt::Debug for AgentSessionConfig {
             .field("tool_config", tool_config)
             .field("max_depth", max_depth)
             .field("cwd_override", cwd_override)
-            .field("extra_env", &extra_env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_env",
+                &extra_env
+                    .keys()
+                    .map(|k| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }

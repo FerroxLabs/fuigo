@@ -444,7 +444,9 @@ impl CommandAvailability {
             BuiltinGate::WorkflowManagement => self.workflows || self.workflow_management,
             // With the feature off the command stays available while the session is peer-influenced: `/peers clear-influence`
             // is the human's only way to lift the guard that a resumed session keeps.
-            BuiltinGate::Peers => self.peers_influenced || crate::session::peer_message::peer_messaging_enabled(),
+            BuiltinGate::Peers => {
+                self.peers_influenced || crate::session::peer_message::peer_messaging_enabled()
+            }
         }
     }
     #[cfg(test)]
@@ -473,7 +475,10 @@ impl CommandAvailability {
 pub(crate) fn build_tools_meta(tool_names: &[String], memory_enabled: bool) -> acp::Meta {
     let mut meta = acp::Meta::new();
     meta.insert("tools".to_owned(), serde_json::json!(tool_names));
-    meta.insert("memoryEnabled".to_owned(), serde_json::json!(memory_enabled));
+    meta.insert(
+        "memoryEnabled".to_owned(),
+        serde_json::json!(memory_enabled),
+    );
     meta
 }
 /// Pager-owned slash trigger keys (canonical and aliases) plus shell command names the pager never offers (`hooks-add`, `reload-plugins`, …).
@@ -1734,7 +1739,10 @@ fn build_loop_prompt_blocks(args: &str, mode: LoopFireMode) -> Vec<acp::ContentB
     };
     vec![acp::ContentBlock::Text(acp::TextContent::new(text))]
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "slash_commands_tests.rs"]
 mod tests;

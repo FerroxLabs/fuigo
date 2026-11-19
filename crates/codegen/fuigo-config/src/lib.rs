@@ -11,38 +11,38 @@
 //! Each layer applies its own [`[[version_overrides]]`](version_overrides) before merge.
 //! Requirements layers (#4 through #6) may opt into fail-closed startup; see [`validate_requirements`].
 
+#[cfg(test)]
+mod campaign_literal_tests;
+#[cfg(test)]
+mod campaign_model_route_tests;
+#[cfg(test)]
+mod campaign_strip_tests;
 pub mod campaigns;
 mod config_layers;
 pub mod config_override;
 pub mod credential_env;
+#[cfg(test)]
+mod credential_env_k13_tests;
 mod env_overlay;
 pub mod fs_atomic;
 pub mod global_hook_sources;
 pub mod key_naming;
-pub mod mcp_bearer_file;
-#[cfg(test)]
-mod credential_env_k13_tests;
 #[cfg(test)]
 mod key_naming_tests;
-#[cfg(test)]
-pub(crate) mod test_support;
-#[cfg(test)]
-mod p147_tests;
-#[cfg(test)]
-mod campaign_literal_tests;
-#[cfg(test)]
-mod campaign_strip_tests;
-#[cfg(test)]
-mod campaign_model_route_tests;
 mod loader;
 mod macos_managed;
 mod managed_cache;
 pub mod managed_text;
+pub mod mcp_bearer_file;
+#[cfg(test)]
+mod p147_tests;
 mod paths;
 pub mod policy_sources;
 pub mod sandbox_mode;
 pub mod shell;
 pub mod signed_policy;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod validation;
 pub mod version_overrides;
 pub mod write_through;
@@ -53,8 +53,9 @@ pub use campaigns::{
     CampaignEntry, CampaignOverrides, filter_active_campaigns, ids_touching_paths,
 };
 pub use credential_env::{
-    FIRST_PARTY_KEY_ENV_VAR, apply_first_party_key_defaults, install_credential_env_resolver, resolve_credential_env_var,
-    read_first_party_key_references, resolve_first_party_key_references,
+    FIRST_PARTY_KEY_ENV_VAR, apply_first_party_key_defaults, install_credential_env_resolver,
+    read_first_party_key_references, resolve_credential_env_var,
+    resolve_first_party_key_references,
 };
 pub use global_hook_sources::{
     GlobalHookSource, GlobalHookSourceError, GlobalHookSourceKind, ResolvedGlobalHookSources,
@@ -75,52 +76,60 @@ pub use env_overlay::{
 pub use global_hook_sources::{
     validate_direct_hook_json_file, validated_hook_json_files_for_sources,
 };
+/// Test seam: a hook run at the blank re-check wait (see `loader::confirm_blank_with`), per thread.
+#[cfg(feature = "test-seams")]
+pub use loader::blank_hook as blank_recheck_seam;
 pub use loader::{
     HookConfigLayer, HookProvenance, MANAGED_CONFIG_FILENAME, ManagedConfigLayer,
     REQUIREMENTS_FILENAME, SANDBOX_CONFIG_FILENAME, TRUSTED_FOLDERS_FILENAME,
     TRUSTED_HOOK_PROJECTS_FILENAME, TRUSTED_PLUGINS_FILENAME, USER_CONFIG_FILENAME,
-    apply_version_overrides_with_registered, deep_merge_toml, merge_requirements_toml, policy_semver, expand_env_vars_in_string,
+    apply_version_overrides_with_registered, deep_merge_toml, expand_env_vars_in_string,
     expand_env_vars_in_toml, hook_config_layers, hook_config_layers_at, load_config_file,
-    load_config_file_with_key_naming, load_project_config_file,
-    load_from_disk, load_managed_config, load_system_managed_config, load_toml_file,
-    managed_config_layers, managed_config_layers_at, parse_user_config_layer, toml_error_detail,
-    user_config_raw,
+    load_config_file_with_key_naming, load_from_disk, load_managed_config,
+    load_project_config_file, load_system_managed_config, load_toml_file, managed_config_layers,
+    managed_config_layers_at, merge_requirements_toml, parse_user_config_layer, policy_semver,
+    toml_error_detail, user_config_raw,
 };
 pub use macos_managed::MDM_REQUIREMENTS_SOURCE;
+#[cfg(feature = "test-seams")]
+pub use macos_managed::mdm_override;
 pub use managed_cache::{
-    managed_marker_records_file,
-    MANAGED_CONFIG_CACHE_FILE, ManagedPolicyCompromise, ServingIdentity, SyncMarker, bump_rollback_floor,
-    bump_rollback_floor_with_now, confirmed_team_switch, confirmed_team_switch_at,
-    fail_closed_policy_armed_at, is_managed_config_hard_stale_for, is_managed_config_stale_for,
-    managed_config_identity_changed_at, managed_config_synced_at, managed_deployment_id,
-    managed_policy_compromise_for, managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
+    MANAGED_CONFIG_CACHE_FILE, ManagedPolicyCompromise, ServingIdentity, SyncMarker,
+    bump_rollback_floor, bump_rollback_floor_with_now, confirmed_team_switch,
+    confirmed_team_switch_at, fail_closed_policy_armed_at, is_managed_config_hard_stale_for,
+    is_managed_config_stale_for, managed_config_identity_changed_at, managed_config_synced_at,
+    managed_deployment_id, managed_marker_records_file, managed_policy_compromise_for,
+    managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
     normalize_identity, persist_legacy_revision_floor_at,
-};
-pub use paths::{
-    claude_managed_settings_path, claude_managed_settings_probe_path, create_dir_all_owner_only,
-    create_file_owner_only, owner_only_file_options, tighten_file_owner_only, tighten_own_regular_file_owner_only,
-    write_file_owner_only,
-    decode_cwd_from_dirname, default_fuigo_home, disable_session_persistence, encode_cwd_dirname, ensure_sessions_cwd_dir,
-    ensure_sessions_cwd_dir_in, fuigo_application, fuigo_application_in, fuigo_home, sessions_cwd_dir,
-    session_persistence_disabled, sessions_cwd_dir_in, set_dir_owner_only, system_config_dir, user_fuigo_home,
 };
 #[cfg(feature = "test-seams")]
 pub use paths::admin_root_override;
-/// Test seam: a hook run at the blank re-check wait (see `loader::confirm_blank_with`), per thread.
-#[cfg(feature = "test-seams")]
-pub use loader::blank_hook as blank_recheck_seam;
-#[cfg(feature = "test-seams")]
-pub use macos_managed::mdm_override;
+pub use paths::{
+    claude_managed_settings_path, claude_managed_settings_probe_path, create_dir_all_owner_only,
+    create_file_owner_only, decode_cwd_from_dirname, default_fuigo_home,
+    disable_session_persistence, encode_cwd_dirname, ensure_sessions_cwd_dir,
+    ensure_sessions_cwd_dir_in, fuigo_application, fuigo_application_in, fuigo_home,
+    owner_only_file_options, session_persistence_disabled, sessions_cwd_dir, sessions_cwd_dir_in,
+    set_dir_owner_only, system_config_dir, tighten_file_owner_only,
+    tighten_own_regular_file_owner_only, user_fuigo_home, write_file_owner_only,
+};
 pub use validation::{
-    RequirementsError, RequirementsLayer, RequirementsSource, load_merged_requirements,
-    BrokenAdminFile, AdminLockdown, admin_lockdowns, admin_lockdowns_at, admin_lockdown_lifted_notice, admin_lockdown_ended_invalid_notice, admin_lockdown_emptied_notice, admin_lockdown_gone_notice, admin_policy_valid_in_force_notice, AdminFileClass, AdminFileState, admin_policy_states_at, admin_policy_reader, RequirementsBroken, admin_lockdown_requirements, admin_lockdown_managed_config, admin_requirements_copy_exists, admin_requirements_copy_id, lockdown_entries, LOCKDOWN_UNSET, broken_admin_files, requirements_layers, requirements_layers_checked, REQUIREMENTS_BOOL_FEATURES, REQUIREMENTS_RESOLVE_BOOL_FEATURES, requirements_file_load_error, validate_requirements, validate_requirements_for_dirs,
-    validate_requirements_with_warnings,
+    AdminFileClass, AdminFileState, AdminLockdown, BrokenAdminFile, LOCKDOWN_UNSET,
+    REQUIREMENTS_BOOL_FEATURES, REQUIREMENTS_RESOLVE_BOOL_FEATURES, RequirementsBroken,
+    RequirementsError, RequirementsLayer, RequirementsSource, admin_lockdown_emptied_notice,
+    admin_lockdown_ended_invalid_notice, admin_lockdown_gone_notice, admin_lockdown_lifted_notice,
+    admin_lockdown_managed_config, admin_lockdown_requirements, admin_lockdowns,
+    admin_lockdowns_at, admin_policy_reader, admin_policy_states_at,
+    admin_policy_valid_in_force_notice, admin_requirements_copy_exists, admin_requirements_copy_id,
+    broken_admin_files, load_merged_requirements, lockdown_entries, requirements_file_load_error,
+    requirements_layers, requirements_layers_checked, validate_requirements,
+    validate_requirements_for_dirs, validate_requirements_with_warnings,
 };
 // P183 round 7: the shapes other crates' policy readers decode (kept in step by tests there), and the managed-settings reader
 pub use validation::{
     ManagedSettingsJson, PERMISSION_PATTERN_MODES, PERMISSION_RULE_ACTIONS, PERMISSION_RULE_TOOLS,
-    TELEMETRY_MODE_STRINGS, hook_event_shape_ok, managed_settings_json, managed_settings_policy_errors,
-    permission_rule_shape_ok,
+    TELEMETRY_MODE_STRINGS, hook_event_shape_ok, managed_settings_json,
+    managed_settings_policy_errors, permission_rule_shape_ok,
 };
 pub use version_overrides::{VersionOverrideError, apply_version_overrides};
 

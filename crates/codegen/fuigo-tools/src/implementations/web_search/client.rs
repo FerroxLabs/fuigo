@@ -647,8 +647,17 @@ mod tests {
         let calls = cb.invocations.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, ToolConsumer::WebSearch);
-        assert_eq!(calls[0].1.as_deref(), Some(fuigo_auth::bearer_fingerprint(bearer).as_str()));
-        assert!(!calls[0].1.as_deref().unwrap_or_default().contains("distinct"));
+        assert_eq!(
+            calls[0].1.as_deref(),
+            Some(fuigo_auth::bearer_fingerprint(bearer).as_str())
+        );
+        assert!(
+            !calls[0]
+                .1
+                .as_deref()
+                .unwrap_or_default()
+                .contains("distinct")
+        );
     }
     /// `record_401_attribution` is a no-op when no callback is wired
     /// -- the BYOK / standalone case must not panic or allocate.
@@ -1113,7 +1122,10 @@ mod tests {
         let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let gate: SharedModelDispatchGate = std::sync::Arc::new(FlagGate(closed));
         let client = gate_client(&server.uri(), None, Some(gate));
-        let err = client.search("q", None).await.expect_err("closed gate must refuse");
+        let err = client
+            .search("q", None)
+            .await
+            .expect_err("closed gate must refuse");
         assert!(err.to_string().contains("not sent"), "{err}");
         client
             .search_with_titles("q", None)
@@ -1129,7 +1141,10 @@ mod tests {
         let gate: SharedModelDispatchGate = std::sync::Arc::new(FlagGate(closed.clone()));
         let provider: SharedApiKeyProvider = std::sync::Arc::new(ClosesGateDuringLookup(closed));
         let client = gate_client(&server.uri(), Some(provider), Some(gate.clone()));
-        client.search("q", None).await.expect_err("gate closed mid-lookup");
+        client
+            .search("q", None)
+            .await
+            .expect_err("gate closed mid-lookup");
         client
             .search_with_titles("q", None)
             .await

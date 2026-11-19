@@ -41,7 +41,9 @@ impl AWSSubjectTokenSource {
         }
         // Not value.cred_verification_url but value.url
         if !validate_metadata_server(&value.url) {
-            return Err(Error::InvalidSecurityCredentialsURL(value.url.unwrap_or_empty()));
+            return Err(Error::InvalidSecurityCredentialsURL(
+                value.url.unwrap_or_empty(),
+            ));
         }
         if !validate_metadata_server(&value.imdsv2_session_token_url) {
             return Err(Error::InvalidIMDSv2SessionTokenURL(
@@ -87,7 +89,10 @@ impl AWSSubjectTokenSource {
             .map(|v| v.to_string())
             .collect();
         let service_name = service_name[0].as_str();
-        let credential_scope = format!("{}/{}/{}/{}", date_stamp_short, &self.region, service_name, AWS_REQUEST_TYPE);
+        let credential_scope = format!(
+            "{}/{}/{}/{}",
+            date_stamp_short, &self.region, service_name, AWS_REQUEST_TYPE
+        );
 
         let (header_keys, header_values) = canonical_headers(headers);
         let query = self.subject_token_url.query().unwrap_or_default();
@@ -105,8 +110,13 @@ impl AWSSubjectTokenSource {
             method, path, query, header_values, header_keys, data_hash
         );
         let request_hash = hex::encode(Sha256::digest(request_string.as_bytes()));
-        let date_stamp_long = now.format(&format_description!("[year][month][day]T[hour][minute][second]Z"))?;
-        let string_to_sign = format!("{}\n{}\n{}\n{}", AWS_ALGORITHM, date_stamp_long, credential_scope, request_hash);
+        let date_stamp_long = now.format(&format_description!(
+            "[year][month][day]T[hour][minute][second]Z"
+        ))?;
+        let string_to_sign = format!(
+            "{}\n{}\n{}\n{}",
+            AWS_ALGORITHM, date_stamp_long, credential_scope, request_hash
+        );
 
         // sign
         let mut signing_key = format!("AWS4{}", self.credentials.secret_access_key).into_bytes();
@@ -134,7 +144,9 @@ impl AWSSubjectTokenSource {
     }
 
     fn create_subject_token(&self, now: OffsetDateTime) -> Result<String, Error> {
-        let format_date = now.format(&format_description!("[year][month][day]T[hour][minute][second]Z"))?;
+        let format_date = now.format(&format_description!(
+            "[year][month][day]T[hour][minute][second]Z"
+        ))?;
         let mut sorted_headers: Vec<(&str, &str)> = vec![
             ("host", self.subject_token_url.host_str().unwrap_or("")),
             ("x-amz-date", &format_date),
@@ -228,7 +240,9 @@ fn can_retrieve_security_credential_from_environment() -> bool {
     var(AWS_ACCESS_KEY_ID).is_ok() && var(AWS_SECRET_ACCESS_KEY).is_ok()
 }
 
-async fn get_aws_session_token(imds_v2_session_token_url: &Option<String>) -> Result<Option<String>, Error> {
+async fn get_aws_session_token(
+    imds_v2_session_token_url: &Option<String>,
+) -> Result<Option<String>, Error> {
     let url = match imds_v2_session_token_url {
         Some(url) => url,
         None => return Ok(None),
@@ -241,7 +255,9 @@ async fn get_aws_session_token(imds_v2_session_token_url: &Option<String>) -> Re
         .send_guarded()
         .await?;
     if !response.status().is_success() {
-        return Err(Error::UnexpectedStatusOnGetSessionToken(response.status().as_u16()));
+        return Err(Error::UnexpectedStatusOnGetSessionToken(
+            response.status().as_u16(),
+        ));
     }
     Ok(response.text().await.map(Some)?)
 }
@@ -267,7 +283,9 @@ async fn get_security_credentials(
     }
     let response = builder.send_guarded().await?;
     if !response.status().is_success() {
-        return Err(Error::UnexpectedStatusOnGetRoleName(response.status().as_u16()));
+        return Err(Error::UnexpectedStatusOnGetRoleName(
+            response.status().as_u16(),
+        ));
     }
     let role_name = response.text().await?;
 
@@ -279,13 +297,18 @@ async fn get_security_credentials(
     }
     let response = builder.send_guarded().await?;
     if !response.status().is_success() {
-        return Err(Error::UnexpectedStatusOnGetCredentials(response.status().as_u16()));
+        return Err(Error::UnexpectedStatusOnGetCredentials(
+            response.status().as_u16(),
+        ));
     }
     let cred: AWSSecurityCredentials = response.json().await?;
     Ok(cred)
 }
 
-async fn get_region(temporary_session_token: &Option<String>, url: &Option<String>) -> Result<String, Error> {
+async fn get_region(
+    temporary_session_token: &Option<String>,
+    url: &Option<String>,
+) -> Result<String, Error> {
     if can_retrieve_region_from_environment() {
         if let Ok(region) = var(AWS_REGION) {
             return Ok(region);
@@ -300,7 +323,9 @@ async fn get_region(temporary_session_token: &Option<String>, url: &Option<Strin
     }
     let response = builder.send_guarded().await?;
     if !response.status().is_success() {
-        return Err(Error::UnexpectedStatusOnGetRegion(response.status().as_u16()));
+        return Err(Error::UnexpectedStatusOnGetRegion(
+            response.status().as_u16(),
+        ));
     }
     let body = response.bytes().await?;
 
@@ -346,7 +371,11 @@ mod tests {
         }"#;
         let region = "ap-northeast-1b".to_string();
         let cred: CredentialsFile = serde_json::from_str(cred).unwrap();
-        let url = cred.credential_source.unwrap().regional_cred_verification_url.unwrap();
+        let url = cred
+            .credential_source
+            .unwrap()
+            .regional_cred_verification_url
+            .unwrap();
         let subject_token_url = Url::parse(&url.replace("{region}", &region)).unwrap();
 
         AWSSubjectTokenSource {
@@ -365,15 +394,25 @@ mod tests {
         let source = create_token_source();
         let now = datetime!(2022-12-31 00:00:00).assume_utc();
         let format_date = now
-            .format(&format_description!("[year][month][day]T[hour][minute][second]Z"))
+            .format(&format_description!(
+                "[year][month][day]T[hour][minute][second]Z"
+            ))
             .unwrap();
         let sorted_headers: Vec<(&str, &str)> = vec![
             ("host", source.subject_token_url.host_str().unwrap_or("")),
             ("x-amz-date", &format_date),
-            ("x-amz-security-token", source.credentials.token.as_ref().unwrap()),
-            ("x-goog-cloud-target-resource", source.target_resource.as_ref().unwrap()),
+            (
+                "x-amz-security-token",
+                source.credentials.token.as_ref().unwrap(),
+            ),
+            (
+                "x-goog-cloud-target-resource",
+                source.target_resource.as_ref().unwrap(),
+            ),
         ];
-        let actual = source.create_auth_header("POST", &now, &sorted_headers).unwrap();
+        let actual = source
+            .create_auth_header("POST", &now, &sorted_headers)
+            .unwrap();
         let expected = "AWS4-HMAC-SHA256 Credential=AccessKeyId/20221231/ap-northeast-1b/sts/aws4_request, SignedHeaders=host;x-amz-date;x-amz-security-token;x-goog-cloud-target-resource, Signature=168a40df8b7c11fb0588a13cada1443e31e4736de702232f9a2177b26edda21c";
         assert_eq!(actual, expected);
     }

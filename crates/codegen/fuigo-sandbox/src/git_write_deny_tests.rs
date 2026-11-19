@@ -14,7 +14,11 @@ fn entries(ws: &Path, user_home: Option<&Path>, write_roots: &[PathBuf]) -> GitE
     super::git_entries_in(ws, user_home, write_roots, &GitConfigEnv::default())
 }
 
-fn git_entries(ws: &Path, user_home: Option<&Path>, write_roots: &[PathBuf]) -> Vec<GitProtectedPath> {
+fn git_entries(
+    ws: &Path,
+    user_home: Option<&Path>,
+    write_roots: &[PathBuf],
+) -> Vec<GitProtectedPath> {
     let got = entries(ws, user_home, write_roots);
     assert!(got.unread.is_empty(), "{:?}", got.unread);
     got.protected
@@ -73,12 +77,21 @@ fn p158_workspace_git_hooks_and_config_are_denied() {
     assert!(tree(&got, ws.join(".git/hooks")), "{got:?}");
     assert!(file(&got, ws.join(".git/config")), "{got:?}");
     assert!(
-        has(&got, ws.join(".git/config.worktree"), GitPathKind::OptionalFile),
+        has(
+            &got,
+            ws.join(".git/config.worktree"),
+            GitPathKind::OptionalFile
+        ),
         "{got:?}"
     );
     assert!(denies(&got, &ws.join(".git/hooks/pre-commit")));
     assert!(!denies(&got, &ws.join(".git/info/exclude")), "{got:?}");
-    for free in [".git/objects/ab/cd", ".git/index", ".git/refs/heads/main", "src/lib.rs"] {
+    for free in [
+        ".git/objects/ab/cd",
+        ".git/index",
+        ".git/refs/heads/main",
+        "src/lib.rs",
+    ] {
         assert!(!denies(&got, &ws.join(free)), "{free} denied: {got:?}");
     }
     let _ = std::fs::remove_dir_all(&root);
@@ -94,7 +107,10 @@ fn p158_no_repository_at_start_protects_only_the_global_config() {
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     let got = git_entries(&ws, Some(&home), &[]);
-    assert!(!got.iter().any(|entry| entry.path.starts_with(&ws)), "{got:?}");
+    assert!(
+        !got.iter().any(|entry| entry.path.starts_with(&ws)),
+        "{got:?}"
+    );
     assert!(file(&got, home.join(".gitconfig")), "{got:?}");
     assert!(file(&got, home.join(".config/git/config")), "{got:?}");
     let _ = std::fs::remove_dir_all(&root);
@@ -107,8 +123,16 @@ fn hooks_path_resolves_home_relative_values_and_the_global_config() {
     let home = root.join("home");
     std::fs::create_dir_all(ws.join(".git")).unwrap();
     std::fs::create_dir_all(home.join(".config/git")).unwrap();
-    std::fs::write(ws.join(".git/config"), "[core]\n\thooksPath = ~/repo-hooks\n").unwrap();
-    std::fs::write(home.join(".gitconfig"), "[core]\n\thooksPath = ~/.githooks\n").unwrap();
+    std::fs::write(
+        ws.join(".git/config"),
+        "[core]\n\thooksPath = ~/repo-hooks\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[core]\n\thooksPath = ~/.githooks\n",
+    )
+    .unwrap();
     std::fs::write(
         home.join(".config/git/config"),
         "[core]\n\thooksPath = tools/shared-hooks\n",
@@ -190,7 +214,11 @@ fn hooks_path_follows_includes_in_place() {
     let home = root.join("home");
     std::fs::create_dir_all(ws.join(".git")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(ws.join("team.gitconfig"), "[core]\n\thooksPath = team-hooks\n").unwrap();
+    std::fs::write(
+        ws.join("team.gitconfig"),
+        "[core]\n\thooksPath = team-hooks\n",
+    )
+    .unwrap();
     std::fs::write(
         home.join("personal.gitconfig"),
         "[core]\n\thooksPath = ~/personal-hooks\n",
@@ -253,7 +281,10 @@ fn an_include_chain_past_the_bound_is_unread_not_skipped() {
         entries(&ws, None, &[])
     };
     let followed = chain(GIT_CONFIG_INCLUDE_DEPTH - 1);
-    assert!(tree(&followed.protected, ws.join("deep-hooks")), "{followed:?}");
+    assert!(
+        tree(&followed.protected, ws.join("deep-hooks")),
+        "{followed:?}"
+    );
     assert!(followed.unread.is_empty(), "{:?}", followed.unread);
     let past = chain(GIT_CONFIG_INCLUDE_DEPTH);
     assert!(!tree(&past.protected, ws.join("deep-hooks")), "{past:?}");
@@ -298,7 +329,11 @@ fn an_include_that_cannot_be_resolved_is_unread_not_skipped() {
         ("[include]\n\tpath =\n", "", Some(&home), "is empty"),
     ] {
         std::fs::write(&config, text).unwrap();
-        let got = entries(&ws, user_home.map(PathBuf::as_path), std::slice::from_ref(&ws));
+        let got = entries(
+            &ws,
+            user_home.map(PathBuf::as_path),
+            std::slice::from_ref(&ws),
+        );
         let want = GitMetadataUnread::Unreadable {
             path: config.clone(),
             reason: format!("its include {value:?} {reason}, not resolved here"),
@@ -313,7 +348,11 @@ fn a_conditional_include_protects_its_hooks_path_beside_the_effective_one() {
     let root = scratch("include-if");
     let ws = root.join("ws");
     std::fs::create_dir_all(ws.join(".git")).unwrap();
-    std::fs::write(ws.join(".git/work.gitconfig"), "[core]\n\thooksPath = work-hooks\n").unwrap();
+    std::fs::write(
+        ws.join(".git/work.gitconfig"),
+        "[core]\n\thooksPath = work-hooks\n",
+    )
+    .unwrap();
     std::fs::write(
         ws.join(".git/config"),
         "[core]\n\thooksPath = repo-hooks\n[includeIf \"gitdir:/opt/x/\"]\n\tpath = work.gitconfig\n",
@@ -345,7 +384,10 @@ fn a_dotted_header_splits_at_its_first_dot() {
     .unwrap();
     let got = git_entries(&ws, None, &[]);
     for expected in ["repo-hooks", "work-hooks", "team-hooks"] {
-        assert!(tree(&got, ws.join(expected)), "{expected} missing from {got:?}");
+        assert!(
+            tree(&got, ws.join(expected)),
+            "{expected} missing from {got:?}"
+        );
     }
     assert!(!tree(&got, ws.join("sub-hooks")), "{got:?}");
     let _ = std::fs::remove_dir_all(&root);
@@ -385,9 +427,18 @@ fn a_hooks_path_holding_a_write_root_is_narrowed_to_hook_names() {
     std::fs::create_dir_all(ws.join(".git")).unwrap();
     std::fs::write(ws.join(".git/config"), "[core]\n\thooksPath = .\n").unwrap();
     let got = git_entries(&ws, None, std::slice::from_ref(&ws));
-    assert!(!tree(&got, &ws), "the workspace itself must not be denied: {got:?}");
-    assert!(has(&got, ws.join("pre-commit"), GitPathKind::HookFile), "{got:?}");
-    assert!(has(&got, ws.join("fsmonitor-watchman"), GitPathKind::HookFile), "{got:?}");
+    assert!(
+        !tree(&got, &ws),
+        "the workspace itself must not be denied: {got:?}"
+    );
+    assert!(
+        has(&got, ws.join("pre-commit"), GitPathKind::HookFile),
+        "{got:?}"
+    );
+    assert!(
+        has(&got, ws.join("fsmonitor-watchman"), GitPathKind::HookFile),
+        "{got:?}"
+    );
     assert!(!denies(&got, &ws.join("README.md")), "{got:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -427,13 +478,25 @@ fn p158_a_linked_worktree_workspace_protects_its_pointers_and_the_common_dir() {
     let gitdir = main.join(".git/worktrees/wt");
     std::fs::create_dir_all(&gitdir).unwrap();
     std::fs::create_dir_all(main.join(".git/worktrees/other")).unwrap();
-    std::fs::write(main.join(".git/worktrees/other/gitdir"), "/elsewhere/.git\n").unwrap();
+    std::fs::write(
+        main.join(".git/worktrees/other/gitdir"),
+        "/elsewhere/.git\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(main.join(".git/hooks")).unwrap();
-    std::fs::write(main.join(".git/config"), "[core]\n\thooksPath = shared-hooks\n").unwrap();
+    std::fs::write(
+        main.join(".git/config"),
+        "[core]\n\thooksPath = shared-hooks\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::write(ws.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
     std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
-    std::fs::write(gitdir.join("gitdir"), format!("{}\n", ws.join(".git").display())).unwrap();
+    std::fs::write(
+        gitdir.join("gitdir"),
+        format!("{}\n", ws.join(".git").display()),
+    )
+    .unwrap();
     let got = git_entries(&ws, None, std::slice::from_ref(&ws));
     assert!(file(&got, ws.join(".git")), "{got:?}");
     assert!(file(&got, gitdir.join("commondir")), "{got:?}");
@@ -492,14 +555,22 @@ fn p158_worktree_config_extension_makes_config_worktree_required() {
     std::fs::write(ws.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
     let got = git_entries(&ws, None, std::slice::from_ref(&ws));
     assert!(
-        has(&got, ws.join(".git/config.worktree"), GitPathKind::OptionalFile),
+        has(
+            &got,
+            ws.join(".git/config.worktree"),
+            GitPathKind::OptionalFile
+        ),
         "{got:?}"
     );
     assert!(
         !denies(&got, &ws.join(".git/worktrees/other/config.worktree")),
         "{got:?}"
     );
-    std::fs::write(ws.join(".git/config"), "[extensions]\n\tworktreeConfig = true\n").unwrap();
+    std::fs::write(
+        ws.join(".git/config"),
+        "[extensions]\n\tworktreeConfig = true\n",
+    )
+    .unwrap();
     let got = git_entries(&ws, None, std::slice::from_ref(&ws));
     assert!(file(&got, ws.join(".git/config.worktree")), "{got:?}");
     // The other linked worktrees are not covered (Fuigo removes its own worktrees)
@@ -517,12 +588,8 @@ fn a_fifo_in_a_configs_place_does_not_stall_the_scan() {
     let root = scratch("fifo");
     let ws = root.join("ws");
     std::fs::create_dir_all(ws.join(".git")).unwrap();
-    let fifo = std::ffi::CString::new(
-        ws.join(".git/config")
-            .into_os_string()
-            .into_encoded_bytes(),
-    )
-    .unwrap();
+    let fifo = std::ffi::CString::new(ws.join(".git/config").into_os_string().into_encoded_bytes())
+        .unwrap();
     // SAFETY: `fifo` is a valid NUL-terminated path and `mkfifo` reads nothing else.
     assert_eq!(0, unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) });
     let (done, finished) = std::sync::mpsc::channel();
@@ -643,7 +710,10 @@ fn a_device_as_the_global_config_is_read_not_protected_and_a_relative_one_is_unr
             panic!("{name}: {:?}", got.unread);
         };
         assert_eq!(Path::new(config_global.or(xdg).unwrap()), path.as_path());
-        assert!(reason.contains(name) && reason.contains("relative"), "{reason}");
+        assert!(
+            reason.contains(name) && reason.contains("relative"),
+            "{reason}"
+        );
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -678,7 +748,9 @@ fn the_host_env_is_read_variable_for_variable() {
 #[cfg(target_os = "linux")]
 #[test]
 fn p158_linux_plan_binds_git_targets_inside_writable_roots() {
-    use crate::hook_write_deny::{HookWriteDenyBwrapPlan, HookWriteDenyError, add_git_leaves_to_plan};
+    use crate::hook_write_deny::{
+        HookWriteDenyBwrapPlan, HookWriteDenyError, add_git_leaves_to_plan,
+    };
     let root = scratch("plan");
     let ws = root.join("ws");
     let outside = root.join("outside");
@@ -701,16 +773,39 @@ fn p158_linux_plan_binds_git_targets_inside_writable_roots() {
     add_git_leaves_to_plan(&mut plan, &got, std::slice::from_ref(&ws)).expect("plan");
     let leaves: Vec<&Path> = plan.leaves.iter().map(|leaf| leaf.path.as_path()).collect();
     for expected in [".git/hooks", ".git/config"] {
-        assert!(leaves.contains(&ws.join(expected).as_path()), "{expected}: {leaves:?}");
+        assert!(
+            leaves.contains(&ws.join(expected).as_path()),
+            "{expected}: {leaves:?}"
+        );
     }
-    assert!(ws.join(".git/hooks").is_dir(), "a missing hooks dir is created to be bound");
-    assert!(!ws.join(".git/config.worktree").exists(), "an optional file is not created");
-    assert!(!leaves.contains(&outside.join("gitconfig").as_path()), "{leaves:?}");
+    assert!(
+        ws.join(".git/hooks").is_dir(),
+        "a missing hooks dir is created to be bound"
+    );
+    assert!(
+        !ws.join(".git/config.worktree").exists(),
+        "an optional file is not created"
+    );
+    assert!(
+        !leaves.contains(&outside.join("gitconfig").as_path()),
+        "{leaves:?}"
+    );
     assert!(!outside.join("gitconfig").exists());
-    assert!(plan.ancestor_rw_binds.contains(&ws.join(".git")), "{:?}", plan.ancestor_rw_binds);
-    assert!(plan.ancestor_rw_binds.contains(&ws), "{:?}", plan.ancestor_rw_binds);
+    assert!(
+        plan.ancestor_rw_binds.contains(&ws.join(".git")),
+        "{:?}",
+        plan.ancestor_rw_binds
+    );
+    assert!(
+        plan.ancestor_rw_binds.contains(&ws),
+        "{:?}",
+        plan.ancestor_rw_binds
+    );
     for leaf in &leaves {
-        assert!(!plan.ancestor_rw_binds.iter().any(|a| a == leaf), "{leaf:?}");
+        assert!(
+            !plan.ancestor_rw_binds.iter().any(|a| a == leaf),
+            "{leaf:?}"
+        );
     }
 
     let link = vec![GitProtectedPath {
@@ -718,13 +813,19 @@ fn p158_linux_plan_binds_git_targets_inside_writable_roots() {
         kind: GitPathKind::LinkNode,
     }];
     let err = add_git_leaves_to_plan(&mut empty(), &link, std::slice::from_ref(&ws)).unwrap_err();
-    assert!(matches!(err, HookWriteDenyError::GitSymlink { .. }), "{err:?}");
+    assert!(
+        matches!(err, HookWriteDenyError::GitSymlink { .. }),
+        "{err:?}"
+    );
     let hook = vec![GitProtectedPath {
         path: ws.join("pre-commit"),
         kind: GitPathKind::HookFile,
     }];
     let err = add_git_leaves_to_plan(&mut empty(), &hook, std::slice::from_ref(&ws)).unwrap_err();
-    assert!(matches!(err, HookWriteDenyError::GitHookMissing { .. }), "{err:?}");
+    assert!(
+        matches!(err, HookWriteDenyError::GitHookMissing { .. }),
+        "{err:?}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -785,11 +886,21 @@ fn p158_r1_dot_dot_after_a_symlink_resolves_as_the_kernel_does() {
     std::fs::create_dir_all(ws.join(".git")).unwrap();
     std::fs::create_dir_all(ws.join("target/deeper")).unwrap();
     std::os::unix::fs::symlink(ws.join("target/deeper"), ws.join("alias")).unwrap();
-    std::fs::write(ws.join(".git/config"), "[core]\n\thooksPath = alias/../hooks\n").unwrap();
+    std::fs::write(
+        ws.join(".git/config"),
+        "[core]\n\thooksPath = alias/../hooks\n",
+    )
+    .unwrap();
     let got = git_entries(&ws, None, std::slice::from_ref(&ws));
     assert!(tree(&got, ws.join("target/hooks")), "{got:?}");
-    assert!(has(&got, ws.join("alias"), GitPathKind::LinkNode), "{got:?}");
-    assert!(!tree(&got, ws.join("hooks")), "the lexical spelling is not git's: {got:?}");
+    assert!(
+        has(&got, ws.join("alias"), GitPathKind::LinkNode),
+        "{got:?}"
+    );
+    assert!(
+        !tree(&got, ws.join("hooks")),
+        "the lexical spelling is not git's: {got:?}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -845,14 +956,16 @@ fn p158_r1_the_system_config_hooks_path_is_protected() {
     let present = |_: &Path| true;
     let (configs, unread) = super::system_configs(None, true, present);
     assert!(configs.is_empty() && unread.is_none());
-    let (configs, unread) = super::system_configs(Some(OsString::from("/x/gitconfig")), false, present);
+    let (configs, unread) =
+        super::system_configs(Some(OsString::from("/x/gitconfig")), false, present);
     assert_eq!(configs, vec![PathBuf::from("/x/gitconfig")]);
     assert!(unread.is_none());
     let (configs, _) = super::system_configs(Some(OsString::new()), false, present);
     assert!(configs.is_empty());
     let (configs, unread) = super::system_configs(Some(OsString::from("rel")), false, present);
     assert!(configs.is_empty() && unread.is_some());
-    let (configs, _) = super::system_configs(None, false, |path| path == Path::new("/etc/gitconfig"));
+    let (configs, _) =
+        super::system_configs(None, false, |path| path == Path::new("/etc/gitconfig"));
     assert_eq!(configs, vec![PathBuf::from("/etc/gitconfig")]);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -932,8 +1045,14 @@ fn p158_r1_linux_plan_binds_symlinked_hook_targets_and_skips_missing_pointers() 
     };
     add_git_leaves_to_plan(&mut plan, &got, std::slice::from_ref(&ws)).expect("plan");
     let leaves: Vec<&Path> = plan.leaves.iter().map(|leaf| leaf.path.as_path()).collect();
-    assert!(leaves.contains(&ws.join("scripts/pre-commit").as_path()), "{leaves:?}");
-    assert!(!ws.join(".git/commondir").exists(), "a missing pointer must not be created");
+    assert!(
+        leaves.contains(&ws.join("scripts/pre-commit").as_path()),
+        "{leaves:?}"
+    );
+    assert!(
+        !ws.join(".git/commondir").exists(),
+        "a missing pointer must not be created"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1000,7 +1119,11 @@ fn p158_r2_a_hard_linked_hook_or_config_refuses() {
     std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
     std::fs::create_dir_all(ws.join("scripts")).unwrap();
     std::fs::write(ws.join("scripts/pre-commit"), "#!/bin/sh\n").unwrap();
-    std::fs::hard_link(ws.join("scripts/pre-commit"), ws.join(".git/hooks/pre-commit")).unwrap();
+    std::fs::hard_link(
+        ws.join("scripts/pre-commit"),
+        ws.join(".git/hooks/pre-commit"),
+    )
+    .unwrap();
     let got = entries(&ws, None, std::slice::from_ref(&ws));
     assert!(
         got.unread.contains(&GitMetadataUnread::HardLinked {
@@ -1073,12 +1196,18 @@ fn drop_file_identity() {
     }
     // SAFETY: an invalid id changes nothing and returns the current one
     let now = unsafe { libc::setfsuid(libc::uid_t::MAX) };
-    assert_eq!(u32::try_from(now).ok(), Some(NOBODY), "filesystem uid not dropped");
+    assert_eq!(
+        u32::try_from(now).ok(),
+        Some(NOBODY),
+        "filesystem uid not dropped"
+    );
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn drop_file_identity() {
-    panic!("root lists every directory and this host has no per-thread filesystem id: run unprivileged");
+    panic!(
+        "root lists every directory and this host has no per-thread filesystem id: run unprivileged"
+    );
 }
 
 /// Astra r3 N6: a protected tree that cannot be listed refuses (it may hide an aliased hook).
@@ -1090,11 +1219,19 @@ fn p158_r3_an_unlistable_hooks_tree_refuses() {
     let root = scratch("r3-unlistable");
     let ws = root.join("ws");
     std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
-    std::fs::set_permissions(ws.join(".git/hooks"), std::fs::Permissions::from_mode(0o111)).unwrap();
+    std::fs::set_permissions(
+        ws.join(".git/hooks"),
+        std::fs::Permissions::from_mode(0o111),
+    )
+    .unwrap();
     let got = unprivileged(&ws.join(".git/hooks"), || {
         entries(&ws, None, std::slice::from_ref(&ws))
     });
-    std::fs::set_permissions(ws.join(".git/hooks"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(
+        ws.join(".git/hooks"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     assert!(
         got.unread.iter().any(|unread| matches!(
             unread,
@@ -1144,7 +1281,11 @@ fn p158_r3_a_git_dir_follows_an_existing_commondir() {
     std::fs::create_dir_all(ws.join(".git")).unwrap();
     std::fs::create_dir_all(common.join("hooks")).unwrap();
     std::fs::write(ws.join(".git/commondir"), "../common-meta\n").unwrap();
-    std::fs::write(common.join("config"), "[core]\n\thooksPath = shared-hooks\n").unwrap();
+    std::fs::write(
+        common.join("config"),
+        "[core]\n\thooksPath = shared-hooks\n",
+    )
+    .unwrap();
     let got = git_entries(&ws, None, std::slice::from_ref(&ws));
     assert!(file(&got, ws.join(".git/commondir")), "{got:?}");
     assert!(tree(&got, common.join("hooks")), "{got:?}");
@@ -1271,9 +1412,21 @@ fn p158_g3_init_template_dir_is_protected() {
     };
     let got = super::git_entries_in(&ws, Some(&home), std::slice::from_ref(&ws), &env);
     assert!(got.unread.is_empty(), "{:?}", got.unread);
-    assert!(tree(&got.protected, home.join(".git-templates")), "{:?}", got.protected);
-    assert!(tree(&got.protected, root.join("tpl2")), "{:?}", got.protected);
-    assert!(tree(&got.protected, root.join("tpl3")), "{:?}", got.protected);
+    assert!(
+        tree(&got.protected, home.join(".git-templates")),
+        "{:?}",
+        got.protected
+    );
+    assert!(
+        tree(&got.protected, root.join("tpl2")),
+        "{:?}",
+        got.protected
+    );
+    assert!(
+        tree(&got.protected, root.join("tpl3")),
+        "{:?}",
+        got.protected
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1312,7 +1465,10 @@ fn p158_g3_a_template_dir_holding_a_write_root_is_narrowed() {
     .unwrap();
     let got = git_entries(&ws, Some(&home), std::slice::from_ref(&ws));
     assert!(!tree(&got, &root), "{got:?}");
-    assert!(has(&got, root.join("config"), GitPathKind::HookFile), "{got:?}");
+    assert!(
+        has(&got, root.join("config"), GitPathKind::HookFile),
+        "{got:?}"
+    );
     assert!(
         has(&got, root.join("hooks/pre-commit"), GitPathKind::HookFile),
         "{got:?}"
@@ -1330,7 +1486,11 @@ fn p158_g3_an_unresolvable_template_dir_is_unread() {
         let home = root.join("home");
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join(".gitconfig"), format!("[init]\n\ttemplateDir = {value}\n")).unwrap();
+        std::fs::write(
+            home.join(".gitconfig"),
+            format!("[init]\n\ttemplateDir = {value}\n"),
+        )
+        .unwrap();
         let got = entries(&ws, Some(&home), std::slice::from_ref(&ws));
         assert!(
             got.unread.iter().any(|unread| matches!(
@@ -1461,7 +1621,11 @@ fn p158_g6_a_link_loop_under_a_bound_tree_is_skipped() {
     };
     let mut plan = empty();
     add_git_leaves_to_plan(&mut plan, &got, std::slice::from_ref(&ws)).expect("plan");
-    assert!(plan.leaves.iter().any(|leaf| leaf.path == tpl), "{:?}", plan.leaves);
+    assert!(
+        plan.leaves.iter().any(|leaf| leaf.path == tpl),
+        "{:?}",
+        plan.leaves
+    );
     std::os::unix::fs::symlink(ws.join("loose-b"), ws.join("loose")).unwrap();
     std::os::unix::fs::symlink(ws.join("loose"), ws.join("loose-b")).unwrap();
     let lone = vec![GitProtectedPath {
@@ -1483,7 +1647,11 @@ fn p158_g4_gitmodules_stays_writable() {
     let module = ws.join(".git/modules/sub");
     std::fs::create_dir_all(&module).unwrap();
     std::fs::write(module.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-    std::fs::write(ws.join(".gitmodules"), "[submodule \"sub\"]\n\tpath = sub\n").unwrap();
+    std::fs::write(
+        ws.join(".gitmodules"),
+        "[submodule \"sub\"]\n\tpath = sub\n",
+    )
+    .unwrap();
     let got = git_entries(&ws, None, std::slice::from_ref(&ws));
     assert!(tree(&got, module.join("hooks")), "{got:?}");
     assert!(!denies(&got, &ws.join(".gitmodules")), "{got:?}");

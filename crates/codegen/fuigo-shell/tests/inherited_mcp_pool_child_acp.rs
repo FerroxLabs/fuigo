@@ -75,13 +75,18 @@ async fn handle_post(State(state): State<FixtureMcp>, Json(req): Json<Value>) ->
                     "serverInfo": {"name": "parent-pool-fixture", "version": "0.0.0"},
                 },
             });
-            ([("mcp-session-id", "parent-pool-fixture-session")], Json(result)).into_response()
+            (
+                [("mcp-session-id", "parent-pool-fixture-session")],
+                Json(result),
+            )
+                .into_response()
         }
         Some("tools/list") => {
             // The first call is the parent's own registration. Every later call is a child registering the
             // inherited client's tools, and a slow one is what exposed the "was the child told" race.
             if state.tool_lists.fetch_add(1, Ordering::SeqCst) >= 1 {
-                tokio::time::sleep(std::time::Duration::from_millis(CHILD_TOOLS_LIST_DELAY_MS)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(CHILD_TOOLS_LIST_DELAY_MS))
+                    .await;
             }
             Json(json!({
                 "jsonrpc": "2.0",
@@ -154,7 +159,10 @@ fn has_user_message(body: &Value, tail: &str) -> bool {
     user_messages(body).iter().any(|c| c.contains(tail))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn inherited_parent_pool_keeps_the_mcp_meta_tools_reachable_from_the_child() {
     // One test per binary; set before any agent or mock thread exists.
@@ -195,7 +203,11 @@ fn inherited_parent_pool_keeps_the_mcp_meta_tools_reachable_from_the_child() {
     }
 
     let outcome = support::run_burst(&server, 1, "none", env.deadline);
-    assert_eq!(outcome.rows.len(), 1, "one real native child must be observed");
+    assert_eq!(
+        outcome.rows.len(),
+        1,
+        "one real native child must be observed"
+    );
     assert_eq!(outcome.failures, 0, "the native child did not complete");
 
     // The pool the child inherits is `SharedMcpPool::from_state`, which holds only
@@ -218,7 +230,11 @@ fn inherited_parent_pool_keeps_the_mcp_meta_tools_reachable_from_the_child() {
         .requests()
         .iter()
         .filter(|r| r.path == "/v1/chat/completions" && r.header("x-fuigo-turn-idx").is_some())
-        .filter_map(|r| r.body.as_ref().and_then(|b| serde_json::from_str(&b.to_string()).ok()))
+        .filter_map(|r| {
+            r.body
+                .as_ref()
+                .and_then(|b| serde_json::from_str(&b.to_string()).ok())
+        })
         .collect();
 
     // Control: the parent declared the server itself, so its own-servers term keeps
@@ -241,7 +257,9 @@ fn inherited_parent_pool_keeps_the_mcp_meta_tools_reachable_from_the_child() {
     // own requests hold the probe text only inside its tool-call arguments).
     let child_requests: Vec<&Value> = bodies
         .iter()
-        .filter(|b| has_user_message(b, CHILD_PROMPT_TAIL) && !has_user_message(b, PARENT_PROMPT_TAIL))
+        .filter(|b| {
+            has_user_message(b, CHILD_PROMPT_TAIL) && !has_user_message(b, PARENT_PROMPT_TAIL)
+        })
         .collect();
     assert!(
         !child_requests.is_empty(),

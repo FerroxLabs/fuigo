@@ -3,15 +3,15 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::os::unix::fs::MetadataExt;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, TryLockError};
 use std::time::{Duration, Instant};
-#[cfg(test)]
-use std::sync::Mutex;
 
 use super::{
     KillOutcome, PLACE_SENTINEL_ERRNO, PlaceError, RefuseReason, SpawnError, SweepReport,
@@ -113,7 +113,11 @@ fn system_lock_dir() -> PathBuf {
 fn new_uuid() -> io::Result<String> {
     let s = fs::read_to_string("/proc/sys/kernel/random/uuid")?;
     let s = s.trim().to_string();
-    if is_uuid(&s) { Ok(s) } else { Err(io::Error::other("malformed kernel uuid")) }
+    if is_uuid(&s) {
+        Ok(s)
+    } else {
+        Err(io::Error::other("malformed kernel uuid"))
+    }
 }
 
 pub(super) fn is_uuid(s: &str) -> bool {
@@ -137,7 +141,12 @@ fn open_dirfd(path: &Path) -> io::Result<File> {
     let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| io::Error::other("nul in path"))?;
     // SAFETY: `c` is NUL-terminated; the fd is wrapped immediately.
-    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -175,7 +184,12 @@ fn events_populated(dirfd: &File) -> io::Result<bool> {
 }
 
 /// Poll `populated` until it equals `want` or `within` passes.
-fn wait_populated(dirfd: &File, want: bool, within: Duration, mut tick: impl FnMut()) -> io::Result<bool> {
+fn wait_populated(
+    dirfd: &File,
+    want: bool,
+    within: Duration,
+    mut tick: impl FnMut(),
+) -> io::Result<bool> {
     let start = Instant::now();
     loop {
         tick();
@@ -214,7 +228,9 @@ fn remove_tree_if_empty(dir: &Path) -> TeardownOutcome {
         Ok(()) => TeardownOutcome::Removed,
         Err(e) if e.kind() == io::ErrorKind::NotFound => TeardownOutcome::Removed,
         // EBUSY: populated. ENOTEMPTY: a populated child or stray entries.
-        Err(e) if matches!(errno_of(&e), libc::EBUSY | libc::ENOTEMPTY) => TeardownOutcome::LeftPopulated,
+        Err(e) if matches!(errno_of(&e), libc::EBUSY | libc::ENOTEMPTY) => {
+            TeardownOutcome::LeftPopulated
+        }
         Err(e) => TeardownOutcome::Failed(e.to_string()),
     }
 }
@@ -280,7 +296,11 @@ fn try_flock(f: &File) -> io::Result<bool> {
         return Ok(true);
     }
     let e = io::Error::last_os_error();
-    if e.raw_os_error() == Some(libc::EWOULDBLOCK) { Ok(false) } else { Err(e) }
+    if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(false)
+    } else {
+        Err(e)
+    }
 }
 
 /// Never follows a symlink at the final component.
@@ -298,13 +318,21 @@ pub(super) fn open_lock(path: &Path) -> io::Result<File> {
 pub(super) fn check_lock_dir(p: &Path, euid: u32) -> Result<(), Unavailable> {
     let m = fs::symlink_metadata(p).map_err(|e| Unavailable::LockDir(format!("lstat: {e}")))?;
     if !m.file_type().is_dir() {
-        return Err(Unavailable::LockDir("lock dir is not a real directory".into()));
+        return Err(Unavailable::LockDir(
+            "lock dir is not a real directory".into(),
+        ));
     }
     if m.uid() != euid {
-        return Err(Unavailable::LockDir(format!("lock dir owned by uid {}", m.uid())));
+        return Err(Unavailable::LockDir(format!(
+            "lock dir owned by uid {}",
+            m.uid()
+        )));
     }
     if m.mode() & 0o077 != 0 {
-        return Err(Unavailable::LockDir(format!("lock dir mode {:o} has group/other bits", m.mode() & 0o7777)));
+        return Err(Unavailable::LockDir(format!(
+            "lock dir mode {:o} has group/other bits",
+            m.mode() & 0o7777
+        )));
     }
     Ok(())
 }
@@ -368,7 +396,10 @@ fn probe_inner(env: &ProbeEnv) -> Result<ParkHost, Unavailable> {
         let mut st: libc::statfs = unsafe { std::mem::zeroed() };
         let r = unsafe { libc::statfs(c.as_ptr(), &mut st) };
         if r != 0 {
-            return Err(Unavailable::NotCgroup2(format!("statfs: {}", io::Error::last_os_error())));
+            return Err(Unavailable::NotCgroup2(format!(
+                "statfs: {}",
+                io::Error::last_os_error()
+            )));
         }
         #[allow(clippy::unnecessary_cast)] // f_type is i32 on some targets, i64 here
         let f_type = st.f_type as i64;
@@ -377,8 +408,14 @@ fn probe_inner(env: &ProbeEnv) -> Result<ParkHost, Unavailable> {
         }
     }
     // 3. Own cgroup visible, sane, ours, and a domain cgroup (or the root).
-    let own_rel = env.own_cgroup.clone().ok_or(Unavailable::OwnCgroupUnreadable)?;
-    if Path::new(&own_rel).components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    let own_rel = env
+        .own_cgroup
+        .clone()
+        .ok_or(Unavailable::OwnCgroupUnreadable)?;
+    if Path::new(&own_rel)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(Unavailable::OwnCgroupInvalid(format!("`..` in {own_rel}")));
     }
     let own_dir = env.own_dir(&own_rel);
@@ -386,12 +423,20 @@ fn probe_inner(env: &ProbeEnv) -> Result<ParkHost, Unavailable> {
         return Err(Unavailable::OwnCgroupMissing(own_rel));
     }
     match fs::read_to_string(own_dir.join("cgroup.procs")) {
-        Ok(p) if p.lines().any(|l| l.trim().parse::<u32>().ok() == Some(std::process::id())) => {}
-        Ok(_) => return Err(Unavailable::OwnCgroupInvalid("our pid is not in its cgroup.procs".into())),
+        Ok(p)
+            if p.lines()
+                .any(|l| l.trim().parse::<u32>().ok() == Some(std::process::id())) => {}
+        Ok(_) => {
+            return Err(Unavailable::OwnCgroupInvalid(
+                "our pid is not in its cgroup.procs".into(),
+            ));
+        }
         Err(e) => return Err(Unavailable::OwnCgroupInvalid(format!("cgroup.procs: {e}"))),
     }
     match fs::read_to_string(own_dir.join("cgroup.type")) {
-        Ok(t) if t.trim() != "domain" => return Err(Unavailable::OwnCgroupNotDomain(t.trim().to_string())),
+        Ok(t) if t.trim() != "domain" => {
+            return Err(Unavailable::OwnCgroupNotDomain(t.trim().to_string()));
+        }
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(Unavailable::OwnCgroupMissing(format!("cgroup.type: {e}"))),
@@ -405,7 +450,10 @@ fn probe_inner(env: &ProbeEnv) -> Result<ParkHost, Unavailable> {
         .map_err(|e| Unavailable::LockDir(e.to_string()))?;
     // SAFETY: geteuid has no preconditions.
     check_lock_dir(&env.lock_dir, unsafe { libc::geteuid() })?;
-    let name = format!("{PARK_PREFIX}{}", new_uuid().map_err(|e| Unavailable::LockDir(e.to_string()))?);
+    let name = format!(
+        "{PARK_PREFIX}{}",
+        new_uuid().map_err(|e| Unavailable::LockDir(e.to_string()))?
+    );
     let lock_path = env.lock_dir.join(format!("{name}.lock"));
     let lock = open_lock(&lock_path).map_err(|e| Unavailable::LockDir(e.to_string()))?;
     match try_flock(&lock) {
@@ -424,9 +472,11 @@ fn probe_inner(env: &ProbeEnv) -> Result<ParkHost, Unavailable> {
     };
     host.sweep_stale();
     // 4. mkdir of the process directory. From here `host`'s Drop cleans up on failure.
-    env.make_dir(&process_dir).map_err(|e| mkdir_err(&process_dir, &e))?;
+    env.make_dir(&process_dir)
+        .map_err(|e| mkdir_err(&process_dir, &e))?;
     let probe_dir = process_dir.join("probe");
-    env.make_dir(&probe_dir).map_err(|e| mkdir_err(&probe_dir, &e))?;
+    env.make_dir(&probe_dir)
+        .map_err(|e| mkdir_err(&probe_dir, &e))?;
     let result = probe_checks(env, &probe_dir);
     remove_tree_retry(env, &probe_dir, Duration::from_secs(1));
     result?;
@@ -434,7 +484,10 @@ fn probe_inner(env: &ProbeEnv) -> Result<ParkHost, Unavailable> {
 }
 
 fn mkdir_err(path: &Path, e: &io::Error) -> Unavailable {
-    Unavailable::MkdirRefused { path: path.display().to_string(), errno: errno_of(e) }
+    Unavailable::MkdirRefused {
+        path: path.display().to_string(),
+        errno: errno_of(e),
+    }
 }
 
 fn probe_checks(env: &ProbeEnv, probe_dir: &Path) -> Result<(), Unavailable> {
@@ -475,7 +528,8 @@ fn probe_checks(env: &ProbeEnv, probe_dir: &Path) -> Result<(), Unavailable> {
 }
 
 fn round_trip(child: &mut std::process::Child, dirfd: &File) -> Result<(), String> {
-    let up = wait_populated(dirfd, true, ROUND_TRIP_STEP, || {}).map_err(|e| format!("events: {e}"))?;
+    let up =
+        wait_populated(dirfd, true, ROUND_TRIP_STEP, || {}).map_err(|e| format!("events: {e}"))?;
     if !up {
         return Err("never saw populated 1".into());
     }
@@ -505,7 +559,10 @@ fn round_trip(child: &mut std::process::Child, dirfd: &File) -> Result<(), Strin
 }
 
 pub(super) fn open_procs(dir: &Path) -> io::Result<File> {
-    let f = OpenOptions::new().write(true).custom_flags(libc::O_CLOEXEC).open(dir.join("cgroup.procs"))?;
+    let f = OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(dir.join("cgroup.procs"))?;
     // The fd must not sit in 0..=2: a child's stdio dup2 would overwrite it
     // before our pre_exec runs.
     if f.as_raw_fd() < 3 {
@@ -541,7 +598,11 @@ impl ParkHost {
         let dir = self.process_dir.join(id);
         self.env.make_dir(&dir).map_err(|e| mkdir_err(&dir, &e))?;
         let made = open_procs(&dir).and_then(|f| {
-            let rel = format!("{}/{}", self.own_rel.trim_end_matches('/'), rel_tail(&self.own_dir, &dir));
+            let rel = format!(
+                "{}/{}",
+                self.own_rel.trim_end_matches('/'),
+                rel_tail(&self.own_dir, &dir)
+            );
             SessionCgroup::from_parts(self.env.clone(), dir.clone(), rel, f)
         });
         made.map_err(|e| {
@@ -557,7 +618,9 @@ impl ParkHost {
     /// own directory, never enters a `fuigo-park-*` directory below a session.
     pub fn sweep_stale(&self) -> SweepReport {
         let mut rep = SweepReport::default();
-        let Ok(rd) = fs::read_dir(&self.own_dir) else { return rep };
+        let Ok(rd) = fs::read_dir(&self.own_dir) else {
+            return rep;
+        };
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().into_owned();
             if !is_park_dir_name(&name) || !ent.file_type().is_ok_and(|t| t.is_dir()) {
@@ -607,10 +670,14 @@ impl ParkHost {
     /// exactly when its owner has exited). Files younger than a minute are left:
     /// an owner may have created its file but not yet taken the lock.
     fn sweep_orphan_locks(&self) {
-        let Ok(rd) = fs::read_dir(&self.env.lock_dir) else { return };
+        let Ok(rd) = fs::read_dir(&self.env.lock_dir) else {
+            return;
+        };
         for ent in rd.flatten() {
             let fname = ent.file_name().to_string_lossy().into_owned();
-            let Some(stem) = fname.strip_suffix(".lock") else { continue };
+            let Some(stem) = fname.strip_suffix(".lock") else {
+                continue;
+            };
             if !is_park_dir_name(stem) || ent.path() == self.lock_path {
                 continue;
             }
@@ -633,7 +700,11 @@ impl ParkHost {
 }
 
 fn open_lock_existing(path: &Path) -> io::Result<Option<File>> {
-    match OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path) {
+    match OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    {
         Ok(f) => Ok(Some(f)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
@@ -641,7 +712,9 @@ fn open_lock_existing(path: &Path) -> io::Result<Option<File>> {
 }
 
 fn rel_tail(base: &Path, dir: &Path) -> String {
-    dir.strip_prefix(base).map(|p| p.display().to_string()).unwrap_or_default()
+    dir.strip_prefix(base)
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
 }
 
 impl Drop for ParkHost {
@@ -736,7 +809,12 @@ pub(crate) enum Gate {
 }
 
 impl SessionCgroup {
-    pub(super) fn from_parts(env: ProbeEnv, dir: PathBuf, rel: String, procs: File) -> io::Result<Self> {
+    pub(super) fn from_parts(
+        env: ProbeEnv,
+        dir: PathBuf,
+        rel: String,
+        procs: File,
+    ) -> io::Result<Self> {
         let dirfd = open_dirfd(&dir)?;
         let procs_id = fstat_ids(procs.as_raw_fd())?;
         Ok(Self {
@@ -766,7 +844,10 @@ impl SessionCgroup {
     /// public placement entries are `ProcessScope::spawn_placed{,_std}`). Same
     /// locking rule: the read lease is held through `spawn()` and `breached` is
     /// latched before it is dropped. A closed gate refuses ([`SpawnError::Closed`]).
-    pub(crate) fn spawn(&self, cmd: &mut std::process::Command) -> Result<std::process::Child, SpawnError> {
+    pub(crate) fn spawn(
+        &self,
+        cmd: &mut std::process::Command,
+    ) -> Result<std::process::Child, SpawnError> {
         let lease = self.place(cmd).map_err(|e| match e {
             PlaceError::Stopping => SpawnError::Stopping,
             _ => SpawnError::Closed,
@@ -775,14 +856,24 @@ impl SessionCgroup {
         // inside the gate and the failure is recorded below, under the lease.
         #[allow(clippy::disallowed_methods)]
         let spawned = cmd.spawn();
-        let out = spawned.map_err(|e| if self.record_spawn_error(&e) { SpawnError::Placement(e) } else { SpawnError::Spawn(e) });
+        let out = spawned.map_err(|e| {
+            if self.record_spawn_error(&e) {
+                SpawnError::Placement(e)
+            } else {
+                SpawnError::Spawn(e)
+            }
+        });
         drop(lease);
         out
     }
 
     #[cfg(test)]
     fn test_pause(&self, stage: &'static str) {
-        let h = self.hook.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let h = self
+            .hook
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         if let Some(h) = h {
             h(stage);
         }
@@ -793,7 +884,10 @@ impl SessionCgroup {
     /// Register the placement `pre_exec` on `cmd` and take a read lease; a
     /// closed gate ([`PlaceError::Closed`]) or a stop ([`PlaceError::Stopping`])
     /// refuses and nothing is latched.
-    pub(crate) fn place(&self, cmd: &mut std::process::Command) -> Result<PlaceLease<'_>, PlaceError> {
+    pub(crate) fn place(
+        &self,
+        cmd: &mut std::process::Command,
+    ) -> Result<PlaceLease<'_>, PlaceError> {
         self.place_inner(cmd, false)
     }
 
@@ -801,7 +895,10 @@ impl SessionCgroup {
     /// back an UNPLACED lease with `breached` already latched under it (the
     /// command still runs, outside the cgroup). A stop in progress, or a gate
     /// whose write side is held or poisoned, is [`PlaceError::Stopping`].
-    pub(crate) fn place_or_latch(&self, cmd: &mut std::process::Command) -> Result<PlaceLease<'_>, PlaceError> {
+    pub(crate) fn place_or_latch(
+        &self,
+        cmd: &mut std::process::Command,
+    ) -> Result<PlaceLease<'_>, PlaceError> {
         self.place_inner(cmd, true)
     }
 
@@ -811,7 +908,11 @@ impl SessionCgroup {
     /// [`PLACE_SENTINEL_ERRNO`]. It allocates nothing, takes no locks and logs
     /// nothing: it runs between fork and exec (`fstat` and `write` are
     /// async-signal-safe). See THE LOCKING RULE above.
-    fn place_inner(&self, cmd: &mut std::process::Command, unplaced_ok: bool) -> Result<PlaceLease<'_>, PlaceError> {
+    fn place_inner(
+        &self,
+        cmd: &mut std::process::Command,
+        unplaced_ok: bool,
+    ) -> Result<PlaceLease<'_>, PlaceError> {
         // Rule 3/4: never wait behind a kill; contention or poison is a refusal.
         let guard = match self.gate.try_read() {
             Ok(g) => g,
@@ -827,7 +928,10 @@ impl SessionCgroup {
                 // Rule 1: latched under the read lease, before the command starts.
                 self.breached.store(true, Ordering::SeqCst);
                 self.test_pause("unplaced");
-                return Ok(PlaceLease { _guard: guard, placed: false });
+                return Ok(PlaceLease {
+                    _guard: guard,
+                    placed: false,
+                });
             }
         }
         let file = Arc::clone(&self.procs);
@@ -850,7 +954,10 @@ impl SessionCgroup {
             });
         }
         self.test_pause("placed");
-        Ok(PlaceLease { _guard: guard, placed: true })
+        Ok(PlaceLease {
+            _guard: guard,
+            placed: true,
+        })
     }
 
     /// Latch `breached` if `err` is the placement sentinel. Returns whether it was.
@@ -914,15 +1021,23 @@ impl SessionCgroup {
     /// (a failed stop; the session continues) or session end; `GateOpen` (the
     /// write side was never taken) leaves it untouched.
     pub fn kill_and_wait(&self, deadline: Duration) -> KillOutcome {
-        let own = std::fs::read_to_string("/proc/self/cgroup").ok().and_then(|s| {
-            s.lines().find_map(|l| l.strip_prefix("0::").map(|p| p.trim().to_string()))
-        });
+        let own = std::fs::read_to_string("/proc/self/cgroup")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("0::").map(|p| p.trim().to_string()))
+            });
         self.kill_and_wait_as(deadline, std::process::id(), own.as_deref())
     }
 
     /// [`kill_and_wait`](Self::kill_and_wait) with the identity of "us" given
     /// (tests substitute a child's pid so the test process is never moved).
-    pub(super) fn kill_and_wait_as(&self, deadline: Duration, self_pid: u32, self_cgroup: Option<&str>) -> KillOutcome {
+    pub(super) fn kill_and_wait_as(
+        &self,
+        deadline: Duration,
+        self_pid: u32,
+        self_cgroup: Option<&str>,
+    ) -> KillOutcome {
         let start = Instant::now();
         let limit = deadline.min(KILL_CAP);
         let mut guard = loop {
@@ -968,8 +1083,12 @@ impl SessionCgroup {
         }
         // From here the kill was written: never report "nothing was killed".
         match wait_populated(&self.dirfd, false, limit, || {}) {
-            Ok(true) => KillOutcome::Emptied { waited: start.elapsed() },
-            Ok(false) => KillOutcome::NotEmptied { waited: start.elapsed() },
+            Ok(true) => KillOutcome::Emptied {
+                waited: start.elapsed(),
+            },
+            Ok(false) => KillOutcome::NotEmptied {
+                waited: start.elapsed(),
+            },
             Err(e) => KillOutcome::KilledUnverified(format!("cgroup.events: {e}")),
         }
     }

@@ -113,10 +113,19 @@ impl std::fmt::Debug for UpdateConfig {
         f.debug_struct("UpdateConfig")
             .field("proxy_base_url", &fuigo_auth::redact_url(proxy_base_url))
             .field("auth_scope", auth_scope)
-            .field("deployment_key", &deployment_key.as_ref().map(|_| "<redacted>"))
-            .field("alpha_test_key", &alpha_test_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "deployment_key",
+                &deployment_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "alpha_test_key",
+                &alpha_test_key.as_ref().map(|_| "<redacted>"),
+            )
             .field("channel", channel)
-            .field("npm_registry", &npm_registry.as_deref().map(fuigo_auth::redact_url))
+            .field(
+                "npm_registry",
+                &npm_registry.as_deref().map(fuigo_auth::redact_url),
+            )
             .finish()
     }
 }
@@ -277,7 +286,10 @@ impl PrivateNpmCache {
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0);
             let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = base.join(format!("fuigo-npm-view-{}-{nanos:x}-{seq}", std::process::id()));
+            let dir = base.join(format!(
+                "fuigo-npm-view-{}-{nanos:x}-{seq}",
+                std::process::id()
+            ));
             // Owner-only from the moment it exists (Unix 0700; Windows a protected, inheritable owner-only DACL given
             // to CreateDirectoryW), and fails if the name exists (Astra P145 r1 #5, r2 #5).
             match fuigo_secrets::owner_only::create_owner_only_dir(&dir) {
@@ -327,7 +339,10 @@ pub(crate) async fn npm_view_version(
     };
 
     if !output.status.success() {
-        anyhow::bail!("{}", npm_error_summary(&String::from_utf8_lossy(&output.stderr)));
+        anyhow::bail!(
+            "{}",
+            npm_error_summary(&String::from_utf8_lossy(&output.stderr))
+        );
     }
 
     let stdout = String::from_utf8(output.stdout)?;
@@ -352,7 +367,13 @@ pub(crate) async fn npm_view_version(
 /// `fuigo update --check` used to print npm's whole dump (code, syscall, errno, log-file lines). Handles npm 7-10
 /// (`npm error ...`) and older (`npm ERR! ...`); falls back to the last non-empty line; capped at 300 characters.
 pub(crate) fn npm_error_summary(stderr: &str) -> String {
-    const NOISE: &[&str] = &["syscall ", "errno ", "A complete log", "Log files were not written", "code "];
+    const NOISE: &[&str] = &[
+        "syscall ",
+        "errno ",
+        "A complete log",
+        "Log files were not written",
+        "code ",
+    ];
     let mut code: Option<&str> = None;
     let mut message: Option<&str> = None;
     let mut last: Option<&str> = None;
@@ -815,8 +836,14 @@ npm error A complete log of this run can be found in: C:\\Users\\a\\npm-cache\\_
             "ECONNREFUSED: FetchError: request to http://127.0.0.1:4873/fuigo failed, reason: connect ECONNREFUSED 127.0.0.1:4873"
         );
         let forbidden = "npm error code E403\nnpm error 403 403 Forbidden - GET https://m.example/fuigo\nnpm error 403 In most cases";
-        assert_eq!(npm_error_summary(forbidden), "E403: 403 Forbidden - GET https://m.example/fuigo");
-        assert_eq!(npm_error_summary("npm ERR! code E404\nnpm ERR! 404 Not Found - GET x"), "E404: Not Found - GET x");
+        assert_eq!(
+            npm_error_summary(forbidden),
+            "E403: 403 Forbidden - GET https://m.example/fuigo"
+        );
+        assert_eq!(
+            npm_error_summary("npm ERR! code E404\nnpm ERR! 404 Not Found - GET x"),
+            "E404: Not Found - GET x"
+        );
         assert_eq!(npm_error_summary("\n  something odd\n"), "something odd");
         assert_eq!(npm_error_summary(""), "npm failed without a message");
         let long = format!("npm error code X\nnpm error {}", "y".repeat(400));
@@ -862,15 +889,18 @@ npm error A complete log of this run can be found in: C:\\Users\\a\\npm-cache\\_
             ("fuigo-0.2.5-windows-x86_64.exe", Some("0.2.5")),
             // Pre-releases must round-trip whole
             // Truncating to "0.1.220" would make an alpha install masquerade as the release and mask updates from alpha to stable
-            ("fuigo-0.1.220-alpha.4-linux-x86_64", Some("0.1.220-alpha.4")),
+            (
+                "fuigo-0.1.220-alpha.4-linux-x86_64",
+                Some("0.1.220-alpha.4"),
+            ),
             ("fuigo-0.1.220-alpha.4", Some("0.1.220-alpha.4")), // npm layout
-            ("fuigo-pager-0.1.5-darwin-arm64", None),          // "pager" is not a version
-            ("fuigo-garbage-darwin-arm64", None),              // unparseable version
+            ("fuigo-pager-0.1.5-darwin-arm64", None),           // "pager" is not a version
+            ("fuigo-garbage-darwin-arm64", None),               // unparseable version
             ("fuigo-0.2.46", Some("0.2.46")),                   // no platform suffix
-            ("other-0.2.46-darwin-arm64", None),               // wrong prefix
-            ("grok-0.2.46-darwin-arm64", None),                // upstream is not Fuigo
-            ("fuigo-latest", None),                            // symlink alias, not a version
-            ("fuigo", None),                                   // bare name
+            ("other-0.2.46-darwin-arm64", None),                // wrong prefix
+            ("grok-0.2.46-darwin-arm64", None),                 // upstream is not Fuigo
+            ("fuigo-latest", None),                             // symlink alias, not a version
+            ("fuigo", None),                                    // bare name
             ("", None),
         ];
         for (name, expected) in cases {
@@ -1042,9 +1072,18 @@ npm error A complete log of this run can be found in: C:\\Users\\a\\npm-cache\\_
     fn highest_release_version_is_semver_max_not_list_order() {
         use super::highest_release_version;
         let tags = "v1.0.19\nv1.0.22-rc.1\nv1.0.21\nnightly\nv1.0.20\n";
-        assert_eq!(highest_release_version(tags, true).as_deref(), Some("1.0.21"));
-        assert_eq!(highest_release_version(tags, false).as_deref(), Some("1.0.22-rc.1"));
-        assert_eq!(highest_release_version("v1.0.10\nv1.0.9\n", true).as_deref(), Some("1.0.10"));
+        assert_eq!(
+            highest_release_version(tags, true).as_deref(),
+            Some("1.0.21")
+        );
+        assert_eq!(
+            highest_release_version(tags, false).as_deref(),
+            Some("1.0.22-rc.1")
+        );
+        assert_eq!(
+            highest_release_version("v1.0.10\nv1.0.9\n", true).as_deref(),
+            Some("1.0.10")
+        );
         assert_eq!(highest_release_version("", true), None);
         assert_eq!(highest_release_version("latest\n", true), None);
     }
@@ -1057,12 +1096,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }

@@ -77,7 +77,8 @@ impl SessionActor {
             InterjectionAuthority::Peer { message_id, from } => {
                 // The stranded message is tracked again so it is rechecked when this row runs as its own turn; if admission
                 // never saw it, it stays untracked and the recheck refuses it.
-                self.peer_admission.retrack_stranded(&(from.clone(), message_id.clone()));
+                self.peer_admission
+                    .retrack_stranded(&(from.clone(), message_id.clone()));
                 InputOrigin::new(super::super::PromptOrigin::PeerMessage { message_id, from })
             }
         };

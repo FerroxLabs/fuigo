@@ -60,14 +60,19 @@ async fn session(
     tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>,
 ) {
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-    let (mut actor, events) = create_test_actor_ex(1_000, 200_000, 85, gateway_tx, persistence_tx).await;
+    let (persistence_tx, _persistence_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    let (mut actor, events) =
+        create_test_actor_ex(1_000, 200_000, 85, gateway_tx, persistence_tx).await;
     actor.tool_context.cwd = fuigo_paths::AbsPathBuf::new(cwd.to_path_buf()).unwrap();
     *actor.system_prompt_override.borrow_mut() = override_prompt.map(str::to_owned);
     let template = actor.agent.borrow().system_prompt().to_owned();
     actor
         .chat_state_handle
-        .replace_conversation(vec![ConversationItem::system(control_head(&template, override_prompt))]);
+        .replace_conversation(vec![ConversationItem::system(control_head(
+            &template,
+            override_prompt,
+        ))]);
     (Arc::new(actor), events, gateway_rx)
 }
 
@@ -77,7 +82,10 @@ async fn rendered_template(actor: &SessionActor, name: &str) -> String {
         .unwrap_or_else(|| panic!("{name}.md fixture must be discoverable"));
     let (ctx, bridge) = {
         let agent = actor.agent.borrow();
-        (agent.prompt_context_for_definition(&def), Arc::clone(agent.tool_bridge()))
+        (
+            agent.prompt_context_for_definition(&def),
+            Arc::clone(agent.tool_bridge()),
+        )
     };
     ctx.render(&bridge).await.expect("mode definition renders")
 }
@@ -98,7 +106,8 @@ fn write_mode_files(agents: &std::path::Path) {
 fn assert_one_rules_and_memory(head: &str) {
     assert_eq!(head.matches("<!-- session-rules -->").count(), 1, "{head}");
     assert_eq!(
-        head.matches(&fuigo_chat_state::memory_context_open_tag(nonce())).count(),
+        head.matches(&fuigo_chat_state::memory_context_open_tag(nonce()))
+            .count(),
         1,
         "{head}"
     );
@@ -123,7 +132,11 @@ async fn without_a_mode_file_set_mode_leaves_the_head_untouched() {
                 let agent_type = actor.active_agent_type.lock().clone();
                 for id in ["default", "ask", "default"] {
                     actor.handle_session_mode(acp::SessionModeId::new(id)).await;
-                    assert_eq!(system_text(&actor).await, control, "{id} {override_prompt:?}");
+                    assert_eq!(
+                        system_text(&actor).await,
+                        control,
+                        "{id} {override_prompt:?}"
+                    );
                     assert_eq!(*actor.active_agent_type.lock(), agent_type);
                 }
             }
@@ -212,12 +225,19 @@ async fn a_mode_file_with_the_rules_marker_is_not_taken_for_rules() {
             let (actor, _events, _gw) = session(cwd.path(), None).await;
             for id in ["default", "default", "ask", "default"] {
                 let template = rendered_template(&actor, id).await;
-                assert!(template.contains(&format!("MODEFILE-RULES-{id}")), "{template}");
+                assert!(
+                    template.contains(&format!("MODEFILE-RULES-{id}")),
+                    "{template}"
+                );
                 actor.handle_session_mode(acp::SessionModeId::new(id)).await;
                 let head = system_text(&actor).await;
                 assert_eq!(extract_human_rules(&head), Some(RULES), "{head}");
                 assert_eq!(head, control_head(&template, None), "set_mode({id})");
-                assert_eq!(head.matches(&format!("MODEFILE-RULES-{id}")).count(), 1, "{head}");
+                assert_eq!(
+                    head.matches(&format!("MODEFILE-RULES-{id}")).count(),
+                    1,
+                    "{head}"
+                );
             }
         })
         .await;

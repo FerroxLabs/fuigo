@@ -39,7 +39,11 @@ impl SessionActor {
     pub(super) async fn initialize(&self, system_prompt: String) {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge.on_skill_discovery_clear().await;
-        save_system_prompt(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &system_prompt);
+        save_system_prompt(
+            &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
+            &system_prompt,
+        );
         let system_message = ConversationItem::system(system_prompt);
         let mut messages = vec![system_message];
         if let Some(effects) = self.inject_baseline_skill_reminder(&mut messages).await
@@ -49,7 +53,11 @@ impl SessionActor {
         }
         self.chat_state_handle
             .replace_conversation(messages.clone());
-        persist_chat_history_jsonl_sync(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &messages);
+        persist_chat_history_jsonl_sync(
+            &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
+            &messages,
+        );
     }
     /// Ensure the conversation carries the correct baseline skill (and workflow) `<system-reminder>`.
     /// An agent that has skills/workflows and uses reminders gets exactly one.
@@ -274,7 +282,10 @@ impl SessionActor {
         self.maybe_reconcile_active_goal_without_plan().await;
         let (_, workflows) = self.named_workflow_snapshot();
         let commands = slash_commands::available_commands(&skills, availability, &workflows);
-        let meta = Some(slash_commands::build_tools_meta(&tool_names, self.memory.is_enabled()));
+        let meta = Some(slash_commands::build_tools_meta(
+            &tool_names,
+            self.memory.is_enabled(),
+        ));
         tracing::info!(
             session_id = %self.session_info.id.0,
             command_count = commands.len(),
@@ -782,8 +793,7 @@ mod p43_identity_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn idle_model_refresh_carries_identity_only_to_fluxrouter() {
         let client = reqwest_middleware::ClientBuilder::new(crate::http::shared_client()).build();
-        let (base, seen, handle) =
-            crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
         let request = super::idle_refresh_models_request(&client, &super::idle_refresh_url(&base))
             .build()
             .unwrap();
@@ -794,7 +804,10 @@ mod p43_identity_tests {
             super::idle_refresh_models_request(&client, "https://api.fluxrouter.ai/v1/models")
                 .build()
                 .unwrap();
-        assert_eq!(fluxrouter.headers()["x-fuigo-client-version"], fuigo_version::VERSION);
+        assert_eq!(
+            fluxrouter.headers()["x-fuigo-client-version"],
+            fuigo_version::VERSION
+        );
     }
 }
 

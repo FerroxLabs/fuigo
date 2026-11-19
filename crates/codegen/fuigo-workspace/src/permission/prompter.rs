@@ -521,7 +521,8 @@ impl AcpPrompter {
 
     /// 1.0.36 item a: mark the next prompt as answering a launch-policy ask (or not).
     pub(crate) fn set_launch_ask(&self, launch_ask: bool) {
-        self.launch_ask.store(launch_ask, std::sync::atomic::Ordering::Relaxed);
+        self.launch_ask
+            .store(launch_ask, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn build_options(

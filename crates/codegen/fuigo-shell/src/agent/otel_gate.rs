@@ -143,7 +143,9 @@ impl OtelGate {
                 self.apply_and_open(identity, Some(&settings));
                 Some(*settings)
             }
-            SettingsFetch::Rejected | SettingsFetch::Retry | SettingsFetch::DestinationRefused(_) => {
+            SettingsFetch::Rejected
+            | SettingsFetch::Retry
+            | SettingsFetch::DestinationRefused(_) => {
                 self.apply_and_open(identity, None);
                 None
             }
@@ -163,7 +165,10 @@ impl OtelGate {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     // Exercise the same config loader and channel classifier used at startup.

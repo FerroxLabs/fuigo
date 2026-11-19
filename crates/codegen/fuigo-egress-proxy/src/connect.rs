@@ -101,8 +101,16 @@ where
     let (mut b_read, mut b_write) = tokio::io::split(b);
     let clock = Instant::now();
     let last_activity = AtomicU64::new(0);
-    let up = pump(&mut a_read, &mut b_write, IdleDeadline::new(idle, clock, &last_activity));
-    let down = pump(&mut b_read, &mut a_write, IdleDeadline::new(idle, clock, &last_activity));
+    let up = pump(
+        &mut a_read,
+        &mut b_write,
+        IdleDeadline::new(idle, clock, &last_activity),
+    );
+    let down = pump(
+        &mut b_read,
+        &mut a_write,
+        IdleDeadline::new(idle, clock, &last_activity),
+    );
     tokio::try_join!(up, down).map(|_| ())
 }
 

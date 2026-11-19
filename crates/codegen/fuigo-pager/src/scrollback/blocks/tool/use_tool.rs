@@ -154,7 +154,11 @@ fn error_rows(err: &str, width: usize, style: ratatui::style::Style) -> Vec<Bloc
             .subsequent_indent(indent.clone());
         for wrapped in word_wrap_line(&line, opts) {
             rows.push(BlockLine::from(Line::from(
-                wrapped.spans.into_iter().map(|s| Span::styled(s.content.into_owned(), s.style)).collect::<Vec<_>>(),
+                wrapped
+                    .spans
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.into_owned(), s.style))
+                    .collect::<Vec<_>>(),
             )));
         }
     }
@@ -236,7 +240,11 @@ impl BlockContent for UseToolCallBlock {
 
                 if let Some(ref err) = self.error {
                     lines.push(Line::from("").into());
-                    lines.extend(error_rows(err, ctx.width as usize, theme.fg(theme.accent_error)));
+                    lines.extend(error_rows(
+                        err,
+                        ctx.width as usize,
+                        theme.fg(theme.accent_error),
+                    ));
                 }
 
                 BlockOutput { lines }
@@ -350,14 +358,29 @@ mod tests {
             .output(&c)
             .lines
             .iter()
-            .map(|l| l.content.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.content
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
         assert!(rows.iter().all(|r| !r.contains('\n')), "{rows:?}");
-        let error_rows: Vec<&String> = rows.iter().skip_while(|r| !r.contains("request failed")).collect();
+        let error_rows: Vec<&String> = rows
+            .iter()
+            .skip_while(|r| !r.contains("request failed"))
+            .collect();
         assert!(error_rows.len() >= 5, "wrapped across rows: {rows:?}");
         for row in &error_rows {
-            assert!(row.starts_with("  "), "continuation keeps the indent: {row:?}");
-            assert!(unicode_width::UnicodeWidthStr::width(row.as_str()) <= 40, "fits the width: {row:?}");
+            assert!(
+                row.starts_with("  "),
+                "continuation keeps the indent: {row:?}"
+            );
+            assert!(
+                unicode_width::UnicodeWidthStr::width(row.as_str()) <= 40,
+                "fits the width: {row:?}"
+            );
         }
     }
 

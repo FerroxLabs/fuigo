@@ -242,15 +242,22 @@ mod tests {
     #[test]
     fn signed_upload_url_response_debug_redacts_the_signed_url() {
         let response = SignedUploadUrlResponse {
-            signed_url: "https://storage.p70.invalid/b/o?X-Goog-Signature=p70sg-FAKE-4c5d6e7f".into(),
+            signed_url: "https://storage.p70.invalid/b/o?X-Goog-Signature=p70sg-FAKE-4c5d6e7f"
+                .into(),
             bucket: "p70-bucket".into(),
             path: "p70/object".into(),
             content_type: "application/json".into(),
             expires_in_secs: 60,
         };
         for out in [format!("{response:?}"), format!("{response:#?}")] {
-            assert!(out.contains("<redacted>") && out.contains("p70-bucket"), "control: {out}");
-            assert!(!out.contains("p70sg-FAKE") && !out.contains("storage.p70.invalid"), "Debug holds the URL: {out}");
+            assert!(
+                out.contains("<redacted>") && out.contains("p70-bucket"),
+                "control: {out}"
+            );
+            assert!(
+                !out.contains("p70sg-FAKE") && !out.contains("storage.p70.invalid"),
+                "Debug holds the URL: {out}"
+            );
         }
     }
 

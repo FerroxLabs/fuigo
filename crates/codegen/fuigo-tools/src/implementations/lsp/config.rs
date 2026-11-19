@@ -130,7 +130,10 @@ pub fn filter_project_lsp_when_untrusted(
         }
         return BTreeMap::new();
     }
-    sourced.into_iter().map(|(name, (cfg, _source))| (name, cfg)).collect()
+    sourced
+        .into_iter()
+        .map(|(name, (cfg, _source))| (name, cfg))
+        .collect()
 }
 
 /// Load LSP server configs from `~/.fuigo/lsp.json` and `<cwd>/.fuigo/lsp.json`.
@@ -325,7 +328,10 @@ impl std::fmt::Debug for LspServerConfig {
             .field("command", command)
             .field("args", &format_args!("<{} args redacted>", args.len()))
             .field("transport", transport)
-            .field("env", &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "env",
+                &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>(),
+            )
             .field("extensions", extensions)
             .field("initialization_options", initialization_options)
             .field("settings", settings)
@@ -416,7 +422,10 @@ mod tests {
     #[test]
     fn untrusted_drops_every_server_including_user_and_plugin() {
         let kept = filter_project_lsp_when_untrusted(sourced(), false);
-        assert!(kept.is_empty(), "audit X2-F3: no language server starts in an untrusted folder");
+        assert!(
+            kept.is_empty(),
+            "audit X2-F3: no language server starts in an untrusted folder"
+        );
     }
 
     #[test]

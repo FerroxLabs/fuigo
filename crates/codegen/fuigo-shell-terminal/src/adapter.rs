@@ -158,15 +158,20 @@ fn wrap_command(command: &str) -> Result<String, ComputerError> {
 /// grant, that environment is first judged as the local runner judges its own child, and the call is refused when it
 /// steers (`checked_client_terminal_env`), so the client runs only what was judged.
 fn to_env(request: &TerminalRunRequest) -> Result<Vec<acp::EnvVariable>, ComputerError> {
-    let check = request.approved_without_grant.then(|| fuigo_tools::sandbox_launch::ClientTerminalCheck {
-        command: &request.command,
-        dir: &request.working_directory,
-        request_cwd: request.request_cwd.as_deref(),
-    });
-    Ok(fuigo_tools::sandbox_launch::checked_client_terminal_env(request.env.clone(), check)?
-        .into_iter()
-        .map(|(name, value)| acp::EnvVariable::new(name, value))
-        .collect())
+    let check =
+        request
+            .approved_without_grant
+            .then(|| fuigo_tools::sandbox_launch::ClientTerminalCheck {
+                command: &request.command,
+                dir: &request.working_directory,
+                request_cwd: request.request_cwd.as_deref(),
+            });
+    Ok(
+        fuigo_tools::sandbox_launch::checked_client_terminal_env(request.env.clone(), check)?
+            .into_iter()
+            .map(|(name, value)| acp::EnvVariable::new(name, value))
+            .collect(),
+    )
 }
 
 pub(super) fn parse_exit(
@@ -272,8 +277,11 @@ impl TerminalBackend for AcpTerminalAdapter {
         let (exit_code, signal) = parse_exit(&output.exit_status);
         let total_bytes = output.output.len();
 
-        let mut recorder =
-            OutputRecorder::new(request.output_file.clone(), request.output_byte_limit, request.output_log);
+        let mut recorder = OutputRecorder::new(
+            request.output_file.clone(),
+            request.output_byte_limit,
+            request.output_log,
+        );
         recorder.initialize().await;
         if let Err(e) = recorder.append(&output.output).await {
             tracing::warn!(error = %e, "output recorder failed to write foreground output");
@@ -323,8 +331,11 @@ impl TerminalBackend for AcpTerminalAdapter {
             );
         }
 
-        let recorder =
-            OutputRecorder::new(output_file.clone(), request.output_byte_limit, request.output_log);
+        let recorder = OutputRecorder::new(
+            output_file.clone(),
+            request.output_byte_limit,
+            request.output_log,
+        );
         recorder.initialize().await;
         tokio::spawn(watch_for_exit(
             self.gateway.clone(),
@@ -429,10 +440,11 @@ impl TerminalBackend for AcpTerminalAdapter {
             } => {
                 // Astra r3 F9: the log read answers under the same bound as the live poll (a log on a stalled
                 // mount must not stall the session actor that lists tasks); past it the snapshot keeps what it has.
-                let tail = tokio::time::timeout(LIVE_OUTPUT_BOUND, read_log_tail(&output_file, limit))
-                    .await
-                    .ok()
-                    .flatten();
+                let tail =
+                    tokio::time::timeout(LIVE_OUTPUT_BOUND, read_log_tail(&output_file, limit))
+                        .await
+                        .ok()
+                        .flatten();
                 if let Some(tail) = tail {
                     snapshot.output = tail.text;
                     snapshot.truncated = tail.truncated;
@@ -671,7 +683,10 @@ impl TerminalBackend for AcpTerminalAdapter {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "adapter_tests.rs"]
 mod tests;

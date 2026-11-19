@@ -37,7 +37,8 @@ fn run_child(sandbox: &TestSandbox, args: &[&str]) -> (Option<i32>, String, Stri
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[allow(clippy::disallowed_methods)] // test-owned child, waited on (or killed and reaped) in this function
+    #[allow(clippy::disallowed_methods)]
+    // test-owned child, waited on (or killed and reaped) in this function
     let mut child = cmd.spawn().expect("spawn fuigo-pager");
     let mut so = child.stdout.take().unwrap();
     let mut se = child.stderr.take().unwrap();
@@ -67,7 +68,9 @@ fn run_child(sandbox: &TestSandbox, args: &[&str]) -> (Option<i32>, String, Stri
 }
 
 async fn echoing_server() -> MockInferenceServer {
-    let server = MockInferenceServer::start().await.expect("start the mock inference server");
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start the mock inference server");
     server.preset_allow_access();
     let body = serde_json::json!({"error": {
         "message": format!("Credit limit reached for key {SENT}; top up to continue"),
@@ -75,7 +78,10 @@ async fn echoing_server() -> MockInferenceServer {
     }});
     for (name, endpoint) in [
         ("402 echo (responses)", InferenceEndpoint::Responses),
-        ("402 echo (chat completions)", InferenceEndpoint::ChatCompletions),
+        (
+            "402 echo (chat completions)",
+            InferenceEndpoint::ChatCompletions,
+        ),
     ] {
         let _ = server.expect_response(
             name,
@@ -93,7 +99,10 @@ async fn a_provider_echoed_api_key_is_redacted_in_every_headless_format() {
         let mut sandbox = TestSandbox::builder().git().mock_url(server.url()).build();
         sandbox.set_env("FUIGO_API_KEY", SENT);
         let (code, stdout, stderr) = tokio::task::spawn_blocking(move || {
-            run_child(&sandbox, &["-p", "say hi", "--trust", "--output-format", format])
+            run_child(
+                &sandbox,
+                &["-p", "say hi", "--trust", "--output-format", format],
+            )
         })
         .await
         .unwrap();
@@ -102,9 +111,19 @@ async fn a_provider_echoed_api_key_is_redacted_in_every_headless_format() {
                 && (e.path.contains("completions") || e.path.contains("responses"))),
             "{format}: control: the model request reached the mock\nstderr:\n{stderr}"
         );
-        assert_ne!(code, Some(0), "{format}: a 402 fails the run\nstderr:\n{stderr}");
-        assert!(!stderr.contains(SENT), "{format}: stderr printed the sent key:\n{stderr}");
-        assert!(!stdout.contains(SENT), "{format}: stdout printed the sent key:\n{stdout}");
+        assert_ne!(
+            code,
+            Some(0),
+            "{format}: a 402 fails the run\nstderr:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains(SENT),
+            "{format}: stderr printed the sent key:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains(SENT),
+            "{format}: stdout printed the sent key:\n{stdout}"
+        );
         let shown = format!("{stdout}\n{stderr}");
         assert!(
             shown.contains("<redacted>"),

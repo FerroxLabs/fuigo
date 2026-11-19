@@ -14,13 +14,14 @@ use serial_test::serial;
 
 use common::FakeBinGuard;
 use fuigo_update::auto_update::{
-    install_npm_checked_for_test, install_npm_for_test, npm_setup_failed_recently_for_test, run_install_script,
+    install_npm_checked_for_test, install_npm_for_test, npm_setup_failed_recently_for_test,
+    run_install_script,
 };
 use fuigo_update::version::npm_view_version_for_test;
-use std::time::{Duration, Instant};
 use fuigo_update::version::{
     fetch_gh_release_version, fetch_npm_tag_for_test, fetch_npm_version_for_test,
 };
+use std::time::{Duration, Instant};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // fetch_npm_tag — reads a single dist-tag from `npm view`.
@@ -75,11 +76,7 @@ async fn fetch_npm_tag_alpha_appends_at_alpha_suffix() {
     assert_eq!(v, "0.1.181-alpha.1");
 
     let log = g.args_log();
-    assert!(
-        log[0].contains("fuigo@alpha"),
-        "args: {}",
-        log[0]
-    );
+    assert!(log[0].contains("fuigo@alpha"), "args: {}", log[0]);
 }
 
 #[tokio::test]
@@ -221,7 +218,9 @@ async fn install_npm_calls_npm_with_version_arg() {
     let g = FakeBinGuard::install_npm();
     // No stdout/exit setup, so the fake npm succeeds with empty stdout
 
-    install_npm_for_test(Some("0.1.181"), "stable", None).await.unwrap();
+    install_npm_for_test(Some("0.1.181"), "stable", None)
+        .await
+        .unwrap();
     let log = g.args_log();
     assert_eq!(log.len(), 1, "exactly one npm invocation");
     let args = &log[0];
@@ -262,7 +261,9 @@ async fn install_npm_falls_back_to_alpha_dist_tag_on_alpha_channel() {
 async fn install_npm_passes_registry_flag_when_set() {
     let g = FakeBinGuard::install_npm();
 
-    install_npm_for_test(Some("0.1.181"), "stable", Some("https://npm.example.com")).await.unwrap();
+    install_npm_for_test(Some("0.1.181"), "stable", Some("https://npm.example.com"))
+        .await
+        .unwrap();
     let log = g.args_log();
     assert!(
         log[0].contains("--registry=https://npm.example.com"),
@@ -276,7 +277,9 @@ async fn install_npm_passes_registry_flag_when_set() {
 async fn install_npm_no_registry_flag_when_unset() {
     let g = FakeBinGuard::install_npm();
 
-    install_npm_for_test(Some("0.1.181"), "stable", None).await.unwrap();
+    install_npm_for_test(Some("0.1.181"), "stable", None)
+        .await
+        .unwrap();
     let log = g.args_log();
     assert!(!log[0].contains("--registry"), "args: {}", log[0]);
 }
@@ -287,7 +290,9 @@ async fn install_npm_returns_err_on_npm_failure() {
     let g = FakeBinGuard::install_npm();
     g.set_exit_code(1);
 
-    let err = install_npm_for_test(Some("0.1.181"), "stable", None).await.unwrap_err();
+    let err = install_npm_for_test(Some("0.1.181"), "stable", None)
+        .await
+        .unwrap_err();
     let msg = format!("{err:#}");
     assert!(msg.contains("npm install failed"), "msg: {msg}");
 }
@@ -299,7 +304,9 @@ async fn install_npm_with_token_passes_userconfig() {
     unsafe { std::env::set_var("NPM_TOKEN", "secrettoken") };
     let g = FakeBinGuard::install_npm();
 
-    install_npm_for_test(Some("0.1.181"), "stable", None).await.unwrap();
+    install_npm_for_test(Some("0.1.181"), "stable", None)
+        .await
+        .unwrap();
     let log = g.args_log();
     assert!(
         log[0].contains("--userconfig="),
@@ -325,7 +332,9 @@ async fn install_npm_no_token_no_userconfig() {
     unsafe { std::env::remove_var("NPM_TOKEN") };
     let g = FakeBinGuard::install_npm();
 
-    install_npm_for_test(Some("0.1.181"), "stable", None).await.unwrap();
+    install_npm_for_test(Some("0.1.181"), "stable", None)
+        .await
+        .unwrap();
     let log = g.args_log();
     assert!(!log[0].contains("--userconfig"), "args: {}", log[0]);
 }
@@ -419,11 +428,7 @@ async fn fetch_gh_release_passes_repo_flag() {
     let _ = fetch_gh_release_version("stable").await.unwrap();
     let log = g.args_log();
     assert!(log[0].contains("--repo"), "args: {}", log[0]);
-    assert!(
-        log[0].contains("FerroxLabs/fuigo"),
-        "args: {}",
-        log[0]
-    );
+    assert!(log[0].contains("FerroxLabs/fuigo"), "args: {}", log[0]);
 }
 
 #[tokio::test]
@@ -443,7 +448,6 @@ async fn fetch_gh_release_uses_jq_to_extract_tag() {
 // P145: a down or hanging registry is bounded and reported, never answered from npm's cache.
 // ─────────────────────────────────────────────────────────────────────────────
 
-
 /// `npm view` runs against an empty private cache (so npm cannot answer a failed request with a stale packument, which
 /// made a down registry report "latest" as success) with short retries, and the cache dir is removed afterwards.
 #[tokio::test]
@@ -462,12 +466,21 @@ async fn p145_npm_view_uses_a_fresh_private_cache_and_short_retries() {
         .split_whitespace()
         .find_map(|a| a.strip_prefix("--cache="))
         .unwrap_or_else(|| panic!("no --cache= in {args}"));
-    assert!(cache.contains("fuigo-npm-view-"), "private cache dir: {cache}");
-    assert!(!std::path::Path::new(cache).exists(), "cache dir left behind: {cache}");
+    assert!(
+        cache.contains("fuigo-npm-view-"),
+        "private cache dir: {cache}"
+    );
+    assert!(
+        !std::path::Path::new(cache).exists(),
+        "cache dir left behind: {cache}"
+    );
 
     let _ = fetch_npm_tag_for_test("latest", None).await.unwrap();
     let second = &g.args_log()[1];
-    assert!(!second.contains(&format!("--cache={cache} ")), "each view gets its own cache: {second}");
+    assert!(
+        !second.contains(&format!("--cache={cache} ")),
+        "each view gets its own cache: {second}"
+    );
 }
 
 /// A registry that never answers: `npm view` is stopped at the bound with a clear error, not after npm's own minutes.
@@ -478,12 +491,23 @@ async fn p145_npm_view_is_bounded_when_the_registry_hangs() {
     g.set_sleep(30);
 
     let started = Instant::now();
-    let err = npm_view_version_for_test("fuigo", Some("http://127.0.0.1:4873/"), Duration::from_secs(1))
-        .await
-        .unwrap_err();
-    assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+    let err = npm_view_version_for_test(
+        "fuigo",
+        Some("http://127.0.0.1:4873/"),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
     let msg = format!("{err:#}");
-    assert!(msg.contains("no answer from the npm registry"), "msg: {msg}");
+    assert!(
+        msg.contains("no answer from the npm registry"),
+        "msg: {msg}"
+    );
     assert!(msg.contains("within 1 s"), "msg: {msg}");
 }
 
@@ -495,7 +519,10 @@ async fn p145_npm_view_of_a_missing_version_says_so() {
     let err = npm_view_version_for_test("fuigo@9.9.9", None, Duration::from_secs(10))
         .await
         .unwrap_err();
-    assert!(format!("{err:#}").contains("the registry has no fuigo@9.9.9"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("the registry has no fuigo@9.9.9"),
+        "{err:#}"
+    );
 }
 
 /// `update --force-reinstall` with the registry down: the preflight fails fast, says nothing changed, and `npm i -g`
@@ -534,11 +561,24 @@ async fn p145_install_preflight_is_bounded() {
     let g = FakeBinGuard::install_npm();
     g.set_sleep(30);
     let started = Instant::now();
-    let err = install_npm_checked_for_test(None, "stable", None, Duration::from_secs(1), Duration::from_secs(60))
-        .await
-        .unwrap_err();
-    assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
-    assert!(format!("{err:#}").contains("cannot install fuigo@latest"), "{err:#}");
+    let err = install_npm_checked_for_test(
+        None,
+        "stable",
+        None,
+        Duration::from_secs(1),
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        format!("{err:#}").contains("cannot install fuigo@latest"),
+        "{err:#}"
+    );
     assert_eq!(g.args_log().len(), 1);
 }
 
@@ -559,7 +599,11 @@ async fn p145_a_stalled_npm_install_is_stopped_at_the_bound() {
     )
     .await
     .unwrap_err();
-    assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
     let msg = format!("{err:#}");
     assert!(msg.contains("did not finish within 1 s"), "msg: {msg}");
     let log = g.args_log();
@@ -584,8 +628,14 @@ async fn p145_install_with_a_healthy_registry_runs_preflight_then_install() {
     .unwrap();
     let log = g.args_log();
     assert_eq!(log.len(), 2, "{log:?}");
-    assert!(log[0].starts_with("view fuigo@1.0.21 version --json --registry=https://npm.example.com"), "{log:?}");
-    assert!(log[1].starts_with("i -g fuigo@1.0.21 --registry=https://npm.example.com"), "{log:?}");
+    assert!(
+        log[0].starts_with("view fuigo@1.0.21 version --json --registry=https://npm.example.com"),
+        "{log:?}"
+    );
+    assert!(
+        log[1].starts_with("i -g fuigo@1.0.21 --registry=https://npm.example.com"),
+        "{log:?}"
+    );
 }
 
 /// Whether `pid` still names a live process. A killed process is dead once it is a zombie (`Z`), and still dead while
@@ -593,7 +643,15 @@ async fn p145_install_with_a_healthy_registry_runs_preflight_then_install() {
 /// counting X as alive let a second read flip a dead pid back to "alive" for a few microseconds.
 fn p145_alive(pid: i32) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => !matches!(stat.rsplit(')').next().unwrap_or("").trim_start().chars().next(), Some('Z' | 'X' | 'x')),
+        Ok(stat) => !matches!(
+            stat.rsplit(')')
+                .next()
+                .unwrap_or("")
+                .trim_start()
+                .chars()
+                .next(),
+            Some('Z' | 'X' | 'x')
+        ),
         Err(_) => unsafe { libc_kill0(pid) },
     }
 }
@@ -626,24 +684,46 @@ async fn p145_a_timeout_kills_the_whole_npm_process_tree() {
     let g = FakeBinGuard::install_npm();
     g.set_grandchild();
     g.set_sleep(30);
-    let _ = npm_view_version_for_test("fuigo", None, Duration::from_secs(1)).await.unwrap_err();
+    let _ = npm_view_version_for_test("fuigo", None, Duration::from_secs(1))
+        .await
+        .unwrap_err();
     let pid = g.grandchild_pid().expect("grandchild started");
-    assert!(p145_dies_within(pid, Duration::from_secs(5)).await, "npm's child {pid} survived the timeout");
+    assert!(
+        p145_dies_within(pid, Duration::from_secs(5)).await,
+        "npm's child {pid} survived the timeout"
+    );
 
     // Same for the install bound: the preflight answers, npm i -g starts a lifecycle child and stalls (r2 #6).
     let g2 = FakeBinGuard::install_npm();
     g2.set_stdout("\"1.0.21\"");
     g2.set_install_grandchild();
     g2.set_install_sleep(30);
-    let err = install_npm_checked_for_test(Some("1.0.21"), "stable", None, Duration::from_secs(5), Duration::from_secs(1))
-        .await
-        .unwrap_err();
-    assert!(format!("{err:#}").contains("did not finish within 1 s"), "{err:#}");
+    let err = install_npm_checked_for_test(
+        Some("1.0.21"),
+        "stable",
+        None,
+        Duration::from_secs(5),
+        Duration::from_secs(1),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("did not finish within 1 s"),
+        "{err:#}"
+    );
     let log = g2.args_log();
     assert_eq!(log.len(), 2, "{log:?}");
-    assert!(log[0].starts_with("view ") && log[1].starts_with("i -g "), "{log:?}");
-    let pid = g2.install_grandchild_pid().expect("install grandchild started");
-    assert!(p145_dies_within(pid, Duration::from_secs(5)).await, "npm install's child {pid} survived the timeout");
+    assert!(
+        log[0].starts_with("view ") && log[1].starts_with("i -g "),
+        "{log:?}"
+    );
+    let pid = g2
+        .install_grandchild_pid()
+        .expect("install grandchild started");
+    assert!(
+        p145_dies_within(pid, Duration::from_secs(5)).await,
+        "npm install's child {pid} survived the timeout"
+    );
 }
 
 /// Astra P145 r1 #3 / r2 #4: `npm view` (the check and the install preflight) runs in npm's global mode, like `npm i -g`,
@@ -656,11 +736,18 @@ async fn p145_npm_view_uses_the_install_configuration_context() {
     g.set_stdout("\"1.0.21\"");
     let _ = fetch_npm_tag_for_test("latest", None).await.unwrap();
     let args = &g.args_log()[0];
-    assert!(args.split_whitespace().any(|a| a == "--global"), "args: {args}");
+    assert!(
+        args.split_whitespace().any(|a| a == "--global"),
+        "args: {args}"
+    );
     let cwd = g.cwd_log();
     let here = std::env::current_dir().unwrap();
     assert_eq!(cwd.len(), 1, "{cwd:?}");
-    assert_eq!(std::path::Path::new(&cwd[0]), here.as_path(), "same cwd as the install");
+    assert_eq!(
+        std::path::Path::new(&cwd[0]),
+        here.as_path(),
+        "same cwd as the install"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -669,7 +756,9 @@ async fn p145_npm_view_uses_the_install_configuration_context() {
 
 fn canonical_target(name: &str) -> Option<String> {
     let link = common::test_home().join("bin").join(name);
-    std::fs::read_link(link).ok().map(|p| p.to_string_lossy().into_owned())
+    std::fs::read_link(link)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// After the update installs a new version, `~/.fuigo/bin/fuigo` points at it, from an older one.
@@ -684,17 +773,25 @@ async fn p29_after_npm_update_the_canonical_binary_points_at_the_new_version() {
     std::fs::write(bin.join("fuigo-1.0.28"), "#!/bin/sh\n").unwrap();
     std::os::unix::fs::symlink("fuigo-1.0.28", bin.join("fuigo")).unwrap();
 
-    install_npm_for_test(Some("1.0.29"), "stable", Some("https://npm.example.com")).await.unwrap();
+    install_npm_for_test(Some("1.0.29"), "stable", Some("https://npm.example.com"))
+        .await
+        .unwrap();
 
     assert_eq!(canonical_target("fuigo").as_deref(), Some("fuigo-1.0.29"));
     let node = g.node_log();
     assert_eq!(node.len(), 1, "the setup step ran exactly once: {node:?}");
     assert!(node[0].contains("fuigo/bin/fuigo-bootstrap.js"), "{node:?}");
     assert!(node[0].contains("INSTALL_ONLY=1"), "{node:?}");
-    assert!(node[0].contains("REGISTRY=https://npm.example.com"), "{node:?}");
+    assert!(
+        node[0].contains("REGISTRY=https://npm.example.com"),
+        "{node:?}"
+    );
     // never the user's project directory: the node side resolves the npm registry from its cwd
     let cwd = std::fs::read_to_string(g.dir().join("node-cwd.log")).unwrap();
-    assert_eq!(dunce::canonicalize(cwd.trim()).unwrap(), dunce::canonicalize(common::test_home()).unwrap());
+    assert_eq!(
+        dunce::canonicalize(cwd.trim()).unwrap(),
+        dunce::canonicalize(common::test_home()).unwrap()
+    );
 }
 
 /// P30-NPM: npm 11 masks UUID-looking path segments (`/home/u/<uuid>/g` prints as `/home/u/***/g`), so the root npm
@@ -706,19 +803,31 @@ async fn p30_a_masked_npm_root_still_completes_the_setup_step() {
     let g = FakeBinGuard::install_npm();
     common::reset_home();
     std::fs::write(g.dir().join("npm-root-masked"), "").unwrap();
-    install_npm_for_test(Some("1.0.30"), "stable", Some("https://npm.example.com")).await.unwrap();
+    install_npm_for_test(Some("1.0.30"), "stable", Some("https://npm.example.com"))
+        .await
+        .unwrap();
     assert_eq!(canonical_target("fuigo").as_deref(), Some("fuigo-1.0.30"));
     let explore = std::fs::read_to_string(g.dir().join("npm-explore.log")).unwrap();
-    assert!(explore.contains("explore -g fuigo -- node bin/fuigo-bootstrap.js"), "{explore}");
+    assert!(
+        explore.contains("explore -g fuigo -- node bin/fuigo-bootstrap.js"),
+        "{explore}"
+    );
     let node = g.node_log();
     assert_eq!(node.len(), 1, "{node:?}");
-    assert!(node[0].contains("INSTALL_ONLY=1") && node[0].contains("REGISTRY=https://npm.example.com"), "{node:?}");
+    assert!(
+        node[0].contains("INSTALL_ONLY=1") && node[0].contains("REGISTRY=https://npm.example.com"),
+        "{node:?}"
+    );
     assert!(!npm_setup_failed_recently_for_test("1.0.30"));
     // the report file is cleaned up
     let leftovers: Vec<_> = std::fs::read_dir(common::test_home())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().starts_with(".npm-setup-report"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".npm-setup-report")
+        })
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
     common::reset_home();
@@ -732,8 +841,13 @@ async fn p30_masked_root_explore_path_rejects_the_wrong_version() {
     common::reset_home();
     std::fs::write(g.dir().join("npm-root-masked"), "").unwrap();
     g.set_installed_package_version("1.0.31");
-    let err = install_npm_for_test(Some("1.0.30"), "stable", None).await.unwrap_err();
-    assert!(format!("{err:#}").contains("installed fuigo@1.0.31, not fuigo@1.0.30"), "{err:#}");
+    let err = install_npm_for_test(Some("1.0.30"), "stable", None)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("installed fuigo@1.0.31, not fuigo@1.0.30"),
+        "{err:#}"
+    );
     common::reset_home();
 }
 
@@ -745,7 +859,9 @@ async fn p30_masked_root_explore_path_failure_is_a_setup_failure() {
     common::reset_home();
     std::fs::write(g.dir().join("npm-root-masked"), "").unwrap();
     g.set_setup_exit_code(1);
-    let err = install_npm_for_test(Some("1.0.32"), "stable", None).await.unwrap_err();
+    let err = install_npm_for_test(Some("1.0.32"), "stable", None)
+        .await
+        .unwrap_err();
     assert!(format!("{err:#}").contains("setup step failed"), "{err:#}");
     assert!(npm_setup_failed_recently_for_test("1.0.32"));
     common::reset_home();
@@ -756,9 +872,18 @@ async fn p30_masked_root_explore_path_failure_is_a_setup_failure() {
 #[serial]
 async fn p29_a_credentialed_registry_is_not_passed_to_the_setup_step() {
     let g = FakeBinGuard::install_npm();
-    install_npm_for_test(Some("1.0.29"), "stable", Some("https://user:pw@npm.example.com")).await.unwrap();
+    install_npm_for_test(
+        Some("1.0.29"),
+        "stable",
+        Some("https://user:pw@npm.example.com"),
+    )
+    .await
+    .unwrap();
     let node = g.node_log();
-    assert!(!node[0].contains("pw@") && node[0].contains("REGISTRY="), "{node:?}");
+    assert!(
+        !node[0].contains("pw@") && node[0].contains("REGISTRY="),
+        "{node:?}"
+    );
     assert!(!node[0].contains("REGISTRY=https"), "{node:?}");
 }
 
@@ -770,7 +895,9 @@ async fn p29_a_failed_setup_step_fails_the_update_and_leaves_the_binary_alone() 
     let g = FakeBinGuard::install_npm();
     common::reset_home();
     g.set_setup_exit_code(1);
-    let err = install_npm_for_test(Some("1.0.30"), "stable", None).await.unwrap_err();
+    let err = install_npm_for_test(Some("1.0.30"), "stable", None)
+        .await
+        .unwrap_err();
     let msg = format!("{err:#}");
     assert!(msg.contains("setup step failed"), "{msg}");
     assert_eq!(canonical_target("fuigo"), None);
@@ -786,9 +913,17 @@ async fn p29_a_setup_step_that_did_not_move_the_link_is_a_failure() {
     common::reset_home();
     // npm "installs" 1.0.31 while 1.0.30 was asked for.
     g.set_installed_package_version("1.0.31");
-    let err = install_npm_for_test(Some("1.0.30"), "stable", None).await.unwrap_err();
-    assert!(format!("{err:#}").contains("installed fuigo@1.0.31, not fuigo@1.0.30"), "{err:#}");
-    assert!(g.node_log().is_empty(), "no setup step for the wrong package");
+    let err = install_npm_for_test(Some("1.0.30"), "stable", None)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("installed fuigo@1.0.31, not fuigo@1.0.30"),
+        "{err:#}"
+    );
+    assert!(
+        g.node_log().is_empty(),
+        "no setup step for the wrong package"
+    );
     common::reset_home();
 }
 
@@ -805,29 +940,62 @@ async fn p29_a_failed_setup_step_does_not_cause_a_reinstall_loop() {
     g.set_setup_exit_code(1);
     let cfg = common::make_update_config("stable");
 
-    let first = run_install_script("npm", Some("1.0.30"), &cfg, CliUpdateTrigger::LeaderConverge).await;
+    let first = run_install_script(
+        "npm",
+        Some("1.0.30"),
+        &cfg,
+        CliUpdateTrigger::LeaderConverge,
+    )
+    .await;
     assert!(first.is_err());
-    let installs = |g: &FakeBinGuard| g.args_log().iter().filter(|l| l.starts_with("i -g")).count();
+    let installs = |g: &FakeBinGuard| {
+        g.args_log()
+            .iter()
+            .filter(|l| l.starts_with("i -g"))
+            .count()
+    };
     assert_eq!(installs(&g), 1);
 
-    for trigger in [CliUpdateTrigger::LeaderConverge, CliUpdateTrigger::AutoBackground, CliUpdateTrigger::LeaderConverge] {
-        let again = run_install_script("npm", Some("1.0.30"), &cfg, trigger).await.unwrap_err();
-        assert!(format!("{again:#}").contains("setup step failed recently"), "{again:#}");
+    for trigger in [
+        CliUpdateTrigger::LeaderConverge,
+        CliUpdateTrigger::AutoBackground,
+        CliUpdateTrigger::LeaderConverge,
+    ] {
+        let again = run_install_script("npm", Some("1.0.30"), &cfg, trigger)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{again:#}").contains("setup step failed recently"),
+            "{again:#}"
+        );
     }
-    assert_eq!(installs(&g), 1, "automatic checks must not reinstall: {:?}", g.args_log());
+    assert_eq!(
+        installs(&g),
+        1,
+        "automatic checks must not reinstall: {:?}",
+        g.args_log()
+    );
     assert_eq!(g.node_log().len(), 1);
 
     // A different (newer) version is a new attempt; and an explicit user update retries the same version.
     let _ = run_install_script("npm", Some("1.0.30"), &cfg, CliUpdateTrigger::UserCommand).await;
     assert_eq!(installs(&g), 2);
     g.set_stdout("\"1.0.31\"");
-    let _ = run_install_script("npm", Some("1.0.31"), &cfg, CliUpdateTrigger::LeaderConverge).await;
+    let _ = run_install_script(
+        "npm",
+        Some("1.0.31"),
+        &cfg,
+        CliUpdateTrigger::LeaderConverge,
+    )
+    .await;
     assert_eq!(installs(&g), 3);
 
     // Once the setup step works, the marker is cleared and the link moves.
     g.set_stdout("\"1.0.30\"");
     std::fs::remove_file(g.dir().join("node-exit")).unwrap();
-    run_install_script("npm", Some("1.0.30"), &cfg, CliUpdateTrigger::UserCommand).await.unwrap();
+    run_install_script("npm", Some("1.0.30"), &cfg, CliUpdateTrigger::UserCommand)
+        .await
+        .unwrap();
     assert_eq!(canonical_target("fuigo").as_deref(), Some("fuigo-1.0.30"));
     assert!(!npm_setup_failed_recently_for_test("1.0.30"));
     common::reset_home();

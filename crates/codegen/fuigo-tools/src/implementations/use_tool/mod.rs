@@ -92,7 +92,9 @@ async fn dispatch_local_mcp(
     ctx: fuigo_tool_runtime::ToolCallContext,
 ) -> Result<ToolOutput, fuigo_tool_runtime::ToolError> {
     let tool_id = fuigo_tool_protocol::ToolId::new(tool_name).map_err(|_| {
-        fuigo_tool_runtime::ToolError::invalid_arguments(format!("invalid tool name: '{tool_name}'"))
+        fuigo_tool_runtime::ToolError::invalid_arguments(format!(
+            "invalid tool name: '{tool_name}'"
+        ))
     })?;
     let typed = dispatch.0.call_terminal(tool_id, tool_input, ctx).await?;
     serde_json::from_value(typed.value)
@@ -481,9 +483,9 @@ mod tests {
             _args: serde_json::Value,
             _ctx: fuigo_tool_runtime::ToolCallContext,
         ) -> fuigo_tool_runtime::ToolStream<fuigo_tool_runtime::TypedToolOutput> {
-            fuigo_tool_runtime::terminal_only(Err(fuigo_tool_runtime::ToolError::invalid_arguments(
-                "local validation failed",
-            )))
+            fuigo_tool_runtime::terminal_only(Err(
+                fuigo_tool_runtime::ToolError::invalid_arguments("local validation failed"),
+            ))
         }
     }
 
@@ -538,7 +540,10 @@ mod tests {
         .await;
 
         let err = result.unwrap_err();
-        assert_eq!(err.kind, fuigo_tool_runtime::ToolErrorKind::InvalidArguments);
+        assert_eq!(
+            err.kind,
+            fuigo_tool_runtime::ToolErrorKind::InvalidArguments
+        );
         assert!(err.detail.contains("not a valid MCP tool name"));
         assert!(err.detail.contains("read_file"));
     }
@@ -559,7 +564,10 @@ mod tests {
         .await;
 
         let err = result.unwrap_err();
-        assert_eq!(err.kind, fuigo_tool_runtime::ToolErrorKind::InvalidArguments);
+        assert_eq!(
+            err.kind,
+            fuigo_tool_runtime::ToolErrorKind::InvalidArguments
+        );
         assert!(err.detail.contains("inner_dispatch not set"));
     }
 
@@ -957,7 +965,10 @@ mod tests {
         .await;
 
         let err = result.unwrap_err();
-        assert_eq!(err.kind, fuigo_tool_runtime::ToolErrorKind::InvalidArguments);
+        assert_eq!(
+            err.kind,
+            fuigo_tool_runtime::ToolErrorKind::InvalidArguments
+        );
         assert!(err.detail.contains("local validation failed"));
         assert!(gateway_captured.lock().unwrap().is_none());
     }
@@ -1433,7 +1444,11 @@ mod tests {
         resources.insert(SessionFolder(tmp.path().to_path_buf()));
         // F5-C4: the dump goes through the session's writer; with none nothing is written by path.
         resources.insert(crate::types::resources::SessionFolderWriter(
-            fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), tmp.path()).unwrap(),
+            fuigo_session_writer::SessionWriter::try_claim(
+                uuid::Uuid::now_v7().to_string(),
+                tmp.path(),
+            )
+            .unwrap(),
         ));
         let mut cfg = TruncationConfig::default();
         cfg.per_tool_max_output_bytes
@@ -1617,7 +1632,10 @@ mod tests {
         .await;
 
         let err = result.unwrap_err();
-        assert_eq!(err.kind, fuigo_tool_runtime::ToolErrorKind::InvalidArguments);
+        assert_eq!(
+            err.kind,
+            fuigo_tool_runtime::ToolErrorKind::InvalidArguments
+        );
         assert!(err.detail.contains("native tool"), "got: {}", err.detail);
         assert!(err.detail.contains("scheduler_create"));
         assert!(err.detail.contains("directly"));

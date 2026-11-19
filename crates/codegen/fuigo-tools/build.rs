@@ -50,7 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// the ripgrep bundling
 /// (release-only or `FUIGO_TOOLS_BUNDLE_FD_PATH` override), plus pinned
 /// per-asset SHA-256 verification of the downloaded tarball.
-#[allow(clippy::disallowed_methods, reason = "build script: writes OUT_DIR and the bundled tool binaries at build time, never a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "build script: writes OUT_DIR and the bundled tool binaries at build time, never a session folder"
+)]
 fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=FUIGO_TOOLS_BUNDLE_FD_PATH");
     println!("cargo:rustc-check-cfg=cfg(bundle_fd)");
@@ -190,7 +193,10 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-#[allow(clippy::disallowed_methods, reason = "build script: writes OUT_DIR and the bundled tool binaries at build time, never a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "build script: writes OUT_DIR and the bundled tool binaries at build time, never a session folder"
+)]
 fn compress_and_pin(
     dest: &std::path::Path,
     name_uc: &str,
@@ -219,7 +225,10 @@ fn compress_and_pin(
 /// release assets, so the release pipeline supplies the path. Unset → not
 /// bundled (the runtime resolver falls back to `~/.fuigo/vendor` / `$PATH`);
 /// never a hard failure, so an un-wired build still succeeds.
-#[allow(clippy::disallowed_methods, reason = "build script: writes OUT_DIR and the bundled tool binaries at build time, never a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "build script: writes OUT_DIR and the bundled tool binaries at build time, never a session folder"
+)]
 fn bundle_search_tool(
     name: &str,
     name_uc: &str,
@@ -255,7 +264,10 @@ fn bundle_search_tool(
 
 /// Download + embed ripgrep. Unchanged behavior; split out of `main` so the new
 /// search-tool bundling runs regardless of ripgrep's early returns.
-#[allow(clippy::disallowed_methods, reason = "build script: writes OUT_DIR and the bundled tool binaries at build time, never a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "build script: writes OUT_DIR and the bundled tool binaries at build time, never a session folder"
+)]
 fn bundle_rg() -> Result<(), Box<dyn std::error::Error>> {
     // Only bundle in release builds to avoid slowing down cargo check.
     println!("cargo:rerun-if-env-changed=FUIGO_TOOLS_BUNDLE_RG_PATH");

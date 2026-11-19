@@ -375,7 +375,9 @@ mod tests {
     fn session_span_exposes_router_field() {
         // A bare registry enables every callsite, so the span has live metadata.
         let subscriber = tracing_subscriber::registry();
+        let _second = crate::hold_second_dispatcher();
         tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             let span = session_span("test-id");
             let meta = span
                 .metadata()

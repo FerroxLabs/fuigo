@@ -11,7 +11,9 @@ mod acp_harness;
 #[allow(dead_code)]
 mod p148_support;
 
-use acp_harness::{RPC_TIMEOUT, connect_client, new_session, run_agent_test, spawn_agent_local_with_config};
+use acp_harness::{
+    RPC_TIMEOUT, connect_client, new_session, run_agent_test, spawn_agent_local_with_config,
+};
 use agent_client_protocol::{self as acp, Agent as _};
 use fuigo_test_support::sse::{
     chat_completion_script_exact, chat_completions_reasoning_then_tool_call_events,
@@ -29,7 +31,9 @@ impl acp::Client for Recorder {
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        Ok(acp::RequestPermissionResponse::new(acp_harness::allow_once(&args)))
+        Ok(acp::RequestPermissionResponse::new(
+            acp_harness::allow_once(&args),
+        ))
     }
     async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
         Ok(())
@@ -44,13 +48,17 @@ impl acp::Client for Recorder {
 
 const AGENT: &str = "---\nname: p148inl\ndescription: p148 inline mcp probe\nmcpServers:\n  - p148_inl_h:\n      type: http\n      url: http://127.0.0.1:9/mcp\n      headers:\n        - name: X-Ref\n          value: \"${FUIGO_API_KEY}\"\n---\nYou are a test agent. Reply done.\n";
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn an_agent_inline_mcp_server_naming_the_key_is_announced_to_the_session() {
     run_agent_test(|cwd, mock| async move {
         let fuigo_home = std::path::PathBuf::from(std::env::var("FUIGO_HOME").expect("FUIGO_HOME"));
         std::fs::create_dir_all(fuigo_home.join("agents")).expect("agents dir");
-        std::fs::write(fuigo_home.join("agents").join("p148inl.md"), AGENT).expect("agent definition");
+        std::fs::write(fuigo_home.join("agents").join("p148inl.md"), AGENT)
+            .expect("agent definition");
 
         let mut config = fuigo_shell::agent::config::Config::default();
         config.session.title_policy = Some(fuigo_shell::agent::config::TitlePolicy::Local);
@@ -88,7 +96,9 @@ fn an_agent_inline_mcp_server_naming_the_key_is_announced_to_the_session() {
             RPC_TIMEOUT,
             conn.prompt(acp::PromptRequest::new(
                 session.clone(),
-                vec![acp::ContentBlock::Text(acp::TextContent::new("Spawn the probe."))],
+                vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    "Spawn the probe.",
+                ))],
             )),
         )
         .await
@@ -108,9 +118,17 @@ fn an_agent_inline_mcp_server_naming_the_key_is_announced_to_the_session() {
             .filter(|(_, m)| m.contains("p148_inl_h"))
             .cloned()
             .collect();
-        assert_eq!(notes.len(), 1, "one note for the refused inline reference: {notes:#?}");
+        assert_eq!(
+            notes.len(),
+            1,
+            "one note for the refused inline reference: {notes:#?}"
+        );
         let (sid, message) = &notes[0];
-        assert_eq!(sid, session.0.as_ref(), "the note reaches the session that started the subagent");
+        assert_eq!(
+            sid,
+            session.0.as_ref(),
+            "the note reaches the session that started the subagent"
+        );
         assert!(
             message.contains("p148inl") && message.contains("FUIGO_API_KEY"),
             "the note names the agent and the key: {message}"

@@ -229,7 +229,15 @@ mod tests {
     /// The re-export is the shared set, widened beyond the bidi and zero-width characters
     #[test]
     fn is_unsafe_display_char_is_the_widened_shared_set() {
-        for c in ['\u{00AD}', '\u{2028}', '\u{180E}', '\u{FFF9}', '\u{13430}', '\u{1BCA0}', '\u{E0041}'] {
+        for c in [
+            '\u{00AD}',
+            '\u{2028}',
+            '\u{180E}',
+            '\u{FFF9}',
+            '\u{13430}',
+            '\u{1BCA0}',
+            '\u{E0041}',
+        ] {
             assert!(is_unsafe_display_char(c), "U+{:04X}", c as u32);
         }
     }

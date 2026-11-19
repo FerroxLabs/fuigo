@@ -179,11 +179,22 @@ mod tests {
     #[test]
     fn auth_path_write_in_the_shared_process_is_refused() {
         let before = std::env::var_os("FUIGO_AUTH_PATH");
-        let refused = std::panic::catch_unwind(|| EnvGuard::set("FUIGO_AUTH_PATH", "/nonexistent/auth.json"));
-        assert!(refused.is_err(), "EnvGuard::set(FUIGO_AUTH_PATH) must panic outside a process of its own");
+        let refused =
+            std::panic::catch_unwind(|| EnvGuard::set("FUIGO_AUTH_PATH", "/nonexistent/auth.json"));
+        assert!(
+            refused.is_err(),
+            "EnvGuard::set(FUIGO_AUTH_PATH) must panic outside a process of its own"
+        );
         let refused = std::panic::catch_unwind(|| EnvGuard::unset("FUIGO_AUTH_PATH"));
-        assert!(refused.is_err(), "EnvGuard::unset(FUIGO_AUTH_PATH) must panic outside a process of its own");
-        assert_eq!(std::env::var_os("FUIGO_AUTH_PATH"), before, "a refused guard must not touch the environment");
+        assert!(
+            refused.is_err(),
+            "EnvGuard::unset(FUIGO_AUTH_PATH) must panic outside a process of its own"
+        );
+        assert_eq!(
+            std::env::var_os("FUIGO_AUTH_PATH"),
+            before,
+            "a refused guard must not touch the environment"
+        );
     }
     #[test]
     #[serial]
@@ -204,10 +215,16 @@ mod tests {
         let (_dir, _g) = isolate_auth_sources();
         let home = tempfile::tempdir().unwrap();
         crate::auth::store_api_key(home.path(), "saved-key").unwrap();
-        assert_eq!(AuthStatus::resolve_in(&Config::default(), home.path()), AuthStatus::SavedKey);
+        assert_eq!(
+            AuthStatus::resolve_in(&Config::default(), home.path()),
+            AuthStatus::SavedKey
+        );
         // An env key outranks it, as at runtime.
         let _key = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "fuigo-test-key");
-        assert_eq!(AuthStatus::resolve_in(&Config::default(), home.path()), AuthStatus::ApiKey);
+        assert_eq!(
+            AuthStatus::resolve_in(&Config::default(), home.path()),
+            AuthStatus::ApiKey
+        );
     }
 
     #[test]
@@ -218,7 +235,10 @@ mod tests {
         }
         let (_dir, _g) = isolate_auth_sources();
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(AuthStatus::resolve_in(&Config::default(), home.path()), AuthStatus::NotAuthenticated);
+        assert_eq!(
+            AuthStatus::resolve_in(&Config::default(), home.path()),
+            AuthStatus::NotAuthenticated
+        );
     }
 
     #[test]

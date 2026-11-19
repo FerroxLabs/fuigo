@@ -619,7 +619,10 @@ struct PrivateTempDir {
 }
 
 impl PrivateTempDir {
-    #[allow(clippy::disallowed_methods, reason = "heap profile dir; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "heap profile dir; not inside a session folder"
+    )]
     fn create() -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!(
             "fuigo-jemalloc-{}-{}",
@@ -641,13 +644,19 @@ impl PrivateTempDir {
 }
 
 impl Drop for PrivateTempDir {
-    #[allow(clippy::disallowed_methods, reason = "heap profile dir; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "heap profile dir; not inside a session folder"
+    )]
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "heap profile dir; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "heap profile dir; not inside a session folder"
+)]
 fn write_exclusive_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -675,7 +684,10 @@ pub fn build_upload_handles(
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1169,13 +1181,33 @@ mod tests {
         let upload = |h: HeapProfileUploadHandles| {
             let (heap, meta) = (heap.clone(), meta.clone());
             async move {
-                upload_pair(None, Some(&h), "s/heap/p.heap", &heap, "application/octet-stream", "s/heap/p.meta.json", &meta, "application/json", 40).await
+                upload_pair(
+                    None,
+                    Some(&h),
+                    "s/heap/p.heap",
+                    &heap,
+                    "application/octet-stream",
+                    "s/heap/p.meta.json",
+                    &meta,
+                    "application/json",
+                    40,
+                )
+                .await
             }
         };
         let third_party = RecordingEndpoint::third_party().await;
-        assert!(!upload(handles(&third_party.proxy_base_url())).await, "a withheld upload is not an ok upload");
-        third_party.settle(std::time::Duration::from_millis(400)).await;
-        assert_eq!(third_party.connections(), 0, "the heap profile reached a third-party proxy");
+        assert!(
+            !upload(handles(&third_party.proxy_base_url())).await,
+            "a withheld upload is not an ok upload"
+        );
+        third_party
+            .settle(std::time::Duration::from_millis(400))
+            .await;
+        assert_eq!(
+            third_party.connections(),
+            0,
+            "the heap profile reached a third-party proxy"
+        );
         let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
         let _ = upload(handles(&fluxrouter_class.proxy_base_url())).await;
         assert!(fluxrouter_class.received_contains(b"P71-HEAP-BYTES heap 0xdeadbeef /home/rowan"));

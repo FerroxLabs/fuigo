@@ -243,7 +243,9 @@ impl GitGate {
             queue_limit,
             state: Mutex::new(GateState::default()),
         };
-        Self { inner: Arc::new(inner) }
+        Self {
+            inner: Arc::new(inner),
+        }
     }
 
     pub async fn acquire_odb(&self) -> Result<OdbPermit> {
@@ -327,8 +329,19 @@ impl GitGate {
                     tracing::debug!(root = %key.root.display(), "git_gate join inflight");
                     (rx, epoch, started)
                 }
-                Decision::Lead { tx, rx, epoch, started } => {
-                    self.spawn_walk(key.clone(), Arc::clone(&walk), tx, epoch, Arc::clone(&started));
+                Decision::Lead {
+                    tx,
+                    rx,
+                    epoch,
+                    started,
+                } => {
+                    self.spawn_walk(
+                        key.clone(),
+                        Arc::clone(&walk),
+                        tx,
+                        epoch,
+                        Arc::clone(&started),
+                    );
                     (rx, epoch, started)
                 }
             };
@@ -382,7 +395,12 @@ impl GitGate {
             epoch,
             started: Arc::clone(&started),
         });
-        Decision::Lead { tx, rx, epoch, started }
+        Decision::Lead {
+            tx,
+            rx,
+            epoch,
+            started,
+        }
     }
 
     fn current_epoch(&self, root: &Path) -> u64 {

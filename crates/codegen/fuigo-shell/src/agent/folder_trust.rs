@@ -17,8 +17,8 @@ use agent_client_protocol as acp;
 use fuigo_workspace::trust::{TrustStore, workspace_key};
 
 use fuigo_workspace::folder_trust::{
-    PromptReason, TrustDecision, claude_project_mcp_names, decide, dir_trust, folder_trust_inert, persist_trust,
-    prompt_for_trust,
+    PromptReason, TrustDecision, claude_project_mcp_names, decide, dir_trust, folder_trust_inert,
+    persist_trust, prompt_for_trust,
 };
 
 use crate::session::managed_mcp::mcp_server_name;
@@ -52,7 +52,8 @@ pub(crate) struct TrustRequestInFlight(std::path::PathBuf);
 
 impl TrustRequestInFlight {
     pub(crate) fn new(key: std::path::PathBuf) -> Self {
-        TRUST_REQUESTS_IN_FLIGHT.send_modify(|requests| *requests.entry(key.clone()).or_default() += 1);
+        TRUST_REQUESTS_IN_FLIGHT
+            .send_modify(|requests| *requests.entry(key.clone()).or_default() += 1);
         Self(key)
     }
 }
@@ -75,7 +76,10 @@ pub(crate) async fn wait_for_trust_reply(cwd: &Path, limit: std::time::Duration)
     let key = workspace_key(cwd);
     let mut requests = TRUST_REQUESTS_IN_FLIGHT.subscribe();
     let settled = tokio::time::timeout(limit, async {
-        requests.wait_for(|requests| !requests.contains_key(&key)).await.map(|_| ())
+        requests
+            .wait_for(|requests| !requests.contains_key(&key))
+            .await
+            .map(|_| ())
     });
     let _ = settled.await;
 }
@@ -141,8 +145,9 @@ pub(crate) fn agent_hooks_allowed(trusted: impl FnOnce() -> bool) -> bool {
 }
 
 #[cfg(test)]
-static TEST_OVERRIDES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<std::path::PathBuf, bool>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+static TEST_OVERRIDES: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<std::path::PathBuf, bool>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
 #[cfg(test)]
 thread_local! {
@@ -264,7 +269,10 @@ pub(crate) fn project_scoped_mcp_names(cwd: &Path) -> HashSet<String> {
     // `load_cursor_mcp_servers` would also merge the user-scoped `~/.cursor/mcp.json`, so read the project file directly instead
     // Held to the repository like the session loader, so the names here are exactly the servers a session could load.
     if let Some(root) = crate::util::config::project_mcp_root(cwd) {
-        for server in crate::util::config::load_mcp_json_file(&cwd.join(".cursor").join("mcp.json"), Some(&root)) {
+        for server in crate::util::config::load_mcp_json_file(
+            &cwd.join(".cursor").join("mcp.json"),
+            Some(&root),
+        ) {
             names.insert(mcp_server_name(&server).to_string());
         }
     }
@@ -344,7 +352,10 @@ pub(crate) fn filter_untrusted_project_lsp(
     fuigo_tools::implementations::lsp::config::filter_project_lsp_when_untrusted(sourced, allowed)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,7 +401,10 @@ mod tests {
         let tmp = repo_tmp();
         assert!(!project_scope_allowed(tmp.path()), "undecided: untrusted");
         assert!(grant_folder_trust(tmp.path()).dismisses_gate());
-        assert!(project_scope_allowed(tmp.path()), "explicit grant must be visible to consume-side resolution");
+        assert!(
+            project_scope_allowed(tmp.path()),
+            "explicit grant must be visible to consume-side resolution"
+        );
     }
 
     /// `/untrust` of a trusted folder takes effect at once and reports that it was trusted.
@@ -407,7 +421,10 @@ mod tests {
         let tmp = repo_tmp();
         assert!(grant_folder_trust(tmp.path()).dismisses_gate());
         assert!(project_scope_allowed(tmp.path()));
-        assert!(revoke_folder_trust(tmp.path()).was_trusted(), "a trusted folder reports was_trusted=true");
+        assert!(
+            revoke_folder_trust(tmp.path()).was_trusted(),
+            "a trusted folder reports was_trusted=true"
+        );
         assert!(!project_scope_allowed(tmp.path()), "untrust is immediate");
     }
 
@@ -425,7 +442,10 @@ mod tests {
         let tmp = repo_tmp();
         assert!(!revoke_folder_trust(tmp.path()).was_trusted());
         assert!(!project_scope_allowed(tmp.path()));
-        assert!(!prompt_warranted(tmp.path(), None), "a declined folder is not asked again");
+        assert!(
+            !prompt_warranted(tmp.path(), None),
+            "a declined folder is not asked again"
+        );
         assert!(TrustStore::load().has_decision(&workspace_key(tmp.path())));
     }
 
@@ -447,7 +467,10 @@ mod tests {
             revoke_folder_trust(home.path()),
             fuigo_workspace::folder_trust::RevokeOutcome::NotApplicable
         ));
-        assert!(!project_scope_allowed(home.path()), "$HOME is never trusted");
+        assert!(
+            !project_scope_allowed(home.path()),
+            "$HOME is never trusted"
+        );
         assert!(!prompt_warranted(home.path(), None), "and never asked");
     }
 
@@ -1103,7 +1126,10 @@ mod tests {
         let untrusted = repo_tmp();
         record_for_test(untrusted.path(), false);
         let kept = filter_untrusted_project_lsp(untrusted.path(), sourced());
-        assert!(kept.is_empty(), "audit X2-F3: user-scoped servers are not started either");
+        assert!(
+            kept.is_empty(),
+            "audit X2-F3: user-scoped servers are not started either"
+        );
 
         // Trusted workspace (a different temp-dir key): both are retained.
         let trusted = repo_tmp();
@@ -1360,12 +1386,6 @@ mod tests {
         assert_eq!(kept.len(), 4);
     }
 
-
-
-
-
-
-
     #[test]
     #[serial_test::serial]
     fn resolve_launch_dir_trust_matches_resolve_and_record() {
@@ -1382,7 +1402,11 @@ mod tests {
         let trusted = repo_tmp();
         std::fs::create_dir_all(trusted.path().join(".fuigo").join("hooks")).unwrap();
         assert!(grant_folder_trust(trusted.path()).dismisses_gate());
-        for (dir, want) in [(empty.path(), false), (untrusted.path(), false), (trusted.path(), true)] {
+        for (dir, want) in [
+            (empty.path(), false),
+            (untrusted.path(), false),
+            (trusted.path(), true),
+        ] {
             let lt = resolve_launch_dir_trust(dir, None);
             assert_eq!(lt, resolve_and_record(dir, None, false));
             assert_eq!(lt, want, "{}", dir.display());
@@ -1449,10 +1473,12 @@ mod tests {
         let plain = tempfile::tempdir().unwrap();
         for dir in [with_configs.path(), without.path(), plain.path()] {
             assert!(prompt_warranted(dir, None), "{}", dir.display());
-            assert_eq!(prompt_reason(dir), Some(fuigo_workspace::folder_trust::PromptReason::New));
+            assert_eq!(
+                prompt_reason(dir),
+                Some(fuigo_workspace::folder_trust::PromptReason::New)
+            );
         }
     }
-
 
     #[test]
     #[serial_test::serial]
@@ -1467,12 +1493,17 @@ mod tests {
         let tmp = repo_tmp();
         let key = workspace_key(tmp.path());
         TrustStore::load().set_trusted_legacy(&key).unwrap();
-        assert_eq!(prompt_reason(tmp.path()), Some(fuigo_workspace::folder_trust::PromptReason::Upgrade));
-        assert!(!project_scope_allowed(tmp.path()), "a pre-1.0.35 record loads nothing until asked");
+        assert_eq!(
+            prompt_reason(tmp.path()),
+            Some(fuigo_workspace::folder_trust::PromptReason::Upgrade)
+        );
+        assert!(
+            !project_scope_allowed(tmp.path()),
+            "a pre-1.0.35 record loads nothing until asked"
+        );
         assert!(grant_folder_trust(tmp.path()).dismisses_gate());
         assert!(!prompt_warranted(tmp.path(), None));
     }
-
 
     #[test]
     fn detected_config_kinds_summarizes_present_markers() {
@@ -1504,29 +1535,48 @@ mod tests {
     #[test]
     fn p180_stderr_prompt_fails_closed_when_nothing_was_saved() {
         use fuigo_workspace::folder_trust::{GrantOutcome, GrantRefuse, PersistStatus};
-        let no_decline = || -> Result<(), std::io::Error> { panic!("an accepted prompt declines nothing") };
-        for reason in [GrantRefuse::Unreadable, GrantRefuse::NoHome, GrantRefuse::KeyMoved, GrantRefuse::UnsafeRoot] {
-            assert!(!stderr_prompt_decision(true, || GrantOutcome::Refused { reason }, no_decline));
+        let no_decline =
+            || -> Result<(), std::io::Error> { panic!("an accepted prompt declines nothing") };
+        for reason in [
+            GrantRefuse::Unreadable,
+            GrantRefuse::NoHome,
+            GrantRefuse::KeyMoved,
+            GrantRefuse::UnsafeRoot,
+        ] {
+            assert!(!stderr_prompt_decision(
+                true,
+                || GrantOutcome::Refused { reason },
+                no_decline
+            ));
         }
         let key = std::path::PathBuf::from("/p180/key");
         assert!(stderr_prompt_decision(
             true,
-            || GrantOutcome::Granted { key: key.clone(), persist: PersistStatus::Durable },
+            || GrantOutcome::Granted {
+                key: key.clone(),
+                persist: PersistStatus::Durable
+            },
             no_decline
         ));
         assert!(!stderr_prompt_decision(
             true,
             || GrantOutcome::Granted {
                 key: key.clone(),
-                persist: PersistStatus::NotSaved { error: std::io::Error::other("denied") },
+                persist: PersistStatus::NotSaved {
+                    error: std::io::Error::other("denied")
+                },
             },
             no_decline
         ));
         let mut declined = false;
-        assert!(!stderr_prompt_decision(false, || panic!("a declined prompt grants nothing"), || {
-            declined = true;
-            Ok(())
-        }));
+        assert!(!stderr_prompt_decision(
+            false,
+            || panic!("a declined prompt grants nothing"),
+            || {
+                declined = true;
+                Ok(())
+            }
+        ));
         assert!(declined);
     }
 }

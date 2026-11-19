@@ -34,7 +34,9 @@ impl acp::Client for TrustingClient {
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        Ok(acp::RequestPermissionResponse::new(acp_harness::allow_once(&args)))
+        Ok(acp::RequestPermissionResponse::new(
+            acp_harness::allow_once(&args),
+        ))
     }
     async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
         Ok(())
@@ -42,7 +44,10 @@ impl acp::Client for TrustingClient {
     async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
         if args.method.as_ref() == "fuigo/folder_trust/request" {
             *self.trust_requests.borrow_mut() += 1;
-            let raw = serde_json::value::to_raw_value(&json!({ "outcome": "trust", "scope": "configAndCommands" })).expect("raw");
+            let raw = serde_json::value::to_raw_value(
+                &json!({ "outcome": "trust", "scope": "configAndCommands" }),
+            )
+            .expect("raw");
             return Ok(acp::ExtResponse::new(std::sync::Arc::from(raw)));
         }
         Err(acp::Error::method_not_found())
@@ -55,7 +60,10 @@ impl acp::Client for TrustingClient {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_trust_grant_tells_the_session_about_a_refused_key_reference_once() {
     run_agent_test(|cwd, _mock| async move {
@@ -88,7 +96,11 @@ fn a_trust_grant_tells_the_session_about_a_refused_key_reference_once() {
         // The grant's reload runs on a detached task after the client's answer; let it and the session settle.
         tokio::time::sleep(Duration::from_secs(8)).await;
 
-        assert_eq!(*client.trust_requests.borrow(), 1, "premise: the client is asked once and grants");
+        assert_eq!(
+            *client.trust_requests.borrow(),
+            1,
+            "premise: the client is asked once and grants"
+        );
         let notes = client.notices.matching("p148projsrv");
         assert_eq!(
             notes.len(),

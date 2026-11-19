@@ -956,7 +956,14 @@ impl std::fmt::Debug for AgentSessionConfig {
             )
             .field("max_depth", &self.max_depth)
             .field("cwd_override", &self.cwd_override)
-            .field("extra_env", &self.extra_env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_env",
+                &self
+                    .extra_env
+                    .keys()
+                    .map(|k| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("parent_session_id", &self.parent_session_id)
             .finish()
     }
@@ -1257,10 +1264,18 @@ mod p70a_redacted_debug {
     #[test]
     fn agent_session_config_debug_prints_extra_env_names_only() {
         let mut config = super::AgentSessionConfig::new("p70a-child");
-        config.extra_env.insert("P70A_API_KEY".to_owned(), "p70ae-FAKE-0a1b2c3d".to_owned());
+        config
+            .extra_env
+            .insert("P70A_API_KEY".to_owned(), "p70ae-FAKE-0a1b2c3d".to_owned());
         for out in [format!("{config:?}"), format!("{config:#?}")] {
-            assert!(out.contains("P70A_API_KEY") && out.contains("<redacted>"), "control: {out}");
-            assert!(!out.contains("p70ae-FAKE"), "Debug holds an env value: {out}");
+            assert!(
+                out.contains("P70A_API_KEY") && out.contains("<redacted>"),
+                "control: {out}"
+            );
+            assert!(
+                !out.contains("p70ae-FAKE"),
+                "Debug holds an env value: {out}"
+            );
         }
     }
 }

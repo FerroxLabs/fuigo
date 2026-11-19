@@ -26,12 +26,20 @@ pub const fn frame_within_limit(len: usize) -> bool {
 
 /// S5.1: the refusal for an over-size frame or body.
 pub fn check_frame(len: usize) -> Result<(), RejectReason> {
-    if frame_within_limit(len) { Ok(()) } else { Err(RejectReason::TooLarge) }
+    if frame_within_limit(len) {
+        Ok(())
+    } else {
+        Err(RejectReason::TooLarge)
+    }
 }
 
 /// S5.1: the refusal for an over-size body.
 pub fn check_body(len: usize) -> Result<(), RejectReason> {
-    if len <= MAX_BODY_BYTES { Ok(()) } else { Err(RejectReason::TooLarge) }
+    if len <= MAX_BODY_BYTES {
+        Ok(())
+    } else {
+        Err(RejectReason::TooLarge)
+    }
 }
 
 /// What kind of turn a send is made from (S5.6).
@@ -102,7 +110,11 @@ pub struct HostSaturated;
 
 impl HostLedger {
     pub fn with_caps(max_messages: usize, max_bytes: usize) -> Self {
-        Self { max_messages, max_bytes, used: Mutex::new((0, 0)) }
+        Self {
+            max_messages,
+            max_bytes,
+            used: Mutex::new((0, 0)),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, (usize, usize)> {
@@ -117,7 +129,10 @@ impl HostLedger {
         }
         u.0 += 1;
         u.1 += bytes;
-        Ok(Ticket { ledger: Arc::clone(self), bytes })
+        Ok(Ticket {
+            ledger: Arc::clone(self),
+            bytes,
+        })
     }
 
     /// Account for a message that is already stored and cannot be refused (a re-hold or a stranded row coming back).
@@ -125,7 +140,10 @@ impl HostLedger {
         let mut u = self.lock();
         u.0 += 1;
         u.1 += bytes;
-        Ticket { ledger: Arc::clone(self), bytes }
+        Ticket {
+            ledger: Arc::clone(self),
+            bytes,
+        }
     }
 
     /// `(messages, bytes)` currently reserved.
@@ -149,7 +167,9 @@ impl Clone for Ticket {
 
 impl fmt::Debug for Ticket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Ticket").field("bytes", &self.bytes).finish()
+        f.debug_struct("Ticket")
+            .field("bytes", &self.bytes)
+            .finish()
     }
 }
 
@@ -229,7 +249,10 @@ impl Default for PeerIngress {
 }
 
 fn prune(q: &mut VecDeque<u64>, now: u64) {
-    while q.front().is_some_and(|&t| t.saturating_add(RATE_WINDOW_SECS) <= now) {
+    while q
+        .front()
+        .is_some_and(|&t| t.saturating_add(RATE_WINDOW_SECS) <= now)
+    {
         q.pop_front();
     }
 }
@@ -260,7 +283,13 @@ impl PeerIngress {
     }
 
     /// S5.1, S5.4, S5.3 in that order. `body_hash` is any stable digest of the body (the caller already has one).
-    pub fn admit(&mut self, now: u64, receiver: u64, env: &Envelope, body_hash: &str) -> IngressVerdict {
+    pub fn admit(
+        &mut self,
+        now: u64,
+        receiver: u64,
+        env: &Envelope,
+        body_hash: &str,
+    ) -> IngressVerdict {
         if let Err(reason) = check_body(env.body.len()) {
             return IngressVerdict::Refuse(DeliveryOutcome::Rejected { reason });
         }
@@ -271,13 +300,17 @@ impl PeerIngress {
             return if r.body_hash == body_hash {
                 IngressVerdict::Replay(r.outcome.clone())
             } else {
-                IngressVerdict::Refuse(DeliveryOutcome::Rejected { reason: RejectReason::Ambiguous })
+                IngressVerdict::Refuse(DeliveryOutcome::Rejected {
+                    reason: RejectReason::Ambiguous,
+                })
             };
         }
         if self.rate_ok(now, receiver, &rkey.1) {
             IngressVerdict::Proceed
         } else {
-            IngressVerdict::Refuse(DeliveryOutcome::Rejected { reason: RejectReason::RateLimited })
+            IngressVerdict::Refuse(DeliveryOutcome::Rejected {
+                reason: RejectReason::RateLimited,
+            })
         }
     }
 
@@ -327,10 +360,22 @@ impl PeerIngress {
 
     /// Remember the outcome of an envelope that passed [`Self::admit`]. Transient refusals (`rate_limited`, `saturated`) and
     /// size refusals are not remembered: a later send with the same id is judged afresh.
-    pub fn record(&mut self, now: u64, receiver: u64, from: &str, message_id: &str, body_hash: &str, outcome: &DeliveryOutcome) {
+    pub fn record(
+        &mut self,
+        now: u64,
+        receiver: u64,
+        from: &str,
+        message_id: &str,
+        body_hash: &str,
+        outcome: &DeliveryOutcome,
+    ) {
         if matches!(
             outcome,
-            DeliveryOutcome::Rejected { reason: RejectReason::RateLimited | RejectReason::Saturated | RejectReason::TooLarge }
+            DeliveryOutcome::Rejected {
+                reason: RejectReason::RateLimited
+                    | RejectReason::Saturated
+                    | RejectReason::TooLarge
+            }
         ) {
             return;
         }
@@ -339,13 +384,22 @@ impl PeerIngress {
             return;
         }
         while self.replay.len() >= self.cfg.remembered_ids {
-            let Some((k, exp)) = self.replay_order.pop_front() else { break };
+            let Some((k, exp)) = self.replay_order.pop_front() else {
+                break;
+            };
             if self.replay.get(&k).is_some_and(|r| r.expires == exp) {
                 self.replay.remove(&k);
             }
         }
         let expires = now.saturating_add(self.cfg.id_memory_secs);
-        self.replay.insert(key.clone(), Remembered { body_hash: body_hash.to_owned(), outcome: outcome.clone(), expires });
+        self.replay.insert(
+            key.clone(),
+            Remembered {
+                body_hash: body_hash.to_owned(),
+                outcome: outcome.clone(),
+                expires,
+            },
+        );
         self.replay_order.push_back((key, expires));
         self.compact();
     }
@@ -353,13 +407,15 @@ impl PeerIngress {
     fn compact(&mut self) {
         if self.replay_order.len() > self.cfg.remembered_ids.saturating_mul(4).max(16) {
             let replay = &self.replay;
-            self.replay_order.retain(|(k, e)| replay.get(k).is_some_and(|r| r.expires == *e));
+            self.replay_order
+                .retain(|(k, e)| replay.get(k).is_some_and(|r| r.expires == *e));
         }
     }
 
     /// Forget one remembered id (the delivery it described failed after all).
     pub fn forget(&mut self, receiver: u64, env_from: &str, message_id: &str) {
-        self.replay.remove(&(receiver, env_from.to_owned(), message_id.to_owned()));
+        self.replay
+            .remove(&(receiver, env_from.to_owned(), message_id.to_owned()));
     }
 
     /// A session ended: drop its rate pairs and remembered ids. The host window stays (it is the backstop).
@@ -367,6 +423,7 @@ impl PeerIngress {
         self.pairs.retain(|(r, _), _| *r != receiver);
         self.replay.retain(|(r, _, _), _| *r != receiver);
         let replay = &self.replay;
-        self.replay_order.retain(|(k, e)| replay.get(k).is_some_and(|r| r.expires == *e));
+        self.replay_order
+            .retain(|(k, e)| replay.get(k).is_some_and(|r| r.expires == *e));
     }
 }

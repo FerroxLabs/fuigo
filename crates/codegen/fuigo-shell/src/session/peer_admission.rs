@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use fuigo_config_types::PeerInboundPolicy;
 use fuigo_peer::limits::{HOLD_EXPIRY_SECS, MAX_BODY_BYTES_PER_SESSION, MAX_MESSAGES_PER_SESSION};
 use fuigo_peer::{
-    DeliveryOutcome, Envelope, HoldReason, HostLedger, IngressConfig, IngressVerdict, OperatorKind, PeerIngress, PeerMode,
-    PeerTurnBudget, RejectReason, Ticket, hop_exhausted,
+    DeliveryOutcome, Envelope, HoldReason, HostLedger, IngressConfig, IngressVerdict, OperatorKind,
+    PeerIngress, PeerMode, PeerTurnBudget, RejectReason, Ticket, hop_exhausted,
 };
 use sha2::{Digest, Sha256};
 
@@ -32,8 +32,10 @@ pub fn msg_key(env: &Envelope) -> MsgKey {
 pub(crate) const CARRIED_CAP: usize = fuigo_peer::limits::MAX_CARRIED_KEYS;
 // The stored (marker) caps live in `fuigo-sampling-types`, which does not depend on `fuigo-peer`; they must equal the live caps
 // or a restore / compaction would silently cut what the session holds.
-const _: () = assert!(fuigo_sampling_types::MAX_STORED_CARRIED == fuigo_peer::limits::MAX_CARRIED_KEYS);
-const _: () = assert!(fuigo_sampling_types::MAX_STORED_KEYS == fuigo_peer::limits::MAX_KEYS_PER_DENIAL);
+const _: () =
+    assert!(fuigo_sampling_types::MAX_STORED_CARRIED == fuigo_peer::limits::MAX_CARRIED_KEYS);
+const _: () =
+    assert!(fuigo_sampling_types::MAX_STORED_KEYS == fuigo_peer::limits::MAX_KEYS_PER_DENIAL);
 const _: () = assert!(fuigo_sampling_types::MAX_STORED_DENIALS == fuigo_peer::limits::DENIAL_RING);
 const IN_FLIGHT_RING: usize = 64;
 
@@ -124,7 +126,8 @@ pub fn decide(i: &AdmissionInputs) -> Decision {
         _ if i.sender_denied => would_hold(HoldReason::SenderDenied),
         PeerInboundPolicy::Hold => would_hold(HoldReason::PolicyHold),
         PeerInboundPolicy::Accept => {
-            let matches = i.sender_mode == i.receiver_mode && i.sender_operator == i.operator.kind();
+            let matches =
+                i.sender_mode == i.receiver_mode && i.sender_operator == i.operator.kind();
             if matches && (i.operator != OperatorPresence::MayReturn || may_return_admits()) {
                 Decision::Admit
             } else if matches {
@@ -283,7 +286,9 @@ pub enum ReleaseOutcome {
     /// It qualified and entered the queue.
     Delivered,
     /// State changed between release and drain: back on hold, expiry not reset.
-    Reheld { expires_at: u64 },
+    Reheld {
+        expires_at: u64,
+    },
     Dropped(RejectReason),
     Expired,
 }
@@ -394,7 +399,8 @@ pub struct PeerAdmissionState {
     operator_cell: Arc<std::sync::atomic::AtomicU8>,
     /// This session's own command channel (weak, so it cannot keep the session loop alive): how the human `/peers` commands reach
     /// the actor's admission handler (`held`, `release`, `refuse`) from inside a turn.
-    admin_tx: Mutex<Option<tokio::sync::mpsc::WeakUnboundedSender<super::commands::SessionCommand>>>,
+    admin_tx:
+        Mutex<Option<tokio::sync::mpsc::WeakUnboundedSender<super::commands::SessionCommand>>>,
     /// Where the baseline snapshot read on a blocking thread is parked (S6.6).
     baseline: Arc<Baseline>,
     /// Test seams for the interleaving and panic tests (per state, so tests cannot affect each other).
@@ -439,7 +445,8 @@ impl Default for PeerAdmissionState {
 /// The process-wide ingress: one per host (S5.2, S5.3). Sessions built for real use share it.
 pub fn host_ingress() -> Arc<Mutex<PeerIngress>> {
     static HOST: std::sync::OnceLock<Arc<Mutex<PeerIngress>>> = std::sync::OnceLock::new();
-    HOST.get_or_init(|| Arc::new(Mutex::new(PeerIngress::default()))).clone()
+    HOST.get_or_init(|| Arc::new(Mutex::new(PeerIngress::default())))
+        .clone()
 }
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -462,19 +469,33 @@ const REFUSE_REASON_SHOWN_CHARS: usize = 200;
 
 /// A tool kind from a peer's stamp, made safe to show: the audit alphabet, at most 32 characters, else `other`.
 fn shown_kind(k: &str) -> String {
-    let ok = !k.is_empty() && k.chars().count() <= 32 && k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
+    let ok = !k.is_empty()
+        && k.chars().count() <= 32
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
     if ok { k.to_owned() } else { "other".to_owned() }
 }
 
 /// The extra line on a held row (S7.2). Kinds only, never a hash, path or command.
-fn hold_detail(reason: HoldReason, env: &Envelope, also: &[HoldReason], overflow: usize) -> Option<String> {
+fn hold_detail(
+    reason: HoldReason,
+    env: &Envelope,
+    also: &[HoldReason],
+    overflow: usize,
+) -> Option<String> {
     if reason != HoldReason::SenderDenied {
         return None;
     }
     let tail = if also.is_empty() {
         String::new()
     } else {
-        format!("; also: {}", also.iter().map(|r| hold_name(*r)).collect::<Vec<_>>().join(", "))
+        format!(
+            "; also: {}",
+            also.iter()
+                .map(|r| hold_name(*r))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     // Kinds and counts only: releasing one row installs one block per stamp, so the human sees how many ("bash x3").
     let mut kinds: Vec<(String, usize)> = Vec::new();
@@ -485,9 +506,16 @@ fn hold_detail(reason: HoldReason, env: &Envelope, also: &[HoldReason], overflow
             None => kinds.push((k, 1)),
         }
     }
-    let kinds: Vec<String> = kinds.into_iter().map(|(k, c)| format!("{k} x{c}")).collect();
+    let kinds: Vec<String> = kinds
+        .into_iter()
+        .map(|(k, c)| format!("{k} x{c}"))
+        .collect();
     // Counts only: how many keys this session could not keep because its carried list was full.
-    let tail = if overflow > 0 { format!("; {overflow} more denial keys were not kept (carried list full){tail}") } else { tail };
+    let tail = if overflow > 0 {
+        format!("; {overflow} more denial keys were not kept (carried list full){tail}")
+    } else {
+        tail
+    };
     Some(if kinds.is_empty() {
         format!("your session refused an earlier message from this sender{tail}")
     } else {
@@ -545,11 +573,19 @@ fn body_hash(env: &Envelope) -> String {
 }
 
 fn new_token() -> String {
-    format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 fn tokens_equal(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 impl Inner {
@@ -557,13 +593,16 @@ impl Inner {
         AdmissionInputs {
             feature_on: live.feature_on,
             // While a remote client is attached to this process nothing is admitted, released or delivered (owner rule, S4.1).
-            opted_in: self.config.opted_in && !self.config.relay_driven && !crate::peer_inbox::driver::remote_attached(),
+            opted_in: self.config.opted_in
+                && !self.config.relay_driven
+                && !crate::peer_inbox::driver::remote_attached(),
             policy: self.config.policy,
             operator: self.config.operator,
             receiver_mode: live.receiver_mode,
             sender_mode: env.from_mode,
             sender_operator: env.from_operator,
-            sender_denied: !env.denied_recently.is_empty() || self.refused_senders.contains(&env.from.to_string()),
+            sender_denied: !env.denied_recently.is_empty()
+                || self.refused_senders.contains(&env.from.to_string()),
         }
     }
 
@@ -583,31 +622,61 @@ impl Inner {
     /// released and would only sit until expiry, so it is refused `no_operator` (as `decide` does for every other would-be hold).
     fn decide_fresh(&self, inputs: &AdmissionInputs) -> Decision {
         match self.decide_live(inputs) {
-            Decision::Hold(HoldReason::Integrity) if !inputs.operator.can_answer() => Decision::Refuse(RejectReason::NoOperator),
+            Decision::Hold(HoldReason::Integrity) if !inputs.operator.can_answer() => {
+                Decision::Refuse(RejectReason::NoOperator)
+            }
             d => d,
         }
     }
 
     /// Audit an outcome for an envelope in hand (S8.1). Queue only; no I/O here.
     fn audit(&mut self, env: &Envelope, outcome: AuditOutcome) {
-        let ev = AuditEvent::from_envelope(env, self.audit.to_session(), outcome, None::<&RejectReason>, now_secs());
+        let ev = AuditEvent::from_envelope(
+            env,
+            self.audit.to_session(),
+            outcome,
+            None::<&RejectReason>,
+            now_secs(),
+        );
         self.audit.emit(ev);
     }
 
     fn audit_hold(&mut self, env: &Envelope, reason: HoldReason) {
-        let ev = AuditEvent::from_envelope(env, self.audit.to_session(), AuditOutcome::Held, Some(&reason), now_secs());
+        let ev = AuditEvent::from_envelope(
+            env,
+            self.audit.to_session(),
+            AuditOutcome::Held,
+            Some(&reason),
+            now_secs(),
+        );
         self.audit.emit(ev);
     }
 
     fn audit_reheld(&mut self, env: &Envelope, reason: HoldReason) {
-        let ev = AuditEvent::from_envelope(env, self.audit.to_session(), AuditOutcome::Reheld, Some(&reason), now_secs());
+        let ev = AuditEvent::from_envelope(
+            env,
+            self.audit.to_session(),
+            AuditOutcome::Reheld,
+            Some(&reason),
+            now_secs(),
+        );
         self.audit.emit(ev);
     }
 
     /// A refusal; `saturated` has its own outcome name, every other reason is `refused` with the reason.
     fn audit_refused(&mut self, env: &Envelope, reason: RejectReason) {
-        let outcome = if reason == RejectReason::Saturated { AuditOutcome::Saturated } else { AuditOutcome::Refused };
-        let ev = AuditEvent::from_envelope(env, self.audit.to_session(), outcome, Some(&reason), now_secs());
+        let outcome = if reason == RejectReason::Saturated {
+            AuditOutcome::Saturated
+        } else {
+            AuditOutcome::Refused
+        };
+        let ev = AuditEvent::from_envelope(
+            env,
+            self.audit.to_session(),
+            outcome,
+            Some(&reason),
+            now_secs(),
+        );
         self.audit.emit(ev);
     }
 
@@ -629,10 +698,22 @@ impl Inner {
             self.notices.pop_front();
         }
         let told = self.gate.watches.on_session_notice(message_id, &kind);
-        self.notices.push_back(PeerNotice { message_id: message_id.to_owned(), from: from.to_owned(), kind, detail: None, told });
+        self.notices.push_back(PeerNotice {
+            message_id: message_id.to_owned(),
+            from: from.to_owned(),
+            kind,
+            detail: None,
+            told,
+        });
     }
 
-    fn notice_with(&mut self, from: &str, message_id: &str, kind: NoticeKind, detail: Option<String>) {
+    fn notice_with(
+        &mut self,
+        from: &str,
+        message_id: &str,
+        kind: NoticeKind,
+        detail: Option<String>,
+    ) {
         self.notice_from(from, message_id, kind);
         if let Some(n) = self.notices.back_mut() {
             n.detail = detail;
@@ -647,7 +728,11 @@ impl Inner {
         self.held = live;
         for h in dead {
             self.audit(&h.envelope, AuditOutcome::Expired);
-            self.notice_from(&h.envelope.from.to_string(), &h.envelope.message_id, NoticeKind::Expired);
+            self.notice_from(
+                &h.envelope.from.to_string(),
+                &h.envelope.message_id,
+                NoticeKind::Expired,
+            );
         }
     }
 
@@ -674,13 +759,28 @@ impl Inner {
             .iter()
             .find(|h| msg_key(&h.envelope) == *k)
             .map(|h| h.body_hash.as_str())
-            .or_else(|| self.approved.iter().find(|p| msg_key(&p.envelope) == *k).map(|p| p.body_hash.as_str()))
+            .or_else(|| {
+                self.approved
+                    .iter()
+                    .find(|p| msg_key(&p.envelope) == *k)
+                    .map(|p| p.body_hash.as_str())
+            })
             .or_else(|| self.queued.get(k).map(|p| p.body_hash.as_str()))
-            .or_else(|| self.in_flight.iter().find(|(kk, _)| kk == k).map(|(_, p)| p.body_hash.as_str()))
+            .or_else(|| {
+                self.in_flight
+                    .iter()
+                    .find(|(kk, _)| kk == k)
+                    .map(|(_, p)| p.body_hash.as_str())
+            })
     }
 
     /// The held entry for this id whose token matches; ids are not unique across senders, tokens are.
-    fn find_held(&mut self, message_id: &str, token: &str, now: u64) -> Result<usize, ReleaseError> {
+    fn find_held(
+        &mut self,
+        message_id: &str,
+        token: &str,
+        now: u64,
+    ) -> Result<usize, ReleaseError> {
         let mut any = false;
         let mut expired = false;
         let mut found = None;
@@ -711,13 +811,33 @@ impl Inner {
 
     /// Put an envelope on hold with the given expiry. Bounds were checked by the caller (or it is a re-hold of a message that
     /// already counted).
-    fn hold(&mut self, envelope: Envelope, hash: String, deadline: u64, reason: HoldReason, ticket: Option<Ticket>) {
+    fn hold(
+        &mut self,
+        envelope: Envelope,
+        hash: String,
+        deadline: u64,
+        reason: HoldReason,
+        ticket: Option<Ticket>,
+    ) {
         let ticket = ticket.unwrap_or_else(|| self.ledger.force(envelope.body.len()));
-        self.held.push(HeldEntry { reason, envelope, body_hash: hash, token: new_token(), deadline, ticket: Some(ticket), also: Vec::new() });
+        self.held.push(HeldEntry {
+            reason,
+            envelope,
+            body_hash: hash,
+            token: new_token(),
+            deadline,
+            ticket: Some(ticket),
+            also: Vec::new(),
+        });
     }
 
     /// Decide whether `p` may enter a turn now; on failure move it back to held or drop it. `true` = enters.
-    fn check_at_drain(&mut self, mut p: Pending, live: &Live, now: u64) -> Result<Pending, ReleaseOutcome> {
+    fn check_at_drain(
+        &mut self,
+        mut p: Pending,
+        live: &Live,
+        now: u64,
+    ) -> Result<Pending, ReleaseOutcome> {
         // A row that was out of the count (passed a start recheck) is counted again while it is being judged.
         if p.ticket.is_none() {
             p.ticket = Some(self.ledger.force(p.envelope.body.len()));
@@ -801,8 +921,10 @@ impl PeerAdmissionState {
     }
 
     pub fn configure(&self, config: PeerAdmissionConfig) {
-        self.gate.set_opted_in(config.opted_in && !config.relay_driven);
-        self.operator_cell.store(config.operator as u8, Ordering::SeqCst);
+        self.gate
+            .set_opted_in(config.opted_in && !config.relay_driven);
+        self.operator_cell
+            .store(config.operator as u8, Ordering::SeqCst);
         lock(&self.inner).config = config;
     }
 
@@ -826,7 +948,10 @@ impl PeerAdmissionState {
     pub(crate) fn operator_kind_handle(&self) -> Arc<dyn Fn() -> OperatorKind + Send + Sync> {
         let cell = self.operator_cell.clone();
         Arc::new(move || {
-            let presence = OperatorPresence::ALL.into_iter().find(|p| *p as u8 == cell.load(Ordering::SeqCst)).unwrap_or_default();
+            let presence = OperatorPresence::ALL
+                .into_iter()
+                .find(|p| *p as u8 == cell.load(Ordering::SeqCst))
+                .unwrap_or_default();
             presence.kind()
         })
     }
@@ -868,31 +993,66 @@ impl PeerAdmissionState {
             laundering_reported: HashSet::new(),
             gate: gate.clone(),
         };
-        Self { inner: Mutex::new(inner), host, session: NEXT_SESSION.fetch_add(1, Ordering::Relaxed), peer_turn: std::sync::atomic::AtomicBool::new(false), admin_tx: Mutex::new(None), gate, operator_cell: Arc::new(std::sync::atomic::AtomicU8::new(OperatorPresence::None as u8)), baseline: Arc::new(Baseline { slot: Mutex::new(None), done: tokio::sync::watch::channel(0).0 }), #[cfg(test)] hooks: Arc::default() }
+        Self {
+            inner: Mutex::new(inner),
+            host,
+            session: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
+            peer_turn: std::sync::atomic::AtomicBool::new(false),
+            admin_tx: Mutex::new(None),
+            gate,
+            operator_cell: Arc::new(std::sync::atomic::AtomicU8::new(
+                OperatorPresence::None as u8,
+            )),
+            baseline: Arc::new(Baseline {
+                slot: Mutex::new(None),
+                done: tokio::sync::watch::channel(0).0,
+            }),
+            #[cfg(test)]
+            hooks: Arc::default(),
+        }
     }
 
     /// Test only: a private ingress with the rate limits lifted, for tests of the S4 and store bounds.
     #[cfg(test)]
     pub fn unmetered() -> Self {
-        Self::metered(IngressConfig { pair_per_minute: usize::MAX, host_per_minute: usize::MAX, ..IngressConfig::default() })
+        Self::metered(IngressConfig {
+            pair_per_minute: usize::MAX,
+            host_per_minute: usize::MAX,
+            ..IngressConfig::default()
+        })
     }
 
     /// Test only: a private ingress and ledger with the given numbers.
     #[cfg(test)]
     pub fn metered(cfg: IngressConfig) -> Self {
-        Self::with_host(Arc::new(Mutex::new(PeerIngress::new(cfg, Arc::new(HostLedger::default())))))
+        Self::with_host(Arc::new(Mutex::new(PeerIngress::new(
+            cfg,
+            Arc::new(HostLedger::default()),
+        ))))
     }
 
     /// A human-intent prompt started a turn: the peer-turn budget is full again (S5.6).
-    pub(crate) fn set_admin_tx(&self, tx: &tokio::sync::mpsc::UnboundedSender<super::commands::SessionCommand>) {
-        *self.admin_tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx.downgrade());
+    pub(crate) fn set_admin_tx(
+        &self,
+        tx: &tokio::sync::mpsc::UnboundedSender<super::commands::SessionCommand>,
+    ) {
+        *self
+            .admin_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx.downgrade());
     }
 
     /// One round trip to this session's own admission handler. `None` when the channel is unset or the session is closing.
     pub(crate) async fn admin(&self, cmd: PeerAdminCmd) -> Option<PeerAdminReply> {
-        let tx = self.admin_tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()?.upgrade()?;
+        let tx = self
+            .admin_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()?
+            .upgrade()?;
         let (respond_to, rx) = tokio::sync::oneshot::channel();
-        tx.send(super::commands::SessionCommand::PeerAdmission { cmd, respond_to }).ok()?;
+        tx.send(super::commands::SessionCommand::PeerAdmission { cmd, respond_to })
+            .ok()?;
         rx.await.ok()
     }
 
@@ -977,7 +1137,9 @@ impl PeerAdmissionState {
                 // A probe is never recorded, so a remembered id is a real message sent under it: not a watch-only.
                 IngressVerdict::Replay(_) => {
                     g.audit_refused(env, RejectReason::Ambiguous);
-                    return DeliveryOutcome::Rejected { reason: RejectReason::Ambiguous };
+                    return DeliveryOutcome::Rejected {
+                        reason: RejectReason::Ambiguous,
+                    };
                 }
             }
         }
@@ -985,7 +1147,11 @@ impl PeerAdmissionState {
         let refuse = |reason| DeliveryOutcome::Rejected { reason };
         let reason = match g.decide_live(&inputs) {
             Decision::Admit if hop_exhausted(env.hop) || g.budget.exhausted() => {
-                if inputs.operator.can_answer() { RejectReason::PolicyRefused } else { RejectReason::NoOperator }
+                if inputs.operator.can_answer() {
+                    RejectReason::PolicyRefused
+                } else {
+                    RejectReason::NoOperator
+                }
             }
             Decision::Admit => return DeliveryOutcome::Delivered {},
             Decision::Refuse(r) => r,
@@ -1017,24 +1183,35 @@ impl PeerAdmissionState {
         if let Some(first) = g.known_hash(&key) {
             if first != hash {
                 g.audit_refused(&env, RejectReason::Ambiguous);
-                return Submitted::Done(DeliveryOutcome::Rejected { reason: RejectReason::Ambiguous });
+                return Submitted::Done(DeliveryOutcome::Rejected {
+                    reason: RejectReason::Ambiguous,
+                });
             }
             g.audit_duplicate(&env);
             if let Some(h) = g.held.iter().find(|h| msg_key(&h.envelope) == key) {
-                return Submitted::Done(DeliveryOutcome::Held { reason: h.reason, expires_at: wall_expiry(h.deadline, now) });
+                return Submitted::Done(DeliveryOutcome::Held {
+                    reason: h.reason,
+                    expires_at: wall_expiry(h.deadline, now),
+                });
             }
             return Submitted::Done(DeliveryOutcome::Delivered {});
         }
         let (count, bytes) = g.usage();
-        if count + 1 > MAX_MESSAGES_PER_SESSION || bytes + env.body.len() > MAX_BODY_BYTES_PER_SESSION {
+        if count + 1 > MAX_MESSAGES_PER_SESSION
+            || bytes + env.body.len() > MAX_BODY_BYTES_PER_SESSION
+        {
             // Never evict: the new message is refused.
             g.audit_refused(&env, RejectReason::Saturated);
-            return Submitted::Done(DeliveryOutcome::Rejected { reason: RejectReason::Saturated });
+            return Submitted::Done(DeliveryOutcome::Rejected {
+                reason: RejectReason::Saturated,
+            });
         }
         let Ok(ticket) = g.ledger.reserve(env.body.len()) else {
             // The per-host total (S5.2): same answer, and it names nothing about other sessions.
             g.audit_refused(&env, RejectReason::Saturated);
-            return Submitted::Done(DeliveryOutcome::Rejected { reason: RejectReason::Saturated });
+            return Submitted::Done(DeliveryOutcome::Rejected {
+                reason: RejectReason::Saturated,
+            });
         };
         let deadline = now + HOLD_EXPIRY_SECS;
         match decision {
@@ -1056,7 +1233,10 @@ impl PeerAdmissionState {
                 if let Some(h) = g.held.last_mut() {
                     h.also = also;
                 }
-                Submitted::Done(DeliveryOutcome::Held { reason, expires_at: wall_expiry(deadline, now) })
+                Submitted::Done(DeliveryOutcome::Held {
+                    reason,
+                    expires_at: wall_expiry(deadline, now),
+                })
             }
             _ => {
                 g.audit(&env, AuditOutcome::Admitted);
@@ -1098,7 +1278,13 @@ impl PeerAdmissionState {
         let mut g = lock(&self.inner);
         if g.queued.remove(key).is_some() {
             // The enqueue that followed an admit failed: the message was not delivered.
-            let ev = AuditEvent::from_key(key, g.audit.to_session(), AuditOutcome::Refused, Some(&RejectReason::Unavailable), now_secs());
+            let ev = AuditEvent::from_key(
+                key,
+                g.audit.to_session(),
+                AuditOutcome::Refused,
+                Some(&RejectReason::Unavailable),
+                now_secs(),
+            );
             g.audit.emit(ev);
         }
         drop(g);
@@ -1143,7 +1329,11 @@ impl PeerAdmissionState {
         let inputs = g.inputs(live, &held.envelope);
         if !inputs.feature_on || !inputs.opted_in || inputs.policy == PeerInboundPolicy::Refuse {
             g.audit_refused(&held.envelope, RejectReason::Unavailable);
-            g.notice_from(&held.envelope.from.to_string(), message_id, NoticeKind::Refused(RejectReason::Unavailable));
+            g.notice_from(
+                &held.envelope.from.to_string(),
+                message_id,
+                NoticeKind::Refused(RejectReason::Unavailable),
+            );
             return Err(ReleaseError::Unavailable);
         }
         let snapshot = ApprovalSnapshot {
@@ -1152,10 +1342,19 @@ impl PeerAdmissionState {
             operator: inputs.operator,
         };
         g.audit(&held.envelope, AuditOutcome::Released);
-        let detail = hold_detail(HoldReason::SenderDenied, &held.envelope, &[], g.carried_overflow).filter(|_| {
-            !held.envelope.denied_recently.is_empty()
-        });
-        g.notice_with(&held.envelope.from.to_string(), message_id, NoticeKind::Released, detail);
+        let detail = hold_detail(
+            HoldReason::SenderDenied,
+            &held.envelope,
+            &[],
+            g.carried_overflow,
+        )
+        .filter(|_| !held.envelope.denied_recently.is_empty());
+        g.notice_with(
+            &held.envelope.from.to_string(),
+            message_id,
+            NoticeKind::Released,
+            detail,
+        );
         g.approved.push_back(Pending {
             envelope: held.envelope,
             body_hash: held.body_hash,
@@ -1175,7 +1374,11 @@ impl PeerAdmissionState {
         let pos = g.find_held(message_id, token, now)?;
         let held = g.held.remove(pos);
         g.audit(&held.envelope, AuditOutcome::RejectedByOperator);
-        g.notice_from(&held.envelope.from.to_string(), message_id, NoticeKind::Refused(RejectReason::PolicyRefused));
+        g.notice_from(
+            &held.envelope.from.to_string(),
+            message_id,
+            NoticeKind::Refused(RejectReason::PolicyRefused),
+        );
         Ok(())
     }
 
@@ -1222,9 +1425,19 @@ impl PeerAdmissionState {
                 .map(|(_, p)| p),
         };
         let Some(p) = tracked else {
-            let ev = AuditEvent::from_key(key, g.audit.to_session(), AuditOutcome::Refused, Some(&RejectReason::Unavailable), now_secs());
+            let ev = AuditEvent::from_key(
+                key,
+                g.audit.to_session(),
+                AuditOutcome::Refused,
+                Some(&RejectReason::Unavailable),
+                now_secs(),
+            );
             g.audit.emit(ev);
-            g.notice_from(&key.0, &key.1, NoticeKind::Refused(RejectReason::Unavailable));
+            g.notice_from(
+                &key.0,
+                &key.1,
+                NoticeKind::Refused(RejectReason::Unavailable),
+            );
             return false;
         };
         match g.check_at_drain(p, live, now) {
@@ -1244,7 +1457,9 @@ impl PeerAdmissionState {
 
     /// Forget tracked rows whose queue row is gone (cancelled, removed): they no longer count against the bounds.
     pub fn prune_queued(&self, still_queued: &HashSet<MsgKey>) {
-        lock(&self.inner).queued.retain(|id, _| still_queued.contains(id));
+        lock(&self.inner)
+            .queued
+            .retain(|id, _| still_queued.contains(id));
     }
 
     /// Any admission not yet delivered: tracked as queued, held for a release, or approved and waiting for the drain.
@@ -1258,7 +1473,9 @@ impl PeerAdmissionState {
         if !running {
             let mut g = lock(&self.inner);
             g.in_flight_live = 0;
-            *g.turn_conv.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            *g.turn_conv
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         }
         self.peer_turn.store(running, Ordering::SeqCst);
     }
@@ -1272,32 +1489,52 @@ impl PeerAdmissionState {
         let c = match g.conv_of.get(message_id).cloned() {
             Some(c) => c,
             None => {
-                tracing::debug!(message_id, "peer turn has no recorded conversation: sends from it use the hop budget");
-                (message_id.to_owned(), fuigo_peer::limits::HOP_BUDGET.saturating_sub(1))
+                tracing::debug!(
+                    message_id,
+                    "peer turn has no recorded conversation: sends from it use the hop budget"
+                );
+                (
+                    message_id.to_owned(),
+                    fuigo_peer::limits::HOP_BUDGET.saturating_sub(1),
+                )
             }
         };
-        let mut ch = g.chain.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ch = g
+            .chain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if ch.as_ref().is_none_or(|(_, h)| c.1 >= *h) {
             *ch = Some(c);
         }
         // The turn's view follows the chain (which never decreases), so a join cannot lower it either.
-        *g.turn_conv.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ch.clone();
+        *g.turn_conv
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ch.clone();
     }
 
     /// S5.6: a turn is starting. `human_typed` is true only for `PromptOrigin::User`: it clears the peer chain, so the turn sends at
     /// hop 0 in a new conversation. Any other turn INHERITS the chain (its sends continue that conversation at hop + 1), and a
     /// peer message that starts it raises the chain. The returned guard clears only the per-turn view when the turn ends (normal,
     /// cancel, error, panic, abort); the chain itself lives across turns.
-    pub(crate) fn begin_turn(&self, human_typed: bool, peer_message_id: Option<&str>) -> TurnConvGuard {
+    pub(crate) fn begin_turn(
+        &self,
+        human_typed: bool,
+        peer_message_id: Option<&str>,
+    ) -> TurnConvGuard {
         let handle = self.turn_conv_handle();
         {
             let mut g = lock(&self.inner);
             g.turn_obs = TurnObs::default();
-            let mut ch = g.chain.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ch = g
+                .chain
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if human_typed {
                 *ch = None;
             }
-            *handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ch.clone();
+            *handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = ch.clone();
         }
         if let Some(id) = peer_message_id {
             self.note_turn_peer_message(id);
@@ -1309,13 +1546,20 @@ impl PeerAdmissionState {
     /// The peer chain since the last human prompt (see [`Inner::chain`]).
     #[cfg(test)]
     pub(crate) fn peer_chain(&self) -> Option<(String, u32)> {
-        lock(&self.inner).chain.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        lock(&self.inner)
+            .chain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// S5.6: what a message sent from the running turn continues: `Some((conversation id, received hop))` when a peer message is
     /// part of the turn, `None` for a human-started turn (a new conversation at hop 0).
     pub(crate) fn turn_conversation(&self) -> Option<(String, u32)> {
-        self.turn_conv_handle().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.turn_conv_handle()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// A `Send + Sync` handle to the turn's conversation, for closures that must not capture the actor.
@@ -1349,7 +1593,10 @@ impl PeerAdmissionState {
                     from_name: h.envelope.from_name.clone(),
                     from_mode: h.envelope.from_mode.to_wire(),
                     reason: h.reason,
-                    reason_names: std::iter::once(h.reason).chain(h.also.iter().copied()).map(hold_name).collect(),
+                    reason_names: std::iter::once(h.reason)
+                        .chain(h.also.iter().copied())
+                        .map(hold_name)
+                        .collect(),
                     detail: hold_detail(h.reason, &h.envelope, &h.also, overflow),
                     expires_at: wall_expiry(h.deadline, now),
                     token: h.token.clone(),
@@ -1373,7 +1620,10 @@ impl PeerAdmissionState {
                 from_name: h.envelope.from_name.clone(),
                 from_mode: h.envelope.from_mode.to_wire(),
                 reason: h.reason,
-                reason_names: std::iter::once(h.reason).chain(h.also.iter().copied()).map(hold_name).collect(),
+                reason_names: std::iter::once(h.reason)
+                    .chain(h.also.iter().copied())
+                    .map(hold_name)
+                    .collect(),
                 detail: hold_detail(h.reason, &h.envelope, &h.also, overflow),
                 expires_at: wall_expiry(h.deadline, now),
                 token: String::new(),
@@ -1416,7 +1666,12 @@ impl PeerAdmissionState {
                 #[cfg(test)]
                 {
                     hooks.baseline_starts.fetch_add(1, Ordering::SeqCst);
-                    if let Some(h) = hooks.in_baseline.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+                    if let Some(h) = hooks
+                        .in_baseline
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .as_ref()
+                    {
                         h();
                     }
                     if hooks.panic_baseline.swap(false, Ordering::SeqCst) {
@@ -1430,7 +1685,8 @@ impl PeerAdmissionState {
                 Ok(w) => (w, false),
                 Err(_) => (Default::default(), true),
             };
-            *baseline.slot.lock().unwrap_or_else(|p| p.into_inner()) = Some((watch, generation, panicked));
+            *baseline.slot.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some((watch, generation, panicked));
             baseline.done.send_modify(|n| *n = n.wrapping_add(1));
         };
         match tokio::runtime::Handle::try_current() {
@@ -1444,7 +1700,12 @@ impl PeerAdmissionState {
     /// Move a finished baseline from its slot into the state.
     /// Returns the generation when the adopted read had panicked (the hold is up; the caller writes marker and warning).
     fn adopt_baseline(&self) -> Option<u64> {
-        let ready = self.baseline.slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let ready = self
+            .baseline
+            .slot
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
         let (watch, generation, panicked) = ready?;
         let mut g = lock(&self.inner);
         g.integrity.adopt(watch, generation);
@@ -1475,7 +1736,10 @@ impl PeerAdmissionState {
         let mut rx = self.baseline.done.subscribe();
         loop {
             if let Some(generation) = self.adopt_baseline() {
-                return self.integrity_apply_changes(vec![super::peer_integrity::Change::unreadable()], generation);
+                return self.integrity_apply_changes(
+                    vec![super::peer_integrity::Change::unreadable()],
+                    generation,
+                );
             }
             if !lock(&self.inner).integrity.arming() {
                 return Vec::new();
@@ -1485,7 +1749,10 @@ impl PeerAdmissionState {
                 Ok(Err(_)) => return Vec::new(),
                 Err(_) => {
                     if let Some(generation) = self.adopt_baseline() {
-                        return self.integrity_apply_changes(vec![super::peer_integrity::Change::unreadable()], generation);
+                        return self.integrity_apply_changes(
+                            vec![super::peer_integrity::Change::unreadable()],
+                            generation,
+                        );
                     }
                     let generation = {
                         let mut g = lock(&self.inner);
@@ -1494,7 +1761,10 @@ impl PeerAdmissionState {
                         }
                         g.integrity.generation()
                     };
-                    return self.integrity_apply_changes(vec![super::peer_integrity::Change::unreadable()], generation);
+                    return self.integrity_apply_changes(
+                        vec![super::peer_integrity::Change::unreadable()],
+                        generation,
+                    );
                 }
             }
         }
@@ -1512,7 +1782,9 @@ impl PeerAdmissionState {
     #[cfg(test)]
     pub(crate) fn integrity_check(&self) -> Vec<super::peer_integrity::Change> {
         let _ = self.adopt_baseline();
-        let Some((watch, generation)) = lock(&self.inner).integrity.take_for_check() else { return Vec::new() };
+        let Some((watch, generation)) = lock(&self.inner).integrity.take_for_check() else {
+            return Vec::new();
+        };
         super::peer_integrity::recheck_into_pending(&watch);
         self.integrity_apply(&watch, generation)
     }
@@ -1524,13 +1796,20 @@ impl PeerAdmissionState {
         if !early.is_empty() {
             return early;
         }
-        let Some((watch, generation)) = lock(&self.inner).integrity.take_for_check() else { return Vec::new() };
+        let Some((watch, generation)) = lock(&self.inner).integrity.take_for_check() else {
+            return Vec::new();
+        };
         let w = watch.clone();
         #[cfg(test)]
         let hooks = self.hooks.clone();
         let job = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
-            if let Some(h) = hooks.in_recheck.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            if let Some(h) = hooks
+                .in_recheck
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+            {
                 h();
             }
             #[cfg(test)]
@@ -1551,12 +1830,20 @@ impl PeerAdmissionState {
         self.integrity_apply(&watch, generation)
     }
 
-    fn integrity_apply(&self, watch: &super::peer_integrity::SharedWatch, generation: u64) -> Vec<super::peer_integrity::Change> {
+    fn integrity_apply(
+        &self,
+        watch: &super::peer_integrity::SharedWatch,
+        generation: u64,
+    ) -> Vec<super::peer_integrity::Change> {
         let changes = super::peer_integrity::drain_pending(watch);
         self.integrity_apply_changes(changes, generation)
     }
 
-    fn integrity_apply_changes(&self, changes: Vec<super::peer_integrity::Change>, generation: u64) -> Vec<super::peer_integrity::Change> {
+    fn integrity_apply_changes(
+        &self,
+        changes: Vec<super::peer_integrity::Change>,
+        generation: u64,
+    ) -> Vec<super::peer_integrity::Change> {
         let mut g = lock(&self.inner);
         if !g.integrity.put_back(!changes.is_empty(), generation) {
             // A clear ran while the files were being read: the human's clear stands, the stale result is dropped.
@@ -1564,7 +1851,10 @@ impl PeerAdmissionState {
         }
         for c in &changes {
             g.audit_integrity(c);
-            g.notice(&super::peer_integrity::display_path(&c.path), NoticeKind::ProtectedFileChanged);
+            g.notice(
+                &super::peer_integrity::display_path(&c.path),
+                NoticeKind::ProtectedFileChanged,
+            );
         }
         changes
     }
@@ -1594,7 +1884,8 @@ impl PeerAdmissionState {
     pub(crate) fn take_guard_kept_feature_off(&self) -> bool {
         let mut g = lock(&self.inner);
         let before = g.notices.len();
-        g.notices.retain(|n| n.kind != NoticeKind::GuardKeptFeatureOff);
+        g.notices
+            .retain(|n| n.kind != NoticeKind::GuardKeptFeatureOff);
         g.notices.len() != before
     }
 
@@ -1617,8 +1908,10 @@ impl PeerAdmissionState {
             }
             g.received.push_back(id.clone());
         }
-        g.conv_of.insert(id.clone(), (env.conversation_id.clone(), env.hop));
-        g.label_of.insert(id.clone(), (env.from_name.clone(), env.from_ref.clone()));
+        g.conv_of
+            .insert(id.clone(), (env.conversation_id.clone(), env.hop));
+        g.label_of
+            .insert(id.clone(), (env.from_name.clone(), env.from_ref.clone()));
         // A message that carried denials stays nameable until the human clears the influence, however many arrive after it.
         if !env.denied_recently.is_empty() && !g.pinned_senders.iter().any(|(i, _)| *i == id) {
             if g.pinned_senders.len() >= PINNED_SENDERS {
@@ -1636,11 +1929,13 @@ impl PeerAdmissionState {
     /// The sender address of a delivered message still remembered: the last 256 delivered, or any that carried denials (at most
     /// 64, until clear-influence). Beyond that the id is unknown.
     fn sender_for(inner: &Inner, id: &str) -> Option<String> {
-        inner
-            .sender_of
-            .get(id)
-            .cloned()
-            .or_else(|| inner.pinned_senders.iter().find(|(i, _)| i == id).map(|(_, f)| f.clone()))
+        inner.sender_of.get(id).cloned().or_else(|| {
+            inner
+                .pinned_senders
+                .iter()
+                .find(|(i, _)| i == id)
+                .map(|(_, f)| f.clone())
+        })
     }
 
     /// The denial log's carried-overflow count, set by the session before it lists held rows or releases one (counts only).
@@ -1651,7 +1946,11 @@ impl PeerAdmissionState {
     /// S7.4: the model refuses a delivered message. The sender is held for the rest of the session (reason `sender_denied`:
     /// the same hold the stamp gives), a `ModelRefused` notice is queued for the human and the sender, and an audit line with
     /// ids only is written. The `reason` text is capped at 200 characters and escaped; it is not audited.
-    pub(crate) fn refuse_by_model(&self, message_id: &str, reason: &str) -> Result<ModelRefusal, UnknownMessage> {
+    pub(crate) fn refuse_by_model(
+        &self,
+        message_id: &str,
+        reason: &str,
+    ) -> Result<ModelRefusal, UnknownMessage> {
         let mut g = lock(&self.inner);
         g.turn_obs.model_refused = true;
         Self::refuse_locked(&mut g, message_id, reason, false)
@@ -1659,7 +1958,12 @@ impl PeerAdmissionState {
 
     /// The refusal itself, shared by the tool and the automatic path. The tool path (`automatic == false`) also holds the sender
     /// for the session; the automatic path refuses that one message only (notice, audit line `automatic`, settled watch).
-    fn refuse_locked(g: &mut Inner, message_id: &str, reason: &str, automatic: bool) -> Result<ModelRefusal, UnknownMessage> {
+    fn refuse_locked(
+        g: &mut Inner,
+        message_id: &str,
+        reason: &str,
+        automatic: bool,
+    ) -> Result<ModelRefusal, UnknownMessage> {
         let Some(from) = Self::sender_for(g, message_id) else {
             return Err(UnknownMessage);
         };
@@ -1672,19 +1976,38 @@ impl PeerAdmissionState {
             g.state_dirty = true;
         }
         let why = automatic.then_some("automatic");
-        let ev = AuditEvent::from_key(&(from, id.clone()), g.audit.to_session(), AuditOutcome::ModelRefused, why.as_ref(), now_secs());
+        let ev = AuditEvent::from_key(
+            &(from, id.clone()),
+            g.audit.to_session(),
+            AuditOutcome::ModelRefused,
+            why.as_ref(),
+            now_secs(),
+        );
         g.audit.emit(ev);
         let cut: String = reason.chars().take(REFUSE_REASON_SHOWN_CHARS).collect();
         let shown_reason = super::peer_message::escape_attr(&cut);
         // The reason is for the human's row only: not in the audit line above, not forwarded to the sender.
-        g.notice_with(&from_s, &id, NoticeKind::ModelRefused, Some(shown_reason.clone()));
+        g.notice_with(
+            &from_s,
+            &id,
+            NoticeKind::ModelRefused,
+            Some(shown_reason.clone()),
+        );
         Ok(ModelRefusal { shown_reason })
     }
 
     /// 26-4/26-5: fold one model reply of the running turn into the turn's record.
-    pub(crate) fn note_model_response(&self, tool_calls: usize, has_text: bool, provider_refused: bool) {
+    pub(crate) fn note_model_response(
+        &self,
+        tool_calls: usize,
+        has_text: bool,
+        provider_refused: bool,
+    ) {
         let mut g = lock(&self.inner);
-        g.turn_obs.tool_calls = g.turn_obs.tool_calls.saturating_add(u32::try_from(tool_calls).unwrap_or(u32::MAX));
+        g.turn_obs.tool_calls = g
+            .turn_obs
+            .tool_calls
+            .saturating_add(u32::try_from(tool_calls).unwrap_or(u32::MAX));
         g.turn_obs.text_seen |= has_text;
         g.turn_obs.provider_refused |= provider_refused;
     }
@@ -1705,13 +2028,23 @@ impl PeerAdmissionState {
         if obs.tool_calls > 0 || obs.model_refused {
             return false;
         }
-        let Some(from) = Self::sender_for(&g, message_id) else { return false };
+        let Some(from) = Self::sender_for(&g, message_id) else {
+            return false;
+        };
         let watched = self.gate.watches.is_watched(message_id);
         let declined = refusal_stop || obs.provider_refused;
         if declined || !obs.text_seen {
             let (name, sref) = g.label_of.get(message_id).cloned().unwrap_or_default();
-            let label = format!("{} [{}]", fuigo_peer::host::display_escape(&name, 64), fuigo_peer::host::display_escape(&sref, 64));
-            let kind = if declined { NoticeKind::PeerTurnDeclined } else { NoticeKind::PeerTurnNoReply };
+            let label = format!(
+                "{} [{}]",
+                fuigo_peer::host::display_escape(&name, 64),
+                fuigo_peer::host::display_escape(&sref, 64)
+            );
+            let kind = if declined {
+                NoticeKind::PeerTurnDeclined
+            } else {
+                NoticeKind::PeerTurnNoReply
+            };
             g.notice_with(&from, message_id, kind, Some(label));
         }
         // A message the human released was explicitly accepted: the empty-reply / declined notices above still show, but it is not
@@ -1733,13 +2066,21 @@ impl PeerAdmissionState {
         let mut g = lock(&self.inner);
         for h in hits {
             let from = Self::sender_for(&g, &h.message_id).unwrap_or_default();
-            let ev = AuditEvent::from_key(&(from.clone(), h.message_id.clone()), g.audit.to_session(), AuditOutcome::LaunderingRefused, Some(&h.kind), now_secs());
+            let ev = AuditEvent::from_key(
+                &(from.clone(), h.message_id.clone()),
+                g.audit.to_session(),
+                AuditOutcome::LaunderingRefused,
+                Some(&h.kind),
+                now_secs(),
+            );
             g.audit.emit(ev);
             // One notice per (message, tool kind): a model retrying the same action cannot push other notices out of the ring.
             if g.laundering_reported.len() >= 256 {
                 g.laundering_reported.clear();
             }
-            if g.laundering_reported.insert((h.message_id.clone(), h.kind.clone())) {
+            if g.laundering_reported
+                .insert((h.message_id.clone(), h.kind.clone()))
+            {
                 g.notice_from(&from, &h.message_id, NoticeKind::LaunderingRefused);
             }
         }
@@ -1751,7 +2092,10 @@ impl PeerAdmissionState {
     pub(crate) fn mirror_carry(&self, message_id: &str, stamps: &[fuigo_peer::DenialStamp]) {
         let mut g = lock(&self.inner);
         for s in stamps {
-            if g.carried_mirror.iter().any(|(k, h, _)| *k == s.tool_kind && *h == s.target_hash) {
+            if g.carried_mirror
+                .iter()
+                .any(|(k, h, _)| *k == s.tool_kind && *h == s.target_hash)
+            {
                 continue;
             }
             // Same rule as the denial log: never evict, drop the newest and count it.
@@ -1759,7 +2103,11 @@ impl PeerAdmissionState {
                 g.carried_overflow += 1;
                 continue;
             }
-            g.carried_mirror.push((s.tool_kind.clone(), s.target_hash.clone(), message_id.to_owned()));
+            g.carried_mirror.push((
+                s.tool_kind.clone(),
+                s.target_hash.clone(),
+                message_id.to_owned(),
+            ));
             g.state_dirty = true;
         }
     }
@@ -1772,7 +2120,10 @@ impl PeerAdmissionState {
         }
         let mut refused: Vec<String> = g.refused_senders.iter().cloned().collect();
         refused.sort();
-        Some(fuigo_sampling_types::PeerCarriedState { carried: g.carried_mirror.clone(), refused })
+        Some(fuigo_sampling_types::PeerCarriedState {
+            carried: g.carried_mirror.clone(),
+            refused,
+        })
     }
 
     /// The current receiver-side state (regardless of the changed flag), `None` when both lists are empty.
@@ -1780,7 +2131,10 @@ impl PeerAdmissionState {
         let g = lock(&self.inner);
         let mut refused: Vec<String> = g.refused_senders.iter().cloned().collect();
         refused.sort();
-        let st = fuigo_sampling_types::PeerCarriedState { carried: g.carried_mirror.clone(), refused };
+        let st = fuigo_sampling_types::PeerCarriedState {
+            carried: g.carried_mirror.clone(),
+            refused,
+        };
         (!st.is_empty()).then_some(st)
     }
 
@@ -1823,18 +2177,27 @@ impl PeerAdmissionState {
 
     /// The sender-side ring entries not yet written: `snapshot` is the ring now (oldest first). Entries already written form a
     /// prefix overlap (the ring only appends and evicts the front), so only the tail past the longest overlap is new.
-    pub(crate) fn new_denials(&self, snapshot: Vec<Vec<fuigo_workspace::permission::DenialKey>>) -> Vec<Vec<fuigo_workspace::permission::DenialKey>> {
+    pub(crate) fn new_denials(
+        &self,
+        snapshot: Vec<Vec<fuigo_workspace::permission::DenialKey>>,
+    ) -> Vec<Vec<fuigo_workspace::permission::DenialKey>> {
         let mut g = lock(&self.inner);
         let old = &g.denial_synced;
         let max = old.len().min(snapshot.len());
-        let overlap = (0..=max).rev().find(|k| old[old.len() - k..] == snapshot[..*k]).unwrap_or(0);
+        let overlap = (0..=max)
+            .rev()
+            .find(|k| old[old.len() - k..] == snapshot[..*k])
+            .unwrap_or(0);
         let fresh = snapshot[overlap..].to_vec();
         g.denial_synced = snapshot;
         fresh
     }
 
     /// Resume: the ring entries rebuilt from storage count as written.
-    pub(crate) fn set_denials_synced(&self, keys: Vec<Vec<fuigo_workspace::permission::DenialKey>>) {
+    pub(crate) fn set_denials_synced(
+        &self,
+        keys: Vec<Vec<fuigo_workspace::permission::DenialKey>>,
+    ) {
         lock(&self.inner).denial_synced = keys;
     }
 
@@ -1846,7 +2209,11 @@ impl PeerAdmissionState {
 
     /// Drop expired holds and report any notices recorded since the last call.
     /// Packet 11: record a notice about a sent message with the kind `None` meaning `outcome unknown`.
-    pub(crate) fn record_sent_notice_opt(&self, message_id: &str, kind: Option<fuigo_peer::NoticeKind>) {
+    pub(crate) fn record_sent_notice_opt(
+        &self,
+        message_id: &str,
+        kind: Option<fuigo_peer::NoticeKind>,
+    ) {
         let k = kind.map_or(NoticeKind::SentOutcomeUnknown, NoticeKind::SentMessage);
         lock(&self.inner).notice(message_id, k);
     }
@@ -1887,7 +2254,9 @@ pub fn now_mono() -> u64 {
         return t;
     }
     static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    BASE.get_or_init(std::time::Instant::now).elapsed().as_secs()
+    BASE.get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
 }
 
 /// Unix seconds, for reporting only. Tests override it with [`set_test_clock`] (no sleeps).
@@ -1915,19 +2284,32 @@ pub fn set_test_clock(t: Option<u64>) {
 /// Commands the session handle sends to the actor for admission.
 pub enum PeerAdminCmd {
     Submit(Box<Envelope>),
-    Release { message_id: String, token: String },
-    Reject { message_id: String, token: String },
+    Release {
+        message_id: String,
+        token: String,
+    },
+    Reject {
+        message_id: String,
+        token: String,
+    },
     ListHeld,
     /// Held rows with empty tokens; voids nothing (packet 13 event pump).
     HeldSnapshot,
     Configure(PeerAdmissionConfig),
     TakeNotices,
     /// A typed notice about a message this session sent (packet 8e).
-    SentNotice { message_id: String, kind: fuigo_peer::NoticeKind },
+    SentNotice {
+        message_id: String,
+        kind: fuigo_peer::NoticeKind,
+    },
     /// Packet 11 (S9.4): a notice about a message this session sent, from the receiving host (`kind`) or from this host's own
     /// watch (`None` = `outcome unknown`). `target` is the target's address as the host recorded it. It is recorded like
     /// `SentNotice` and ALSO wakes the model with fixed text, if the peer-turn budget allows.
-    SentNoticeWake { message_id: String, kind: Option<fuigo_peer::NoticeKind>, target: String },
+    SentNoticeWake {
+        message_id: String,
+        kind: Option<fuigo_peer::NoticeKind>,
+        target: String,
+    },
 }
 
 pub enum PeerAdminReply {
@@ -1952,11 +2334,17 @@ mod laundering_tests;
 mod ingress_tests;
 
 /// Clears the running turn's peer conversation when dropped (see [`PeerAdmissionState::begin_turn`]).
-pub(crate) struct TurnConvGuard(Arc<Mutex<Option<(String, u32)>>>, Arc<super::message_delivery::PeerGate>);
+pub(crate) struct TurnConvGuard(
+    Arc<Mutex<Option<(String, u32)>>>,
+    Arc<super::message_delivery::PeerGate>,
+);
 
 impl Drop for TurnConvGuard {
     fn drop(&mut self) {
-        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         // Packet 11: the watches bound to this turn fire now, once.
         self.1.watches.turn_ended();
     }

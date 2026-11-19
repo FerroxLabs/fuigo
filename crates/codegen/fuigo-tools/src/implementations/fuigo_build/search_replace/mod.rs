@@ -340,7 +340,8 @@ async fn handle_new_file_creation(
     empty_old_string_does_not_override: bool,
 ) -> Result<SearchReplaceOutput, fuigo_tool_runtime::ToolError> {
     // One bounded read serves both the exists check and the prior-state snapshot (audit S4-F7).
-    let read = crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await;
+    let read =
+        crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await;
     if let Err(e) = &read
         && let Some(msg) = crate::implementations::fuigo_build::read_file::source_too_large_message(
             e,
@@ -580,7 +581,11 @@ fn restore_mixed_line_endings(old_text: &str, match_text: &str, new_text: &str) 
         let old_range = op.old_range();
         let crlf_style = old_range
             .clone()
-            .find_map(|i| original[i].ends_with('\n').then(|| original[i].ends_with("\r\n")))
+            .find_map(|i| {
+                original[i]
+                    .ends_with('\n')
+                    .then(|| original[i].ends_with("\r\n"))
+            })
             .or_else(|| {
                 old_range
                     .start
@@ -614,48 +619,54 @@ async fn handle_replacement(
     is_legacy: bool,
     include_user_edit_hint: bool,
 ) -> Result<SearchReplaceOutput, fuigo_tool_runtime::ToolError> {
-    let bytes = match crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            if let Some(msg) = unreadable_source_message(&e, &input.file_path) {
-                return Ok(SearchReplaceOutput::InvalidInput(msg));
-            }
-            let output = match e.io_error_kind() {
-                Some(std::io::ErrorKind::NotFound) => {
-                    let display_dcwd = display_cwd_or_cwd(cwd, display_cwd);
-                    let display_path = display_dcwd.join(&input.file_path);
-                    let msg = crate::util::format_not_found_error(
-                        &display_path,
-                        path,
-                        cwd,
-                        &display_dcwd,
-                        hints_enabled,
-                    )
-                    .await;
-                    SearchReplaceOutput::FileNotFound(msg)
+    let bytes =
+        match crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path)
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                if let Some(msg) = unreadable_source_message(&e, &input.file_path) {
+                    return Ok(SearchReplaceOutput::InvalidInput(msg));
                 }
-                Some(std::io::ErrorKind::IsADirectory) => SearchReplaceOutput::InvalidInput(
-                    format!("Error: {} is a directory, not a file.", input.file_path),
-                ),
-                Some(std::io::ErrorKind::InvalidFilename) => {
-                    SearchReplaceOutput::FilenameTooLong(format!(
-                        "Error: file name exceeds the {NAME_MAX}-character limit. \
+                let output = match e.io_error_kind() {
+                    Some(std::io::ErrorKind::NotFound) => {
+                        let display_dcwd = display_cwd_or_cwd(cwd, display_cwd);
+                        let display_path = display_dcwd.join(&input.file_path);
+                        let msg = crate::util::format_not_found_error(
+                            &display_path,
+                            path,
+                            cwd,
+                            &display_dcwd,
+                            hints_enabled,
+                        )
+                        .await;
+                        SearchReplaceOutput::FileNotFound(msg)
+                    }
+                    Some(std::io::ErrorKind::IsADirectory) => SearchReplaceOutput::InvalidInput(
+                        format!("Error: {} is a directory, not a file.", input.file_path),
+                    ),
+                    Some(std::io::ErrorKind::InvalidFilename) => {
+                        SearchReplaceOutput::FilenameTooLong(format!(
+                            "Error: file name exceeds the {NAME_MAX}-character limit. \
                          Please use a shorter file name.",
-                    ))
-                }
-                Some(std::io::ErrorKind::PermissionDenied) => SearchReplaceOutput::InvalidInput(
-                    format!("Error: permission denied reading {}.", input.file_path),
-                ),
-                _ => {
-                    return Err(fuigo_tool_runtime::ToolError::execution(
-                        fuigo_tool_protocol::ToolId::new("search_replace").expect("valid"),
-                        e.to_string(),
-                    ));
-                }
-            };
-            return Ok(output);
-        }
-    };
+                        ))
+                    }
+                    Some(std::io::ErrorKind::PermissionDenied) => {
+                        SearchReplaceOutput::InvalidInput(format!(
+                            "Error: permission denied reading {}.",
+                            input.file_path
+                        ))
+                    }
+                    _ => {
+                        return Err(fuigo_tool_runtime::ToolError::execution(
+                            fuigo_tool_protocol::ToolId::new("search_replace").expect("valid"),
+                            e.to_string(),
+                        ));
+                    }
+                };
+                return Ok(output);
+            }
+        };
     // Writing the edit back would replace every undecodable byte with U+FFFD, so a binary file is refused, not rewritten
     let old_text = match String::from_utf8(bytes) {
         Ok(text) => text,
@@ -992,7 +1003,10 @@ impl fuigo_tool_runtime::Tool for SearchReplaceTool {
         }
     }
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1220,8 +1234,11 @@ mod tests {
     async fn editing_a_fifo_is_a_clear_refusal() {
         let tmp = TempDir::new().unwrap();
         let fifo = tmp.path().join("pipe");
-        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR)
-            .unwrap();
+        nix::unistd::mkfifo(
+            &fifo,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
         let resources = skip_read_resources(tmp.path());
         let run = fuigo_tool_runtime::Tool::run(
             &SearchReplaceTool,
@@ -1259,7 +1276,10 @@ mod tests {
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
-        assert_eq!(std::fs::read(tmp.path().join("blob.bin")).unwrap(), original);
+        assert_eq!(
+            std::fs::read(tmp.path().join("blob.bin")).unwrap(),
+            original
+        );
     }
     #[test]
     fn oversized_source_is_reported_with_its_limit() {
@@ -1282,7 +1302,11 @@ mod tests {
         let out = restore_mixed_line_endings(&old, &matched, &new);
         let took = started.elapsed();
         assert!(took < std::time::Duration::from_secs(15), "took {took:?}");
-        assert_eq!(out.replace("\r\n", "\n"), new, "the text is the edit, whatever the endings");
+        assert_eq!(
+            out.replace("\r\n", "\n"),
+            new,
+            "the text is the edit, whatever the endings"
+        );
     }
     #[tokio::test]
     async fn file_not_found() {
@@ -1608,14 +1632,22 @@ mod tests {
         std::fs::File::create(&big).unwrap().set_len(len).unwrap();
         let resources = test_resources(tmp.path());
         let input = make_input("big.log", "", "replacement\n");
-        let result = fuigo_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let result = fuigo_tool_runtime::Tool::run(
+            &SearchReplaceTool,
+            test_ctx(resources.into_shared()),
+            input,
+        )
+        .await
+        .unwrap();
         match result {
             SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("256 MB"), "{msg}"),
             other => panic!("expected a size refusal, got {other:?}"),
         }
-        assert_eq!(std::fs::metadata(&big).unwrap().len(), len, "the file must be left untouched");
+        assert_eq!(
+            std::fs::metadata(&big).unwrap().len(),
+            len,
+            "the file must be left untouched"
+        );
     }
     #[tokio::test]
     async fn empty_old_string_overrides_with_explicit_false() {
@@ -2842,7 +2874,11 @@ neutTest_set);
     #[tokio::test]
     async fn mixed_line_endings_are_kept_on_untouched_lines() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("test.txt"), b"#!/bin/sh\r\nline2\nline3\r\nline4\n").unwrap();
+        std::fs::write(
+            tmp.path().join("test.txt"),
+            b"#!/bin/sh\r\nline2\nline3\r\nline4\n",
+        )
+        .unwrap();
         let mut resources = test_resources(tmp.path());
         resources.insert(Params(SearchReplaceParams {
             skip_read_before_edit: true,
@@ -2851,19 +2887,29 @@ neutTest_set);
         }));
         let shared = resources.into_shared();
         let input = make_input("test.txt", "line4", "NEW");
-        let result = fuigo_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(shared.clone()), input)
-            .await
-            .unwrap();
-        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)), "{result:?}");
+        let result =
+            fuigo_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(shared.clone()), input)
+                .await
+                .unwrap();
+        assert!(
+            matches!(result, SearchReplaceOutput::EditsApplied(_)),
+            "{result:?}"
+        );
         let written = std::fs::read(tmp.path().join("test.txt")).unwrap();
         assert_eq!(written, b"#!/bin/sh\r\nline2\nline3\r\nNEW\n");
         let input = make_input("test.txt", "line2\nline3", "A\nB\nC");
         let result = fuigo_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(shared), input)
             .await
             .unwrap();
-        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)), "{result:?}");
+        assert!(
+            matches!(result, SearchReplaceOutput::EditsApplied(_)),
+            "{result:?}"
+        );
         let written = std::fs::read(tmp.path().join("test.txt")).unwrap();
-        assert_eq!(written, b"#!/bin/sh\r\nA\nB\nC\nNEW\n", "a replaced span takes the endings of the lines it replaces");
+        assert_eq!(
+            written, b"#!/bin/sh\r\nA\nB\nC\nNEW\n",
+            "a replaced span takes the endings of the lines it replaces"
+        );
     }
 
     /// P166 Grok r4 MEDIUM 5 (S7 parity): `search_replace` refuses an ignored LOGICAL path, even when its symlink
@@ -2877,20 +2923,32 @@ neutTest_set);
         std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
         let canonical = dunce::canonicalize(repo.path()).unwrap();
         let mut resources = test_resources(repo.path());
-        resources.insert(GitignoreFilter::new(build_gitignore(&canonical, &["secret/"]), canonical));
+        resources.insert(GitignoreFilter::new(
+            build_gitignore(&canonical, &["secret/"]),
+            canonical,
+        ));
         resources.insert(Params(SearchReplaceParams {
             skip_read_before_edit: true,
             empty_old_string_does_not_override: false,
             ..Default::default()
         }));
         let input = make_input("secret/key.txt", "TOKEN=1", "TOKEN=2");
-        let result = fuigo_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let result = fuigo_tool_runtime::Tool::run(
+            &SearchReplaceTool,
+            test_ctx(resources.into_shared()),
+            input,
+        )
+        .await
+        .unwrap();
         match result {
-            SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("ignored by .gitignore"), "{msg}")
+            }
             other => panic!("expected the gitignore refusal, got {other:?}"),
         }
-        assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOKEN=1\n");
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("key.txt")).unwrap(),
+            "TOKEN=1\n"
+        );
     }
 }

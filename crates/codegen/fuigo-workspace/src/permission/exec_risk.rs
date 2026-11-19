@@ -160,16 +160,29 @@ pub(crate) fn is_git_repo_retarget_flag(tok: &str) -> bool {
 /// P166 r9: git environment variables that retarget the repository or make git run a program, so a prefix assignment
 /// (`GIT_DIR=/tmp/evil git commit`) is the same exec risk as the matching flag. Case-sensitive: environment names are.
 const GIT_EXEC_ENV_NAMES: &[&str] = &[
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EDITOR",
-    "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_ASKPASS", "GIT_EXTERNAL_DIFF", "GIT_PROXY_COMMAND", "GIT_TEMPLATE_DIR",
-    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_EXEC_PATH",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_PAGER",
+    "GIT_ASKPASS",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PROXY_COMMAND",
+    "GIT_TEMPLATE_DIR",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
 ];
 
 /// `NAME=value` where NAME is one of [`GIT_EXEC_ENV_NAMES`], unless the value is an allowlisted harmless one
 /// ([`HARMLESS_COMMAND_VALUES`], P166 r13B): that removes only this finding, not the unvetted-env classification.
 pub(crate) fn is_git_exec_env_assignment(text: &str) -> bool {
     text.split_once('=').is_some_and(|(name, value)| {
-        (GIT_EXEC_ENV_NAMES.contains(&name) && !harmless_env_value(name, value)) || is_git_config_env_name(name)
+        (GIT_EXEC_ENV_NAMES.contains(&name) && !harmless_env_value(name, value))
+            || is_git_config_env_name(name)
     })
 }
 
@@ -186,7 +199,11 @@ pub(crate) struct HarmlessValueRow {
 /// `GIT_SSH_COMMAND` is deliberately absent. Read by the env path (`is_git_exec_env_assignment`) and the config-key
 /// path (`command_valued_config`).
 pub(crate) const HARMLESS_COMMAND_VALUES: &[HarmlessValueRow] = &[
-    HarmlessValueRow { env: &["GIT_PAGER", "PAGER"], keys: &["core.pager", "pager.*"], values: &["cat"] },
+    HarmlessValueRow {
+        env: &["GIT_PAGER", "PAGER"],
+        keys: &["core.pager", "pager.*"],
+        values: &["cat"],
+    },
     HarmlessValueRow {
         env: &["GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "EDITOR", "VISUAL"],
         keys: &["core.editor", "sequence.editor"],
@@ -203,7 +220,9 @@ pub(crate) const HARMLESS_COMMAND_VALUES: &[HarmlessValueRow] = &[
 /// expansion-free word is removed; anything else is returned unchanged (and so will not match the allowlist).
 fn decode_plain_quotes(value: &str) -> &str {
     for quote in ['\'', '"'] {
-        if let Some(inner) = value.strip_prefix(quote).and_then(|rest| rest.strip_suffix(quote))
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
             && !inner.contains(['\'', '"', '$', '`', '\\'])
         {
             return inner;
@@ -215,15 +234,21 @@ fn decode_plain_quotes(value: &str) -> &str {
 /// Whether `NAME=value` (value as written, maybe plainly quoted) is an allowlisted harmless env value.
 pub(crate) fn harmless_env_value(name: &str, value: &str) -> bool {
     let value = decode_plain_quotes(value);
-    HARMLESS_COMMAND_VALUES.iter().any(|row| row.env.contains(&name) && row.values.contains(&value))
+    HARMLESS_COMMAND_VALUES
+        .iter()
+        .any(|row| row.env.contains(&name) && row.values.contains(&value))
 }
 
 /// Whether the config `key` (any case) set to exactly `value` is an allowlisted harmless value.
 pub(crate) fn harmless_config_value(key: &str, value: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    HARMLESS_COMMAND_VALUES
-        .iter()
-        .any(|row| row.values.contains(&value) && row.keys.iter().any(|pattern| config_key_matches(pattern, &key)))
+    HARMLESS_COMMAND_VALUES.iter().any(|row| {
+        row.values.contains(&value)
+            && row
+                .keys
+                .iter()
+                .any(|pattern| config_key_matches(pattern, &key))
+    })
 }
 
 /// P166 r11 rule 3(c): ANY assignment of git's config-by-environment variables fails closed (keys and values are not
@@ -231,7 +256,9 @@ pub(crate) fn harmless_config_value(key: &str, value: &str) -> bool {
 pub(crate) fn is_git_config_env_name(name: &str) -> bool {
     name == "GIT_CONFIG_COUNT"
         || name == "GIT_CONFIG_PARAMETERS"
-        || ["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"].iter().any(|prefix| name.starts_with(prefix))
+        || ["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 /// How a command-valued config key's value decides whether it is a command.
@@ -340,7 +367,17 @@ fn config_key_has_command_suffix(key: &str) -> bool {
     }
     matches!(
         last,
-        "command" | "cmd" | "program" | "helper" | "tunnel" | "driver" | "editor" | "pager" | "textconv" | "hook" | "hookspath"
+        "command"
+            | "cmd"
+            | "program"
+            | "helper"
+            | "tunnel"
+            | "driver"
+            | "editor"
+            | "pager"
+            | "textconv"
+            | "hook"
+            | "hookspath"
     ) || last.ends_with("cmd")
         || last.ends_with("command")
 }
@@ -376,7 +413,11 @@ fn contains_helper_colons(url: &str) -> bool {
 /// `-`; and, only for [`UrlRole::Source`], `file://` and a bare local path. Everything else (`ext::...`, any `word::`,
 /// a `-` host, an unknown scheme) is a command (a remote helper, a transport option or an unrecognised form).
 pub(crate) fn url_is_ordinary(url: &str, role: UrlRole) -> bool {
-    if url.is_empty() || url.starts_with('-') || url.contains(char::is_whitespace) || contains_helper_colons(url) {
+    if url.is_empty()
+        || url.starts_with('-')
+        || url.contains(char::is_whitespace)
+        || contains_helper_colons(url)
+    {
         return false;
     }
     // P166 r13 item 6: `file:` with any number of slashes is the file scheme (`file:/tmp/x.git`).
@@ -388,11 +429,16 @@ pub(crate) fn url_is_ordinary(url: &str, role: UrlRole) -> bool {
         if scheme == "file" {
             return role == UrlRole::Source;
         }
-        if !matches!(scheme.as_str(), "http" | "https" | "ssh" | "git" | "ftp" | "ftps") {
+        if !matches!(
+            scheme.as_str(),
+            "http" | "https" | "ssh" | "git" | "ftp" | "ftps"
+        ) {
             return false;
         }
         let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-        let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+        let host = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
         return !host.is_empty() && !host.starts_with(['-', ':']);
     }
     // scp-like `host:path` needs the colon before any slash; otherwise this is a local path.
@@ -403,7 +449,9 @@ pub(crate) fn url_is_ordinary(url: &str, role: UrlRole) -> bool {
             !host.is_empty()
                 && !host.starts_with('-')
                 && (host.starts_with('[') && host.ends_with(']')
-                    || host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')))
+                    || host
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')))
         }
         _ => role == UrlRole::Source,
     }
@@ -411,7 +459,10 @@ pub(crate) fn url_is_ordinary(url: &str, role: UrlRole) -> bool {
 
 fn config_key_matches(pattern: &str, key: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix(".*") {
-        return key.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('.')).is_some_and(|rest| !rest.is_empty());
+        return key
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(|rest| !rest.is_empty());
     }
     let Some((head, tail)) = pattern.split_once(".*.") else {
         return pattern == key;
@@ -426,7 +477,10 @@ fn config_key_matches(pattern: &str, key: &str) -> bool {
 fn config_value_is_command(rule: ConfigValue, key: &str, value: Option<&str>) -> bool {
     if rule == ConfigValue::ExtBase {
         // The subsection between `url.` and the last `.`; the value is irrelevant.
-        let mid = key.strip_prefix("url.").and_then(|rest| rest.rsplit_once('.')).map_or("", |(mid, _)| mid);
+        let mid = key
+            .strip_prefix("url.")
+            .and_then(|rest| rest.rsplit_once('.'))
+            .map_or("", |(mid, _)| mid);
         return !url_is_ordinary(mid, UrlRole::InsteadOfBase);
     }
     let Some(value) = value.map(str::trim) else {
@@ -442,7 +496,8 @@ fn config_value_is_command(rule: ConfigValue, key: &str, value: Option<&str>) ->
         ConfigValue::NotNever => !value.eq_ignore_ascii_case("never"),
         ConfigValue::Url => !url_is_ordinary(value, UrlRole::Source),
         ConfigValue::TraceTarget => {
-            git2::Config::parse_bool(value).is_err() && !(value.len() == 1 && value.bytes().all(|b| b.is_ascii_digit()))
+            git2::Config::parse_bool(value).is_err()
+                && !(value.len() == 1 && value.bytes().all(|b| b.is_ascii_digit()))
         }
     }
 }
@@ -454,10 +509,10 @@ pub(crate) fn command_valued_config(key: &str, value: Option<&str>) -> bool {
     if value.is_some_and(|value| harmless_config_value(&key, value)) {
         return false;
     }
-    COMMAND_VALUED_CONFIG_KEYS
-        .iter()
-        .any(|(pattern, rule)| config_key_matches(pattern, &key) && config_value_is_command(*rule, &key, value))
-        || (config_key_has_command_suffix(&key) && config_value_is_command(ConfigValue::NotBool, &key, value))
+    COMMAND_VALUED_CONFIG_KEYS.iter().any(|(pattern, rule)| {
+        config_key_matches(pattern, &key) && config_value_is_command(*rule, &key, value)
+    }) || (config_key_has_command_suffix(&key)
+        && config_value_is_command(ConfigValue::NotBool, &key, value))
 }
 
 /// A `git config` SET's argument words (`key value ...`) or `-c`/env `key=value` text: some word names a
@@ -557,9 +612,9 @@ pub(crate) fn git_config_sets_shell_alias(words: &[String]) -> bool {
     let Some(config_at) = words.iter().position(|word| word == "config") else {
         return false;
     };
-    words[config_at + 1..].windows(2).any(|pair| {
-        pair[0].to_ascii_lowercase().starts_with("alias.") && pair[1].starts_with('!')
-    })
+    words[config_at + 1..]
+        .windows(2)
+        .any(|pair| pair[0].to_ascii_lowercase().starts_with("alias.") && pair[1].starts_with('!'))
 }
 
 /// How a git URL verb treats one option (P166 r13 rule 2).
@@ -584,42 +639,101 @@ fn git_url_verb_option(verb: &str, option: &str) -> Option<GitOpt> {
     use GitOpt::{Config, Exec, Url, Value};
     let table: &[(&str, GitOpt)] = match verb {
         "clone" => &[
-            ("-u", Exec), ("--upload-pack", Exec), ("--template", Exec), ("--exec", Exec), ("--receive-pack", Exec),
-            ("-c", Config), ("--config", Config),
-            ("-o", Value), ("--origin", Value), ("-b", Value), ("--branch", Value), ("--reference", Value),
-            ("--reference-if-able", Value), ("--separate-git-dir", Value), ("--depth", Value),
-            ("--shallow-since", Value), ("--shallow-exclude", Value), ("--filter", Value), ("-j", Value),
-            ("--jobs", Value), ("--server-option", Value), ("--bundle-uri", Value), ("--ref-format", Value),
+            ("-u", Exec),
+            ("--upload-pack", Exec),
+            ("--template", Exec),
+            ("--exec", Exec),
+            ("--receive-pack", Exec),
+            ("-c", Config),
+            ("--config", Config),
+            ("-o", Value),
+            ("--origin", Value),
+            ("-b", Value),
+            ("--branch", Value),
+            ("--reference", Value),
+            ("--reference-if-able", Value),
+            ("--separate-git-dir", Value),
+            ("--depth", Value),
+            ("--shallow-since", Value),
+            ("--shallow-exclude", Value),
+            ("--filter", Value),
+            ("-j", Value),
+            ("--jobs", Value),
+            ("--server-option", Value),
+            ("--bundle-uri", Value),
+            ("--ref-format", Value),
             ("--revision", Value),
         ],
         "fetch" | "pull" => &[
-            ("--upload-pack", Exec), ("--exec", Exec), ("--receive-pack", Exec),
-            ("--depth", Value), ("--deepen", Value), ("--shallow-since", Value), ("--shallow-exclude", Value),
-            ("--filter", Value), ("-j", Value), ("--jobs", Value), ("--refmap", Value), ("--negotiation-tip", Value),
-            ("--recurse-submodules-default", Value), ("-o", Value), ("--server-option", Value), ("-s", Value),
-            ("--strategy", Value), ("-X", Value), ("--strategy-option", Value),
+            ("--upload-pack", Exec),
+            ("--exec", Exec),
+            ("--receive-pack", Exec),
+            ("--depth", Value),
+            ("--deepen", Value),
+            ("--shallow-since", Value),
+            ("--shallow-exclude", Value),
+            ("--filter", Value),
+            ("-j", Value),
+            ("--jobs", Value),
+            ("--refmap", Value),
+            ("--negotiation-tip", Value),
+            ("--recurse-submodules-default", Value),
+            ("-o", Value),
+            ("--server-option", Value),
+            ("-s", Value),
+            ("--strategy", Value),
+            ("-X", Value),
+            ("--strategy-option", Value),
         ],
         "push" => &[
-            ("--receive-pack", Exec), ("--exec", Exec), ("--upload-pack", Exec),
-            ("--repo", Url), ("--push-option", Value), ("-o", Value),
+            ("--receive-pack", Exec),
+            ("--exec", Exec),
+            ("--upload-pack", Exec),
+            ("--repo", Url),
+            ("--push-option", Value),
+            ("-o", Value),
         ],
         "ls-remote" => &[
-            ("--upload-pack", Exec), ("--exec", Exec), ("--receive-pack", Exec),
-            ("--sort", Value), ("-o", Value), ("--server-option", Value),
+            ("--upload-pack", Exec),
+            ("--exec", Exec),
+            ("--receive-pack", Exec),
+            ("--sort", Value),
+            ("-o", Value),
+            ("--server-option", Value),
         ],
-        "remote" => &[("-t", Value), ("-m", Value), ("--track", Value), ("--master", Value)],
+        "remote" => &[
+            ("-t", Value),
+            ("-m", Value),
+            ("--track", Value),
+            ("--master", Value),
+        ],
         "submodule" => &[
-            ("-b", Value), ("--branch", Value), ("--name", Value), ("--reference", Value), ("--depth", Value),
-            ("--jobs", Value), ("-j", Value),
+            ("-b", Value),
+            ("--branch", Value),
+            ("--name", Value),
+            ("--reference", Value),
+            ("--depth", Value),
+            ("--jobs", Value),
+            ("-j", Value),
         ],
         "archive" => &[
-            ("--exec", Exec), ("--upload-pack", Exec), ("--receive-pack", Exec), ("--remote", Url),
-            ("--format", Value), ("--prefix", Value), ("--output", Value), ("-o", Value), ("--add-file", Value),
+            ("--exec", Exec),
+            ("--upload-pack", Exec),
+            ("--receive-pack", Exec),
+            ("--remote", Url),
+            ("--format", Value),
+            ("--prefix", Value),
+            ("--output", Value),
+            ("-o", Value),
+            ("--add-file", Value),
             ("--add-virtual-file", Value),
         ],
         _ => &[],
     };
-    table.iter().find(|(name, _)| *name == option).map(|(_, kind)| *kind)
+    table
+        .iter()
+        .find(|(name, _)| *name == option)
+        .map(|(_, kind)| *kind)
 }
 
 /// P166 r12 item 4: whether a git URL operand of `clone`, `fetch`, `pull`, `push`, `ls-remote`, `remote add|set-url`,
@@ -641,7 +755,10 @@ pub(crate) fn git_command_url_operand(words: &[String]) -> bool {
     let Some(verb) = words.get(i).map(String::as_str) else {
         return false;
     };
-    if !matches!(verb, "clone" | "fetch" | "pull" | "push" | "ls-remote" | "remote" | "submodule" | "archive") {
+    if !matches!(
+        verb,
+        "clone" | "fetch" | "pull" | "push" | "ls-remote" | "remote" | "submodule" | "archive"
+    ) {
         return false;
     }
     let mut operands: Vec<&str> = Vec::new();
@@ -701,7 +818,10 @@ pub(crate) fn git_command_url_operand(words: &[String]) -> bool {
                 // Unlisted: `--opt=VALUE` is skipped; `--opt WORD` leaves WORD possibly a URL.
                 if value.is_none()
                     && !word.contains('=')
-                    && let Some(next) = rest.as_slice().first().filter(|next| !next.starts_with('-'))
+                    && let Some(next) = rest
+                        .as_slice()
+                        .first()
+                        .filter(|next| !next.starts_with('-'))
                 {
                     urls.push(next);
                     unlisted_value_seen = true;
@@ -709,7 +829,10 @@ pub(crate) fn git_command_url_operand(words: &[String]) -> bool {
             }
         }
     }
-    if urls.iter().any(|url| !url_is_ordinary(url, UrlRole::Source)) {
+    if urls
+        .iter()
+        .any(|url| !url_is_ordinary(url, UrlRole::Source))
+    {
         return true;
     }
     if verb == "archive" {
@@ -718,13 +841,16 @@ pub(crate) fn git_command_url_operand(words: &[String]) -> bool {
     let judged: &[&str] = match verb {
         // `git clone URL [DIR]`, `fetch|pull|push|ls-remote REPO …`.
         // After an unlisted option that was followed by a word, the real URL may be the second operand.
-        "clone" | "fetch" | "pull" | "push" | "ls-remote" => {
-            operands.get(..if unlisted_value_seen { 2 } else { 1 }).or(Some(&operands[..])).unwrap_or_default()
-        }
+        "clone" | "fetch" | "pull" | "push" | "ls-remote" => operands
+            .get(..if unlisted_value_seen { 2 } else { 1 })
+            .or(Some(&operands[..]))
+            .unwrap_or_default(),
         // `git remote add NAME URL`, `git remote set-url NAME NEWURL [OLDURL]` (a `--delete` URL is a pattern).
         "remote" => match operands.first() {
             Some(&"add") => operands.get(2..3).unwrap_or_default(),
-            Some(&"set-url") if !words.iter().any(|word| word == "--delete") => operands.get(2..3).unwrap_or_default(),
+            Some(&"set-url") if !words.iter().any(|word| word == "--delete") => {
+                operands.get(2..3).unwrap_or_default()
+            }
             _ => &[],
         },
         // `git submodule add [-b B] URL [PATH]`.
@@ -733,7 +859,9 @@ pub(crate) fn git_command_url_operand(words: &[String]) -> bool {
             _ => &[],
         },
     };
-    judged.iter().any(|url| !url_is_ordinary(url, UrlRole::Source))
+    judged
+        .iter()
+        .any(|url| !url_is_ordinary(url, UrlRole::Source))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -746,7 +874,12 @@ pub(crate) struct SegmentExecFacts {
 pub(crate) fn segment_exec_facts(words: &[String]) -> SegmentExecFacts {
     // P166 r9: `env GIT_DIR=/tmp/evil git commit` keeps the assignment as a word; the wrapper peel below drops it.
     if words.iter().any(|word| is_git_exec_env_assignment(word)) {
-        return SegmentExecFacts { exec_risk: true, has_git: words.iter().any(|word| normalized_token_basename(word) == "git") };
+        return SegmentExecFacts {
+            exec_risk: true,
+            has_git: words
+                .iter()
+                .any(|word| normalized_token_basename(word) == "git"),
+        };
     }
     match normalize_for_exec_risk(words) {
         NormalizedArgv::FailClosed => SegmentExecFacts {
@@ -852,12 +985,21 @@ pub(crate) fn git_words_have_unsafe_query_option(words: &[String]) -> bool {
         return true;
     }
     // `git grep -O<cmd>` / `-O <cmd>` executes <cmd>; the short-attached form is not a long-option abbreviation, so guard it verb-specifically
-    git_subcommand(words) == Some("grep") && words.iter().skip(1).any(|w| git_grep_word_opens_pager(w))
+    git_subcommand(words) == Some("grep")
+        && words.iter().skip(1).any(|w| git_grep_word_opens_pager(w))
 }
 
 /// Git global options that take their value as the next word.
-const GIT_GLOBAL_VALUE_OPTIONS: &[&str] =
-    &["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source"];
+const GIT_GLOBAL_VALUE_OPTIONS: &[&str] = &[
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--super-prefix",
+    "--config-env",
+    "--attr-source",
+];
 
 /// u35 r3: the subcommand of a git invocation (normalised program name `git`), past every global option: a value
 /// option in [`GIT_GLOBAL_VALUE_OPTIONS`] skips its value, any other option is a flag. Used by floors, which must see
@@ -874,7 +1016,11 @@ pub(crate) fn git_subcommand(words: &[String]) -> Option<&str> {
         if !word.starts_with('-') {
             return Some(word.as_str());
         }
-        i += if GIT_GLOBAL_VALUE_OPTIONS.contains(&word.as_str()) { 2 } else { 1 };
+        i += if GIT_GLOBAL_VALUE_OPTIONS.contains(&word.as_str()) {
+            2
+        } else {
+            1
+        };
     }
     None
 }
@@ -914,7 +1060,8 @@ pub(crate) fn git_words_are_read_only_query(words: &[String]) -> bool {
     if !SAFE_GIT_SUBCOMMANDS.contains(&words[verb_idx].as_str()) {
         return false;
     }
-    git_query_form_is_read_only(&words[verb_idx], &words[verb_idx + 1..]) && !git_words_have_unsafe_query_option(words)
+    git_query_form_is_read_only(&words[verb_idx], &words[verb_idx + 1..])
+        && !git_words_have_unsafe_query_option(words)
 }
 
 /// u35 g3 (Astra r3): per-verb forms of the read-only verbs that are not queries. `branch` is read-only only in its
@@ -946,7 +1093,11 @@ fn git_query_form_is_read_only(verb: &str, args: &[String]) -> bool {
         "grep" => !args.iter().any(|word| word == "--no-index"),
         "blame" => !args.iter().take_while(|w| *w != "--").any(|word| {
             is_accepted_long_option_prefix(word.split('=').next().unwrap_or(word), "--contents", 5)
-                || is_accepted_long_option_prefix(word.split('=').next().unwrap_or(word), "--ignore-revs-file", 13)
+                || is_accepted_long_option_prefix(
+                    word.split('=').next().unwrap_or(word),
+                    "--ignore-revs-file",
+                    13,
+                )
                 || (word.starts_with('-') && !word.starts_with("--") && word.contains('S'))
         }),
         _ => true,
@@ -966,7 +1117,12 @@ pub(crate) fn local_git_config_entry_is_exec(name: &str, value: &str) -> bool {
     }
     // u35 g8 (Grok r7): `log.showsignature` makes the safe verbs `git log` / `git show` verify signatures, which runs
     // the system `gpg` (and lets it write `~/.gnupg`). Any value git reads as true counts.
-    if name == "log.showsignature" && !matches!(value.to_ascii_lowercase().as_str(), "false" | "no" | "off" | "0") {
+    if name == "log.showsignature"
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "false" | "no" | "off" | "0"
+        )
+    {
         return true;
     }
     // P166 r8B: a shell alias (`alias.<any> = !cmd`) runs a stored command on a later `git <alias>`; the alias name
@@ -989,12 +1145,64 @@ pub(crate) fn local_repo_config_has_exec_risk(cwd: &Path) -> bool {
 /// what `git status` runs (probe: git 2.43, 2.50 Apple Git, 2.55; BUILD-LOG g5b). Only names that have been part of
 /// git for many releases are listed, so an older git cannot fall through to an alias for one of them.
 const GIT_LONGSTANDING_COMMANDS: &[&str] = &[
-    "add", "am", "apply", "archive", "bisect", "blame", "branch", "bundle", "cat-file", "check-attr", "check-ignore",
-    "checkout", "cherry", "cherry-pick", "clean", "clone", "commit", "config", "count-objects", "describe", "diff",
-    "fetch", "for-each-ref", "format-patch", "fsck", "gc", "grep", "help", "init", "log", "ls-files", "ls-remote",
-    "ls-tree", "merge", "merge-base", "mv", "name-rev", "notes", "pull", "push", "rebase", "reflog", "remote", "repack",
-    "replace", "reset", "rev-list", "rev-parse", "revert", "rm", "shortlog", "show", "show-ref", "stash", "status",
-    "submodule", "tag", "worktree",
+    "add",
+    "am",
+    "apply",
+    "archive",
+    "bisect",
+    "blame",
+    "branch",
+    "bundle",
+    "cat-file",
+    "check-attr",
+    "check-ignore",
+    "checkout",
+    "cherry",
+    "cherry-pick",
+    "clean",
+    "clone",
+    "commit",
+    "config",
+    "count-objects",
+    "describe",
+    "diff",
+    "fetch",
+    "for-each-ref",
+    "format-patch",
+    "fsck",
+    "gc",
+    "grep",
+    "help",
+    "init",
+    "log",
+    "ls-files",
+    "ls-remote",
+    "ls-tree",
+    "merge",
+    "merge-base",
+    "mv",
+    "name-rev",
+    "notes",
+    "pull",
+    "push",
+    "rebase",
+    "reflog",
+    "remote",
+    "repack",
+    "replace",
+    "reset",
+    "rev-list",
+    "rev-parse",
+    "revert",
+    "rm",
+    "shortlog",
+    "show",
+    "show-ref",
+    "stash",
+    "status",
+    "submodule",
+    "tag",
+    "worktree",
 ];
 
 /// u35 g5b (Grok r4): a subcommand that is not part of git and is defined as an alias in the repository's own config
@@ -1015,7 +1223,9 @@ pub(crate) fn repo_alias_runs_for(entries: &[(String, String)], verb: &str) -> b
 /// otherwise), so the real environment of the test process (cargo's `LD_LIBRARY_PATH`, the builder's `HOME`) never
 /// decides a test.
 fn inherited_env(name: &str) -> Option<String> {
-    if let Some(value) = ENV_VIEW.with(|view| view.borrow().as_ref().map(|map| map.get(name).cloned())) {
+    if let Some(value) =
+        ENV_VIEW.with(|view| view.borrow().as_ref().map(|map| map.get(name).cloned()))
+    {
         return value;
     }
     #[cfg(test)]
@@ -1030,16 +1240,27 @@ fn inherited_env(name: &str) -> Option<String> {
 
 /// The names of every inherited variable (for the `DYLD_*` family), seen the same way as [`inherited_env`].
 fn inherited_env_names() -> Vec<String> {
-    if let Some(names) = ENV_VIEW.with(|view| view.borrow().as_ref().map(|map| map.keys().cloned().collect())) {
+    if let Some(names) = ENV_VIEW.with(|view| {
+        view.borrow()
+            .as_ref()
+            .map(|map| map.keys().cloned().collect())
+    }) {
         return names;
     }
     #[cfg(test)]
     {
-        TEST_ENV.with(|env| env.borrow().as_ref().map(|map| map.keys().cloned().collect()).unwrap_or_default())
+        TEST_ENV.with(|env| {
+            env.borrow()
+                .as_ref()
+                .map(|map| map.keys().cloned().collect())
+                .unwrap_or_default()
+        })
     }
     #[cfg(not(test))]
     {
-        std::env::vars_os().map(|(name, _)| name.to_string_lossy().into_owned()).collect()
+        std::env::vars_os()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect()
     }
 }
 
@@ -1079,7 +1300,10 @@ pub(crate) fn with_env_view<T>(env: &[(String, String)], f: impl FnOnce() -> T) 
 #[cfg(test)]
 pub(crate) fn with_inherited_env<T>(vars: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
     // u35 g13 (Fable r12 Low): restore what was installed before (a live `TestInheritedEnv` guard included).
-    let map = vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+    let map = vars
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
     let previous = TEST_ENV.with(|env| env.borrow_mut().replace(map));
     let out = f();
     TEST_ENV.with(|env| *env.borrow_mut() = previous);
@@ -1095,7 +1319,10 @@ pub(crate) struct TestInheritedEnv(Option<std::collections::HashMap<String, Stri
 #[cfg(test)]
 impl TestInheritedEnv {
     pub(crate) fn set(vars: &[(&str, &str)]) -> Self {
-        let map = vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        let map = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
         Self(TEST_ENV.with(|env| env.borrow_mut().replace(map)))
     }
 }
@@ -1111,12 +1338,19 @@ impl Drop for TestInheritedEnv {
 /// The variables a test installed with [`with_inherited_env`], for a git child process the classifier runs.
 #[cfg(test)]
 pub(crate) fn test_inherited_env() -> Vec<(String, String)> {
-    TEST_ENV.with(|env| env.borrow().as_ref().map(|map| map.clone().into_iter().collect()).unwrap_or_default())
+    TEST_ENV.with(|env| {
+        env.borrow()
+            .as_ref()
+            .map(|map| map.clone().into_iter().collect())
+            .unwrap_or_default()
+    })
 }
 
 /// The top of the work tree that contains `dir` (the nearest ancestor holding `.git`), or `dir` itself.
 fn work_tree_root(dir: &Path) -> &Path {
-    dir.ancestors().find(|candidate| candidate.join(".git").exists()).unwrap_or(dir)
+    dir.ancestors()
+        .find(|candidate| candidate.join(".git").exists())
+        .unwrap_or(dir)
 }
 
 /// An absolute path inside `dir` or its work tree, compared as spelled and with symlinks resolved on both sides
@@ -1124,50 +1358,103 @@ fn work_tree_root(dir: &Path) -> &Path {
 /// holds it, or is the filesystem root is the user's own tree, not a checkout: no absolute path counts as inside it
 /// (so Fuigo started in `~` or `/` does not treat `~/.cargo/bin` or `/usr/bin` as the repository's).
 fn absolute_path_is_inside(candidate: &Path, dir: &Path) -> bool {
-    let root = dunce::canonicalize(work_tree_root(dir)).unwrap_or_else(|_| work_tree_root(dir).to_path_buf());
+    let root = dunce::canonicalize(work_tree_root(dir))
+        .unwrap_or_else(|_| work_tree_root(dir).to_path_buf());
     let holds_home = inherited_env("HOME").is_some_and(|home| {
         let home = Path::new(home.trim());
-        home.is_absolute() && dunce::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()).starts_with(&root)
+        home.is_absolute()
+            && dunce::canonicalize(home)
+                .unwrap_or_else(|_| home.to_path_buf())
+                .starts_with(&root)
     });
     if root.parent().is_none() || holds_home {
         return false;
     }
-    let inside = |file: &Path, dir: &Path| file.starts_with(dir) || file.starts_with(work_tree_root(dir));
+    let inside =
+        |file: &Path, dir: &Path| file.starts_with(dir) || file.starts_with(work_tree_root(dir));
     let resolved_dir = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let resolved_file = dunce::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
     inside(candidate, dir) || inside(&resolved_file, &resolved_dir)
 }
 
 /// The rustup proxies: each reads `RUSTUP_TOOLCHAIN` / `RUSTUP_HOME` to pick the toolchain it runs.
-const RUSTUP_PROXIES: &[&str] = &["cargo", "rustc", "rustfmt", "clippy", "clippy-driver", "cargo-clippy", "rustup"];
+const RUSTUP_PROXIES: &[&str] = &[
+    "cargo",
+    "rustc",
+    "rustfmt",
+    "clippy",
+    "clippy-driver",
+    "cargo-clippy",
+    "rustup",
+];
 
 /// u35 g7: inherited variables that steer which program runs, what it loads or which config it reads, by the
 /// programs they affect (`*`: every command, through the runner shell or the dynamic loader). Their value is never
 /// read: set and non-empty is enough ([`inherited_env_steers`]). Any `DYLD_*` variable counts for `*` too.
 pub(crate) const STEERING_ENV: &[(&[&str], &[&str])] = &[
-    (&["*"], &["LD_PRELOAD", "LD_AUDIT", "GCONV_PATH", "BASH_ENV", "ENV"]),
+    (
+        &["*"],
+        &["LD_PRELOAD", "LD_AUDIT", "GCONV_PATH", "BASH_ENV", "ENV"],
+    ),
     (
         &["git"],
         &[
-            "GIT_EXTERNAL_DIFF", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR",
-            "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXEC_PATH", "GIT_CONFIG_COUNT",
-            "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG", "GIT_DIR",
-            "GIT_COMMON_DIR", "GIT_TEMPLATE_DIR", "LESSCLOSE",
+            "GIT_EXTERNAL_DIFF",
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "GIT_PAGER",
+            "GIT_EDITOR",
+            "GIT_SEQUENCE_EDITOR",
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "GIT_PROXY_COMMAND",
+            "GIT_EXEC_PATH",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG",
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_TEMPLATE_DIR",
+            "LESSCLOSE",
         ],
     ),
     (&["rg"], &["RIPGREP_CONFIG_PATH"]),
     (&["file"], &["MAGIC"]),
-    (&["gh"], &["GH_CONFIG_DIR", "GH_PAGER", "GH_BROWSER", "BROWSER", "GH_EDITOR"]),
+    (
+        &["gh"],
+        &[
+            "GH_CONFIG_DIR",
+            "GH_PAGER",
+            "GH_BROWSER",
+            "BROWSER",
+            "GH_EDITOR",
+        ],
+    ),
     (&["docker"], &["DOCKER_CONFIG"]),
     (
         &["npm", "npx", "pnpm"],
         &[
-            "NPM_CONFIG_USERCONFIG", "npm_config_userconfig", "NPM_CONFIG_GLOBALCONFIG", "npm_config_globalconfig",
-            "NPM_CONFIG_SCRIPT_SHELL", "npm_config_script_shell",
+            "NPM_CONFIG_USERCONFIG",
+            "npm_config_userconfig",
+            "NPM_CONFIG_GLOBALCONFIG",
+            "npm_config_globalconfig",
+            "NPM_CONFIG_SCRIPT_SHELL",
+            "npm_config_script_shell",
         ],
     ),
     (&["yarn"], &["YARN_RC_FILENAME"]),
-    (&["cargo"], &["RUSTC", "RUSTDOC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"]),
+    (
+        &["cargo"],
+        &[
+            "RUSTC",
+            "RUSTDOC",
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+        ],
+    ),
     (&["go"], &["GOENV", "GOFLAGS"]),
     (&["go", "make", "cmake"], &["CC", "CXX"]),
     (&["make"], &["MAKEFILES", "MAKEFLAGS", "GNUMAKEFLAGS"]),
@@ -1198,7 +1485,11 @@ enum UserValue {
 /// command, `FUIGO_HOME` / `FUIGO_CONFIG_PATH` the configuration (and `FUIGO_HOME` the vendored search tools), and
 /// `FUIGO_TOOLS_UGREP_PATH` / `FUIGO_TOOLS_BFS_PATH` the programs Fuigo's `grep` / `find` shadows run.
 const USER_PATH_ENV: &[(&[&str], &[&str], UserValue)] = &[
-    (&["*"], &["ZDOTDIR", "FUIGO_HOME", "FUIGO_CONFIG_PATH"], UserValue::Path),
+    (
+        &["*"],
+        &["ZDOTDIR", "FUIGO_HOME", "FUIGO_CONFIG_PATH"],
+        UserValue::Path,
+    ),
     (&["*"], &["SHELL", "FUIGO_SHELL"], UserValue::Program),
     // u35 g8 (release gate): library search paths are commonly set (CUDA, conda, Homebrew; cargo sets them for every
     // test and `cargo run`): directories outside the project are the user's own. A preload stays presence-judged.
@@ -1207,13 +1498,21 @@ const USER_PATH_ENV: &[(&[&str], &[&str], UserValue)] = &[
     (&["grep"], &["FUIGO_TOOLS_UGREP_PATH"], UserValue::Path),
     (&["find"], &["FUIGO_TOOLS_BFS_PATH"], UserValue::Path),
     (&["git", "gh"], &["PAGER"], UserValue::Program),
-    (&["git"], &["LESSOPEN", "EDITOR", "VISUAL"], UserValue::Program),
+    (
+        &["git"],
+        &["LESSOPEN", "EDITOR", "VISUAL"],
+        UserValue::Program,
+    ),
     (&["git", "go"], &["XDG_CONFIG_HOME"], UserValue::Path),
     (&["kubectl"], &["KUBECONFIG"], UserValue::PathList),
     (&["cargo"], &["CARGO_HOME"], UserValue::Path),
     (RUSTUP_PROXIES, &["RUSTUP_HOME"], UserValue::Path),
     (&["go"], &["GOROOT"], UserValue::Path),
-    (&[FUIGO_GREP_TOOL], &["RG_BIN_PATH", "RUNFILES_DIR"], UserValue::Path),
+    (
+        &[FUIGO_GREP_TOOL],
+        &["RG_BIN_PATH", "RUNFILES_DIR"],
+        UserValue::Path,
+    ),
 ];
 
 /// u35 g8 (Astra r7): Fuigo's own grep tool, as a program of [`USER_PATH_ENV`]: in a build without a bundled `rg` it
@@ -1228,24 +1527,34 @@ pub(crate) fn grep_tool_env_steers(dir: &Path) -> Option<&'static str> {
 
 /// The first [`USER_PATH_ENV`] variable, of the rows `affects` selects, with a value that is not the user's own.
 fn user_value_rows_steer(affects: impl Fn(&[&str]) -> bool, dir: &Path) -> Option<&'static str> {
-    USER_PATH_ENV.iter().filter(|(programs, ..)| affects(programs)).find_map(|(_, vars, kind)| {
-        vars.iter().copied().find(|var| {
-            inherited_env_values(var).iter().any(|value| !value.is_empty() && !user_value_is_own(*kind, value, dir))
+    USER_PATH_ENV
+        .iter()
+        .filter(|(programs, ..)| affects(programs))
+        .find_map(|(_, vars, kind)| {
+            vars.iter().copied().find(|var| {
+                inherited_env_values(var)
+                    .iter()
+                    .any(|value| !value.is_empty() && !user_value_is_own(*kind, value, dir))
+            })
         })
-    })
 }
 
 /// u35 g8: the dynamic loader's search-path variables, judged entry by entry ([`UserValue::PathList`]); every other
 /// `DYLD_*` (`DYLD_INSERT_LIBRARIES`, ...) is judged by presence.
 const LIBRARY_PATH_ENV: &[&str] = &[
-    "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
     "DYLD_FALLBACK_FRAMEWORK_PATH",
 ];
 
 /// Letters, digits and `/._-+@,` (on Windows also `\` and `:`): no whitespace, quote or expansion.
 fn plain_value(value: &str) -> bool {
     !value.is_empty()
-        && value.chars().all(|c| c.is_alphanumeric() || "/._-+@,".contains(c) || (cfg!(windows) && "\\:".contains(c)))
+        && value.chars().all(|c| {
+            c.is_alphanumeric() || "/._-+@,".contains(c) || (cfg!(windows) && "\\:".contains(c))
+        })
 }
 
 /// An absolute path outside the work tree of `dir` ([`absolute_path_is_inside`]).
@@ -1264,7 +1573,8 @@ fn outside_tree(entry: &Path, dir: &Path) -> bool {
 /// empty entry from the check. Unix has one reading and is judged as before.
 fn path_list_is_clean(path: &str, dir: &Path) -> bool {
     let path = fuigo_tools::sandbox_launch::child_path_value(path);
-    let clean = |entry: &Path| !entry.to_string_lossy().contains('\u{FFFD}') && outside_tree(entry, dir);
+    let clean =
+        |entry: &Path| !entry.to_string_lossy().contains('\u{FFFD}') && outside_tree(entry, dir);
     std::env::split_paths(path.as_ref()).all(|entry| clean(&entry))
         && (!cfg!(windows)
             || fuigo_tools::sandbox_launch::windows_path_entries_as_git_bash_reads(&path)
@@ -1275,10 +1585,12 @@ fn path_list_is_clean(path: &str, dir: &Path) -> bool {
 fn user_value_is_own(kind: UserValue, value: &str, dir: &Path) -> bool {
     match kind {
         UserValue::Path => plain_value(value) && outside_tree(Path::new(value), dir),
-        UserValue::PathList => {
-            std::env::split_paths(value).all(|e| plain_value(&e.to_string_lossy()) && outside_tree(&e, dir))
+        UserValue::PathList => std::env::split_paths(value)
+            .all(|e| plain_value(&e.to_string_lossy()) && outside_tree(&e, dir)),
+        UserValue::Program => {
+            plain_value(value)
+                && (!value.contains(['/', '\\']) || outside_tree(Path::new(value), dir))
         }
-        UserValue::Program => plain_value(value) && (!value.contains(['/', '\\']) || outside_tree(Path::new(value), dir)),
     }
 }
 
@@ -1298,14 +1610,20 @@ fn user_value_is_own(kind: UserValue, value: &str, dir: &Path) -> bool {
 ///   a program a bare name.
 pub(crate) fn inherited_env_steers(program: Option<&str>, dir: &Path) -> Option<&'static str> {
     let affects = |programs: &[&str]| programs.iter().any(|p| *p == "*" || Some(*p) == program);
-    let set = |var: &str| inherited_env_values(var).iter().any(|value| !value.is_empty());
-    if inherited_env_values("PATH").iter().any(|path| !path_list_is_clean(path, dir)) {
+    let set = |var: &str| {
+        inherited_env_values(var)
+            .iter()
+            .any(|value| !value.is_empty())
+    };
+    if inherited_env_values("PATH")
+        .iter()
+        .any(|path| !path_list_is_clean(path, dir))
+    {
         return Some("PATH");
     }
-    if inherited_env_names()
-        .iter()
-        .any(|name| name.starts_with("DYLD_") && !LIBRARY_PATH_ENV.contains(&name.as_str()) && set(name))
-    {
+    if inherited_env_names().iter().any(|name| {
+        name.starts_with("DYLD_") && !LIBRARY_PATH_ENV.contains(&name.as_str()) && set(name)
+    }) {
         return Some("DYLD_*");
     }
     if let Some(var) = STEERING_ENV
@@ -1324,16 +1642,30 @@ pub(crate) fn inherited_env_steers(program: Option<&str>, dir: &Path) -> Option<
 /// write files). The configuration sources (`GIT_CONFIG_*`, `GIT_DIR`, `HOME`, `XDG_CONFIG_HOME`) stay, so the scan
 /// reads the configuration the command will.
 pub(crate) fn scan_env_removals() -> Vec<String> {
-    const FIXED: &[&str] =
-        &["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "GCONV_PATH", "BASH_ENV", "ENV", "GIT_EXEC_PATH"];
+    const FIXED: &[&str] = &[
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "GCONV_PATH",
+        "BASH_ENV",
+        "ENV",
+        "GIT_EXEC_PATH",
+    ];
     let mut names: Vec<String> = FIXED.iter().map(|name| (*name).to_owned()).collect();
-    names.extend(inherited_env_names().into_iter().filter(|name| name.starts_with("DYLD_") || name.starts_with("GIT_TRACE")));
+    names.extend(
+        inherited_env_names()
+            .into_iter()
+            .filter(|name| name.starts_with("DYLD_") || name.starts_with("GIT_TRACE")),
+    );
     names
 }
 
 /// u35 g7: [`inherited_env_steers`] over a script: what steers every command in `dir` and in every directory a
 /// literal `cd` moves to, then each command's program in the directory it runs in.
-pub(crate) fn inherited_env_steers_script(segments: &[Vec<String>], dir: &Path) -> Option<&'static str> {
+pub(crate) fn inherited_env_steers_script(
+    segments: &[Vec<String>],
+    dir: &Path,
+) -> Option<&'static str> {
     let mut cwd = dir.to_path_buf();
     let mut found = inherited_env_steers(None, &cwd);
     for words in segments {
@@ -1359,9 +1691,14 @@ pub(crate) fn inherited_env_steers_script(segments: &[Vec<String>], dir: &Path) 
 /// the work tree: an outside `PATH` entry can hold a `git` symlink into the repository. A git that does not resolve
 /// is not trusted.
 fn trusted_git_program(dir: &Path) -> Option<PathBuf> {
-    let locate = |name: &str| inherited_env(name).or_else(|| std::env::var(name).ok()).filter(|v| !v.is_empty());
+    let locate = |name: &str| {
+        inherited_env(name)
+            .or_else(|| std::env::var(name).ok())
+            .filter(|v| !v.is_empty())
+    };
     let resolves_outside = |git: &Path| {
-        outside_tree(git, dir) && dunce::canonicalize(git).is_ok_and(|real| real.is_file() && outside_tree(&real, dir))
+        outside_tree(git, dir)
+            && dunce::canonicalize(git).is_ok_and(|real| real.is_file() && outside_tree(&real, dir))
     };
     if let Some(bin) = locate("GIT_BIN_PATH") {
         let bin = PathBuf::from(bin);
@@ -1449,7 +1786,12 @@ fn read_pointer_first_line(path: &Path, follow: bool) -> Option<Vec<u8>> {
     }
     #[cfg(not(unix))]
     {
-        let meta = if follow { std::fs::metadata(path) } else { std::fs::symlink_metadata(path) }.ok()?;
+        let meta = if follow {
+            std::fs::metadata(path)
+        } else {
+            std::fs::symlink_metadata(path)
+        }
+        .ok()?;
         if !meta.is_file() {
             return None;
         }
@@ -1460,7 +1802,10 @@ fn read_pointer_first_line(path: &Path, follow: bool) -> Option<Vec<u8>> {
     }
     let mut bytes = Vec::new();
     file.take(4096).read_to_end(&mut bytes).ok()?;
-    let end = bytes.iter().position(|b| matches!(b, b'\n' | b'\r')).unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .position(|b| matches!(b, b'\n' | b'\r'))
+        .unwrap_or(bytes.len());
     bytes.truncate(end);
     Some(bytes)
 }
@@ -1484,7 +1829,8 @@ fn plausible_git_dir(dir: &Path, worktree_root: &Path) -> bool {
     dir.parent().is_some()
         && !worktree_root.starts_with(dir)
         && std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
-        && std::fs::symlink_metadata(dir.join("HEAD")).is_ok_and(|m| m.is_file() || m.file_type().is_symlink())
+        && std::fs::symlink_metadata(dir.join("HEAD"))
+            .is_ok_and(|m| m.is_file() || m.file_type().is_symlink())
 }
 
 /// P175d: the git directories a write must not touch before a branch switch in `effective`: the nearest `.git`
@@ -1492,12 +1838,21 @@ fn plausible_git_dir(dir: &Path, worktree_root: &Path) -> bool {
 /// symlink to one, as git follows it), the `gitdir:` it names plus that directory's `commondir` (where the shared
 /// refs live). A pointer that cannot be read as git reads it adds nothing, so the result is never smaller than before.
 fn protected_git_dirs(effective: &Path) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = effective.ancestors().map(|dir| dir.join(".git")).filter(|dir| dir.is_dir()).take(1).collect();
+    let mut dirs: Vec<PathBuf> = effective
+        .ancestors()
+        .map(|dir| dir.join(".git"))
+        .filter(|dir| dir.is_dir())
+        .take(1)
+        .collect();
     let pointer_dirs = || -> Option<Vec<PathBuf>> {
         let (root, file, is_link) = effective.ancestors().find_map(|dir| {
             let dot_git = dir.join(".git");
             let meta = std::fs::symlink_metadata(&dot_git).ok()?;
-            (meta.is_dir() || meta.is_file() || meta.file_type().is_symlink()).then_some((dir, dot_git, meta.file_type().is_symlink()))
+            (meta.is_dir() || meta.is_file() || meta.file_type().is_symlink()).then_some((
+                dir,
+                dot_git,
+                meta.file_type().is_symlink(),
+            ))
         })?;
         // A symlink is followed one level (open without O_NOFOLLOW; the handle must still be a regular file).
         let line = read_pointer_first_line(&file, is_link)?;
@@ -1601,7 +1956,9 @@ pub(crate) fn ambient_scan_plan_from_segments(
             Some("gh") => {
                 git_cwds.push(cwd.clone());
                 git_verbs.push(None);
-                git_queries.push(crate::permission::auto_mode::gh_subcommand_is_read_only(words));
+                git_queries.push(crate::permission::auto_mode::gh_subcommand_is_read_only(
+                    words,
+                ));
             }
             Some("git") => match git_effective_cwd(words, &cwd) {
                 Some(effective) => {
@@ -1626,7 +1983,10 @@ pub(crate) fn ambient_scan_plan_from_segments(
 /// any other segment is ignored. A listed verb in a form not modelled (flags, pathspecs, `--detach`, ...) is
 /// [`BranchSwitchPlan::Undetermined`]. `switch -c <name>` / `checkout -b <name>` (a new branch at HEAD) rewrite
 /// nothing and need no probe.
-pub(crate) fn branch_switch_plan(raw_segments: &[Vec<String>], session_cwd: &Path) -> BranchSwitchPlan {
+pub(crate) fn branch_switch_plan(
+    raw_segments: &[Vec<String>],
+    session_cwd: &Path,
+) -> BranchSwitchPlan {
     branch_switch_plan_with(raw_segments, session_cwd, None)
 }
 
@@ -1644,13 +2004,18 @@ pub(crate) fn branch_switch_plan_with(
     let req = |rev: &str| TreeRef::new(rev, true);
     let opt = |rev: String| TreeRef::new(rev, false);
     // HEAD: an unborn HEAD is skipped, only the target tree is judged.
-    let head = || TreeRef { unborn_ok: true, ..TreeRef::new("HEAD", true) };
+    let head = || TreeRef {
+        unborn_ok: true,
+        ..TreeRef::new("HEAD", true)
+    };
     // Set once an earlier segment can move refs or is not a recognised read-only git command: the trees git would
     // read later no longer match what a probe sees now.
     let mut unsettled = false;
     let mut git_ordinal = 0usize;
     for raw in raw_segments {
-        if raw.iter().any(|word| word.contains("GIT_NO_REPLACE_OBJECTS") || word.contains("GIT_REPLACE_REF_BASE")) {
+        if raw.iter().any(|word| {
+            word.contains("GIT_NO_REPLACE_OBJECTS") || word.contains("GIT_REPLACE_REF_BASE")
+        }) {
             return BranchSwitchPlan::Undetermined;
         }
         let words = match normalize_for_exec_risk(raw) {
@@ -1674,17 +2039,30 @@ pub(crate) fn branch_switch_plan_with(
                     }
                     // `-c submodule.recurse=true` / `--config-env`: recursion the config child cannot see.
                     if matches!(tok.as_str(), "-c") || tok.starts_with("--config-env") {
-                        let value = words.get(at + 1).map(|v| v.to_ascii_lowercase()).unwrap_or_default();
-                        if tok.to_ascii_lowercase().contains("recurse") || value.contains("recurse") || value.contains("submodule") {
+                        let value = words
+                            .get(at + 1)
+                            .map(|v| v.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        if tok.to_ascii_lowercase().contains("recurse")
+                            || value.contains("recurse")
+                            || value.contains("submodule")
+                        {
                             return BranchSwitchPlan::Undetermined;
                         }
                     }
-                    at += if !tok.contains('=') && git_global_option_takes_value(tok) { 2 } else { 1 };
+                    at += if !tok.contains('=') && git_global_option_takes_value(tok) {
+                        2
+                    } else {
+                        1
+                    };
                 }
                 let Some(verb) = words.get(at).map(String::as_str) else {
                     continue;
                 };
-                if !matches!(verb, "checkout" | "switch" | "merge" | "rebase" | "pull" | "stash") {
+                if !matches!(
+                    verb,
+                    "checkout" | "switch" | "merge" | "rebase" | "pull" | "stash"
+                ) {
                     // Read-only verbs (and `add`, which only touches the index) leave refs alone; every other verb
                     // (fetch, remote, commit, push, an alias, ...) may move one.
                     let rest = &words[at + 1..];
@@ -1696,8 +2074,22 @@ pub(crate) fn branch_switch_plan_with(
                     if forced_add
                         || !(matches!(
                             verb,
-                            "status" | "log" | "diff" | "show" | "rev-parse" | "ls-tree" | "ls-files" | "cat-file" | "describe"
-                                | "blame" | "grep" | "shortlog" | "add" | "for-each-ref" | "show-ref" | "rev-list"
+                            "status"
+                                | "log"
+                                | "diff"
+                                | "show"
+                                | "rev-parse"
+                                | "ls-tree"
+                                | "ls-files"
+                                | "cat-file"
+                                | "describe"
+                                | "blame"
+                                | "grep"
+                                | "shortlog"
+                                | "add"
+                                | "for-each-ref"
+                                | "show-ref"
+                                | "rev-list"
                         ) || git_readonly_listing(verb, rest))
                     {
                         unsettled = true;
@@ -1705,20 +2097,41 @@ pub(crate) fn branch_switch_plan_with(
                     continue;
                 }
                 let args: Vec<&str> = words[at + 1..].iter().map(String::as_str).collect();
-                let plain = |arg: &&str| !arg.starts_with('-') && !arg.is_empty() && !arg.contains(['\\', ':', '^', '~', '@', '*', '?', '[']);
+                let plain = |arg: &&str| {
+                    !arg.starts_with('-')
+                        && !arg.is_empty()
+                        && !arg.contains(['\\', ':', '^', '~', '@', '*', '?', '['])
+                };
                 let trees: Option<Vec<TreeRef>> = match (verb, args.as_slice()) {
                     ("stash", [sub @ ("pop" | "apply"), rest @ ..]) => {
                         let _ = sub;
-                        let rest: Vec<&&str> = rest.iter().filter(|arg| !matches!(**arg, "--index" | "-q" | "--quiet")).collect();
+                        let rest: Vec<&&str> = rest
+                            .iter()
+                            .filter(|arg| !matches!(**arg, "--index" | "-q" | "--quiet"))
+                            .collect();
                         let stash = match rest.as_slice() {
                             [] => Some("stash@{0}".to_owned()),
-                            [one] if one.len() > 8 && one.starts_with("stash@{") && one.ends_with('}') && one[7..one.len() - 1].bytes().all(|b| b.is_ascii_digit()) => Some(one.to_string()),
-                            [one] if one.bytes().all(|b| b.is_ascii_digit()) => Some(format!("stash@{{{one}}}")),
+                            [one]
+                                if one.len() > 8
+                                    && one.starts_with("stash@{")
+                                    && one.ends_with('}')
+                                    && one[7..one.len() - 1]
+                                        .bytes()
+                                        .all(|b| b.is_ascii_digit()) =>
+                            {
+                                Some(one.to_string())
+                            }
+                            [one] if one.bytes().all(|b| b.is_ascii_digit()) => {
+                                Some(format!("stash@{{{one}}}"))
+                            }
                             _ => None,
                         };
                         // No such stash: git errors out and rewrites nothing.
                         stash.map(|stash| {
-                            let na = TreeRef { na_if_absent: true, ..TreeRef::new(stash.as_str(), true) };
+                            let na = TreeRef {
+                                na_if_absent: true,
+                                ..TreeRef::new(stash.as_str(), true)
+                            };
                             vec![na, head(), opt(format!("{stash}^3"))]
                         })
                     }
@@ -1728,32 +2141,57 @@ pub(crate) fn branch_switch_plan_with(
                         None => continue,
                     },
                     ("checkout" | "switch", ["-"]) => Some(vec![head(), req("@{-1}")]),
-                    ("switch", ["-c" | "-C" | "--create", name]) | ("checkout", ["-b" | "-B", name]) if plain(name) => {
+                    ("switch", ["-c" | "-C" | "--create", name])
+                    | ("checkout", ["-b" | "-B", name])
+                        if plain(name) =>
+                    {
                         continue;
                     }
                     // New branch at a start point: the working tree goes from HEAD to the start point's tree.
-                    ("switch", ["-c" | "-C" | "--create", name, start]) | ("checkout", ["-b" | "-B", name, start])
+                    ("switch", ["-c" | "-C" | "--create", name, start])
+                    | ("checkout", ["-b" | "-B", name, start])
                         if plain(name) && plain(start) =>
                     {
                         Some(vec![head(), req(start)])
                     }
-                    ("checkout" | "switch", [target]) if plain(target) => {
-                        Some(vec![head(), TreeRef { guess_remote: true, ..TreeRef::new(*target, true) }])
+                    ("checkout" | "switch", [target]) if plain(target) => Some(vec![
+                        head(),
+                        TreeRef {
+                            guess_remote: true,
+                            ..TreeRef::new(*target, true)
+                        },
+                    ]),
+                    ("merge" | "rebase", [target]) if plain(target) => {
+                        Some(vec![head(), req(target)])
                     }
-                    ("merge" | "rebase", [target]) if plain(target) => Some(vec![head(), req(target)]),
                     ("pull", rest) => {
                         let mut positional = Vec::new();
                         let mut ok = true;
                         for arg in rest {
                             if matches!(
                                 *arg,
-                                "--rebase" | "--no-rebase" | "--ff" | "--ff-only" | "--no-ff" | "--no-edit" | "--autostash"
-                                    | "--no-autostash" | "-q" | "--quiet" | "-v" | "--verbose" | "-r" | "--rebase=true"
-                                    | "--rebase=false" | "--rebase=merges"
+                                "--rebase"
+                                    | "--no-rebase"
+                                    | "--ff"
+                                    | "--ff-only"
+                                    | "--no-ff"
+                                    | "--no-edit"
+                                    | "--autostash"
+                                    | "--no-autostash"
+                                    | "-q"
+                                    | "--quiet"
+                                    | "-v"
+                                    | "--verbose"
+                                    | "-r"
+                                    | "--rebase=true"
+                                    | "--rebase=false"
+                                    | "--rebase=merges"
                             ) {
                                 continue;
                             }
-                            if plain(arg) && !arg.contains('/') || (plain(arg) && positional.len() == 1) {
+                            if plain(arg) && !arg.contains('/')
+                                || (plain(arg) && positional.len() == 1)
+                            {
                                 positional.push(*arg);
                             } else {
                                 ok = false;
@@ -1787,7 +2225,10 @@ pub(crate) fn branch_switch_plan_with(
                 }
                 match (trees, effective_cwd) {
                     (Some(_), Some(_)) if unsettled => undetermined = true,
-                    (Some(trees), Some(effective)) => probes.push(TreeProbe { cwd: effective, trees }),
+                    (Some(trees), Some(effective)) => probes.push(TreeProbe {
+                        cwd: effective,
+                        trees,
+                    }),
                     _ => undetermined = true,
                 }
                 // A pull fetches: later segments read refs it moves.
@@ -1834,19 +2275,44 @@ pub(crate) fn git_add_is_force_for_tests(args: &[String]) -> bool {
 fn git_readonly_listing(verb: &str, args: &[String]) -> bool {
     let valued = |flag: &str| {
         let name = flag.split('=').next().unwrap_or(flag);
-        ["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"].contains(&name)
+        [
+            "--contains",
+            "--no-contains",
+            "--merged",
+            "--no-merged",
+            "--points-at",
+            "--format",
+            "--sort",
+        ]
+        .contains(&name)
     };
     let optional_value = |flag: &str| {
         let name = flag.split('=').next().unwrap_or(flag);
-        !flag.contains('=') && ["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"].contains(&name)
+        !flag.contains('=')
+            && [
+                "--contains",
+                "--no-contains",
+                "--merged",
+                "--no-merged",
+                "--points-at",
+                "--format",
+                "--sort",
+            ]
+            .contains(&name)
     };
     match verb {
         "reflog" => {
             // `reflog [show] <rev>` lists; a flag or a reflog subcommand name in the revision slot does not.
             let rev_ok = |rev: &str| {
-                !rev.starts_with('-') && !["expire", "delete", "exists", "list", "drop", "write"].contains(&rev)
+                !rev.starts_with('-')
+                    && !["expire", "delete", "exists", "list", "drop", "write"].contains(&rev)
             };
-            match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            match args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
                 [] | ["show"] => true,
                 [rev] => rev_ok(rev),
                 ["show", rev] => rev_ok(rev),
@@ -1864,13 +2330,15 @@ fn git_readonly_listing(verb: &str, args: &[String]) -> bool {
                     let name = long.split('=').next().unwrap_or("");
                     match name {
                         "list" => list_mode = true,
-                        "show-current" | "verbose" | "all" | "remotes" | "no-color" | "color" | "column" | "no-column" => {
+                        "show-current" | "verbose" | "all" | "remotes" | "no-color" | "color"
+                        | "column" | "no-column" => {
                             if name == "show-current" && verb == "tag" {
                                 return false;
                             }
                         }
                         _ if valued(a) => {
-                            if optional_value(a) && args.get(i).is_some_and(|v| !v.starts_with('-')) {
+                            if optional_value(a) && args.get(i).is_some_and(|v| !v.starts_with('-'))
+                            {
                                 i += 1;
                             }
                         }
@@ -1881,12 +2349,16 @@ fn git_readonly_listing(verb: &str, args: &[String]) -> bool {
                     if verb == "tag" {
                         // A cluster of only `l` and `n` with an optional trailing digit run: -l, -n, -n3, -ln, -nl, -ln5
                         let letters = flags.trim_end_matches(|c: char| c.is_ascii_digit());
-                        if !letters.is_empty() && letters.bytes().all(|b| matches!(b, b'l' | b'n')) {
+                        if !letters.is_empty() && letters.bytes().all(|b| matches!(b, b'l' | b'n'))
+                        {
                             list_mode = true;
                         } else {
                             return false;
                         }
-                    } else if flags.bytes().all(|b| matches!(b, b'l' | b'a' | b'r' | b'v')) {
+                    } else if flags
+                        .bytes()
+                        .all(|b| matches!(b, b'l' | b'a' | b'r' | b'v'))
+                    {
                         list_mode |= flags.contains('l');
                     } else {
                         return false;
@@ -1906,7 +2378,9 @@ fn git_readonly_listing(verb: &str, args: &[String]) -> bool {
 fn git_stash_untracked_scope(args: &[String]) -> Option<&'static str> {
     use crate::permission::branch_switch::{UNTRACKED_ALL_REV, UNTRACKED_REV};
     let first = args.first().map(String::as_str);
-    if !matches!(first, None | Some("push") | Some("save")) && !first.is_some_and(|f| f.starts_with('-')) {
+    if !matches!(first, None | Some("push") | Some("save"))
+        && !first.is_some_and(|f| f.starts_with('-'))
+    {
         return None;
     }
     let mut scope = None;
@@ -1953,7 +2427,10 @@ pub(crate) fn ambient_git_risk_from_plan(plan: &AmbientScanPlan) -> AmbientGitRi
 /// [`ambient_git_risk_from_plan`]; `folder_trusted` false (u35 t1, design d2 §3.3-5): the command's folder is not
 /// trusted, so the scan reads the repositories with libgit2 alone and starts no git; whatever libgit2 cannot settle
 /// fails closed, so the grant floors keep working.
-pub(crate) fn ambient_git_risk_from_plan_in(plan: &AmbientScanPlan, folder_trusted: bool) -> AmbientGitRisk {
+pub(crate) fn ambient_git_risk_from_plan_in(
+    plan: &AmbientScanPlan,
+    folder_trusted: bool,
+) -> AmbientGitRisk {
     let mut risk = AmbientGitRisk::default();
     match plan {
         AmbientScanPlan::FailClosed => risk.exec = true,
@@ -1968,16 +2445,20 @@ pub(crate) fn ambient_git_risk_from_plan_in(plan: &AmbientScanPlan, folder_trust
                         risk.exec = true;
                         return risk;
                     };
-                    crate::git_content_filters::read_local_git_config_entries_with(dir, Some(git.as_path()))
+                    crate::git_content_filters::read_local_git_config_entries_with(
+                        dir,
+                        Some(git.as_path()),
+                    )
                 } else {
                     crate::git_content_filters::read_local_git_config_entries_git2_only(dir)
                 };
-                let Some(entries) = entries
-                else {
+                let Some(entries) = entries else {
                     risk.exec = true;
                     return risk;
                 };
-                if entries.iter().any(|(name, value)| local_git_config_entry_is_exec(name, value))
+                if entries
+                    .iter()
+                    .any(|(name, value)| local_git_config_entry_is_exec(name, value))
                     || verbs
                         .get(at)
                         .and_then(Option::as_deref)
@@ -1988,7 +2469,9 @@ pub(crate) fn ambient_git_risk_from_plan_in(plan: &AmbientScanPlan, folder_trust
                 }
                 // A command not known to be a read-only query runs whichever hooks its verb fires.
                 if !queries.get(at).copied().unwrap_or(false)
-                    && entries.iter().any(|(name, _)| name == crate::git_content_filters::REPOSITORY_HOOK_KEY)
+                    && entries
+                        .iter()
+                        .any(|(name, _)| name == crate::git_content_filters::REPOSITORY_HOOK_KEY)
                 {
                     risk.hook = true;
                 }
@@ -2170,12 +2653,21 @@ mod tests {
     fn u35_g13_inherited_env_helpers_restore_the_previous_environment() {
         let outer = TestInheritedEnv::set(&[("PATH", "bin")]);
         with_inherited_env(&[("PATH", "/usr/bin")], || {
-            assert_eq!(test_inherited_env(), vec![("PATH".to_owned(), "/usr/bin".to_owned())]);
+            assert_eq!(
+                test_inherited_env(),
+                vec![("PATH".to_owned(), "/usr/bin".to_owned())]
+            );
             let inner = TestInheritedEnv::set(&[("PATH", "/opt/bin")]);
             drop(inner);
-            assert_eq!(test_inherited_env(), vec![("PATH".to_owned(), "/usr/bin".to_owned())]);
+            assert_eq!(
+                test_inherited_env(),
+                vec![("PATH".to_owned(), "/usr/bin".to_owned())]
+            );
         });
-        assert_eq!(test_inherited_env(), vec![("PATH".to_owned(), "bin".to_owned())]);
+        assert_eq!(
+            test_inherited_env(),
+            vec![("PATH".to_owned(), "bin".to_owned())]
+        );
         drop(outer);
         assert!(test_inherited_env().is_empty());
     }

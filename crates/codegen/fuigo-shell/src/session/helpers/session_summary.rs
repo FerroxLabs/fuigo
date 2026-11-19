@@ -67,7 +67,10 @@ pub(crate) fn initial_title_refresh_idx(
 /// It is best-effort and written atomically (temp sibling, then rename).
 /// A crash mid-write therefore can't leave a partial/empty file that would load as `0` and reopen the refresh window.
 /// Written as the session's writer (F5-C6); with none (a session without a folder writer) nothing is written.
-pub(crate) fn save_title_refresh_watermark(writer: Option<&fuigo_session_writer::SessionWriter>, idx: usize) {
+pub(crate) fn save_title_refresh_watermark(
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    idx: usize,
+) {
     let Some(writer) = writer else {
         tracing::debug!("no session writer: title refresh watermark not persisted");
         return;
@@ -77,7 +80,9 @@ pub(crate) fn save_title_refresh_watermark(writer: Option<&fuigo_session_writer:
         return;
     }
     let path = session_dir.join(TITLE_REFRESH_WATERMARK_FILE);
-    if let Err(e) = crate::session::storage::write_bytes_atomic_as(writer, &path, idx.to_string().as_bytes()) {
+    if let Err(e) =
+        crate::session::storage::write_bytes_atomic_as(writer, &path, idx.to_string().as_bytes())
+    {
         tracing::warn!(error = %e, path = %path.display(), "failed to persist title refresh watermark");
     }
 }
@@ -123,8 +128,11 @@ pub(crate) fn title_fallback_from_user_text(user_message: &str) -> String {
     // Never copy arbitrary user words into a public-facing title: pattern-based
     // secret redaction cannot recognize private names or novel credential formats.
     // A small fixed vocabulary still makes common development tasks recognizable.
-    let words: Vec<_> = text.split(|c: char| !c.is_alphabetic())
-        .filter(|s| !s.is_empty()).map(str::to_ascii_lowercase).collect();
+    let words: Vec<_> = text
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
     let action = match words.first().map(String::as_str) {
         Some("fix" | "debug" | "repair") => "Fix",
         Some("build" | "create" | "implement" | "add") => "Build",
@@ -134,12 +142,18 @@ pub(crate) fn title_fallback_from_user_text(user_message: &str) -> String {
         _ => return "New session".into(),
     };
     let topic = [
-        ("auth", "authentication"), ("authentication", "authentication"),
-        ("rendering", "rendering"), ("game", "game"),
-        ("tests", "tests"), ("database", "database"),
-        ("api", "API"), ("docs", "documentation"),
-    ].into_iter().find_map(|(word, label)| words.iter().any(|w| w == word).then_some(label))
-        .unwrap_or("project");
+        ("auth", "authentication"),
+        ("authentication", "authentication"),
+        ("rendering", "rendering"),
+        ("game", "game"),
+        ("tests", "tests"),
+        ("database", "database"),
+        ("api", "API"),
+        ("docs", "documentation"),
+    ]
+    .into_iter()
+    .find_map(|(word, label)| words.iter().any(|w| w == word).then_some(label))
+    .unwrap_or("project");
     format!("{action} {topic}")
 }
 
@@ -174,7 +188,11 @@ pub async fn generate_session_summary(
     title_fallback_from_user_text(&clean_message)
 }
 
-fn initial_title_request(clean_message: &str, model: &str, session_id: &str) -> ConversationRequest {
+fn initial_title_request(
+    clean_message: &str,
+    model: &str,
+    session_id: &str,
+) -> ConversationRequest {
     let mut request = ConversationRequest::from_items(vec![
         ConversationItem::system(
             r#"You are tasked with generating the session title. The user is asking almost always software engineering related questions on their codebase.
@@ -246,7 +264,10 @@ pub(crate) fn clean_title_text(raw: &str) -> String {
     out
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::{
@@ -279,7 +300,11 @@ mod tests {
             None,
             "missing → None"
         );
-        let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir.path()).unwrap();
+        let writer = fuigo_session_writer::SessionWriter::try_claim(
+            uuid::Uuid::now_v7().to_string(),
+            dir.path(),
+        )
+        .unwrap();
         save_title_refresh_watermark(Some(&writer), 1);
         assert_eq!(load_title_refresh_watermark(dir.path()), Some(1));
         std::fs::write(dir.path().join(TITLE_REFRESH_WATERMARK_FILE), "99").unwrap();
@@ -379,10 +404,7 @@ mod tests {
     fn fallback_titles_off_goal_objective_not_reminder() {
         let input = "<system-reminder>\nA goal has been set: do stuff\nStart \
                      now.\n</system-reminder>\n\nbuild a mario platformer game in html";
-        assert_eq!(
-            title_fallback_from_user_text(input),
-            "Build game"
-        );
+        assert_eq!(title_fallback_from_user_text(input), "Build game");
     }
 
     #[test]
@@ -405,10 +427,7 @@ mod tests {
         let input = "<command-name>implement</command-name>\n\
                       <command-message>/implement</command-message>\n\
                       <command-args>fix the rendering bug</command-args>";
-        assert_eq!(
-            title_fallback_from_user_text(input),
-            "Build rendering",
-        );
+        assert_eq!(title_fallback_from_user_text(input), "Build rendering",);
     }
 
     #[test]
@@ -436,8 +455,14 @@ mod tests {
         ] {
             assert_eq!(title_fallback_from_user_text(input), "Fix authentication");
         }
-        assert_eq!(title_fallback_from_user_text("private@example.com"), "New session");
-        assert_eq!(title_fallback_from_user_text("<system-reminder>fix auth secret</system-reminder>"), "New session");
+        assert_eq!(
+            title_fallback_from_user_text("private@example.com"),
+            "New session"
+        );
+        assert_eq!(
+            title_fallback_from_user_text("<system-reminder>fix auth secret</system-reminder>"),
+            "New session"
+        );
     }
 
     #[test]
@@ -446,6 +471,9 @@ mod tests {
         let request = super::initial_title_request("fix auth", "selected-model", &session_id);
         assert_eq!(request.purpose, fuigo_sampling_types::RequestPurpose::Title);
         assert_eq!(request.model.as_deref(), Some("selected-model"));
-        assert_eq!(request.x_fuigo_session_id.as_deref(), Some(session_id.as_str()));
+        assert_eq!(
+            request.x_fuigo_session_id.as_deref(),
+            Some(session_id.as_str())
+        );
     }
 }

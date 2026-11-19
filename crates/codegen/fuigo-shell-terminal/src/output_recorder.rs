@@ -39,7 +39,10 @@ impl OutputRecorder {
         &self.last
     }
 
-    #[allow(clippy::disallowed_methods, reason = "`OutputLog::ByPath` only (tests); `OutputLog::open` gives a session without a writer `Unavailable`, so no session folder gets here.")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "`OutputLog::ByPath` only (tests); `OutputLog::open` gives a session without a writer `Unavailable`, so no session folder gets here."
+    )]
     pub(crate) async fn initialize(&self) {
         // Through the session's writer the log was created (owner-only) when it was opened; no writer that could
         // open it means no log.
@@ -64,7 +67,10 @@ impl OutputRecorder {
 
     /// Append what `current` adds beyond the previous snapshot, realigning on the largest overlap once the buffer rolls.
     /// On write error `last` is left unadvanced so the next poll retries, and the error is returned.
-    #[allow(clippy::disallowed_methods, reason = "`OutputLog::ByPath` only (tests); a session without a writer is `Unavailable` (see `initialize`).")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "`OutputLog::ByPath` only (tests); a session without a writer is `Unavailable` (see `initialize`)."
+    )]
     pub(crate) async fn append(&mut self, current: &str) -> std::io::Result<()> {
         // An empty snapshot must not clear the baseline, or the next cumulative one gets re-appended in full
         if current.is_empty() || current == self.last {
@@ -199,7 +205,10 @@ pub(crate) async fn read_log_tail(path: &std::path::Path, limit: usize) -> Optio
     })
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,7 +242,10 @@ mod tests {
         let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024, OutputLog::ByPath);
         recorder.append("line1\n").await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "line1\n");
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[tokio::test]
@@ -247,7 +259,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            let mode =
+                |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode(&path), 0o600);
             assert_eq!(mode(path.parent().unwrap()), 0o700);
         }
@@ -266,7 +279,8 @@ mod tests {
     async fn recorder_retries_the_suffix_after_a_failed_write() {
         let dir = tempfile::tempdir().unwrap();
 
-        let mut recorder = OutputRecorder::new(dir.path().to_path_buf(), 1024 * 1024, OutputLog::ByPath);
+        let mut recorder =
+            OutputRecorder::new(dir.path().to_path_buf(), 1024 * 1024, OutputLog::ByPath);
         assert!(recorder.append("line1\n").await.is_err());
         assert_eq!(recorder.last, "");
 
@@ -351,10 +365,19 @@ mod tests {
         recorder.initialize().await;
         recorder.append("hello ").await.unwrap();
         recorder.append("hello world").await.unwrap();
-        assert!(!SessionWriter::is_free(id), "the recorder holds the session writer");
-        assert_eq!(std::fs::read_to_string(folder.join(&rel)).unwrap(), "hello world");
+        assert!(
+            !SessionWriter::is_free(id),
+            "the recorder holds the session writer"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join(&rel)).unwrap(),
+            "hello world"
+        );
         drop(recorder);
-        assert!(SessionWriter::is_free(id), "the writer frees with the recorder");
+        assert!(
+            SessionWriter::is_free(id),
+            "the writer frees with the recorder"
+        );
     }
 
     /// F5-C4: a session without a writer gets `OutputLog::Unavailable`; the recorder then creates and appends
@@ -366,6 +389,9 @@ mod tests {
         let mut recorder = OutputRecorder::new(path.clone(), 1024 * 1024, OutputLog::Unavailable);
         recorder.initialize().await;
         recorder.append("line1\n").await.unwrap();
-        assert!(!dir.path().join("session").exists(), "an unavailable log created the session folder");
+        assert!(
+            !dir.path().join("session").exists(),
+            "an unavailable log created the session folder"
+        );
     }
 }

@@ -1072,7 +1072,11 @@ async fn seven_by_eight_is_rejected() {
 fn jpeg_with_exif_orientation(width: u32, height: u32, orientation: u16) -> Vec<u8> {
     use image::{ImageBuffer, Rgb};
     let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(width, height, |x, _| {
-        if x < width / 2 { Rgb([230, 20, 20]) } else { Rgb([20, 20, 230]) }
+        if x < width / 2 {
+            Rgb([230, 20, 20])
+        } else {
+            Rgb([20, 20, 230])
+        }
     });
     let mut jpeg = Vec::new();
     JpegEncoder::new_with_quality(&mut jpeg, 95)
@@ -1121,8 +1125,14 @@ async fn exif_orientation_is_applied_before_the_image_is_sent() {
     );
     let top = decoded.get_pixel(75, 20).0;
     let bottom = decoded.get_pixel(75, 280).0;
-    assert!(top[0] > 150 && top[2] < 100, "red half is now on top: {top:?}");
-    assert!(bottom[2] > 150 && bottom[0] < 100, "blue half is now at the bottom: {bottom:?}");
+    assert!(
+        top[0] > 150 && top[2] < 100,
+        "red half is now on top: {top:?}"
+    );
+    assert!(
+        bottom[2] > 150 && bottom[0] < 100,
+        "blue half is now at the bottom: {bottom:?}"
+    );
 }
 /// An upright photo (no orientation tag) is untouched.
 #[tokio::test]
@@ -1130,7 +1140,14 @@ async fn jpeg_without_orientation_passes_through_unchanged() {
     let jpeg = jpeg_with_exif_orientation(300, 150, 1);
     let data = base64::engine::general_purpose::STANDARD.encode(&jpeg);
     let cache = fresh_cache();
-    match normalize_one_in(ImageContent::new(data.clone(), "image/jpeg"), 1, false, &cache).await {
+    match normalize_one_in(
+        ImageContent::new(data.clone(), "image/jpeg"),
+        1,
+        false,
+        &cache,
+    )
+    .await
+    {
         Outcome::Unchanged(c) => assert_eq!(c.data, data),
         other => panic!("expected Unchanged, got {other:?}"),
     }

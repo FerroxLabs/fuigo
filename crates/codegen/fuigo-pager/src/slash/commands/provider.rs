@@ -158,7 +158,10 @@ fn bind_subscription_model(
             "{model} is not in the {label} model list. Run /provider {slug} to see it."
         ));
     }
-    match ctx.models.resolve_by_name_or_id(&subscription.model_key(model)) {
+    match ctx
+        .models
+        .resolve_by_name_or_id(&subscription.model_key(model))
+    {
         Some(id) => CommandResult::Action(crate::app::actions::Action::SetDefaultModel(id)),
         None => CommandResult::Error(format!(
             "{model} is not in this session's model list yet. Restart Fuigo to pick up the {label} models."
@@ -396,9 +399,9 @@ fn env_var_for(provider: &Provider) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol as acp;
     use crate::acp::model_state::ModelState;
     use crate::app::bundle::BundleState;
+    use agent_client_protocol as acp;
 
     /// `run` never reads this context for `/provider`; the paths under test are
     /// argument parsing and provider lookup, both of which return before any
@@ -593,9 +596,18 @@ mod tests {
             SubscriptionProvider::Xai,
             None,
         ));
-        assert!(out.contains("Grok subscription") && !out.contains("acct-42"), "{out}");
-        assert!(out.find("grok-4.7").unwrap() < out.find("grok-3").unwrap(), "best first: {out}");
-        assert!(out.contains("/provider grok-subscription <model-id>"), "{out}");
+        assert!(
+            out.contains("Grok subscription") && !out.contains("acct-42"),
+            "{out}"
+        );
+        assert!(
+            out.find("grok-4.7").unwrap() < out.find("grok-3").unwrap(),
+            "best first: {out}"
+        );
+        assert!(
+            out.contains("/provider grok-subscription <model-id>"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -636,7 +648,10 @@ mod tests {
             SubscriptionProvider::Xai,
             Some("grok-99"),
         ));
-        assert!(out.contains("not in the Grok subscription model list"), "{out}");
+        assert!(
+            out.contains("not in the Grok subscription model list"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -663,7 +678,10 @@ mod tests {
     #[test]
     fn the_listing_shows_both_subscriptions_with_their_state() {
         let out = message(run(""));
-        assert!(out.contains("chatgpt-subscription") && out.contains("grok-subscription"), "{out}");
+        assert!(
+            out.contains("chatgpt-subscription") && out.contains("grok-subscription"),
+            "{out}"
+        );
         assert!(out.contains("fluxrouter"), "{out}");
         assert!(out.contains("Recommended"), "{out}");
     }

@@ -91,8 +91,10 @@ fn auth_error_with_credential(
     fuigo_sampler::SamplingErrorInfo {
         credential,
         upstream_details: fuigo_sampling_types::error::UpstreamError {
-            flux_routed: true, ..Default::default()
-        }.with_body(401, br#"{"error":{"message":"Unauthorized"}}"#),
+            flux_routed: true,
+            ..Default::default()
+        }
+        .with_body(401, br#"{"error":{"message":"Unauthorized"}}"#),
         ..auth_error()
     }
 }
@@ -1335,7 +1337,9 @@ async fn reconstruct_full_config_wires_bearer_resolver_for_session_method_despit
             )
             .await;
 
-            let cfg = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+            let cfg = actor
+                .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                .await;
 
             assert!(
                 cfg.bearer_resolver.is_some(),
@@ -1360,7 +1364,9 @@ async fn reconstruct_full_config_no_bearer_resolver_for_api_key_method() {
             )
             .await;
 
-            let cfg = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+            let cfg = actor
+                .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                .await;
 
             assert!(
                 cfg.bearer_resolver.is_none(),
@@ -1532,7 +1538,9 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                     provider: None,
                 }));
 
-            let cfg = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+            let cfg = actor
+                .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                .await;
 
             assert!(
                 cfg.bearer_resolver.is_none(),
@@ -2067,15 +2075,19 @@ async fn subscription_acp_reconstruction_uses_native_resolver_without_session_ke
                     ..Default::default()
                 },
             );
-            actor.model_auth_memo.replace(Some(crate::session::acp_session::ModelAuthMemo {
-                model_id: SLUG.into(),
-                facts: crate::agent::config::ModelAuthFacts {
-                    byok: crate::agent::auth_method::ModelByok::Byok,
-                    auth_scheme: Default::default(),
-                },
-                provider: Some(provider),
-            }));
-            let sampling = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
+                    model_id: SLUG.into(),
+                    facts: crate::agent::config::ModelAuthFacts {
+                        byok: crate::agent::auth_method::ModelByok::Byok,
+                        auth_scheme: Default::default(),
+                    },
+                    provider: Some(provider),
+                }));
+            let sampling = actor
+                .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                .await;
             assert_eq!(
                 sampling.subscription,
                 Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt)
@@ -2121,15 +2133,19 @@ async fn p192_memo_only_subscription_is_not_attached_to_the_turn() {
                     ..Default::default()
                 },
             );
-            actor.model_auth_memo.replace(Some(crate::session::acp_session::ModelAuthMemo {
-                model_id: "p192-memo-only-slug".into(),
-                facts: crate::agent::config::ModelAuthFacts {
-                    byok: crate::agent::auth_method::ModelByok::Byok,
-                    auth_scheme: Default::default(),
-                },
-                provider: Some(provider),
-            }));
-            let sampling = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
+                    model_id: "p192-memo-only-slug".into(),
+                    facts: crate::agent::config::ModelAuthFacts {
+                        byok: crate::agent::auth_method::ModelByok::Byok,
+                        auth_scheme: Default::default(),
+                    },
+                    provider: Some(provider),
+                }));
+            let sampling = actor
+                .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                .await;
             assert_eq!(sampling.subscription, None);
             assert!(sampling.subscription_resolver.is_none());
         })
@@ -2151,27 +2167,51 @@ async fn p42_withheld_session_401_is_terminal_with_the_endpoints_remedy() {
                 ("https://api.fluxrouter.ai:8443/v1", true),
                 (P42_CONFIGURED_ORIGIN, false),
             ] {
-                let (actor, _rx) =
-                    make_actor_with_method_and_credentials(Some(am.clone()), "cached_token", fuigo_chat_state::AuthType::SessionToken, String::new()).await;
+                let (actor, _rx) = make_actor_with_method_and_credentials(
+                    Some(am.clone()),
+                    "cached_token",
+                    fuigo_chat_state::AuthType::SessionToken,
+                    String::new(),
+                )
+                .await;
                 let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
                 cfg.base_url = base.to_string();
                 cfg.model = String::new();
                 actor.chat_state_handle.update_sampling_config(cfg);
-                let error = auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing);
-                assert_eq!(actor.session_withheld_401(&error, "", base), withheld, "{base}");
+                let error =
+                    auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing);
+                assert_eq!(
+                    actor.session_withheld_401(&error, "", base),
+                    withheld,
+                    "{base}"
+                );
                 if withheld {
                     let result = actor
-                        .handle_sampling_failure(error, 0, transient_state(0, true), false, TurnParkState::Fresh)
+                        .handle_sampling_failure(
+                            error,
+                            0,
+                            transient_state(0, true),
+                            false,
+                            TurnParkState::Fresh,
+                        )
                         .await;
-                    let err = result.err().unwrap_or_else(|| panic!("{base}: must be terminal"));
+                    let err = result
+                        .err()
+                        .unwrap_or_else(|| panic!("{base}: must be terminal"));
                     let data = format!("{:?}", err.data);
-                    assert!(data.contains("[endpoints]"), "{base}: remedy must name [endpoints]: {data}");
+                    assert!(
+                        data.contains("[endpoints]"),
+                        "{base}: remedy must name [endpoints]: {data}"
+                    );
                     assert!(!data.contains("temporarily unavailable"), "{base}: {data}");
                     assert!(
                         data.contains("auth_destination_refused") && !data.contains("\"auth\""),
                         "{base}: the returned error_kind must not invite a sign-in: {data}"
                     );
-                    p42_assert_refused_destination_wire(base, err.data.as_ref().expect("typed data"));
+                    p42_assert_refused_destination_wire(
+                        base,
+                        err.data.as_ref().expect("typed data"),
+                    );
                 }
             }
             // The pager's banner decision: never a re-auth prompt for a refused destination, even though the
@@ -2181,7 +2221,13 @@ async fn p42_withheld_session_401_is_terminal_with_the_endpoints_remedy() {
                 "Unauthorized (401) from http://127.0.0.1:9/v1/responses"
             ));
             // A request that DID carry a credential is a real rejection, not a withheld session.
-            let (actor, _rx) = make_actor_with_method_and_credentials(Some(am.clone()), "cached_token", fuigo_chat_state::AuthType::SessionToken, String::new()).await;
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am.clone()),
+                "cached_token",
+                fuigo_chat_state::AuthType::SessionToken,
+                String::new(),
+            )
+            .await;
             assert!(!actor.session_withheld_401(
                 &auth_error_with_credential(fuigo_sampling_types::SentCredential::Sent),
                 "",
@@ -2204,24 +2250,50 @@ async fn p149_refused_destination_is_named_by_location_only() {
             crate::agent::config::Config::install_test_trusted_origins();
             let (_dir, am) = auth_manager_with_valid_token("p149-userinfo-session");
             let base = format!("https://p149u:{PASS}@gw.p149.invalid/v1?key={QUERY}");
-            let (actor, _rx) =
-                make_actor_with_method_and_credentials(Some(am.clone()), "cached_token", fuigo_chat_state::AuthType::SessionToken, String::new()).await;
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                Some(am.clone()),
+                "cached_token",
+                fuigo_chat_state::AuthType::SessionToken,
+                String::new(),
+            )
+            .await;
             let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
             cfg.base_url = base.clone();
             cfg.model = String::new();
             actor.chat_state_handle.update_sampling_config(cfg);
             let error = auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing);
-            assert!(actor.session_withheld_401(&error, "", &base), "control: the destination is refused");
+            assert!(
+                actor.session_withheld_401(&error, "", &base),
+                "control: the destination is refused"
+            );
             let result = actor
-                .handle_sampling_failure(error, 0, transient_state(0, true), false, TurnParkState::Fresh)
+                .handle_sampling_failure(
+                    error,
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             let err = result.err().expect("terminal");
-            let message = err.data.as_ref().and_then(|d| d["message"].as_str()).expect("message").to_owned();
+            let message = err
+                .data
+                .as_ref()
+                .and_then(|d| d["message"].as_str())
+                .expect("message")
+                .to_owned();
             assert!(!message.contains(PASS), "the password was shown: {message}");
-            assert!(!message.contains(QUERY), "the query secret was shown: {message}");
-            assert!(!message.contains("p149u"), "the user name was shown: {message}");
             assert!(
-                message.contains("  Endpoint:  https://<redacted>@gw.p149.invalid/v1?key=<redacted>"),
+                !message.contains(QUERY),
+                "the query secret was shown: {message}"
+            );
+            assert!(
+                !message.contains("p149u"),
+                "the user name was shown: {message}"
+            );
+            assert!(
+                message
+                    .contains("  Endpoint:  https://<redacted>@gw.p149.invalid/v1?key=<redacted>"),
                 "control: the location is kept: {message}"
             );
         })
@@ -2236,21 +2308,32 @@ fn p42_assert_refused_destination_wire(base: &str, data: &serde_json::Value) {
     use crate::extensions::notification::{
         AUTH_DESTINATION_REFUSED_REMEDY, AUTH_DESTINATION_REFUSED_SENTENCE,
     };
-    assert!(data.get("http_status").is_none(), "{base}: no http_status may be sent: {data}");
+    assert!(
+        data.get("http_status").is_none(),
+        "{base}: no http_status may be sent: {data}"
+    );
     let message = data["message"].as_str().expect("message");
     assert!(
         message.starts_with(AUTH_DESTINATION_REFUSED_REMEDY),
         "{base}: the remedy must lead the message: {message}"
     );
-    let sentence = message.find(AUTH_DESTINATION_REFUSED_SENTENCE).expect("the plain sentence");
+    let sentence = message
+        .find(AUTH_DESTINATION_REFUSED_SENTENCE)
+        .expect("the plain sentence");
     let model = message.find("\n\n  Model:").expect("the diagnostics block");
     assert!(
         AUTH_DESTINATION_REFUSED_REMEDY.len() < sentence && sentence < model,
         "{base}: remedy, sentence, then diagnostics: {message}"
     );
-    assert!(message.contains(&format!("  Endpoint:  {base}")), "{base}: {message}");
+    assert!(
+        message.contains(&format!("  Endpoint:  {base}")),
+        "{base}: {message}"
+    );
     for needle in ["(401)", "Unauthorized (", "status 401", "Unauthorized"] {
-        assert!(!message.contains(needle), "{base}: {needle:?} must not appear: {message}");
+        assert!(
+            !message.contains(needle),
+            "{base}: {needle:?} must not appear: {message}"
+        );
     }
 }
 
@@ -2280,14 +2363,16 @@ async fn p42_subscription_401_is_not_classified_as_a_withheld_session() {
                     ..Default::default()
                 },
             );
-            actor.model_auth_memo.replace(Some(crate::session::acp_session::ModelAuthMemo {
-                model_id: String::new(),
-                facts: crate::agent::config::ModelAuthFacts {
-                    byok: crate::agent::auth_method::ModelByok::NotByok,
-                    auth_scheme: Default::default(),
-                },
-                provider: Some(provider),
-            }));
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
+                    model_id: String::new(),
+                    facts: crate::agent::config::ModelAuthFacts {
+                        byok: crate::agent::auth_method::ModelByok::NotByok,
+                        auth_scheme: Default::default(),
+                    },
+                    provider: Some(provider),
+                }));
             let error = auth_error_with_credential(fuigo_sampling_types::SentCredential::Missing);
             assert!(
                 !actor.session_withheld_401(&error, "", SUBSCRIPTION_URL),
@@ -2331,14 +2416,20 @@ base_url = "http://127.0.0.1:9/v1"
     const LOOPBACK_URL: &str = "http://127.0.0.1:9/v1";
     // Precondition: configuration alone selects the subscription for this endpoint, and only for it.
     assert!(
-        crate::auth::subscription::inference::selected_for_endpoint("p42-shared-slug", SUBSCRIPTION_URL)
-            .and_then(|p| p.subscription_provider())
-            .is_some(),
+        crate::auth::subscription::inference::selected_for_endpoint(
+            "p42-shared-slug",
+            SUBSCRIPTION_URL
+        )
+        .and_then(|p| p.subscription_provider())
+        .is_some(),
         "the fixture config must select the subscription at its endpoint"
     );
     assert!(
-        crate::auth::subscription::inference::selected_for_endpoint("p42-shared-slug", LOOPBACK_URL)
-            .is_none()
+        crate::auth::subscription::inference::selected_for_endpoint(
+            "p42-shared-slug",
+            LOOPBACK_URL
+        )
+        .is_none()
     );
     let local = tokio::task::LocalSet::new();
     local
@@ -2375,168 +2466,353 @@ base_url = "http://127.0.0.1:9/v1"
 
 #[tokio::test(flavor = "current_thread")]
 async fn p4_workflow_child_terminal_keeps_upstream_with_no_top_level_status() {
-    tokio::task::LocalSet::new().run_until(async {
-        for budgeted in [true,false] {
-            let (gateway_tx,_)=tokio::sync::mpsc::unbounded_channel();
-            let (persistence_tx,_)=tokio::sync::mpsc::unbounded_channel();
-            let mut actor=create_test_actor(50_000,100_000,85,gateway_tx,persistence_tx).await;
-            if budgeted {
-                actor.tool_context.task_output_token_budget=Some(crate::tools::tool_context::TaskOutputTokenBudget::limited(100_000));
-            } else {actor.tool_context.sampler_retry_only_before_output=true;}
-            let e=fuigo_sampling_types::SamplingError::Api {
-                status:reqwest::StatusCode::TOO_MANY_REQUESTS,message:"refusal".into(),model_metadata:None,
-                retry_after_secs:None,should_retry:None,error_code:None,
-                upstream_state:Some("free_cap_reached".into()),upstream_type:Some("rate_limit_exceeded".into()),upstream_details:Default::default(),
-            };
-            let actor=Arc::new(actor);
-            let result=actor.handle_sampling_failure(fuigo_sampler::SamplingErrorInfo::from(&e),0,transient_state(0,true),false,TurnParkState::Fresh).await;
-            let Err(err)=result else {panic!("child must fail closed");};
-            let data=err.data.unwrap();
-            assert_eq!(data["upstream"]["state"],"free_cap_reached");
-            assert_eq!(data["upstream"]["http_status"],429);
-            assert!(data.get("http_status").is_none());
-            assert!(data["message"].as_str().unwrap().contains("workflow child model request failed"));
-        }
-    }).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for budgeted in [true, false] {
+                let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+                let mut actor =
+                    create_test_actor(50_000, 100_000, 85, gateway_tx, persistence_tx).await;
+                if budgeted {
+                    actor.tool_context.task_output_token_budget = Some(
+                        crate::tools::tool_context::TaskOutputTokenBudget::limited(100_000),
+                    );
+                } else {
+                    actor.tool_context.sampler_retry_only_before_output = true;
+                }
+                let e = fuigo_sampling_types::SamplingError::Api {
+                    status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    message: "refusal".into(),
+                    model_metadata: None,
+                    retry_after_secs: None,
+                    should_retry: None,
+                    error_code: None,
+                    upstream_state: Some("free_cap_reached".into()),
+                    upstream_type: Some("rate_limit_exceeded".into()),
+                    upstream_details: Default::default(),
+                };
+                let actor = Arc::new(actor);
+                let result = actor
+                    .handle_sampling_failure(
+                        fuigo_sampler::SamplingErrorInfo::from(&e),
+                        0,
+                        transient_state(0, true),
+                        false,
+                        TurnParkState::Fresh,
+                    )
+                    .await;
+                let Err(err) = result else {
+                    panic!("child must fail closed");
+                };
+                let data = err.data.unwrap();
+                assert_eq!(data["upstream"]["state"], "free_cap_reached");
+                assert_eq!(data["upstream"]["http_status"], 429);
+                assert!(data.get("http_status").is_none());
+                assert!(
+                    data["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("workflow child model request failed")
+                );
+            }
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(attribution_emit_count)]
 async fn busyloop_terminal_prompt_blocks_expired_token_preflight_for_helpers() {
-    tokio::task::LocalSet::new().run_until(async {
-        let called=Arc::new(AtomicBool::new(false));
-        let (_dir,am)=auth_manager_with_refresher(Arc::new(AlwaysSucceedRefresher {called:called.clone()}));
-        let (actor,_rx)=make_actor_with_auth_and_credentials(Some(am),fuigo_chat_state::AuthType::SessionToken,"initial-test-key".into()).await;
-        actor.refusal_prompt.lock().unwrap().state=fuigo_sampling_types::refusal::PromptState::Terminal;
-        actor.refresh_token_if_expired().await;
-        assert!(!called.load(Ordering::SeqCst),"terminal prompt must not refresh for a helper");
-    }).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let (_dir, am) = auth_manager_with_refresher(Arc::new(AlwaysSucceedRefresher {
+                called: called.clone(),
+            }));
+            let (actor, _rx) = make_actor_with_auth_and_credentials(
+                Some(am),
+                fuigo_chat_state::AuthType::SessionToken,
+                "initial-test-key".into(),
+            )
+            .await;
+            actor.refusal_prompt.lock().unwrap().state =
+                fuigo_sampling_types::refusal::PromptState::Terminal;
+            actor.refresh_token_if_expired().await;
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "terminal prompt must not refresh for a helper"
+            );
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn r3_fa6_static_401_flux_minus_32000_non_flux_parent() {
-    tokio::task::LocalSet::new().run_until(async {
-        for flux in [false, true] {
-            let (actor, _rx) = make_actor_with_auth_and_credentials(None, fuigo_chat_state::AuthType::ApiKey, "static-test-key".into()).await;
-            let upstream = fuigo_sampling_types::error::UpstreamError { flux_routed: flux, ..Default::default() }.with_body(401, br#"{"error":{"message":"unauthorized","type":"authentication_error"}}"#);
-            let error = fuigo_sampling_types::SamplingError::Auth { message: "Unauthorized (401): unauthorized".into(), status: 401, credential: fuigo_sampling_types::SentCredential::Sent, upstream };
-            let result = actor.handle_sampling_failure(fuigo_sampler::SamplingErrorInfo::from(&error), 0, transient_state(0, true), false, TurnParkState::Fresh).await.err().expect("static 401 is terminal");
-            let data = result.data.unwrap();
-            if flux {
-                // FA6: a Flux-routed static-key 401 is an auth failure on the wire (-32000), typed in data.upstream.
-                assert_eq!(result.code, acp::Error::auth_required().code);
-                assert_eq!(data["upstream"]["http_status"], 401);
-                assert_eq!(data["upstream"]["type"], "authentication_error");
-            } else {
-                assert_eq!(result.code, acp::Error::internal_error().code);
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for flux in [false, true] {
+                let (actor, _rx) = make_actor_with_auth_and_credentials(
+                    None,
+                    fuigo_chat_state::AuthType::ApiKey,
+                    "static-test-key".into(),
+                )
+                .await;
+                let upstream = fuigo_sampling_types::error::UpstreamError {
+                    flux_routed: flux,
+                    ..Default::default()
+                }
+                .with_body(
+                    401,
+                    br#"{"error":{"message":"unauthorized","type":"authentication_error"}}"#,
+                );
+                let error = fuigo_sampling_types::SamplingError::Auth {
+                    message: "Unauthorized (401): unauthorized".into(),
+                    status: 401,
+                    credential: fuigo_sampling_types::SentCredential::Sent,
+                    upstream,
+                };
+                let result = actor
+                    .handle_sampling_failure(
+                        fuigo_sampler::SamplingErrorInfo::from(&error),
+                        0,
+                        transient_state(0, true),
+                        false,
+                        TurnParkState::Fresh,
+                    )
+                    .await
+                    .err()
+                    .expect("static 401 is terminal");
+                let data = result.data.unwrap();
+                if flux {
+                    // FA6: a Flux-routed static-key 401 is an auth failure on the wire (-32000), typed in data.upstream.
+                    assert_eq!(result.code, acp::Error::auth_required().code);
+                    assert_eq!(data["upstream"]["http_status"], 401);
+                    assert_eq!(data["upstream"]["type"], "authentication_error");
+                } else {
+                    assert_eq!(result.code, acp::Error::internal_error().code);
+                }
+                assert!(
+                    data.get("http_status").is_none(),
+                    "Auth projection must match 1.0.42"
+                );
+                assert_eq!(result.message, "Internal error");
+                let message = data["message"].as_str().unwrap();
+                assert!(message.contains("Model:"), "{message}");
+                assert!(message.contains("Auth:"), "{message}");
+                assert!(message.contains("Version:"), "{message}");
             }
-            assert!(data.get("http_status").is_none(), "Auth projection must match 1.0.42");
-            assert_eq!(result.message, "Internal error");
-            let message = data["message"].as_str().unwrap();
-            assert!(message.contains("Model:"), "{message}");
-            assert!(message.contains("Auth:"), "{message}");
-            assert!(message.contains("Version:"), "{message}");
-        }
-    }).await;
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn r4_rebuilt_child_gate_obeys_parent_stop_and_pause() {
     use fuigo_sampling_types::refusal::{PromptSM, PromptState};
-    tokio::task::LocalSet::new().run_until(async {
-        let (gateway, _) = mpsc::unbounded_channel();
-        let (persist, _) = mpsc::unbounded_channel();
-        let mut actor = create_test_actor(50_000, 100_000, 85, gateway, persist).await;
-        actor.session_info.id = acp::SessionId::new(format!("r4-child-{}", uuid::Uuid::new_v4()));
-        let id = actor.session_info.id.to_string();
-        let parent_id = format!("parent-{id}");
-        let _parent = crate::session::quiesce::SessionGuard::new(&parent_id, None);
-        let _child = crate::session::quiesce::SessionGuard::new(&id, Some(&parent_id));
-        let prompt = Arc::new(std::sync::Mutex::new(PromptSM::new(false)));
-        super::sampler_turn::bind_refusal_prompt(&parent_id, &prompt);
-        super::sampler_turn::bind_refusal_prompt(&id, &actor.refusal_prompt);
-        let server = fuigo_test_support::MockInferenceServer::start().await.unwrap();
-        for status in [402, 429] {
-            prompt.lock().unwrap().state = PromptState::Open;
-            actor.refusal_prompt.lock().unwrap().state = PromptState::Open;
-            let mut config = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
-            config.base_url = server.url();
-            config.flux_base_url = Some(server.url());
-            config.api_backend = fuigo_sampler::ApiBackend::Responses;
-            let gate = config.dispatch_gate.as_ref().unwrap().clone();
-            assert!(gate.check_open().is_ok());
-            server.enqueue_response("/v1/responses", fuigo_test_support::ScriptedResponse::json(status, serde_json::json!({"error":{"message":"refused"}})));
-            let client = fuigo_sampler::SamplingClient::new(config).unwrap();
-            assert!(client.conversation_stream_responses(fuigo_sampling_types::ConversationRequest::new()).await.is_err());
-            assert_eq!(prompt.lock().unwrap().state, PromptState::Open, "a child's own refusal must not end the parent");
-            assert_eq!(actor.refusal_prompt.lock().unwrap().state, PromptState::Terminal);
-            // Rebuild with an open child after the parent's terminal response.
-            actor.refusal_prompt.lock().unwrap().state = PromptState::Open;
-            prompt.lock().unwrap().state = PromptState::Terminal;
-            let before = server.request_count();
-            assert!(gate.check_open().is_err(), "rebuilt child dispatched after parent terminal {status}");
-            assert!(client.conversation_stream_responses(fuigo_sampling_types::ConversationRequest::new()).await.is_err());
-            assert_eq!(server.request_count(), before, "parent STOP/PAUSE must prevent child POSTs");
-        }
-        assert_eq!(server.request_count(), 2, "only the two child-own refusals were sent");
-    }).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway, _) = mpsc::unbounded_channel();
+            let (persist, _) = mpsc::unbounded_channel();
+            let mut actor = create_test_actor(50_000, 100_000, 85, gateway, persist).await;
+            actor.session_info.id =
+                acp::SessionId::new(format!("r4-child-{}", uuid::Uuid::new_v4()));
+            let id = actor.session_info.id.to_string();
+            let parent_id = format!("parent-{id}");
+            let _parent = crate::session::quiesce::SessionGuard::new(&parent_id, None);
+            let _child = crate::session::quiesce::SessionGuard::new(&id, Some(&parent_id));
+            let prompt = Arc::new(std::sync::Mutex::new(PromptSM::new(false)));
+            super::sampler_turn::bind_refusal_prompt(&parent_id, &prompt);
+            super::sampler_turn::bind_refusal_prompt(&id, &actor.refusal_prompt);
+            let server = fuigo_test_support::MockInferenceServer::start()
+                .await
+                .unwrap();
+            for status in [402, 429] {
+                prompt.lock().unwrap().state = PromptState::Open;
+                actor.refusal_prompt.lock().unwrap().state = PromptState::Open;
+                let mut config = actor
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                    .await;
+                config.base_url = server.url();
+                config.flux_base_url = Some(server.url());
+                config.api_backend = fuigo_sampler::ApiBackend::Responses;
+                let gate = config.dispatch_gate.as_ref().unwrap().clone();
+                assert!(gate.check_open().is_ok());
+                server.enqueue_response(
+                    "/v1/responses",
+                    fuigo_test_support::ScriptedResponse::json(
+                        status,
+                        serde_json::json!({"error":{"message":"refused"}}),
+                    ),
+                );
+                let client = fuigo_sampler::SamplingClient::new(config).unwrap();
+                assert!(
+                    client
+                        .conversation_stream_responses(
+                            fuigo_sampling_types::ConversationRequest::new()
+                        )
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    prompt.lock().unwrap().state,
+                    PromptState::Open,
+                    "a child's own refusal must not end the parent"
+                );
+                assert_eq!(
+                    actor.refusal_prompt.lock().unwrap().state,
+                    PromptState::Terminal
+                );
+                // Rebuild with an open child after the parent's terminal response.
+                actor.refusal_prompt.lock().unwrap().state = PromptState::Open;
+                prompt.lock().unwrap().state = PromptState::Terminal;
+                let before = server.request_count();
+                assert!(
+                    gate.check_open().is_err(),
+                    "rebuilt child dispatched after parent terminal {status}"
+                );
+                assert!(
+                    client
+                        .conversation_stream_responses(
+                            fuigo_sampling_types::ConversationRequest::new()
+                        )
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    server.request_count(),
+                    before,
+                    "parent STOP/PAUSE must prevent child POSTs"
+                );
+            }
+            assert_eq!(
+                server.request_count(),
+                2,
+                "only the two child-own refusals were sent"
+            );
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn r7_terminal_wakes_are_accepted_without_dispatch() {
-    tokio::task::LocalSet::new().run_until(async {
-        let (actor, mut rx) = make_actor_with_auth_and_credentials(None, fuigo_chat_state::AuthType::ApiKey, "static-test-key".into()).await;
-        let server = fuigo_test_support::MockInferenceServer::start().await.unwrap();
-        let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
-        config.base_url = server.url();
-        actor.chat_state_handle.update_sampling_config(config);
-        actor.sampler_handle.update_config(actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await);
-        let dir = tempfile::tempdir().unwrap();
-        let writer = fuigo_session_writer::SessionWriter::try_claim("wake-actor-test", dir.path()).unwrap();
-        let load_writer = writer.clone();
-        let persistence = tokio::task::spawn_local(async move {
-            while let Some(message) = rx.recv().await {
-                match message {
-                    PersistenceMsg::HeldWakes { queue, respond_to } => { let _ = respond_to.send(queue.save(&writer)); }
-                    PersistenceMsg::FlushAndAck { respond_to } => { let _ = respond_to.send(Ok(())); }
-                    _ => (),
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, mut rx) = make_actor_with_auth_and_credentials(
+                None,
+                fuigo_chat_state::AuthType::ApiKey,
+                "static-test-key".into(),
+            )
+            .await;
+            let server = fuigo_test_support::MockInferenceServer::start()
+                .await
+                .unwrap();
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.base_url = server.url();
+            actor.chat_state_handle.update_sampling_config(config);
+            actor.sampler_handle.update_config(
+                actor
+                    .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                    .await,
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let writer =
+                fuigo_session_writer::SessionWriter::try_claim("wake-actor-test", dir.path())
+                    .unwrap();
+            let load_writer = writer.clone();
+            let persistence = tokio::task::spawn_local(async move {
+                while let Some(message) = rx.recv().await {
+                    match message {
+                        PersistenceMsg::HeldWakes { queue, respond_to } => {
+                            let _ = respond_to.send(queue.save(&writer));
+                        }
+                        PersistenceMsg::FlushAndAck { respond_to } => {
+                            let _ = respond_to.send(Ok(()));
+                        }
+                        _ => (),
+                    }
                 }
+            });
+            actor.refusal_prompt.lock().unwrap().state =
+                fuigo_sampling_types::refusal::PromptState::Terminal;
+            for origin in [
+                crate::session::PromptOrigin::TaskCompleted {
+                    task_id: "task".into(),
+                },
+                crate::session::PromptOrigin::SubagentCompleted {
+                    subagent_id: "child".into(),
+                },
+                crate::session::PromptOrigin::ParentAgentMessage {
+                    message_id: "message".into(),
+                    sender_session_id: "parent".into(),
+                },
+                crate::session::PromptOrigin::PeerMessage {
+                    message_id: "peer-message".into(),
+                    from: "peer".into(),
+                },
+            ] {
+                let request = super::turn_task::TurnInputRequest {
+                    prompt_id: "held-wake".into(),
+                    input_origin: InputOrigin::new(origin),
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "completion payload",
+                    ))],
+                    prompt_mode: PromptMode::Agent,
+                    trace_gcs_config: None,
+                    artifact_tracker: None,
+                    client_identifier: None,
+                    screen_mode: None,
+                    verbatim: false,
+                    send_now: false,
+                    json_schema: None,
+                    persist_ack: None,
+                    parsed_prompt_tx: None,
+                    traceparent: None,
+                };
+                assert!(
+                    actor.handle_turn_input(request).await.is_ok(),
+                    "terminal wakes must be held, not rejected"
+                );
+                assert_eq!(
+                    actor.refusal_prompt.lock().unwrap().state,
+                    fuigo_sampling_types::refusal::PromptState::Terminal
+                );
             }
-        });
-        actor.refusal_prompt.lock().unwrap().state = fuigo_sampling_types::refusal::PromptState::Terminal;
-        for origin in [
-            crate::session::PromptOrigin::TaskCompleted { task_id: "task".into() },
-            crate::session::PromptOrigin::SubagentCompleted { subagent_id: "child".into() },
-            crate::session::PromptOrigin::ParentAgentMessage { message_id: "message".into(), sender_session_id: "parent".into() },
-            crate::session::PromptOrigin::PeerMessage { message_id: "peer-message".into(), from: "peer".into() },
-        ] {
-            let request = super::turn_task::TurnInputRequest {
-                prompt_id: "held-wake".into(), input_origin: InputOrigin::new(origin),
-                prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new("completion payload"))],
-                prompt_mode: PromptMode::Agent, trace_gcs_config: None, artifact_tracker: None,
-                client_identifier: None, screen_mode: None, verbatim: false, send_now: false,
-                json_schema: None, persist_ack: None, parsed_prompt_tx: None, traceparent: None,
-            };
-            assert!(actor.handle_turn_input(request).await.is_ok(), "terminal wakes must be held, not rejected");
-            assert_eq!(actor.refusal_prompt.lock().unwrap().state, fuigo_sampling_types::refusal::PromptState::Terminal);
-        }
-        assert_eq!(actor.held_wakes.lock().unwrap().wakes.len(), 4);
-        assert_eq!(server.request_count(), 0, "held wakes cannot dispatch a POST");
-        let saved = super::held_wakes::HeldWakes::load(dir.path(), &load_writer).unwrap();
-        assert_eq!(saved.wakes.len(), 4);
-        // Simulate a restart by replacing the in-memory queue with its durable read.
-        *actor.held_wakes.lock().unwrap() = saved;
-        actor.deliver_held_wakes().await.unwrap();
-        assert!(actor.held_wakes.lock().unwrap().wakes.is_empty());
-        assert!(super::held_wakes::HeldWakes::load(dir.path(), &load_writer).unwrap().wakes.is_empty());
-        let messages = actor.chat_state_handle.get_conversation().await;
-        let text = serde_json::to_string(&messages).unwrap();
-        assert_eq!(text.matches("completion payload").count(), 4);
-        let expected = serde_json::to_value(fuigo_sampling_types::ConversationItem::peer_message("completion payload")).unwrap();
-        assert!(serde_json::to_value(&messages).unwrap().as_array().unwrap().iter().any(|item| item == &expected), "peer framing must survive holding: {text}");
-        assert_eq!(server.request_count(), 0);
-        persistence.abort();
-    }).await;
+            assert_eq!(actor.held_wakes.lock().unwrap().wakes.len(), 4);
+            assert_eq!(
+                server.request_count(),
+                0,
+                "held wakes cannot dispatch a POST"
+            );
+            let saved = super::held_wakes::HeldWakes::load(dir.path(), &load_writer).unwrap();
+            assert_eq!(saved.wakes.len(), 4);
+            // Simulate a restart by replacing the in-memory queue with its durable read.
+            *actor.held_wakes.lock().unwrap() = saved;
+            actor.deliver_held_wakes().await.unwrap();
+            assert!(actor.held_wakes.lock().unwrap().wakes.is_empty());
+            assert!(
+                super::held_wakes::HeldWakes::load(dir.path(), &load_writer)
+                    .unwrap()
+                    .wakes
+                    .is_empty()
+            );
+            let messages = actor.chat_state_handle.get_conversation().await;
+            let text = serde_json::to_string(&messages).unwrap();
+            assert_eq!(text.matches("completion payload").count(), 4);
+            let expected = serde_json::to_value(
+                fuigo_sampling_types::ConversationItem::peer_message("completion payload"),
+            )
+            .unwrap();
+            assert!(
+                serde_json::to_value(&messages)
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item == &expected),
+                "peer framing must survive holding: {text}"
+            );
+            assert_eq!(server.request_count(), 0);
+            persistence.abort();
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2570,54 +2846,108 @@ async fn r2_side_refusal_leaves_main_open() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn r2_terminal_without_wakes_survives_reload() {
-    tokio::task::LocalSet::new().run_until(async {
-        let (mut actor, mut rx) = make_actor_parts_with_method_and_credentials(None, "fuigo.api_key", fuigo_chat_state::AuthType::ApiKey, "test-key".into()).await;
-        let dir = tempfile::tempdir().unwrap();
-        let writer = fuigo_session_writer::SessionWriter::try_claim("terminal-reload", dir.path()).unwrap();
-        let load_writer = writer.clone();
-        Arc::get_mut(&mut actor.rebuild_spec).unwrap().session_writer = Some(writer.clone());
-        let actor = Arc::new(actor);
-        let persistence = tokio::task::spawn_local(async move {
-            while let Some(message) = rx.recv().await {
-                match message {
-                    PersistenceMsg::HeldWakes { queue, respond_to } => { let _ = respond_to.send(queue.save(&writer)); }
-                    PersistenceMsg::FlushAndAck { respond_to } => { let _ = respond_to.send(Ok(())); }
-                    _ => (),
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut actor, mut rx) = make_actor_parts_with_method_and_credentials(
+                None,
+                "fuigo.api_key",
+                fuigo_chat_state::AuthType::ApiKey,
+                "test-key".into(),
+            )
+            .await;
+            let dir = tempfile::tempdir().unwrap();
+            let writer =
+                fuigo_session_writer::SessionWriter::try_claim("terminal-reload", dir.path())
+                    .unwrap();
+            let load_writer = writer.clone();
+            Arc::get_mut(&mut actor.rebuild_spec)
+                .unwrap()
+                .session_writer = Some(writer.clone());
+            let actor = Arc::new(actor);
+            let persistence = tokio::task::spawn_local(async move {
+                while let Some(message) = rx.recv().await {
+                    match message {
+                        PersistenceMsg::HeldWakes { queue, respond_to } => {
+                            let _ = respond_to.send(queue.save(&writer));
+                        }
+                        PersistenceMsg::FlushAndAck { respond_to } => {
+                            let _ = respond_to.send(Ok(()));
+                        }
+                        _ => (),
+                    }
                 }
+            });
+            let error = fuigo_sampling_types::SamplingError::Api {
+                status: reqwest::StatusCode::PAYMENT_REQUIRED,
+                message: "refused".into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: None,
+                error_code: None,
+                upstream_state: None,
+                upstream_type: None,
+                upstream_details: fuigo_sampling_types::error::UpstreamError {
+                    flux_routed: true,
+                    ..Default::default()
+                }
+                .with_body(402, b"{}"),
+            };
+            assert!(
+                actor
+                    .handle_sampling_failure(
+                        fuigo_sampler::SamplingErrorInfo::from(&error),
+                        0,
+                        transient_state(0, true),
+                        false,
+                        TurnParkState::Fresh
+                    )
+                    .await
+                    .is_err()
+            );
+            {
+                let queue = actor.held_wakes.lock().unwrap();
+                assert!(queue.wakes.is_empty());
+                assert_eq!(
+                    serde_json::to_value(&*queue).unwrap()["terminal"],
+                    true,
+                    "terminal state must be independent of held content"
+                );
             }
-        });
-        let error = fuigo_sampling_types::SamplingError::Api {
-            status: reqwest::StatusCode::PAYMENT_REQUIRED, message: "refused".into(), model_metadata: None,
-            retry_after_secs: None, should_retry: None, error_code: None, upstream_state: None, upstream_type: None,
-            upstream_details: fuigo_sampling_types::error::UpstreamError { flux_routed: true, ..Default::default() }.with_body(402, b"{}"),
-        };
-        assert!(actor.handle_sampling_failure(fuigo_sampler::SamplingErrorInfo::from(&error), 0, transient_state(0, true), false, TurnParkState::Fresh).await.is_err());
-        let queue = actor.held_wakes.lock().unwrap();
-        assert!(queue.wakes.is_empty());
-        assert_eq!(serde_json::to_value(&*queue).unwrap()["terminal"], true, "terminal state must be independent of held content");
-        drop(queue);
-        let restored = super::held_wakes::HeldWakes::load(dir.path(), &load_writer).unwrap();
-        assert_eq!(serde_json::to_value(&restored).unwrap()["terminal"], true);
-        // Use the exact session/load initializer, then deliver a completion wake.
-        *actor.refusal_prompt.lock().unwrap() = restored.refusal_prompt();
-        *actor.held_wakes.lock().unwrap() = restored;
-        let server = fuigo_test_support::MockInferenceServer::start().await.unwrap();
-        let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
-        cfg.base_url = server.url();
-        actor.chat_state_handle.update_sampling_config(cfg);
-        let request = super::turn_task::TurnInputRequest {
-            prompt_id: "reload-wake".into(),
-            input_origin: InputOrigin::new(crate::session::PromptOrigin::TaskCompleted { task_id: "task".into() }),
-            prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new("completion"))],
-            prompt_mode: PromptMode::Agent, trace_gcs_config: None, artifact_tracker: None,
-            client_identifier: None, screen_mode: None, verbatim: false, send_now: false,
-            json_schema: None, persist_ack: None, parsed_prompt_tx: None, traceparent: None,
-        };
-        actor.handle_turn_input(request).await.unwrap();
-        assert_eq!(actor.held_wakes.lock().unwrap().wakes.len(), 1);
-        assert_eq!(server.request_count(), 0);
-        persistence.abort();
-    }).await;
+            let restored = super::held_wakes::HeldWakes::load(dir.path(), &load_writer).unwrap();
+            assert_eq!(serde_json::to_value(&restored).unwrap()["terminal"], true);
+            // Use the exact session/load initializer, then deliver a completion wake.
+            *actor.refusal_prompt.lock().unwrap() = restored.refusal_prompt();
+            *actor.held_wakes.lock().unwrap() = restored;
+            let server = fuigo_test_support::MockInferenceServer::start()
+                .await
+                .unwrap();
+            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            cfg.base_url = server.url();
+            actor.chat_state_handle.update_sampling_config(cfg);
+            let request = super::turn_task::TurnInputRequest {
+                prompt_id: "reload-wake".into(),
+                input_origin: InputOrigin::new(crate::session::PromptOrigin::TaskCompleted {
+                    task_id: "task".into(),
+                }),
+                prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new("completion"))],
+                prompt_mode: PromptMode::Agent,
+                trace_gcs_config: None,
+                artifact_tracker: None,
+                client_identifier: None,
+                screen_mode: None,
+                verbatim: false,
+                send_now: false,
+                json_schema: None,
+                persist_ack: None,
+                parsed_prompt_tx: None,
+                traceparent: None,
+            };
+            actor.handle_turn_input(request).await.unwrap();
+            assert_eq!(actor.held_wakes.lock().unwrap().wakes.len(), 1);
+            assert_eq!(server.request_count(), 0);
+            persistence.abort();
+        })
+        .await;
 }
 
 /// Wire expectations transcribed from 413f407d6, with only the documented Flux deltas.
@@ -2718,7 +3048,7 @@ async fn r2_wire_golden_terminal_paths() {
             let result = actor.handle_sampling_failure(fuigo_sampler::SamplingErrorInfo::from(&error), 0, transient_state(0, false), false, TurnParkState::Fresh).await.err().expect("withheld session is terminal");
             let wire = serde_json::to_value(result).unwrap();
             if wire["code"] != json!(-32603) { mismatches.push(format!("session_withheld flux={flux}: code {}", wire["code"])); }
-            if !wire["data"].get("http_status").is_none() { mismatches.push(format!("session_withheld flux={flux}: data.http_status present: {wire}")); }
+            if wire["data"].get("http_status").is_some() { mismatches.push(format!("session_withheld flux={flux}: data.http_status present: {wire}")); }
             if wire["data"]["error_kind"] != json!("auth_destination_refused") { mismatches.push(format!("session_withheld flux={flux}: error_kind {}", wire["data"]["error_kind"])); }
         }
         assert!(mismatches.is_empty(), "wire golden mismatches:\n{}", mismatches.join("\n"));
@@ -2749,54 +3079,121 @@ async fn r2_wire_golden_setup_auth_helper() {
 /// F2: a Flux STOP/PAUSE on the auto-compaction call ends the prompt with THAT classified refusal. No main request follows.
 #[tokio::test(flavor = "current_thread")]
 async fn f2_compaction_refusal_ends_the_prompt_with_the_classified_error() {
-    tokio::task::LocalSet::new().run_until(async {
-        for flux in [true, false] {
-            let server = fuigo_test_support::MockInferenceServer::start().await.unwrap();
-            let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(None, "fuigo.api_key", fuigo_chat_state::AuthType::ApiKey, "test-key".into()).await;
-            actor.session_info.id = acp::SessionId::new(uuid::Uuid::new_v4().to_string());
-            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
-            cfg.base_url = server.url();
-            cfg.api_backend = fuigo_sampler::ApiBackend::Responses;
-            actor.chat_state_handle.update_sampling_config(cfg);
-            let _models_dir = tempfile::tempdir().unwrap();
-            if flux {
-                let am = Arc::new(AuthManager::new(_models_dir.path(), FuigoComConfig::default()));
-                let mut endpoints_cfg = crate::agent::config::Config::default();
-                endpoints_cfg.endpoints.fuigo_api_base_url = server.url();
-                actor.models_manager = crate::agent::models::ModelsManager::new(None, Default::default(), acp::ModelId::new("test"), am, endpoints_cfg);
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for flux in [true, false] {
+                let server = fuigo_test_support::MockInferenceServer::start()
+                    .await
+                    .unwrap();
+                let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(
+                    None,
+                    "fuigo.api_key",
+                    fuigo_chat_state::AuthType::ApiKey,
+                    "test-key".into(),
+                )
+                .await;
+                actor.session_info.id = acp::SessionId::new(uuid::Uuid::new_v4().to_string());
+                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                cfg.base_url = server.url();
+                cfg.api_backend = fuigo_sampler::ApiBackend::Responses;
+                actor.chat_state_handle.update_sampling_config(cfg);
+                let _models_dir = tempfile::tempdir().unwrap();
+                if flux {
+                    let am = Arc::new(AuthManager::new(
+                        _models_dir.path(),
+                        FuigoComConfig::default(),
+                    ));
+                    let mut endpoints_cfg = crate::agent::config::Config::default();
+                    endpoints_cfg.endpoints.fuigo_api_base_url = server.url();
+                    actor.models_manager = crate::agent::models::ModelsManager::new(
+                        None,
+                        Default::default(),
+                        acp::ModelId::new("test"),
+                        am,
+                        endpoints_cfg,
+                    );
+                }
+                actor.chat_state_handle.replace_conversation(vec![
+                    fuigo_sampling_types::ConversationItem::system("sys"),
+                    fuigo_sampling_types::ConversationItem::user("first request"),
+                    fuigo_sampling_types::ConversationItem::user("second request"),
+                ]);
+                let actor = Arc::new(actor);
+                let id = actor.session_info.id.to_string();
+                super::sampler_turn::bind_refusal_prompt(&id, &actor.refusal_prompt);
+                server.enqueue_response(
+                    "/v1/responses",
+                    fuigo_test_support::ScriptedResponse::json(
+                        402,
+                        serde_json::json!({"error":{"message":"refused"}}),
+                    ),
+                );
+                let trigger = super::compaction::AutoCompactTriggerInfo {
+                    tokens_used: 90_000,
+                    context_window: 100_000,
+                    percentage: 90,
+                };
+                let err = actor
+                    .run_compact_only(trigger, false)
+                    .await
+                    .expect_err("a refused compaction fails");
+                let wire = serde_json::to_value(&err).unwrap();
+                assert_eq!(
+                    server.request_count(),
+                    1,
+                    "flux={flux}: exactly one compaction POST"
+                );
+                if flux {
+                    assert_eq!(wire["code"], serde_json::json!(-32603), "{wire}");
+                    assert_eq!(
+                        wire["message"],
+                        serde_json::json!("Internal error"),
+                        "{wire}"
+                    );
+                    assert_eq!(
+                        wire["data"]["upstream"]["http_status"],
+                        serde_json::json!(402),
+                        "{wire}"
+                    );
+                    assert_eq!(
+                        wire["data"]["error_kind"],
+                        serde_json::json!("api"),
+                        "{wire}"
+                    );
+                    assert_eq!(
+                        wire["data"]["http_status"],
+                        serde_json::json!(402),
+                        "{wire}"
+                    );
+                    assert!(actor.is_terminal_prompt_refusal(&err), "{wire}");
+                    assert_eq!(
+                        actor.refusal_prompt.lock().unwrap().state,
+                        fuigo_sampling_types::refusal::PromptState::Terminal
+                    );
+                    let main = actor
+                        .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                        .await;
+                    assert!(
+                        main.dispatch_gate.as_ref().unwrap().check_open().is_err(),
+                        "the main request is still blocked"
+                    );
+                    assert_eq!(server.request_count(), 1, "0 main POSTs");
+                } else {
+                    // Parent behaviour: a compaction failure the caller logs and continues from.
+                    assert!(!actor.is_terminal_prompt_refusal(&err), "{wire}");
+                    assert_eq!(
+                        wire["data"]["error_kind"],
+                        serde_json::json!("compaction"),
+                        "{wire}"
+                    );
+                    assert_eq!(
+                        actor.refusal_prompt.lock().unwrap().state,
+                        fuigo_sampling_types::refusal::PromptState::Open
+                    );
+                }
             }
-            actor.chat_state_handle.replace_conversation(vec![
-                fuigo_sampling_types::ConversationItem::system("sys"),
-                fuigo_sampling_types::ConversationItem::user("first request"),
-                fuigo_sampling_types::ConversationItem::user("second request"),
-            ]);
-            let actor = Arc::new(actor);
-            let id = actor.session_info.id.to_string();
-            super::sampler_turn::bind_refusal_prompt(&id, &actor.refusal_prompt);
-            server.enqueue_response("/v1/responses", fuigo_test_support::ScriptedResponse::json(402, serde_json::json!({"error":{"message":"refused"}})));
-            let trigger = super::compaction::AutoCompactTriggerInfo { tokens_used: 90_000, context_window: 100_000, percentage: 90 };
-            let err = actor.run_compact_only(trigger, false).await.err().expect("a refused compaction fails");
-            let wire = serde_json::to_value(&err).unwrap();
-            assert_eq!(server.request_count(), 1, "flux={flux}: exactly one compaction POST");
-            if flux {
-                assert_eq!(wire["code"], serde_json::json!(-32603), "{wire}");
-                assert_eq!(wire["message"], serde_json::json!("Internal error"), "{wire}");
-                assert_eq!(wire["data"]["upstream"]["http_status"], serde_json::json!(402), "{wire}");
-                assert_eq!(wire["data"]["error_kind"], serde_json::json!("api"), "{wire}");
-                assert_eq!(wire["data"]["http_status"], serde_json::json!(402), "{wire}");
-                assert!(actor.is_terminal_prompt_refusal(&err), "{wire}");
-                assert_eq!(actor.refusal_prompt.lock().unwrap().state, fuigo_sampling_types::refusal::PromptState::Terminal);
-                let main = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
-                assert!(main.dispatch_gate.as_ref().unwrap().check_open().is_err(), "the main request is still blocked");
-                assert_eq!(server.request_count(), 1, "0 main POSTs");
-            } else {
-                // Parent behaviour: a compaction failure the caller logs and continues from.
-                assert!(!actor.is_terminal_prompt_refusal(&err), "{wire}");
-                assert_eq!(wire["data"]["error_kind"], serde_json::json!("compaction"), "{wire}");
-                assert_eq!(actor.refusal_prompt.lock().unwrap().state, fuigo_sampling_types::refusal::PromptState::Open);
-            }
-        }
-    }).await;
+        })
+        .await;
 }
 
 /// F3: a legacy held-wake file keeps every readable entry; only an unreadable ENTRY is dropped.
@@ -2811,39 +3208,86 @@ fn f3_legacy_held_wakes_drop_only_the_unreadable_entry() {
         entry("d", "TaskCompleted { task_id: \"t\" }"),
         entry("e", "GoalSummary"),
     ]});
-    std::fs::write(dir.path().join(super::held_wakes::HELD_WAKE_FILE), serde_json::to_vec(&file).unwrap()).unwrap();
+    std::fs::write(
+        dir.path().join(super::held_wakes::HELD_WAKE_FILE),
+        serde_json::to_vec(&file).unwrap(),
+    )
+    .unwrap();
     let writer = fuigo_session_writer::SessionWriter::try_claim("f3-legacy", dir.path()).unwrap();
     let loaded = super::held_wakes::HeldWakes::load(dir.path(), &writer).unwrap();
     let ids: Vec<_> = loaded.wakes.iter().map(|w| w.prompt_id.as_str()).collect();
     assert_eq!(ids, ["a", "b", "d", "e"]);
-    assert!(loaded.terminal, "a legacy file with wakes keeps the prompt terminal");
-    assert!(!dir.path().join("held_wakes.json.bad").exists(), "the file is not quarantined");
+    assert!(
+        loaded.terminal,
+        "a legacy file with wakes keeps the prompt terminal"
+    );
+    assert!(
+        !dir.path().join("held_wakes.json.bad").exists(),
+        "the file is not quarantined"
+    );
 }
 
 /// F5: a `terminal` field that is present but not a bool is a file-level error: quarantine, start terminal.
 #[test]
 fn f5_non_bool_terminal_field_quarantines_the_held_wakes_file() {
-    for terminal in [serde_json::json!("false"), serde_json::json!(0), serde_json::json!(null)] {
+    for terminal in [
+        serde_json::json!("false"),
+        serde_json::json!(0),
+        serde_json::json!(null),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let file = serde_json::json!({"terminal": terminal, "wakes": []});
-        std::fs::write(dir.path().join(super::held_wakes::HELD_WAKE_FILE), serde_json::to_vec(&file).unwrap()).unwrap();
-        let writer = fuigo_session_writer::SessionWriter::try_claim("f5-non-bool", dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join(super::held_wakes::HELD_WAKE_FILE),
+            serde_json::to_vec(&file).unwrap(),
+        )
+        .unwrap();
+        let writer =
+            fuigo_session_writer::SessionWriter::try_claim("f5-non-bool", dir.path()).unwrap();
         let loaded = super::held_wakes::HeldWakes::load(dir.path(), &writer).unwrap();
-        assert!(loaded.terminal, "terminal={terminal}: must start terminal, not read as false");
-        assert!(dir.path().join("held_wakes.json.bad").exists(), "terminal={terminal}: quarantined");
+        assert!(
+            loaded.terminal,
+            "terminal={terminal}: must start terminal, not read as false"
+        );
+        assert!(
+            dir.path().join("held_wakes.json.bad").exists(),
+            "terminal={terminal}: quarantined"
+        );
         assert!(!dir.path().join(super::held_wakes::HELD_WAKE_FILE).exists());
     }
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(super::held_wakes::HELD_WAKE_FILE), br#"{"terminal":false,"wakes":[]}"#).unwrap();
-    let writer = fuigo_session_writer::SessionWriter::try_claim("f5-real-bool", dir.path()).unwrap();
+    std::fs::write(
+        dir.path().join(super::held_wakes::HELD_WAKE_FILE),
+        br#"{"terminal":false,"wakes":[]}"#,
+    )
+    .unwrap();
+    let writer =
+        fuigo_session_writer::SessionWriter::try_claim("f5-real-bool", dir.path()).unwrap();
     let loaded = super::held_wakes::HeldWakes::load(dir.path(), &writer).unwrap();
-    assert!(!loaded.terminal && !dir.path().join("held_wakes.json.bad").exists(), "a real bool stays valid");
+    assert!(
+        !loaded.terminal && !dir.path().join("held_wakes.json.bad").exists(),
+        "a real bool stays valid"
+    );
 }
 
 /// A session whose auto-compaction call gets a scripted 401, with the Flux endpoint (or not) pointing at the mock.
-async fn compaction_401_actor(flux: bool) -> (Arc<SessionActor>, fuigo_test_support::MockInferenceServer, tempfile::TempDir) {
-    let server = fuigo_test_support::MockInferenceServer::start().await.unwrap();
-    let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(None, "fuigo.api_key", fuigo_chat_state::AuthType::ApiKey, "test-key".into()).await;
+async fn compaction_401_actor(
+    flux: bool,
+) -> (
+    Arc<SessionActor>,
+    fuigo_test_support::MockInferenceServer,
+    tempfile::TempDir,
+) {
+    let server = fuigo_test_support::MockInferenceServer::start()
+        .await
+        .unwrap();
+    let (mut actor, _rx) = make_actor_parts_with_method_and_credentials(
+        None,
+        "fuigo.api_key",
+        fuigo_chat_state::AuthType::ApiKey,
+        "test-key".into(),
+    )
+    .await;
     actor.session_info.id = acp::SessionId::new(uuid::Uuid::new_v4().to_string());
     let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
     cfg.base_url = server.url();
@@ -2854,7 +3298,13 @@ async fn compaction_401_actor(flux: bool) -> (Arc<SessionActor>, fuigo_test_supp
         let am = Arc::new(AuthManager::new(dir.path(), FuigoComConfig::default()));
         let mut endpoints_cfg = crate::agent::config::Config::default();
         endpoints_cfg.endpoints.fuigo_api_base_url = server.url();
-        actor.models_manager = crate::agent::models::ModelsManager::new(None, Default::default(), acp::ModelId::new("test"), am, endpoints_cfg);
+        actor.models_manager = crate::agent::models::ModelsManager::new(
+            None,
+            Default::default(),
+            acp::ModelId::new("test"),
+            am,
+            endpoints_cfg,
+        );
     }
     actor.chat_state_handle.replace_conversation(vec![
         fuigo_sampling_types::ConversationItem::system("sys"),
@@ -2862,16 +3312,32 @@ async fn compaction_401_actor(flux: bool) -> (Arc<SessionActor>, fuigo_test_supp
         fuigo_sampling_types::ConversationItem::user("second request"),
     ]);
     let actor = Arc::new(actor);
-    super::sampler_turn::bind_refusal_prompt(&actor.session_info.id.to_string(), &actor.refusal_prompt);
-    server.enqueue_response("/v1/responses", fuigo_test_support::ScriptedResponse::json(401, serde_json::json!({"error":{"message":"unauthorized","type":"authentication_error"}})));
+    super::sampler_turn::bind_refusal_prompt(
+        &actor.session_info.id.to_string(),
+        &actor.refusal_prompt,
+    );
+    server.enqueue_response(
+        "/v1/responses",
+        fuigo_test_support::ScriptedResponse::json(
+            401,
+            serde_json::json!({"error":{"message":"unauthorized","type":"authentication_error"}}),
+        ),
+    );
     (actor, server, dir)
 }
 
 /// The wire error of an inline auto-compaction whose model call got a 401, and the POSTs the server saw.
 async fn inline_compaction_401_wire(flux: bool) -> (serde_json::Value, u32) {
     let (actor, server, _dir) = compaction_401_actor(flux).await;
-    let trigger = super::compaction::AutoCompactTriggerInfo { tokens_used: 90_000, context_window: 100_000, percentage: 90 };
-    let err = actor.run_compact_only(trigger, false).await.err().expect("a refused compaction fails");
+    let trigger = super::compaction::AutoCompactTriggerInfo {
+        tokens_used: 90_000,
+        context_window: 100_000,
+        percentage: 90,
+    };
+    let err = actor
+        .run_compact_only(trigger, false)
+        .await
+        .expect_err("a refused compaction fails");
     (serde_json::to_value(&err).unwrap(), server.request_count())
 }
 
@@ -2884,76 +3350,169 @@ async fn overflow_compaction_401_wire(flux: bool) -> (serde_json::Value, u32, bo
         model_metadata: None, retry_after_secs: None, should_retry: None, error_code: None, upstream_state: None, upstream_type: None,
         upstream_details: Default::default(),
     };
-    let err = actor.handle_sampling_failure(fuigo_sampler::SamplingErrorInfo::from(&overflow), 0, transient_state(0, false), false, TurnParkState::Fresh).await.err().expect("the compaction 401 ends the turn");
-    let main = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+    let err = actor
+        .handle_sampling_failure(
+            fuigo_sampler::SamplingErrorInfo::from(&overflow),
+            0,
+            transient_state(0, false),
+            false,
+            TurnParkState::Fresh,
+        )
+        .await
+        .err()
+        .expect("the compaction 401 ends the turn");
+    let main = actor
+        .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+        .await;
     let main_blocked = main.dispatch_gate.as_ref().unwrap().check_open().is_err();
-    (serde_json::to_value(&err).unwrap(), server.request_count(), main_blocked)
+    (
+        serde_json::to_value(&err).unwrap(),
+        server.request_count(),
+        main_blocked,
+    )
 }
 
 /// F4, Flux: a compaction 401 after a context overflow ends the prompt as the classified Flux 401, not a re-auth prompt.
 #[tokio::test(flavor = "current_thread")]
 async fn f4_overflow_compaction_401_on_flux_is_the_classified_prompt_error() {
-    tokio::task::LocalSet::new().run_until(async {
-        let (wire, posts, main_blocked) = overflow_compaction_401_wire(true).await;
-        assert_eq!(wire["code"], serde_json::json!(-32000), "{wire}");
-        assert_eq!(wire["message"], serde_json::json!("Internal error"), "{wire}");
-        assert_eq!(wire["data"]["upstream"]["http_status"], serde_json::json!(401), "{wire}");
-        assert!(wire["data"].get("http_status").is_none(), "no client re-auth key: {wire}");
-        assert_eq!(posts, 1, "the compaction POST only; 0 main POSTs after it");
-        assert!(main_blocked, "the main request stays blocked");
-    }).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (wire, posts, main_blocked) = overflow_compaction_401_wire(true).await;
+            assert_eq!(wire["code"], serde_json::json!(-32000), "{wire}");
+            assert_eq!(
+                wire["message"],
+                serde_json::json!("Internal error"),
+                "{wire}"
+            );
+            assert_eq!(
+                wire["data"]["upstream"]["http_status"],
+                serde_json::json!(401),
+                "{wire}"
+            );
+            assert!(
+                wire["data"].get("http_status").is_none(),
+                "no client re-auth key: {wire}"
+            );
+            assert_eq!(posts, 1, "the compaction POST only; 0 main POSTs after it");
+            assert!(main_blocked, "the main request stays blocked");
+        })
+        .await;
 }
 
 /// F4, non-Flux: the parent's surface_compact_auth_failure output, unchanged.
 #[tokio::test(flavor = "current_thread")]
 async fn f4_overflow_compaction_401_off_flux_keeps_the_parent_auth_failure() {
-    tokio::task::LocalSet::new().run_until(async {
-        let (wire, posts, _) = overflow_compaction_401_wire(false).await;
-        assert_eq!(wire["code"], serde_json::json!(-32000), "{wire}");
-        assert_eq!(wire["data"]["error_kind"], serde_json::json!("auth"), "{wire}");
-        assert_eq!(wire["data"]["http_status"], serde_json::json!(401), "{wire}");
-        assert_eq!(posts, 1, "{wire}");
-    }).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (wire, posts, _) = overflow_compaction_401_wire(false).await;
+            assert_eq!(wire["code"], serde_json::json!(-32000), "{wire}");
+            assert_eq!(
+                wire["data"]["error_kind"],
+                serde_json::json!("auth"),
+                "{wire}"
+            );
+            assert_eq!(
+                wire["data"]["http_status"],
+                serde_json::json!(401),
+                "{wire}"
+            );
+            assert_eq!(posts, 1, "{wire}");
+        })
+        .await;
 }
 
 /// Wire-golden rows for Flux 401s that end a prompt through compaction, and the sign-in signal's one legitimate source.
 #[tokio::test(flavor = "current_thread")]
 async fn r3_wire_golden_flux_401_rows_and_signin_signal() {
-    tokio::task::LocalSet::new().run_until(async {
-        // (a) Flux: -32000 with data.upstream.http_status 401 for the inline and the overflow compaction 401.
-        let (inline, _) = inline_compaction_401_wire(true).await;
-        let (overflow, _, _) = overflow_compaction_401_wire(true).await;
-        for (name, wire) in [("inline_compaction", &inline), ("overflow_compaction", &overflow)] {
-            assert_eq!(wire["code"], serde_json::json!(-32000), "{name}: {wire}");
-            assert_eq!(wire["data"]["upstream"]["http_status"], serde_json::json!(401), "{name}: {wire}");
-            assert!(wire["data"].get("http_status").is_none(), "{name}: {wire}");
-        }
-        // (b) Off Flux the compaction 401 carries the parent's values: the inline error is a compaction failure the
-        // caller remaps; the overflow path surfaces the auth failure with the status a re-auth prompt keys off,
-        // because a credential WAS sent and got the 401.
-        let (inline_off, _) = inline_compaction_401_wire(false).await;
-        assert_eq!(inline_off["data"]["error_kind"], serde_json::json!("compaction"), "{inline_off}");
-        let (overflow_off, _, _) = overflow_compaction_401_wire(false).await;
-        assert_eq!(overflow_off["data"]["error_kind"], serde_json::json!("auth"), "{overflow_off}");
-        assert_eq!(overflow_off["data"]["http_status"], serde_json::json!(401), "{overflow_off}");
-        // (c) A withheld session token (nothing sent) never produces the sign-in signal, on either host: the P1 row.
-        crate::agent::config::Config::install_test_trusted_origins();
-        let (_dir, am) = auth_manager_with_valid_token("golden-signin-withheld");
-        for flux in [false, true] {
-            let (actor, _rx) = make_actor_with_method_and_credentials(Some(am.clone()), "cached_token", fuigo_chat_state::AuthType::SessionToken, String::new()).await;
-            let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
-            cfg.base_url = "http://127.0.0.1:9/v1".to_string();
-            cfg.model = String::new();
-            actor.chat_state_handle.update_sampling_config(cfg);
-            let error = fuigo_sampling_types::SamplingError::Auth {
-                message: "Unauthorized (401): refused".into(), status: 401, credential: fuigo_sampling_types::SentCredential::Missing,
-                upstream: fuigo_sampling_types::error::UpstreamError { flux_routed: flux, ..Default::default() }.with_body(401, br#"{"error":{"message":"refused"}}"#),
-            };
-            let err = actor.handle_sampling_failure(fuigo_sampler::SamplingErrorInfo::from(&error), 0, transient_state(0, false), false, TurnParkState::Fresh).await.err().expect("withheld session is terminal");
-            let wire = serde_json::to_value(err).unwrap();
-            assert_eq!(wire["code"], serde_json::json!(-32603), "flux={flux}: {wire}");
-            assert!(wire["data"].get("http_status").is_none(), "flux={flux}: {wire}");
-            assert_eq!(wire["data"]["error_kind"], serde_json::json!("auth_destination_refused"), "flux={flux}: {wire}");
-        }
-    }).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            // (a) Flux: -32000 with data.upstream.http_status 401 for the inline and the overflow compaction 401.
+            let (inline, _) = inline_compaction_401_wire(true).await;
+            let (overflow, _, _) = overflow_compaction_401_wire(true).await;
+            for (name, wire) in [
+                ("inline_compaction", &inline),
+                ("overflow_compaction", &overflow),
+            ] {
+                assert_eq!(wire["code"], serde_json::json!(-32000), "{name}: {wire}");
+                assert_eq!(
+                    wire["data"]["upstream"]["http_status"],
+                    serde_json::json!(401),
+                    "{name}: {wire}"
+                );
+                assert!(wire["data"].get("http_status").is_none(), "{name}: {wire}");
+            }
+            // (b) Off Flux the compaction 401 carries the parent's values: the inline error is a compaction failure the
+            // caller remaps; the overflow path surfaces the auth failure with the status a re-auth prompt keys off,
+            // because a credential WAS sent and got the 401.
+            let (inline_off, _) = inline_compaction_401_wire(false).await;
+            assert_eq!(
+                inline_off["data"]["error_kind"],
+                serde_json::json!("compaction"),
+                "{inline_off}"
+            );
+            let (overflow_off, _, _) = overflow_compaction_401_wire(false).await;
+            assert_eq!(
+                overflow_off["data"]["error_kind"],
+                serde_json::json!("auth"),
+                "{overflow_off}"
+            );
+            assert_eq!(
+                overflow_off["data"]["http_status"],
+                serde_json::json!(401),
+                "{overflow_off}"
+            );
+            // (c) A withheld session token (nothing sent) never produces the sign-in signal, on either host: the P1 row.
+            crate::agent::config::Config::install_test_trusted_origins();
+            let (_dir, am) = auth_manager_with_valid_token("golden-signin-withheld");
+            for flux in [false, true] {
+                let (actor, _rx) = make_actor_with_method_and_credentials(
+                    Some(am.clone()),
+                    "cached_token",
+                    fuigo_chat_state::AuthType::SessionToken,
+                    String::new(),
+                )
+                .await;
+                let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                cfg.base_url = "http://127.0.0.1:9/v1".to_string();
+                cfg.model = String::new();
+                actor.chat_state_handle.update_sampling_config(cfg);
+                let error = fuigo_sampling_types::SamplingError::Auth {
+                    message: "Unauthorized (401): refused".into(),
+                    status: 401,
+                    credential: fuigo_sampling_types::SentCredential::Missing,
+                    upstream: fuigo_sampling_types::error::UpstreamError {
+                        flux_routed: flux,
+                        ..Default::default()
+                    }
+                    .with_body(401, br#"{"error":{"message":"refused"}}"#),
+                };
+                let err = actor
+                    .handle_sampling_failure(
+                        fuigo_sampler::SamplingErrorInfo::from(&error),
+                        0,
+                        transient_state(0, false),
+                        false,
+                        TurnParkState::Fresh,
+                    )
+                    .await
+                    .err()
+                    .expect("withheld session is terminal");
+                let wire = serde_json::to_value(err).unwrap();
+                assert_eq!(
+                    wire["code"],
+                    serde_json::json!(-32603),
+                    "flux={flux}: {wire}"
+                );
+                assert!(
+                    wire["data"].get("http_status").is_none(),
+                    "flux={flux}: {wire}"
+                );
+                assert_eq!(
+                    wire["data"]["error_kind"],
+                    serde_json::json!("auth_destination_refused"),
+                    "flux={flux}: {wire}"
+                );
+            }
+        })
+        .await;
 }

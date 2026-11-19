@@ -288,8 +288,10 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, cause: SwitchC
 
     // A cold `/resume` builds a new loading agent, so it follows the overlay exactly as `/new` and `/fork` do; otherwise the session
     // overlay would close the moment the load starts
-    if matches!(cause, SwitchCause::New | SwitchCause::Fork | SwitchCause::Load)
-        && let Some(previous) = previous_top_level
+    if matches!(
+        cause,
+        SwitchCause::New | SwitchCause::Fork | SwitchCause::Load
+    ) && let Some(previous) = previous_top_level
         && let Some(d) = app.dashboard.as_mut()
     {
         d.repoint_attach_if_on(previous, target);

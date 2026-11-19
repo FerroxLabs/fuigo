@@ -382,11 +382,19 @@ mod tests {
     #[test]
     fn native_tool_names_work_as_rule_prefixes() {
         for (rule_str, tool, pattern) in [
-            ("run_terminal_command(git status)", ToolFilter::Bash, Some("git status")),
+            (
+                "run_terminal_command(git status)",
+                ToolFilter::Bash,
+                Some("git status"),
+            ),
             ("Shell(git status)", ToolFilter::Bash, Some("git status")),
             ("read_file(src/**)", ToolFilter::Read, Some("src/**")),
             ("list_dir(src)", ToolFilter::Read, Some("src")),
-            ("search_replace(src/**/*.rs)", ToolFilter::Edit, Some("src/**/*.rs")),
+            (
+                "search_replace(src/**/*.rs)",
+                ToolFilter::Edit,
+                Some("src/**/*.rs"),
+            ),
             ("grep(TODO)", ToolFilter::Grep, Some("TODO")),
             ("web_search", ToolFilter::WebSearch, None),
             ("web_fetch", ToolFilter::WebFetch, None),

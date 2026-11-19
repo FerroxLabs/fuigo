@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use fuigo_config::policy_sources::{PolicyLayerTier, PolicySource, policy_sources_at};
 
 use super::super::{AllowedMcpServer, ManagedSettings, McpServerAllowlist};
-use crate::permission::types::{RuleAction, ToolFilter};
 use super::*;
+use crate::permission::types::{RuleAction, ToolFilter};
 
 const SYS_REQ: &str = "/etc/fuigo/requirements.toml";
 const SYS_MANAGED: &str = "/etc/fuigo/managed_config.toml";
@@ -328,7 +328,10 @@ fn broken_claude_file_with_copy_keeps_copy_rules_p183r9() {
         (s.tier == PolicyLayerTier::Vendor).then(|| copy.clone())
     });
     assert!(tool_denied(&ms, ToolFilter::Bash), "remembered deny stays");
-    assert!(!tool_denied(&ms, ToolFilter::Edit), "the copy, not a blanket deny");
+    assert!(
+        !tool_denied(&ms, ToolFilter::Edit),
+        "the copy, not a blanket deny"
+    );
     assert!(ms.non_managed_hooks.is_disabled());
     assert!(ms.project_mcp.is_disabled());
 }
@@ -342,10 +345,14 @@ fn broken_admin_toml_denies_only_without_copy_p183r9() {
         path: PathBuf::from(SYS_REQ),
         policy: Err("x".to_string()),
     };
-    let with_copy = resolve_managed_settings_with(vec![src.clone()], |_| Some(serde_json::Value::Null));
+    let with_copy =
+        resolve_managed_settings_with(vec![src.clone()], |_| Some(serde_json::Value::Null));
     assert!(!tool_denied(&with_copy, ToolFilter::Bash));
     assert!(with_copy.non_managed_hooks.is_disabled());
-    assert!(tool_denied(&resolve_managed_settings_with(vec![src], |_| None), ToolFilter::Bash));
+    assert!(tool_denied(
+        &resolve_managed_settings_with(vec![src], |_| None),
+        ToolFilter::Bash
+    ));
 }
 
 /// An admin-owned managed-only lockdown accepts only admin-owned grants; a user-owned one accepts any.
@@ -766,7 +773,10 @@ fn single_source_policy_from_allowlist() {
 #[test]
 fn name_only_servers_are_judged_by_server_name_entries() {
     let blocked = |ms: &ManagedSettings, name: &str| {
-        !matches!(ms.mcp_allowlist.name_only_verdict(name), McpVerdict::Allowed)
+        !matches!(
+            ms.mcp_allowlist.name_only_verdict(name),
+            McpVerdict::Allowed
+        )
     };
     let ms = layered(None, &[]);
     assert!(!blocked(&ms, "sdk"), "no policy: allowed");
@@ -780,7 +790,10 @@ fn name_only_servers_are_judged_by_server_name_entries() {
         )],
     );
     assert!(!blocked(&ms, "sdk"));
-    assert!(blocked(&ms, "other"), "a name allow list excludes other names");
+    assert!(
+        blocked(&ms, "other"),
+        "a name allow list excludes other names"
+    );
 
     let ms = layered(
         None,
@@ -790,7 +803,10 @@ fn name_only_servers_are_judged_by_server_name_entries() {
             "[[allowed_mcp_servers]]\nserver_url = \"https://ok.example.com/*\"\n",
         )],
     );
-    assert!(blocked(&ms, "sdk"), "a URL-only allow list grants no name-only server");
+    assert!(
+        blocked(&ms, "sdk"),
+        "a URL-only allow list grants no name-only server"
+    );
 
     let ms = layered(
         None,
@@ -813,11 +829,18 @@ fn name_only_servers_are_judged_by_server_name_entries() {
             "[[denied_mcp_servers]]\nserver_url = \"https://evil.example.com/*\"\n",
         )],
     );
-    assert!(!blocked(&ms, "sdk"), "a deny-only source lets a name it does not deny through");
+    assert!(
+        !blocked(&ms, "sdk"),
+        "a deny-only source lets a name it does not deny through"
+    );
 
     let ms = layered(
         None,
-        &[(PolicyLayerTier::SystemManaged, SYS_MANAGED, "allowed_mcp_servers = []\n")],
+        &[(
+            PolicyLayerTier::SystemManaged,
+            SYS_MANAGED,
+            "allowed_mcp_servers = []\n",
+        )],
     );
     assert!(matches!(
         ms.mcp_allowlist.name_only_verdict("sdk"),
@@ -839,7 +862,10 @@ fn name_only_servers_are_judged_by_server_name_entries() {
             ),
         ],
     );
-    assert!(blocked(&ms, "sdk"), "a user-layer grant cannot satisfy an admin managed-only lock");
+    assert!(
+        blocked(&ms, "sdk"),
+        "a user-layer grant cannot satisfy an admin managed-only lock"
+    );
 }
 
 /// A checkout the way a real install leaves it: under the install dir, with the clone's own `origin` remote.
@@ -852,7 +878,12 @@ fn write_origin(path: &Path, url: &str) {
     .unwrap();
 }
 
-fn installed(dir: &Path, key: &str, url: &str, plugin: &str) -> fuigo_agent::plugins::install_registry::InstalledRepo {
+fn installed(
+    dir: &Path,
+    key: &str,
+    url: &str,
+    plugin: &str,
+) -> fuigo_agent::plugins::install_registry::InstalledRepo {
     let path = dir.join("installed-plugins").join(key);
     write_origin(&path, url);
     fuigo_agent::plugins::install_registry::InstalledRepo {
@@ -906,9 +937,17 @@ fn plugin_load_restriction_lists_only_allowed_installs() {
         .plugin_load_restriction(&registry)
         .expect("restricted");
     assert_eq!(restriction.allowed_ids, vec![good_id]);
-    assert!(restriction.allowed_ids.iter().all(|id| id.starts_with("user/")));
+    assert!(
+        restriction
+            .allowed_ids
+            .iter()
+            .all(|id| id.starts_with("user/"))
+    );
 
-    let lockdown = layered(Some(serde_json::json!({"strictKnownMarketplaces": []})), &[]);
+    let lockdown = layered(
+        Some(serde_json::json!({"strictKnownMarketplaces": []})),
+        &[],
+    );
     assert_eq!(
         lockdown
             .marketplace_allowlist
@@ -978,7 +1017,12 @@ fn plugin_load_restriction_requires_the_checkout_origin_to_match_the_record() {
     let genuine_id = genuine.plugin_id("demo").unwrap();
     registry.insert("genuine".into(), genuine);
     // The record says the allowed URL; the checkout is a clone of somewhere else.
-    let swapped = installed(tmp.path(), "swapped", "https://github.com/a/b.git", "swapped");
+    let swapped = installed(
+        tmp.path(),
+        "swapped",
+        "https://github.com/a/b.git",
+        "swapped",
+    );
     write_origin(&swapped.path, "https://github.com/evil/x.git");
     registry.insert("swapped".into(), swapped);
     // The record says the allowed URL; the directory is not a git checkout at all.
@@ -1064,7 +1108,11 @@ fn plugin_load_restriction_ignores_a_subdir_symlink_out_of_the_install_dir() {
     std::fs::write(outside.join("plugin.json"), r#"{"name": "evil"}"#).unwrap();
     std::os::unix::fs::symlink(&outside, repo.path.join("escape")).unwrap();
     repo.plugins.get_mut("evil").unwrap().subdir = Some("escape".to_string());
-    assert_eq!(repo.plugin_id("evil"), None, "the id of a root outside the install dir is never minted");
+    assert_eq!(
+        repo.plugin_id("evil"),
+        None,
+        "the id of a root outside the install dir is never minted"
+    );
     registry.insert("stub".into(), repo);
     assert!(load_ids(&allowed_ab(), &registry).is_empty());
 }
@@ -1097,14 +1145,25 @@ fn plugin_load_restriction_admits_a_marketplace_copy_bound_to_its_source_checkou
 fn plugin_root_is_none_when_the_path_does_not_canonicalize() {
     let tmp = tempfile::tempdir().unwrap();
     let mut repo = installed(tmp.path(), "stub", "https://github.com/a/b.git", "demo");
-    assert!(repo.plugin_root("demo").is_some(), "guard: an existing checkout has a root");
+    assert!(
+        repo.plugin_root("demo").is_some(),
+        "guard: an existing checkout has a root"
+    );
     repo.plugins.get_mut("demo").unwrap().subdir = Some("missing".to_string());
     assert_eq!(repo.plugin_root("demo"), None, "subdir that does not exist");
     repo.plugins.get_mut("demo").unwrap().subdir = Some("/no/such/absolute/dir".to_string());
-    assert_eq!(repo.plugin_root("demo"), None, "absolute subdir replaces the checkout path");
+    assert_eq!(
+        repo.plugin_root("demo"),
+        None,
+        "absolute subdir replaces the checkout path"
+    );
     repo.plugins.get_mut("demo").unwrap().subdir = None;
     repo.path = tmp.path().join("gone");
-    assert_eq!(repo.plugin_root("demo"), None, "checkout that does not exist");
+    assert_eq!(
+        repo.plugin_root("demo"),
+        None,
+        "checkout that does not exist"
+    );
 }
 
 // ---- P183 round 10 (Grok r6 H): an admin entry replaced by a non-regular object, read through the real source reader ----------
@@ -1124,7 +1183,13 @@ fn mkfifo_at(path: &Path) {
 fn replaced_admin_entry_is_a_broken_source_the_engine_locks_down_p183r10() {
     use std::os::unix::fs::PermissionsExt as _;
     for name in ["requirements.toml", "managed_config.toml"] {
-        for kind in ["dev-null", "fifo", "directory", "dangling", "writable-parent"] {
+        for kind in [
+            "dev-null",
+            "fifo",
+            "directory",
+            "dangling",
+            "writable-parent",
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(name);
             match kind {
@@ -1134,7 +1199,8 @@ fn replaced_admin_entry_is_a_broken_source_the_engine_locks_down_p183r10() {
                 "dangling" => std::os::unix::fs::symlink("/nonexistent-p183r10/x", &path).unwrap(),
                 _ => {
                     std::fs::write(&path, "allow_managed_hooks_only = false\n").unwrap();
-                    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+                    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+                        .unwrap();
                 }
             }
             let d = dir.path().to_path_buf();
@@ -1150,10 +1216,16 @@ fn replaced_admin_entry_is_a_broken_source_the_engine_locks_down_p183r10() {
                 "{name} {kind}: must be an Err source, got {sources:?}"
             );
             let locked = resolve_managed_settings_with(sources.clone(), |_| None);
-            assert!(tool_denied(&locked, ToolFilter::Bash), "{name} {kind}: no copy denies every tool");
+            assert!(
+                tool_denied(&locked, ToolFilter::Bash),
+                "{name} {kind}: no copy denies every tool"
+            );
             assert!(locked.non_managed_hooks.is_disabled(), "{name} {kind}");
             let kept = resolve_managed_settings_with(sources, |_| Some(serde_json::Value::Null));
-            assert!(!tool_denied(&kept, ToolFilter::Edit), "{name} {kind}: the copy, not a blanket deny");
+            assert!(
+                !tool_denied(&kept, ToolFilter::Edit),
+                "{name} {kind}: the copy, not a blanket deny"
+            );
             assert!(kept.non_managed_hooks.is_disabled(), "{name} {kind}");
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -1169,17 +1241,29 @@ fn managed_settings_cache_key_changes_with_copy_existence_p183r10() {
         path: PathBuf::from(SYS_REQ),
         policy: Err("not a regular file".to_string()),
     };
-    let with = crate::permission::resolution::managed_settings_cache_key(std::slice::from_ref(&src), |_| Some(1));
-    let without = crate::permission::resolution::managed_settings_cache_key(std::slice::from_ref(&src), |_| None);
+    let with = crate::permission::resolution::managed_settings_cache_key(
+        std::slice::from_ref(&src),
+        |_| Some(1),
+    );
+    let without = crate::permission::resolution::managed_settings_cache_key(
+        std::slice::from_ref(&src),
+        |_| None,
+    );
     assert_ne!(with, without);
     assert_eq!(
         with,
-        crate::permission::resolution::managed_settings_cache_key(std::slice::from_ref(&src), |_| Some(1))
+        crate::permission::resolution::managed_settings_cache_key(
+            std::slice::from_ref(&src),
+            |_| Some(1)
+        )
     );
     // P183 round 11 (Grok r7 H1): a REPLACED copy (same existence, other text) is another key
     assert_ne!(
         with,
-        crate::permission::resolution::managed_settings_cache_key(std::slice::from_ref(&src), |_| Some(2))
+        crate::permission::resolution::managed_settings_cache_key(
+            std::slice::from_ref(&src),
+            |_| Some(2)
+        )
     );
 }
 
@@ -1210,11 +1294,20 @@ fn claude_file_break_after_a_newer_valid_read_enforces_the_newer_rules_p183r11()
     let broken = src(Err("unreadable".to_string()));
     let ms = load_managed_settings_from(vec![broken.clone()]);
     let denies = format!("{:?}", ms.permissions);
-    assert!(denies.contains("curl"), "v2's rule must be enforced: {denies}");
-    let k1 = crate::permission::resolution::managed_settings_cache_key(std::slice::from_ref(&broken), fuigo_config::admin_requirements_copy_id);
+    assert!(
+        denies.contains("curl"),
+        "v2's rule must be enforced: {denies}"
+    );
+    let k1 = crate::permission::resolution::managed_settings_cache_key(
+        std::slice::from_ref(&broken),
+        fuigo_config::admin_requirements_copy_id,
+    );
     std::fs::write(&path, v1).unwrap();
     let _ = policy_sources_at(None, None, Some(&path), None);
-    let k2 = crate::permission::resolution::managed_settings_cache_key(std::slice::from_ref(&broken), fuigo_config::admin_requirements_copy_id);
+    let k2 = crate::permission::resolution::managed_settings_cache_key(
+        std::slice::from_ref(&broken),
+        fuigo_config::admin_requirements_copy_id,
+    );
     assert_ne!(k1, k2, "a replaced copy must not be served from the cache");
 }
 
@@ -1236,7 +1329,10 @@ fn partly_invalid_claude_file_keeps_the_copy_and_locks_down_p183r12() {
         let sources = policy_sources_at(None, None, Some(&path), None);
         assert!(sources.iter().all(|s| s.policy.is_err()), "{bad}");
         let ms = load_managed_settings_from(sources);
-        assert!(tool_denied(&ms, ToolFilter::Bash), "{bad}: the copy's Bash deny must hold");
+        assert!(
+            tool_denied(&ms, ToolFilter::Bash),
+            "{bad}: the copy's Bash deny must hold"
+        );
         assert!(ms.non_managed_hooks.is_disabled(), "{bad}");
         assert!(ms.project_mcp.is_disabled(), "{bad}");
     }
@@ -1253,13 +1349,21 @@ fn partly_invalid_claude_file_keeps_the_copy_and_locks_down_p183r12() {
 /// requirements reader and the policy engine alike; hooks-only engages.
 #[test]
 fn wrong_typed_mdm_payload_is_broken_on_both_paths_p183r12() {
-    let v: toml::Value = toml::from_str("allow_managed_hooks_only = false\n[ui]\nyolo = \"no\"\n").unwrap();
+    let v: toml::Value =
+        toml::from_str("allow_managed_hooks_only = false\n[ui]\nyolo = \"no\"\n").unwrap();
     let _g = fuigo_config::mdm_override::set(Ok(Some(v.clone())));
     let sources = policy_sources_at(None, None, None, Some(Ok(v)));
-    assert!(sources.iter().any(|s| s.tier == PolicyLayerTier::Mdm && s.policy.is_err()));
+    assert!(
+        sources
+            .iter()
+            .any(|s| s.tier == PolicyLayerTier::Mdm && s.policy.is_err())
+    );
     let ms = load_managed_settings_from(sources);
     assert!(ms.non_managed_hooks.is_disabled());
-    assert!(tool_denied(&ms, ToolFilter::Bash), "no copy of an MDM payload: every tool is denied");
+    assert!(
+        tool_denied(&ms, ToolFilter::Bash),
+        "no copy of an MDM payload: every tool is denied"
+    );
 }
 
 fn engine_for(system_dir: Option<&Path>, claude: Option<&Path>) -> ManagedSettings {
@@ -1273,7 +1377,10 @@ fn unstable_claude_blank_keeps_the_copy_stable_blank_clears_it_p183r13() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("managed-settings.json");
     std::fs::write(&path, r#"{"permissions":{"deny":["Bash"]}}"#).unwrap();
-    assert!(tool_denied(&engine_for(None, Some(&path)), ToolFilter::Bash));
+    assert!(tool_denied(
+        &engine_for(None, Some(&path)),
+        ToolFilter::Bash
+    ));
     std::fs::write(&path, "").unwrap();
     // The writer is played at the re-check wait itself (test seam, this thread): every re-check sees the file changed.
     let writer_path = path.clone();
@@ -1286,12 +1393,18 @@ fn unstable_claude_blank_keeps_the_copy_stable_blank_clears_it_p183r13() {
     let waits = fuigo_config::blank_recheck_seam::fired();
     fuigo_config::blank_recheck_seam::set(None);
     assert!(waits > 0, "the read never reached the blank re-check");
-    assert!(tool_denied(&during, ToolFilter::Bash), "an unstable blank must keep the copy's Bash deny");
+    assert!(
+        tool_denied(&during, ToolFilter::Bash),
+        "an unstable blank must keep the copy's Bash deny"
+    );
     assert!(fuigo_config::admin_requirements_copy_exists(&path));
     // the owner really emptied it: the same blank, now holding still across the re-check interval
     std::fs::write(&path, "  \n").unwrap();
     let after = engine_for(None, Some(&path));
-    assert!(!tool_denied(&after, ToolFilter::Bash), "a stable trusted blank is the admin clearing the policy");
+    assert!(
+        !tool_denied(&after, ToolFilter::Bash),
+        "a stable trusted blank is the admin clearing the policy"
+    );
     assert!(!fuigo_config::admin_requirements_copy_exists(&path));
 }
 
@@ -1302,12 +1415,24 @@ fn deleted_claude_file_keeps_denying_bash_p183r13() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("managed-settings.json");
     std::fs::write(&path, r#"{"permissions":{"deny":["Bash"]}}"#).unwrap();
-    assert!(tool_denied(&engine_for(None, Some(&path)), ToolFilter::Bash));
+    assert!(tool_denied(
+        &engine_for(None, Some(&path)),
+        ToolFilter::Bash
+    ));
     std::fs::remove_file(&path).unwrap();
-    assert!(tool_denied(&engine_for(None, Some(&path)), ToolFilter::Bash), "the copy holds after unlink");
-    assert!(tool_denied(&engine_for(None, Some(&path)), ToolFilter::Bash), "and on every later read");
+    assert!(
+        tool_denied(&engine_for(None, Some(&path)), ToolFilter::Bash),
+        "the copy holds after unlink"
+    );
+    assert!(
+        tool_denied(&engine_for(None, Some(&path)), ToolFilter::Bash),
+        "and on every later read"
+    );
     let never_seen = dir.path().join("fresh").join("managed-settings.json");
-    assert!(!tool_denied(&engine_for(None, Some(&never_seen)), ToolFilter::Bash));
+    assert!(!tool_denied(
+        &engine_for(None, Some(&never_seen)),
+        ToolFilter::Bash
+    ));
 }
 
 /// Round 13 sequence 3: `requirements.toml` pins managed hooks only; it is deleted; the engine still engages the hooks pin.
@@ -1316,11 +1441,24 @@ fn deleted_requirements_toml_keeps_the_hooks_pin_in_the_engine_p183r13() {
     let sys = tempfile::tempdir().unwrap();
     let path = sys.path().join("requirements.toml");
     std::fs::write(&path, "allow_managed_hooks_only = true\n").unwrap();
-    assert!(engine_for(Some(sys.path()), None).non_managed_hooks.is_disabled());
+    assert!(
+        engine_for(Some(sys.path()), None)
+            .non_managed_hooks
+            .is_disabled()
+    );
     std::fs::remove_file(&path).unwrap();
-    assert!(engine_for(Some(sys.path()), None).non_managed_hooks.is_disabled(), "the hooks pin survives the unlink");
+    assert!(
+        engine_for(Some(sys.path()), None)
+            .non_managed_hooks
+            .is_disabled(),
+        "the hooks pin survives the unlink"
+    );
     let never = tempfile::tempdir().unwrap();
-    assert!(!engine_for(Some(never.path()), None).non_managed_hooks.is_disabled());
+    assert!(
+        !engine_for(Some(never.path()), None)
+            .non_managed_hooks
+            .is_disabled()
+    );
 }
 
 /// Round 13 sequence 4: unlink-then-create and rename-over both end with the NEW valid file enforced on the next read, and
@@ -1330,13 +1468,22 @@ fn unlink_then_create_and_rename_over_enforce_the_new_file_p183r13() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("managed-settings.json");
     std::fs::write(&path, r#"{"permissions":{"deny":["Bash"]}}"#).unwrap();
-    assert!(tool_denied(&engine_for(None, Some(&path)), ToolFilter::Bash));
+    assert!(tool_denied(
+        &engine_for(None, Some(&path)),
+        ToolFilter::Bash
+    ));
     // unlink, gap, create (stricter)
     std::fs::remove_file(&path).unwrap();
-    assert!(tool_denied(&engine_for(None, Some(&path)), ToolFilter::Bash), "gap");
+    assert!(
+        tool_denied(&engine_for(None, Some(&path)), ToolFilter::Bash),
+        "gap"
+    );
     std::fs::write(&path, r#"{"permissions":{"deny":["Edit"]}}"#).unwrap();
     let ms = engine_for(None, Some(&path));
-    assert!(tool_denied(&ms, ToolFilter::Edit) && !tool_denied(&ms, ToolFilter::Bash), "new file replaces the copy");
+    assert!(
+        tool_denied(&ms, ToolFilter::Edit) && !tool_denied(&ms, ToolFilter::Bash),
+        "new file replaces the copy"
+    );
     // rename a temp file over the name: never absent
     let tmp = dir.path().join("managed-settings.json.tmp");
     std::fs::write(&tmp, r#"{"permissions":{"deny":["Bash","WebFetch"]}}"#).unwrap();
@@ -1347,8 +1494,16 @@ fn unlink_then_create_and_rename_over_enforce_the_new_file_p183r13() {
     let sys = tempfile::tempdir().unwrap();
     let req = sys.path().join("requirements.toml");
     std::fs::write(&req, "allow_managed_hooks_only = false\n").unwrap();
-    assert!(!engine_for(Some(sys.path()), None).non_managed_hooks.is_disabled());
+    assert!(
+        !engine_for(Some(sys.path()), None)
+            .non_managed_hooks
+            .is_disabled()
+    );
     std::fs::remove_file(&req).unwrap();
     std::fs::write(&req, "allow_managed_hooks_only = true\n").unwrap();
-    assert!(engine_for(Some(sys.path()), None).non_managed_hooks.is_disabled());
+    assert!(
+        engine_for(Some(sys.path()), None)
+            .non_managed_hooks
+            .is_disabled()
+    );
 }

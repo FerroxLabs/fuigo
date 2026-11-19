@@ -864,13 +864,21 @@ mod tests {
         );
         let mut lines = Vec::new();
         block.push_command_soft_wrap(&mut lines, &theme, ExecuteHeaderStyle::Shell, false, 30, 0);
-        assert!(lines.len() >= 3, "narrow width wraps the command: {}", lines.len());
+        assert!(
+            lines.len() >= 3,
+            "narrow width wraps the command: {}",
+            lines.len()
+        );
         let copied: String = lines
             .iter()
             .enumerate()
             .map(|(i, l)| {
                 let text = line_text(&l.content);
-                let text = if i == 0 { text[2..].to_string() } else { text.trim_start().to_string() };
+                let text = if i == 0 {
+                    text[2..].to_string()
+                } else {
+                    text.trim_start().to_string()
+                };
                 match (&l.joiner, i) {
                     (_, 0) => text,
                     (Some(j), _) => format!("{j}{text}"),
@@ -887,7 +895,11 @@ mod tests {
         let mut lines = Vec::new();
         multi.push_command_soft_wrap(&mut lines, &theme, ExecuteHeaderStyle::Shell, false, 80, 0);
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[1].joiner.as_deref(), Some("\n"), "a real newline stays a newline");
+        assert_eq!(
+            lines[1].joiner.as_deref(),
+            Some("\n"),
+            "a real newline stays a newline"
+        );
     }
 
     #[test]
@@ -897,11 +909,23 @@ mod tests {
             line_text(&b.header_lines(&theme, ExecuteHeaderStyle::Label, false, false)[0].0)
         };
         let mut b = ExecuteToolCallBlock::new("cargo test");
-        assert!(first(&b).starts_with("Run cargo test"), "idle: {}", first(&b));
+        assert!(
+            first(&b).starts_with("Run cargo test"),
+            "idle: {}",
+            first(&b)
+        );
         b.started_at = Some(std::time::Instant::now());
-        assert!(first(&b).starts_with("Running cargo test"), "running: {}", first(&b));
+        assert!(
+            first(&b).starts_with("Running cargo test"),
+            "running: {}",
+            first(&b)
+        );
         b.finish();
-        assert!(first(&b).starts_with("Ran cargo test"), "finished: {}", first(&b));
+        assert!(
+            first(&b).starts_with("Ran cargo test"),
+            "finished: {}",
+            first(&b)
+        );
     }
 
     #[test]

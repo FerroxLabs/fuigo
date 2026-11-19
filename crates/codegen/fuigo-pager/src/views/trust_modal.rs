@@ -51,15 +51,27 @@ pub enum TrustStatus {
 impl TrustStatus {
     fn line(self) -> &'static str {
         match self {
-            Self::Trusted => "Trusted: its settings load and its shell commands run without asking each time.",
-            Self::Undecided => "Not trusted: you have not decided yet. Its settings do not load; shell commands ask.",
-            Self::Declined => "Not trusted: you said no. Its settings do not load; shell commands ask.",
+            Self::Trusted => {
+                "Trusted: its settings load and its shell commands run without asking each time."
+            }
+            Self::Undecided => {
+                "Not trusted: you have not decided yet. Its settings do not load; shell commands ask."
+            }
+            Self::Declined => {
+                "Not trusted: you said no. Its settings do not load; shell commands ask."
+            }
             Self::SettingsOnly => {
                 "Not trusted: trusted before 1.0.35 for its settings only. Trust it again to cover shell commands."
             }
-            Self::Never => "Can never be trusted: home and root folders. Run Fuigo from a project folder.",
-            Self::Unreadable => "Not trusted: your trust store could not be read. Check that your Fuigo home is readable.",
-            Self::Off => "Folder trust is off (config, FUIGO_FOLDER_TRUST=0, or a local build): every folder is trusted.",
+            Self::Never => {
+                "Can never be trusted: home and root folders. Run Fuigo from a project folder."
+            }
+            Self::Unreadable => {
+                "Not trusted: your trust store could not be read. Check that your Fuigo home is readable."
+            }
+            Self::Off => {
+                "Folder trust is off (config, FUIGO_FOLDER_TRUST=0, or a local build): every folder is trusted."
+            }
         }
     }
 
@@ -118,7 +130,12 @@ impl TrustSnapshot {
                 settings_only: !current_consent,
             })
             .collect();
-        Self { cwd: cwd.to_path_buf(), key, status, rows }
+        Self {
+            cwd: cwd.to_path_buf(),
+            key,
+            status,
+            rows,
+        }
     }
 }
 
@@ -147,7 +164,12 @@ impl TrustModalState {
     pub fn new(snapshot: TrustSnapshot) -> Self {
         let mut window = ModalWindowState::new();
         window.tab_count = TABS.len();
-        Self { snapshot, selected: 0, confirm: None, window }
+        Self {
+            snapshot,
+            selected: 0,
+            confirm: None,
+            window,
+        }
     }
 
     /// The tab on screen (0 this folder, 1 trusted folders).
@@ -158,7 +180,9 @@ impl TrustModalState {
     /// Replace the snapshot (after a revoke), keeping the tab and clamping the selection.
     pub fn refresh(&mut self, snapshot: TrustSnapshot) {
         self.snapshot = snapshot;
-        self.selected = self.selected.min(self.snapshot.rows.len().saturating_sub(1));
+        self.selected = self
+            .selected
+            .min(self.snapshot.rows.len().saturating_sub(1));
         self.confirm = None;
     }
 }
@@ -204,7 +228,9 @@ pub fn handle_trust_key(state: &mut TrustModalState, key: &KeyEvent) -> TrustKey
             state.confirm = Some(Confirm::Grant);
             TrustKeyOutcome::Changed
         }
-        (0, KeyCode::Char('u')) if state.snapshot.status == TrustStatus::Trusted && state.snapshot.key.is_some() => {
+        (0, KeyCode::Char('u'))
+            if state.snapshot.status == TrustStatus::Trusted && state.snapshot.key.is_some() =>
+        {
             state.confirm = Some(Confirm::RevokeCurrent);
             TrustKeyOutcome::Changed
         }
@@ -216,17 +242,19 @@ pub fn handle_trust_key(state: &mut TrustModalState, key: &KeyEvent) -> TrustKey
             state.selected += 1;
             TrustKeyOutcome::Changed
         }
-        (1, KeyCode::Char('u') | KeyCode::Delete) => match state.snapshot.rows.get(state.selected) {
-            Some(row) if row.current => {
-                state.confirm = Some(Confirm::RevokeCurrent);
-                TrustKeyOutcome::Changed
+        (1, KeyCode::Char('u') | KeyCode::Delete) => {
+            match state.snapshot.rows.get(state.selected) {
+                Some(row) if row.current => {
+                    state.confirm = Some(Confirm::RevokeCurrent);
+                    TrustKeyOutcome::Changed
+                }
+                Some(row) => {
+                    state.confirm = Some(Confirm::RevokeOther(row.folder.clone()));
+                    TrustKeyOutcome::Changed
+                }
+                None => TrustKeyOutcome::Unchanged,
             }
-            Some(row) => {
-                state.confirm = Some(Confirm::RevokeOther(row.folder.clone()));
-                TrustKeyOutcome::Changed
-            }
-            None => TrustKeyOutcome::Unchanged,
-        },
+        }
         _ => TrustKeyOutcome::Unchanged,
     }
 }
@@ -237,12 +265,16 @@ fn shown(path: &Path) -> String {
 
 fn confirm_text(confirm: &Confirm) -> String {
     match confirm {
-        Confirm::Grant => "Trust this folder? Its settings load and its shell commands run without asking. \
+        Confirm::Grant => {
+            "Trust this folder? Its settings load and its shell commands run without asking. \
                            y yes, any other key no"
-            .to_owned(),
-        Confirm::RevokeCurrent => "Stop trusting this folder? Shell commands ask again; settings already loaded stay \
+                .to_owned()
+        }
+        Confirm::RevokeCurrent => {
+            "Stop trusting this folder? Shell commands ask again; settings already loaded stay \
                                    until you reopen this session. y yes, any other key no"
-            .to_owned(),
+                .to_owned()
+        }
         Confirm::RevokeOther(folder) => format!(
             "Stop trusting {}? Sessions already open there keep their settings until reopened. y yes, any other key no",
             shown(folder)
@@ -257,16 +289,25 @@ pub fn content_lines(state: &TrustModalState, theme: &Theme) -> Vec<Line<'static
     let mut lines = Vec::new();
     let snap = &state.snapshot;
     if state.tab() == 0 {
-        lines.push(Line::from(vec![Span::styled("Folder     ", label), Span::styled(shown(&snap.cwd), text)]));
+        lines.push(Line::from(vec![
+            Span::styled("Folder     ", label),
+            Span::styled(shown(&snap.cwd), text),
+        ]));
         if let Some(key) = snap.key.as_deref().filter(|k| *k != snap.cwd.as_path()) {
-            lines.push(Line::from(vec![Span::styled("Trust key  ", label), Span::styled(shown(key), text)]));
+            lines.push(Line::from(vec![
+                Span::styled("Trust key  ", label),
+                Span::styled(shown(key), text),
+            ]));
         }
         let status_style = match snap.status {
             TrustStatus::Trusted | TrustStatus::Off => Style::default().fg(theme.accent_success),
             TrustStatus::Never | TrustStatus::Unreadable => Style::default().fg(theme.accent_error),
             _ => Style::default().fg(theme.warning),
         };
-        lines.push(Line::from(vec![Span::styled("Status     ", label), Span::styled(snap.status.line(), status_style)]));
+        lines.push(Line::from(vec![
+            Span::styled("Status     ", label),
+            Span::styled(snap.status.line(), status_style),
+        ]));
         lines.push(Line::default());
         lines.push(Line::styled(
             "Trust covers the folder's settings (MCP servers, hooks, skills, rules) and its shell commands.",
@@ -278,17 +319,30 @@ pub fn content_lines(state: &TrustModalState, theme: &Theme) -> Vec<Line<'static
         for (i, row) in snap.rows.iter().enumerate() {
             let selected = i == state.selected;
             let mut spans = vec![
-                Span::styled(if selected { "> " } else { "  " }, Style::default().fg(theme.accent_user)),
+                Span::styled(
+                    if selected { "> " } else { "  " },
+                    Style::default().fg(theme.accent_user),
+                ),
                 Span::styled(
                     shown(&row.folder),
-                    if selected { text.add_modifier(Modifier::BOLD) } else { text },
+                    if selected {
+                        text.add_modifier(Modifier::BOLD)
+                    } else {
+                        text
+                    },
                 ),
             ];
             if row.current {
-                spans.push(Span::styled("  (this folder)", Style::default().fg(theme.accent_user)));
+                spans.push(Span::styled(
+                    "  (this folder)",
+                    Style::default().fg(theme.accent_user),
+                ));
             }
             if row.settings_only {
-                spans.push(Span::styled("  (settings only)", Style::default().fg(theme.warning)));
+                spans.push(Span::styled(
+                    "  (settings only)",
+                    Style::default().fg(theme.warning),
+                ));
             }
             lines.push(Line::from(spans));
         }
@@ -302,13 +356,22 @@ pub fn content_lines(state: &TrustModalState, theme: &Theme) -> Vec<Line<'static
     }
     if let Some(confirm) = &state.confirm {
         lines.push(Line::default());
-        lines.push(Line::styled(confirm_text(confirm), Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)));
+        lines.push(Line::styled(
+            confirm_text(confirm),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     lines
 }
 
 fn shortcuts(state: &TrustModalState) -> Vec<Shortcut<'static>> {
-    let hint = |label| Shortcut { label, clickable: false, id: 0 };
+    let hint = |label| Shortcut {
+        label,
+        clickable: false,
+        id: 0,
+    };
     let mut out = Vec::new();
     if state.confirm.is_some() {
         out.push(hint("y confirm"));
@@ -332,7 +395,12 @@ fn shortcuts(state: &TrustModalState) -> Vec<Shortcut<'static>> {
 }
 
 /// Render the modal.
-pub fn render_trust_modal(buf: &mut Buffer, area: Rect, state: &mut TrustModalState, compact: bool) {
+pub fn render_trust_modal(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut TrustModalState,
+    compact: bool,
+) {
     let theme = Theme::current();
     let shortcuts = shortcuts(state);
     let config = ModalWindowConfig {
@@ -356,7 +424,9 @@ pub fn render_trust_modal(buf: &mut Buffer, area: Rect, state: &mut TrustModalSt
     else {
         return;
     };
-    Paragraph::new(content_lines(state, &theme)).wrap(Wrap { trim: false }).render(content, buf);
+    Paragraph::new(content_lines(state, &theme))
+        .wrap(Wrap { trim: false })
+        .render(content, buf);
 }
 
 #[cfg(test)]

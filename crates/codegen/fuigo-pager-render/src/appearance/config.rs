@@ -2,10 +2,10 @@
 //! `AppearanceConfig` is the resolved runtime form (ratatui::Color, BlockBackground, etc.).
 
 use documented::{Documented, DocumentedFields};
+use fuigo_shared::ui_config::UiConfig;
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, RawString};
-use fuigo_shared::ui_config::UiConfig;
 
 // ============================================================================
 // Runtime Config (used by render code)
@@ -1833,8 +1833,9 @@ fn persist_respect_manual_folds_at(path: &std::path::Path, enabled: bool) -> std
         |current| {
             let content = match current {
                 Ok(None) => "",
-                Ok(Some(bytes)) => std::str::from_utf8(bytes)
-                    .map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+                Ok(Some(bytes)) => {
+                    std::str::from_utf8(bytes).map_err(|e| Error::new(ErrorKind::InvalidData, e))?
+                }
                 Err(e) => return Err(Error::new(e.kind(), e.to_string())),
             };
             let updated = upsert_respect_manual_folds(content, enabled)
@@ -2032,7 +2033,8 @@ gutter_bg = true
                         &path,
                         |bytes| fuigo_config::fs_atomic::stage_atomically(&path, bytes, None),
                         |current| {
-                            let mut s = String::from_utf8(current.unwrap().unwrap().to_vec()).unwrap();
+                            let mut s =
+                                String::from_utf8(current.unwrap().unwrap().to_vec()).unwrap();
                             s.push_str(&format!("\n[other{i}]\nset = true\n"));
                             Ok::<_, std::io::Error>(fuigo_config::fs_atomic::Edit::Replace {
                                 contents: s.into_bytes(),
@@ -2050,9 +2052,16 @@ gutter_bg = true
         other.join().unwrap();
         persist_respect_manual_folds_at(&path, true).unwrap();
         let v: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["scrollback"]["scroll"]["respect_manual_folds"].as_bool(), Some(true));
+        assert_eq!(
+            v["scrollback"]["scroll"]["respect_manual_folds"].as_bool(),
+            Some(true)
+        );
         for i in 0..25 {
-            assert_eq!(v[format!("other{i}")]["set"].as_bool(), Some(true), "other{i}");
+            assert_eq!(
+                v[format!("other{i}")]["set"].as_bool(),
+                Some(true),
+                "other{i}"
+            );
         }
         let names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -2089,7 +2098,10 @@ gutter_bg = true
         writer.join().unwrap().unwrap();
         let v: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["ui"]["added"].as_integer(), Some(2));
-        assert_eq!(v["scrollback"]["scroll"]["respect_manual_folds"].as_bool(), Some(true));
+        assert_eq!(
+            v["scrollback"]["scroll"]["respect_manual_folds"].as_bool(),
+            Some(true)
+        );
     }
 
     #[test]

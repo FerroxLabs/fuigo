@@ -43,7 +43,10 @@ pub fn run_bounded(
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(pipe) = pipe.as_mut() {
-            let _ = pipe.by_ref().take(max_stdout as u64 + 1).read_to_end(&mut buf);
+            let _ = pipe
+                .by_ref()
+                .take(max_stdout as u64 + 1)
+                .read_to_end(&mut buf);
         }
         buf
     });
@@ -105,7 +108,10 @@ mod tests {
         let start = Instant::now();
         let r = run_bounded(detached(cmd), Duration::from_millis(200), 1024);
         assert!(matches!(r, Err(BoundedError::Timeout)), "got {r:?}");
-        assert!(start.elapsed() < Duration::from_secs(10), "returned only after the helper finished");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "returned only after the helper finished"
+        );
     }
 
     #[test]

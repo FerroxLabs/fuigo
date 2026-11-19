@@ -110,7 +110,9 @@ async fn wait_for_file(path: &Path, secs: u64) -> bool {
     path.exists()
 }
 
-async fn results_by_call_id(actor: &SessionActor) -> std::collections::HashMap<String, Vec<String>> {
+async fn results_by_call_id(
+    actor: &SessionActor,
+) -> std::collections::HashMap<String, Vec<String>> {
     let mut by_id: std::collections::HashMap<String, Vec<String>> = Default::default();
     for item in actor.chat_state_handle.get_conversation().await {
         if let fuigo_sampling_types::ConversationItem::ToolResult(tr) = &item {
@@ -203,7 +205,8 @@ async fn an_acp_error_in_the_body_still_answers_the_exit_plan_tail() {
             let dir = tempfile::tempdir().unwrap();
             let d = dir.path().display().to_string();
             let backend = Arc::new(LocalTerminalBackend::new());
-            let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (gateway_tx, mut gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
             let mut tools = shell_toolset();
             tools.push(ToolConfig::for_tool::<EnterPlanModeTool>());
             tools.push(ToolConfig::for_tool::<ExitPlanModeTool>());
@@ -212,7 +215,8 @@ async fn an_acp_error_in_the_body_still_answers_the_exit_plan_tail() {
             std::fs::write(&plan_path, "# plan").unwrap();
             {
                 let mut tracker = actor.plan_mode.lock();
-                *tracker = crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+                *tracker =
+                    crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
                 tracker.activate_from_tool();
             }
             actor
@@ -230,9 +234,11 @@ async fn an_acp_error_in_the_body_still_answers_the_exit_plan_tail() {
                                 exit_fired_task.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
                             let raw: Arc<serde_json::value::RawValue> =
-                                serde_json::value::to_raw_value(&serde_json::json!({ "outcome": "approved" }))
-                                    .unwrap()
-                                    .into();
+                                serde_json::value::to_raw_value(
+                                    &serde_json::json!({ "outcome": "approved" }),
+                                )
+                                .unwrap()
+                                .into();
                             let _ = args.response_tx.send(Ok(acp::ExtResponse::new(raw)));
                         }
                         fuigo_acp_lib::AcpClientMessage::SessionNotification(args) => {
@@ -262,7 +268,10 @@ async fn an_acp_error_in_the_body_still_answers_the_exit_plan_tail() {
             );
             responder.abort();
 
-            assert!(matches!(&outcome, Ok(Err(_))), "the ACP error must still surface");
+            assert!(
+                matches!(&outcome, Ok(Err(_))),
+                "the ACP error must still surface"
+            );
             for id in ["call_fail", "call_b", "call_exit"] {
                 assert_eq!(
                     results.get(id).map(Vec::len),

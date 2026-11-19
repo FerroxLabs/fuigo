@@ -102,7 +102,9 @@ impl ClassifierSecurityFinding {
             Self::InheritedEnvironment => {
                 "the environment the command inherits can change which program runs or what it loads"
             }
-            Self::RepositoryHook => "the repository has git hooks of its own, which this git command can run",
+            Self::RepositoryHook => {
+                "the repository has git hooks of its own, which this git command can run"
+            }
         }
     }
 
@@ -183,7 +185,8 @@ impl BashSecurityAssessment {
             && self.0.iter().all(|finding| {
                 matches!(
                     finding,
-                    ClassifierSecurityFinding::InheritedEnvironment | ClassifierSecurityFinding::RepositoryHook
+                    ClassifierSecurityFinding::InheritedEnvironment
+                        | ClassifierSecurityFinding::RepositoryHook
                 )
             })
     }

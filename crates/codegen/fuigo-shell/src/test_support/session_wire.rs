@@ -50,10 +50,22 @@ impl SessionWire {
         let proxy = format!("http://127.0.0.1:{port}");
         // SAFETY: the caller runs alone in a fresh process, before any HTTP client exists.
         unsafe {
-            for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"] {
+            for key in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "ALL_PROXY",
+            ] {
                 std::env::set_var(key, &proxy);
             }
-            for key in ["NO_PROXY", "no_proxy", "FUIGO_API_KEY", "FUIGO_CODE_API_KEY", "SSL_CERT_FILE"] {
+            for key in [
+                "NO_PROXY",
+                "no_proxy",
+                "FUIGO_API_KEY",
+                "FUIGO_CODE_API_KEY",
+                "SSL_CERT_FILE",
+            ] {
                 std::env::remove_var(key);
             }
             std::env::set_var("FUIGO_EXTRA_CA_BUNDLE", &ca_path);
@@ -117,7 +129,11 @@ async fn serve(
             .await?;
         let mut tls = acceptor.accept(socket).await?;
         let (inner_line, inner_headers) = read_request(&mut tls).await?;
-        let path = inner_line.split_whitespace().nth(1).unwrap_or("").to_string();
+        let path = inner_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("")
+            .to_string();
         let _ = tx.send(Observed {
             target: format!("https://{authority}{path}"),
             authorization: header(&inner_headers, "authorization"),
@@ -281,7 +297,10 @@ impl SessionFront {
         if changed {
             self.route_generation.send_modify(|g| *g += 1);
         }
-        format!("https://{CONFIGURED_HOST}{}", parsed.path().trim_end_matches('/'))
+        format!(
+            "https://{CONFIGURED_HOST}{}",
+            parsed.path().trim_end_matches('/')
+        )
     }
 
     /// [`Self::front`], spelled as the non-FluxRouter service origin [`SERVICE_HOST`].
@@ -291,8 +310,15 @@ impl SessionFront {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-fn tls_acceptor_and_ca() -> (tokio_rustls::TlsAcceptor, tempfile::TempDir, std::path::PathBuf) {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+fn tls_acceptor_and_ca() -> (
+    tokio_rustls::TlsAcceptor,
+    tempfile::TempDir,
+    std::path::PathBuf,
+) {
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     let ca_key = KeyPair::generate().unwrap();
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
@@ -318,7 +344,11 @@ fn tls_acceptor_and_ca() -> (tokio_rustls::TlsAcceptor, tempfile::TempDir, std::
     )
     .unwrap();
     tls.alpn_protocols = vec![b"http/1.1".to_vec()];
-    (tokio_rustls::TlsAcceptor::from(Arc::new(tls)), ca_dir, ca_path)
+    (
+        tokio_rustls::TlsAcceptor::from(Arc::new(tls)),
+        ca_dir,
+        ca_path,
+    )
 }
 
 async fn forward(
@@ -339,7 +369,9 @@ async fn forward(
         });
     if !is_configured {
         socket
-            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .write_all(
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
             .await?;
         return Ok(());
     }

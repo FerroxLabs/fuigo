@@ -194,7 +194,9 @@ pub(super) fn dispatch_open_folder_trust(app: &mut AppView) -> Vec<Effect> {
 /// The toast for [`dispatch_decline_folder_trust`]'s result.
 pub(super) fn decline_toast(shown: &str, saved: &Result<(), std::io::Error>) -> String {
     match saved {
-        Ok(()) => format!("Stopped trusting {shown}. Sessions already open there keep their settings until reopened."),
+        Ok(()) => format!(
+            "Stopped trusting {shown}. Sessions already open there keep their settings until reopened."
+        ),
         // The "no" holds only in this pager process; the agent and new sessions decide from the store, so the folder
         // is still trusted there (Fable r1 M2).
         Err(error) => format!(
@@ -207,14 +209,23 @@ pub(super) fn decline_toast(shown: &str, saved: &Result<(), std::io::Error>) -> 
 /// F11: stop trusting `folder`, another folder from the `/trust` list, with the writer the startup question's "no"
 /// uses. It holds in this process at once and is saved; sessions already open there keep what they loaded until
 /// they are reopened. The open list is re-read; a save error is said, never swallowed.
-pub(super) fn dispatch_decline_folder_trust(app: &mut AppView, folder: &std::path::Path) -> Vec<Effect> {
+pub(super) fn dispatch_decline_folder_trust(
+    app: &mut AppView,
+    folder: &std::path::Path,
+) -> Vec<Effect> {
     let shown = fuigo_tty_utils::untrusted(folder.display()).to_string();
-    let msg = decline_toast(&shown, &fuigo_workspace::folder_trust::decline_folder_trust_key(folder));
+    let msg = decline_toast(
+        &shown,
+        &fuigo_workspace::folder_trust::decline_folder_trust_key(folder),
+    );
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
-        && let Some(crate::views::modal::ActiveModal::FolderTrust { state }) = agent.active_modal.as_mut()
+        && let Some(crate::views::modal::ActiveModal::FolderTrust { state }) =
+            agent.active_modal.as_mut()
     {
-        state.refresh(crate::views::trust_modal::TrustSnapshot::read(&agent.session.cwd));
+        state.refresh(crate::views::trust_modal::TrustSnapshot::read(
+            &agent.session.cwd,
+        ));
     }
     app.show_toast(&msg);
     vec![]

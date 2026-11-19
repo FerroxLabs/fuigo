@@ -102,8 +102,10 @@ pub(super) fn find_working_tree_content(
                     DirEntryStatus::Untracked => {
                         // A folder that holds only empty folders holds no work; one that cannot be read is assumed to
                         let only_empty_folders = entry.disk_kind.is_some_and(|kind| kind.is_dir())
-                            && !has_any_file(&workdir.join(gix::path::from_byte_slice(&entry.rela_path)))
-                                .unwrap_or(true);
+                            && !has_any_file(
+                                &workdir.join(gix::path::from_byte_slice(&entry.rela_path)),
+                            )
+                            .unwrap_or(true);
                         !only_empty_folders && !is_build_output(repo, &entry)
                     }
                     DirEntryStatus::Ignored(_) if is_build_output(repo, &entry) => false,

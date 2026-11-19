@@ -11,13 +11,15 @@
 mod acp_harness;
 
 use acp_harness::{
-    AutoApproveClient, RPC_TIMEOUT, close_and_release, connect_client, ext_method, new_session, prompt_turn, run_agent_test,
-    spawn_agent_local_with_config,
+    AutoApproveClient, RPC_TIMEOUT, close_and_release, connect_client, ext_method, new_session,
+    prompt_turn, run_agent_test, spawn_agent_local_with_config,
 };
 use agent_client_protocol::{self as acp, Agent as _};
 use fuigo_shell::session::info::Info;
 use fuigo_test_support::sse::chat_completion_script_exact;
-use fuigo_test_support::{InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, ScriptedResponse};
+use fuigo_test_support::{
+    InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, ScriptedResponse,
+};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -33,9 +35,13 @@ fn agent_config() -> fuigo_shell::agent::config::Config {
 }
 
 async fn connect(label: &str) -> acp::ClientSideConnection {
-    connect_client(AutoApproveClient, label, spawn_agent_local_with_config(agent_config()))
-        .await
-        .0
+    connect_client(
+        AutoApproveClient,
+        label,
+        spawn_agent_local_with_config(agent_config()),
+    )
+    .await
+    .0
 }
 
 fn session_dir(session: &acp::SessionId, cwd: &Path) -> PathBuf {
@@ -79,13 +85,18 @@ fn tree_text(dir: &Path) -> String {
         if meta.is_dir() {
             text.push_str(&tree_text(&path));
         } else if meta.is_file() {
-            text.push_str(&String::from_utf8_lossy(&std::fs::read(&path).unwrap_or_default()));
+            text.push_str(&String::from_utf8_lossy(
+                &std::fs::read(&path).unwrap_or_default(),
+            ));
         }
     }
     text
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(unix)]
 #[test]
 fn a_symlinked_compaction_checkpoint_is_never_followed() {
@@ -103,7 +114,10 @@ fn a_symlinked_compaction_checkpoint_is_never_followed() {
         )
         .await;
         let live = turn(&a, &mock, &session, "Second prompt.", "Second answer.").await;
-        assert!(live.contains(SUMMARY_PREAMBLE), "fixture: the compacted session's request carries the summary: {live}");
+        assert!(
+            live.contains(SUMMARY_PREAMBLE),
+            "fixture: the compacted session's request carries the summary: {live}"
+        );
         close_and_release(&a, &[&session]).await;
         drop(a);
 
@@ -114,13 +128,23 @@ fn a_symlinked_compaction_checkpoint_is_never_followed() {
             .expect("checkpoint dir")
             .map(|e| e.expect("entry").path())
             .collect();
-        assert_eq!(checkpoints.len(), 1, "fixture: one compaction, one checkpoint");
+        assert_eq!(
+            checkpoints.len(),
+            1,
+            "fixture: one compaction, one checkpoint"
+        );
         let checkpoint = &checkpoints[0];
         let original = std::fs::read_to_string(checkpoint).expect("read checkpoint");
-        assert!(original.contains(SUMMARY_PREAMBLE), "fixture: the checkpoint holds the summary");
+        assert!(
+            original.contains(SUMMARY_PREAMBLE),
+            "fixture: the checkpoint holds the summary"
+        );
         let planted = outside.path().join("sentinel.json");
-        std::fs::write(&planted, original.replace(SUMMARY_PREAMBLE, &format!("{SENTINEL} {SUMMARY_PREAMBLE}")))
-            .expect("write outside file");
+        std::fs::write(
+            &planted,
+            original.replace(SUMMARY_PREAMBLE, &format!("{SENTINEL} {SUMMARY_PREAMBLE}")),
+        )
+        .expect("write outside file");
         let planted_before = std::fs::read(&planted).expect("read outside file");
         std::fs::remove_file(checkpoint).expect("remove checkpoint");
         std::os::unix::fs::symlink(&planted, checkpoint).expect("plant symlink");
@@ -131,7 +155,10 @@ fn a_symlinked_compaction_checkpoint_is_never_followed() {
         let mut failures = Vec::new();
         match tokio::time::timeout(
             RPC_TIMEOUT,
-            b.load_session(acp::LoadSessionRequest::new(session.clone(), cwd.to_path_buf())),
+            b.load_session(acp::LoadSessionRequest::new(
+                session.clone(),
+                cwd.to_path_buf(),
+            )),
         )
         .await
         {
@@ -141,7 +168,9 @@ fn a_symlinked_compaction_checkpoint_is_never_followed() {
                     failures.push(format!("the loaded session's request carries the outside file's content: {messages}"));
                 }
                 if !messages.contains("Second prompt.") {
-                    failures.push(format!("the loaded session lost its post-compaction turn: {messages}"));
+                    failures.push(format!(
+                        "the loaded session lost its post-compaction turn: {messages}"
+                    ));
                 }
             }
             Ok(Err(e)) => failures.push(format!("session/load failed: {e}")),
@@ -157,7 +186,12 @@ fn a_symlinked_compaction_checkpoint_is_never_followed() {
             }),
         )
         .await;
-        let fork = acp::SessionId::new(fork["newSessionId"].as_str().expect("fork returns its session id").to_string());
+        let fork = acp::SessionId::new(
+            fork["newSessionId"]
+                .as_str()
+                .expect("fork returns its session id")
+                .to_string(),
+        );
         let fork_text = tree_text(&session_dir(&fork, &cwd));
         if fork_text.contains(SENTINEL) {
             failures.push("the fork copied the outside file's content".into());

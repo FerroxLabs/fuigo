@@ -29,6 +29,10 @@ pub struct CancellationContext {
 /// `handle_btw` maps them with [`map_sampling_err_to_acp`](crate::sampling::error::map_sampling_err_to_acp).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "SamplingError inlines the upstream classification; boxing it touches every construction site and is a separate refactor"
+)]
 pub enum SideQuestionError {
     #[error("side question model call failed: {0}")]
     Sampling(#[from] fuigo_sampling_types::SamplingError),
@@ -1111,8 +1115,17 @@ mod cancel_trigger_tests {
     /// sending the same wire name may read as the limit: a client's Stop never becomes a budget denial.
     #[test]
     fn the_runtime_limit_trigger_needs_a_passed_deadline() {
-        assert!(fuigo_sampler::execution_budget::process_budget().ok().flatten().is_none(), "precondition");
-        assert_eq!(CancelTrigger::runtime_limit().as_str(), CancelTrigger::RUNTIME_LIMIT_NAME);
+        assert!(
+            fuigo_sampler::execution_budget::process_budget()
+                .ok()
+                .flatten()
+                .is_none(),
+            "precondition"
+        );
+        assert_eq!(
+            CancelTrigger::runtime_limit().as_str(),
+            CancelTrigger::RUNTIME_LIMIT_NAME
+        );
         assert!(!CancelTrigger::runtime_limit().is_runtime_limit());
         assert!(!CancelTrigger::from_client(CancelTrigger::RUNTIME_LIMIT_NAME).is_runtime_limit());
         assert!(!CancelTrigger::Esc.is_runtime_limit());

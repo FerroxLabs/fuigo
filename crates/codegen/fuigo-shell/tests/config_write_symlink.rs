@@ -21,7 +21,10 @@ fn echo_server() -> fuigo_shell::util::config::McpServerConfig {
         .expect("stdio server config")
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn config_writers_replace_a_symlink_and_never_write_its_target() {
     // One #[test] per binary: the env is process-global and `fuigo_home()` is cached.
@@ -65,7 +68,8 @@ fn config_writers_replace_a_symlink_and_never_write_its_target() {
             assert!(!is_symlink(&link), "mcp add replaces the link");
             let written = std::fs::read_to_string(&link).unwrap();
             assert!(
-                written.contains("[mcp_servers.qa-echo]") && written.contains("default = \"keep-me\""),
+                written.contains("[mcp_servers.qa-echo]")
+                    && written.contains("default = \"keep-me\""),
                 "{written}"
             );
             assert_eq!(original, std::fs::read_to_string(&target).unwrap());
@@ -81,7 +85,9 @@ fn config_writers_replace_a_symlink_and_never_write_its_target() {
             assert!(!is_symlink(&link), "mcp remove replaces the link");
             assert!(!std::fs::read_to_string(&link).unwrap().contains("qa-echo"));
             assert!(
-                std::fs::read_to_string(&target).unwrap().contains("qa-echo"),
+                std::fs::read_to_string(&target)
+                    .unwrap()
+                    .contains("qa-echo"),
                 "the link target is not written"
             );
 
@@ -110,7 +116,11 @@ fn config_writers_replace_a_symlink_and_never_write_its_target() {
                     .expect("project mcp remove")
             );
             assert!(!is_symlink(&project_link), "the committed link is replaced");
-            assert!(!std::fs::read_to_string(&project_link).unwrap().contains("planted"));
+            assert!(
+                !std::fs::read_to_string(&project_link)
+                    .unwrap()
+                    .contains("planted")
+            );
             assert_eq!(
                 defined,
                 std::fs::read_to_string(&outside).unwrap(),

@@ -25,8 +25,8 @@ use tokio_util::sync::CancellationToken;
 use super::directory::PeerDirectory;
 use super::rows::LOCATOR_NAME;
 use super::win_logic::{
-    DialClass, MAX_PROBES, PROBE_CAP, REAP_BUDGET, ReapReport, TRY_GAP, classify, disabled_of, others, win_reap_decision,
-    with_row_added, without_exact, without_host,
+    DialClass, MAX_PROBES, PROBE_CAP, REAP_BUDGET, ReapReport, TRY_GAP, classify, disabled_of,
+    others, win_reap_decision, with_row_added, without_exact, without_host,
 };
 use super::win_pipe::{self, WinPeerInbox};
 use super::win_watch::{self, PipeProber};
@@ -55,11 +55,15 @@ pub(crate) struct StartOptions {
 
 fn mint_host_id() -> HostId {
     let n: u128 = rand::random();
-    HostId::new(&format!("{n:032x}")).unwrap_or_else(|_| unreachable!("32 lower-case hex characters"))
+    HostId::new(&format!("{n:032x}"))
+        .unwrap_or_else(|_| unreachable!("32 lower-case hex characters"))
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg_attr(not(test), allow(unused_variables))]
@@ -86,7 +90,11 @@ fn publish_row(dir: &CheckedDir, mine: HostRow) -> Result<(), Disabled> {
             cur.map(<[u8]>::to_vec)
         }
     })?;
-    if full { Err(Disabled::LocatorFull) } else { Ok(()) }
+    if full {
+        Err(Disabled::LocatorFull)
+    } else {
+        Ok(())
+    }
 }
 
 /// Orders one start's publish against the undo of that publish. The publish holds `lock` for its whole write and does
@@ -100,7 +108,10 @@ struct PublishGate {
 
 impl PublishGate {
     fn publish(&self, dir: &CheckedDir, mine: HostRow) -> Result<(), Disabled> {
-        let _held = self.lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _held = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.cancelled.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -109,7 +120,10 @@ impl PublishGate {
 
     fn undo(&self, dir: &CheckedDir, host_id: &HostId) {
         self.cancelled.store(true, Ordering::SeqCst);
-        let _held = self.lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _held = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         remove_own_row(dir, host_id);
     }
 }
@@ -138,7 +152,11 @@ impl Drop for RowGuard {
 
 /// The rows of other hosts from the locator, at most `cap`. A rejected, unreadable or garbage file is an error (rejected)
 /// or no rows (garbage): never a panic.
-pub(crate) async fn read_others(dir: &Arc<CheckedDir>, own: &HostId, cap: usize) -> Result<Vec<HostRow>, Disabled> {
+pub(crate) async fn read_others(
+    dir: &Arc<CheckedDir>,
+    own: &HostId,
+    cap: usize,
+) -> Result<Vec<HostRow>, Disabled> {
     let d = dir.clone();
     let bytes = tokio::task::spawn_blocking(move || read_locator(&d, LOCATOR_NAME))
         .await
@@ -148,7 +166,9 @@ pub(crate) async fn read_others(dir: &Arc<CheckedDir>, own: &HostId, cap: usize)
 
 /// One dial to a host on this machine; the failure is already classified (the one mapping, `win_logic::classify`).
 pub(crate) async fn dial_class(our: &HostId, host: &HostId, op: Op) -> Result<Reply, DialClass> {
-    win_pipe::dial(our, host, op).await.map_err(|e| classify(&e))
+    win_pipe::dial(our, host, op)
+        .await
+        .map_err(|e| classify(&e))
 }
 
 /// One reaping or watch try: open the pipe, hello each way (the server must announce `host`), a `List`, close.
@@ -161,14 +181,20 @@ pub(crate) async fn try_hello(our: &HostId, host: &HostId) -> TryResult {
 }
 
 async fn capped_hello(our: &HostId, row: &HostRow) -> TryResult {
-    tokio::time::timeout(PROBE_CAP, try_hello(our, &row.host_id)).await.unwrap_or(TryResult::Timeout)
+    tokio::time::timeout(PROBE_CAP, try_hello(our, &row.host_id))
+        .await
+        .unwrap_or(TryResult::Timeout)
 }
 
 /// Judge every row but ours with at most two tries `gap` apart and remove the rows [`win_reap_decision`] condemns (both
 /// tries found no pipe). Same shape as the unix pass: phase 1 the first try of every row, at most `MAX_PROBES` at once,
 /// each under `PROBE_CAP`; after ONE gap phase 2 for the rows whose first try found no pipe; each condemned row is removed
 /// under the locator lock, only if it is still the very row that was read.
-pub(crate) async fn reap_pass(dir: &Arc<CheckedDir>, our: &HostId, gap: Duration) -> Result<ReapReport, Disabled> {
+pub(crate) async fn reap_pass(
+    dir: &Arc<CheckedDir>,
+    our: &HostId,
+    gap: Duration,
+) -> Result<ReapReport, Disabled> {
     use futures::StreamExt;
     let rows = read_others(dir, our, MAX_OTHER_ROWS).await?;
     let mut report = ReapReport::default();
@@ -180,7 +206,9 @@ pub(crate) async fn reap_pass(dir: &Arc<CheckedDir>, our: &HostId, gap: Duration
         .buffer_unordered(MAX_PROBES)
         .collect()
         .await;
-    let (candidates, kept_now): (Vec<_>, Vec<_>) = firsts.into_iter().partition(|(_, first)| *first == TryResult::NoSuchFile);
+    let (candidates, kept_now): (Vec<_>, Vec<_>) = firsts
+        .into_iter()
+        .partition(|(_, first)| *first == TryResult::NoSuchFile);
     report.kept += kept_now.len();
     if !candidates.is_empty() {
         tokio::time::sleep(gap).await;
@@ -266,7 +294,11 @@ impl PeerInbox {
     }
 
     /// `start_with` with a chosen host id.
-    pub(crate) async fn start_inner(home: &Path, opts: StartOptions, host_id: HostId) -> Result<PeerInbox, Disabled> {
+    pub(crate) async fn start_inner(
+        home: &Path,
+        opts: StartOptions,
+        host_id: HostId,
+    ) -> Result<PeerInbox, Disabled> {
         // a. Before ANY OS call, thread or task.
         if !opts.enabled {
             return Err(Disabled::FeatureOff);
@@ -291,19 +323,37 @@ impl PeerInbox {
             Err(_) => return Err(Disabled::StartPanicked),
         }
         // A failure from here on drops `inner`, which closes the pipe.
-        let inner = WinPeerInbox::start_inner(win_pipe::StartOptions { enabled: true, evidence_open_acl: false }, host_id.clone())
-            .await
-            .map_err(disabled_of)?;
+        let inner = WinPeerInbox::start_inner(
+            win_pipe::StartOptions {
+                enabled: true,
+                evidence_open_acl: false,
+            },
+            host_id.clone(),
+        )
+        .await
+        .map_err(disabled_of)?;
         // d. One bounded reap pass BEFORE our row is written (a full locator would otherwise refuse us). Never repeated on a
         // timer; a failed or cut-short pass changes nothing else.
         let _ = tokio::time::timeout(REAP_BUDGET, reap_pass(&home_dir, &host_id, TRY_GAP)).await;
         // e. Our row. The guard exists BEFORE the publish begins: a start dropped while the blocking publish runs still
         // removes the row that publish writes (its removal queues behind the publish on the locator lock).
-        let row = HostRow { host_id: host_id.clone(), pid: std::process::id(), started: now_secs(), dir: HostDir::Home };
+        let row = HostRow {
+            host_id: host_id.clone(),
+            pid: std::process::id(),
+            started: now_secs(),
+            dir: HostDir::Home,
+        };
         let gate = Arc::new(PublishGate::default());
-        let mut row_guard = RowGuard { dir: home_dir.clone(), host_id: host_id.clone(), gate: gate.clone(), armed: true };
+        let mut row_guard = RowGuard {
+            dir: home_dir.clone(),
+            host_id: host_id.clone(),
+            gate: gate.clone(),
+            armed: true,
+        };
         let (d, r) = (home_dir.clone(), row.clone());
-        tokio::task::spawn_blocking(move || gate.publish(&d, r)).await.map_err(|_| Disabled::StartPanicked)??;
+        tokio::task::spawn_blocking(move || gate.publish(&d, r))
+            .await
+            .map_err(|_| Disabled::StartPanicked)??;
         #[cfg(test)]
         if fault::is(&host_id, fault::Fault::PauseAfterPublish) {
             std::future::pending::<()>().await;
@@ -313,10 +363,18 @@ impl PeerInbox {
         let token = CancellationToken::new();
         let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
         directory.set_notice_out(notice_tx);
-        let pump = tokio::spawn(win_watch::pump(notice_rx, directory.clone(), home_dir.clone(), None));
+        let pump = tokio::spawn(win_watch::pump(
+            notice_rx,
+            directory.clone(),
+            home_dir.clone(),
+            None,
+        ));
         let ticker = tokio::spawn(win_watch::ticker(
             directory.clone(),
-            PipeProber { home_dir: home_dir.clone(), own: host_id.clone() },
+            PipeProber {
+                home_dir: home_dir.clone(),
+                own: host_id.clone(),
+            },
             token.clone(),
         ));
         // The inbox owns the cleanup from here on (shutdown / Drop).
@@ -357,14 +415,20 @@ impl PeerInbox {
 
     /// The typed reason the locator could not be read the last time (a rejected file), for status. `None` when it read fine.
     pub(crate) fn locator_problem(&self) -> Option<Disabled> {
-        *self.locator_problem.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self
+            .locator_problem
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Other hosts' rows from the locator (display data only), minus ours, at most `cap`. A rejected locator gives no rows
     /// and is remembered in [`PeerInbox::locator_problem`].
     pub(crate) async fn other_hosts(&self, cap: usize) -> Vec<HostRow> {
         let r = read_others(&self.home_dir, &self.host_id, cap).await;
-        *self.locator_problem.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = r.as_ref().err().copied();
+        *self
+            .locator_problem
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = r.as_ref().err().copied();
         r.unwrap_or_default()
     }
 
@@ -403,7 +467,11 @@ impl PeerInbox {
         self.directory.announce_exit();
         // Dropping the directory's sender lets the pump end once it has delivered what is queued.
         drop(self.directory.take_notice_out());
-        let pump = self.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let pump = self
+            .pump
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         if let Some(p) = pump {
             let _ = tokio::time::timeout(ANNOUNCE_BUDGET, p).await;
         }
@@ -411,10 +479,20 @@ impl PeerInbox {
 
     fn stop_accepting(&self) {
         self.token.cancel();
-        if let Some(t) = self.ticker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        if let Some(t) = self
+            .ticker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             t.abort();
         }
-        if let Some(t) = self.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        if let Some(t) = self
+            .pump
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             t.abort();
         }
     }
@@ -455,13 +533,17 @@ pub(super) mod fault {
         FAULTS.lock().unwrap().push((id.clone(), f));
     }
     pub(crate) fn is(id: &HostId, f: Fault) -> bool {
-        FAULTS.lock().unwrap().iter().any(|(i, x)| i == id && *x == f)
+        FAULTS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(i, x)| i == id && *x == f)
     }
 }
 
 #[cfg(test)]
-#[path = "win_inbox_tests.rs"]
-mod tests;
-#[cfg(test)]
 #[path = "win_inbox_pipe_tests.rs"]
 mod pipe_tests;
+#[cfg(test)]
+#[path = "win_inbox_tests.rs"]
+mod tests;

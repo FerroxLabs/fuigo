@@ -1261,7 +1261,9 @@ impl BlockViewerPane {
             Some(id) => id as usize,
             None => {
                 let vi = self.list_state.visible_range().next_back()?;
-                self.list_state.to_physical(vi).checked_sub(self.prepend_items.len())?
+                self.list_state
+                    .to_physical(vi)
+                    .checked_sub(self.prepend_items.len())?
             }
         };
         let index = entry.block.with_code_blocks(|blocks| {

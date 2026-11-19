@@ -2075,8 +2075,16 @@ fn append_skeptic_reports_prefers_latest_attempt_numerically() {
     )
     .unwrap();
 
-    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dest.parent().unwrap()).unwrap();
-    append_skeptic_reports(scratch.path(), &writer, std::path::Path::new(dest.file_name().unwrap()));
+    let writer = fuigo_session_writer::SessionWriter::try_claim(
+        uuid::Uuid::now_v7().to_string(),
+        dest.parent().unwrap(),
+    )
+    .unwrap();
+    append_skeptic_reports(
+        scratch.path(),
+        &writer,
+        std::path::Path::new(dest.file_name().unwrap()),
+    );
 
     let body = std::fs::read_to_string(&dest).unwrap();
     let s0 = body
@@ -2110,7 +2118,11 @@ fn rescue_move_never_writes_through_a_destination_symlink() {
 
     // F5-C5: the rescue moves the file in through the session's writer; a symlink at the destination is replaced,
     // never written through.
-    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir.path()).unwrap();
+    let writer = fuigo_session_writer::SessionWriter::try_claim(
+        uuid::Uuid::now_v7().to_string(),
+        dir.path(),
+    )
+    .unwrap();
     writer.move_in_sync(&src, "dest.md").unwrap();
     assert_eq!(std::fs::read_to_string(&dest).unwrap(), "rescued body");
     assert_eq!(
@@ -2239,7 +2251,14 @@ fn create_goal_plumbs_baseline_commit_into_orchestration() {
 #[test]
 fn idle_continuation_streak_counts_and_resets() {
     let mut t = make_tracker();
-    t.create_goal("g".into(), "obj".into(), None, 0, "2026-01-01T00:00:00Z".into(), None);
+    t.create_goal(
+        "g".into(),
+        "obj".into(),
+        None,
+        0,
+        "2026-01-01T00:00:00Z".into(),
+        None,
+    );
     assert_eq!(t.note_idle_continuation(), 1);
     assert_eq!(t.note_idle_continuation(), 2);
     t.reset_idle_continuations();
@@ -2249,14 +2268,36 @@ fn idle_continuation_streak_counts_and_resets() {
 #[test]
 fn resume_and_a_new_goal_reset_the_idle_streak() {
     let mut t = make_tracker();
-    t.create_goal("g".into(), "obj".into(), None, 0, "2026-01-01T00:00:00Z".into(), None);
+    t.create_goal(
+        "g".into(),
+        "obj".into(),
+        None,
+        0,
+        "2026-01-01T00:00:00Z".into(),
+        None,
+    );
     t.note_idle_continuation();
     t.note_idle_continuation();
     assert!(t.pause(GoalPauseReason::NoProgress));
     assert!(t.resume());
-    assert_eq!(t.note_idle_continuation(), 1, "resume starts the count over");
-    t.create_goal("g2".into(), "obj2".into(), None, 0, "2026-01-01T00:00:00Z".into(), None);
-    assert_eq!(t.note_idle_continuation(), 1, "a replacement goal starts the count over");
+    assert_eq!(
+        t.note_idle_continuation(),
+        1,
+        "resume starts the count over"
+    );
+    t.create_goal(
+        "g2".into(),
+        "obj2".into(),
+        None,
+        0,
+        "2026-01-01T00:00:00Z".into(),
+        None,
+    );
+    assert_eq!(
+        t.note_idle_continuation(),
+        1,
+        "a replacement goal starts the count over"
+    );
 }
 
 /// Audit S12-F3: a report-named symlink or FIFO is skipped, never followed or waited on; a regular report is inlined.
@@ -2286,6 +2327,9 @@ fn inlining_reports_skips_symlinks_and_fifos() {
     rx.recv_timeout(std::time::Duration::from_secs(10))
         .expect("inlining must not block on a FIFO");
     let text = std::fs::read_to_string(&out_path).unwrap();
-    assert!(!text.contains("TOP-SECRET-CONTENT"), "a symlinked report was followed: {text}");
+    assert!(
+        !text.contains("TOP-SECRET-CONTENT"),
+        "a symlinked report was followed: {text}"
+    );
     assert!(text.contains("REGULAR-REPORT"), "{text}");
 }

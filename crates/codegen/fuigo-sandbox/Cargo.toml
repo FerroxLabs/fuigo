@@ -63,6 +63,8 @@ enforce = []
 test-bwrap-dirs = []
 
 [dev-dependencies]
+# Integration tests simulate hosts with different bwrap layouts (FUIGO_TEST_BWRAP_DIRS).
+fuigo-sandbox = { path = ".", default-features = false, features = ["enforce", "test-bwrap-dirs"] }
 fuigo-session-writer = { workspace = true }
 fuigo-test-support = { workspace = true }
 serial_test = { workspace = true }

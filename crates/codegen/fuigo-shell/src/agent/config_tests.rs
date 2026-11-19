@@ -403,7 +403,8 @@ fn hidden_default_web_search_resolution_is_explicit_and_responses_only() {
         false,
         None,
         None,
-        &endpoints, &crate::agent::models::EffectiveAllowlist::Unrestricted,
+        &endpoints,
+        &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("hidden default web search model should resolve");
     assert_eq!(resolved.model, crate::models::default_web_search_model());
@@ -422,7 +423,13 @@ fn finalize_image_describe_sampler_none_uses_active_session_model_not_forced_hel
         model: "composer-session-model".into(),
         ..Default::default()
     };
-    let (model, cfg) = finalize_image_describe_sampler_config(None, &active, None, Some(3), HelperModelChoice::Default);
+    let (model, cfg) = finalize_image_describe_sampler_config(
+        None,
+        &active,
+        None,
+        Some(3),
+        HelperModelChoice::Default,
+    );
     assert_eq!(model, "composer-session-model");
     assert_eq!(cfg.model, "composer-session-model");
     assert_ne!(cfg.model, "fuigo-build");
@@ -437,14 +444,13 @@ fn finalize_image_describe_sampler_some_stamps_session_fields() {
         model: "fuigo-build".into(),
         ..Default::default()
     };
-    let (model, cfg) =
-        finalize_image_describe_sampler_config(
-            Some(aux),
-            &active,
-            Some("cli".into()),
-            Some(7),
-            HelperModelChoice::Default,
-        );
+    let (model, cfg) = finalize_image_describe_sampler_config(
+        Some(aux),
+        &active,
+        Some("cli".into()),
+        Some(7),
+        HelperModelChoice::Default,
+    );
     assert_eq!(model, "fuigo-build");
     assert_eq!(cfg.model, "fuigo-build");
     assert_eq!(cfg.client_identifier.as_deref(), Some("cli"));
@@ -605,7 +611,8 @@ async fn web_search_with_auth_provider_requires_warm_cache() {
             false,
             None,
             None,
-            &endpoints, &crate::agent::models::EffectiveAllowlist::Unrestricted,
+            &endpoints,
+            &crate::agent::models::EffectiveAllowlist::Unrestricted,
         )
         .is_none(),
         "a cold provider cache must disable web search, not send an unauthenticated request"
@@ -618,7 +625,8 @@ async fn web_search_with_auth_provider_requires_warm_cache() {
         false,
         None,
         None,
-        &endpoints, &crate::agent::models::EffectiveAllowlist::Unrestricted,
+        &endpoints,
+        &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("warm cache resolves");
     assert_eq!(resolved.api_key.as_deref(), Some("ws-token"));
@@ -837,7 +845,8 @@ fn web_search_disable_api_key_auth_swaps_first_party_key_for_session() {
         true,
         None,
         None,
-        &endpoints, &crate::agent::models::EffectiveAllowlist::Unrestricted,
+        &endpoints,
+        &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("web search model should resolve");
     assert_eq!(
@@ -1695,9 +1704,13 @@ fn the_injectable_trust_set_follows_the_endpoints_in_use() {
     // A settings reapply after an `[endpoints]` edit: requests still go to OLD, so OLD stays trusted, and NEW (which
     // a reloaded model's `base_url` can use) becomes trusted too.
     cfg.re_resolve_runtime_fields(&new_raw, None);
-    assert_eq!(cfg.endpoints.fuigo_api_base_url, OLD, "the endpoints are fixed at process start");
+    assert_eq!(
+        cfg.endpoints.fuigo_api_base_url, OLD,
+        "the endpoints are fixed at process start"
+    );
     assert!(
-        cfg.trusted_origins().is_fuigo_api_bearer_url(&cfg.endpoints.fuigo_api_base_url),
+        cfg.trusted_origins()
+            .is_fuigo_api_bearer_url(&cfg.endpoints.fuigo_api_base_url),
         "the endpoint requests go to must stay a configured API origin: this is the 401 after an [endpoints] edit"
     );
     assert!(
@@ -1708,7 +1721,10 @@ fn the_injectable_trust_set_follows_the_endpoints_in_use() {
     // Astra r2: a re-read that fails to parse says nothing new about `[endpoints]`, so the set stays as it was (a
     // reloaded model may already point at NEW).
     let broken: toml::Value = toml::from_str("[endpoints]\nfuigo_api_base_url = 5\n").unwrap();
-    assert!(Config::new_from_toml_cfg(&broken).is_err(), "precondition: this table fails to parse");
+    assert!(
+        Config::new_from_toml_cfg(&broken).is_err(),
+        "precondition: this table fails to parse"
+    );
     cfg.re_resolve_runtime_fields(&broken, None);
     assert!(cfg.trusted_origins().is_fuigo_api_bearer_url(OLD));
     assert!(
@@ -5836,21 +5852,30 @@ fn p47_resolve_upload_method_drops_the_session_token_for_a_refused_trace_url() {
         deployment_key: dk.map(str::to_string),
         ..Default::default()
     };
-    for refused in ["http://127.0.0.1:9/v1", "http://api.fluxrouter.ai/v1", "https://localhost/v1"] {
+    for refused in [
+        "http://127.0.0.1:9/v1",
+        "http://api.fluxrouter.ai/v1",
+        "https://localhost/v1",
+    ] {
         let method = endpoints(refused, None).resolve_upload_method(Some(token.into()));
         assert!(
             !matches!(&method, Some(UploadMethod::Proxy { user_token, .. }) if user_token == token),
             "{refused}: the session token must not reach the proxy upload method: {method:?}"
         );
         match endpoints(refused, Some("enterprise-key")).resolve_upload_method(Some(token.into())) {
-            Some(UploadMethod::Proxy { deployment_key, user_token, .. }) => {
+            Some(UploadMethod::Proxy {
+                deployment_key,
+                user_token,
+                ..
+            }) => {
                 assert_eq!(deployment_key.as_deref(), Some("enterprise-key"));
                 assert_eq!(user_token, token, "the deployment key wins on the wire");
             }
             other => panic!("{refused}: expected the deployment-key proxy method, got {other:?}"),
         }
     }
-    match endpoints("https://api.fluxrouter.ai/v1", None).resolve_upload_method(Some(token.into())) {
+    match endpoints("https://api.fluxrouter.ai/v1", None).resolve_upload_method(Some(token.into()))
+    {
         Some(UploadMethod::Proxy { user_token, .. }) => assert_eq!(user_token, token),
         other => panic!("expected Proxy with the token, got {other:?}"),
     }
@@ -8236,7 +8261,8 @@ fn a_status_line_the_parser_could_not_read_in_full_reaches_fuigo_inspect() {
 
 #[test]
 fn subscription_model_selection_is_provider_scoped_and_keeps_flux_key() {
-    let raw: toml::Value=toml::from_str(r#"
+    let raw: toml::Value = toml::from_str(
+        r#"
         [auth_provider.chatgpt]
         subscription = "chatgpt"
         account = "account-a"
@@ -8254,19 +8280,57 @@ fn subscription_model_selection_is_provider_scoped_and_keeps_flux_key() {
         model = "shared-model"
         base_url = "https://api.fluxrouter.ai/v1"
         api_key = "fake-flux-key"
-    "#).unwrap();
-    let cfg=Config::new_from_toml_cfg(&raw).unwrap();let models=resolve_model_list(&cfg,None);
-    for (key,kind) in [("chatgpt",fuigo_sampler::subscription::SubscriptionKind::Chatgpt),("grok",fuigo_sampler::subscription::SubscriptionKind::Xai)] {
-        let model=&models[key];let credentials=resolve_credentials(model,Some("unrelated-session-secret"));
+    "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    let models = resolve_model_list(&cfg, None);
+    for (key, kind) in [
+        (
+            "chatgpt",
+            fuigo_sampler::subscription::SubscriptionKind::Chatgpt,
+        ),
+        ("grok", fuigo_sampler::subscription::SubscriptionKind::Xai),
+    ] {
+        let model = &models[key];
+        let credentials = resolve_credentials(model, Some("unrelated-session-secret"));
         assert!(credentials.api_key.is_none());
-        let sampling=sampling_config_for_model(model,credentials,None,None,None,None);
-        assert_eq!(sampling.subscription,Some(kind));assert!(sampling.subscription_resolver.is_some());assert!(sampling.api_key.is_none());assert!(sampling.bearer_resolver.is_none());
-        let revived:ModelEntry=serde_json::from_value(serde_json::to_value(model).unwrap()).unwrap();
-        assert!(revived.auth_provider.unwrap().subscription_provider().is_none(),"serialized auth ref requires trusted config reattachment");
+        let sampling = sampling_config_for_model(model, credentials, None, None, None, None);
+        assert_eq!(sampling.subscription, Some(kind));
+        assert!(sampling.subscription_resolver.is_some());
+        assert!(sampling.api_key.is_none());
+        assert!(sampling.bearer_resolver.is_none());
+        let revived: ModelEntry =
+            serde_json::from_value(serde_json::to_value(model).unwrap()).unwrap();
+        assert!(
+            revived
+                .auth_provider
+                .unwrap()
+                .subscription_provider()
+                .is_none(),
+            "serialized auth ref requires trusted config reattachment"
+        );
     }
-    let flux=resolve_credentials(&models["flux"],Some("unrelated-session-secret"));assert_eq!(flux.api_key.as_deref(),Some("fake-flux-key"));
-    assert!(crate::auth::subscription::inference::from_models(&models,"shared-model","https://api.fluxrouter.ai/v1").is_none());
-    assert_eq!(crate::auth::subscription::inference::from_models(&models,"shared-model","https://chatgpt.com/backend-api/codex").unwrap().subscription_provider(),Some(crate::auth::subscription::SubscriptionProvider::Chatgpt));
+    let flux = resolve_credentials(&models["flux"], Some("unrelated-session-secret"));
+    assert_eq!(flux.api_key.as_deref(), Some("fake-flux-key"));
+    assert!(
+        crate::auth::subscription::inference::from_models(
+            &models,
+            "shared-model",
+            "https://api.fluxrouter.ai/v1"
+        )
+        .is_none()
+    );
+    assert_eq!(
+        crate::auth::subscription::inference::from_models(
+            &models,
+            "shared-model",
+            "https://chatgpt.com/backend-api/codex"
+        )
+        .unwrap()
+        .subscription_provider(),
+        Some(crate::auth::subscription::SubscriptionProvider::Chatgpt)
+    );
 }
 /// P192: Sean signed in with `fuigo login --provider xai` and picked a Grok model whose entry
 /// points at xAI's own inference endpoint but names no auth provider. The entry fell through
@@ -8287,7 +8351,10 @@ fn p192_subscription_endpoint_model_without_auth_provider_uses_the_subscription(
         let sampling = sampling_config_for_model(model, credentials, None, None, None, None);
         if sampling.subscription.is_some() {
             assert!(sampling.subscription_resolver.is_some());
-            assert!(sampling.api_key.is_none(), "no other credential rides a subscription request");
+            assert!(
+                sampling.api_key.is_none(),
+                "no other credential rides a subscription request"
+            );
             assert!(sampling.bearer_resolver.is_none());
             let provider = crate::auth::subscription::inference::from_models(
                 &models,
@@ -8303,18 +8370,33 @@ fn p192_subscription_endpoint_model_without_auth_provider_uses_the_subscription(
         sampling.subscription
     };
     for (entry, kind) in [
-        (r#"model = "grok-4.7"
-            base_url = "https://api.x.ai/v1""#, SubscriptionKind::Xai),
-        (r#"model = "grok-4.7"
-            base_url = "https://api.x.ai/v1/""#, SubscriptionKind::Xai),
-        (r#"model = "grok-4.7"
-            base_url = "HTTPS://API.X.AI:443/v1""#, SubscriptionKind::Xai),
-        (r#"model = "gpt-fixture"
+        (
+            r#"model = "grok-4.7"
+            base_url = "https://api.x.ai/v1""#,
+            SubscriptionKind::Xai,
+        ),
+        (
+            r#"model = "grok-4.7"
+            base_url = "https://api.x.ai/v1/""#,
+            SubscriptionKind::Xai,
+        ),
+        (
+            r#"model = "grok-4.7"
+            base_url = "HTTPS://API.X.AI:443/v1""#,
+            SubscriptionKind::Xai,
+        ),
+        (
+            r#"model = "gpt-fixture"
             base_url = "https://chatgpt.com/backend-api/codex"
-            api_backend = "responses""#, SubscriptionKind::Chatgpt),
-        (r#"model = "gpt-fixture"
+            api_backend = "responses""#,
+            SubscriptionKind::Chatgpt,
+        ),
+        (
+            r#"model = "gpt-fixture"
             base_url = "https://chatgpt.com/backend-api/codex//"
-            api_backend = "responses""#, SubscriptionKind::Chatgpt),
+            api_backend = "responses""#,
+            SubscriptionKind::Chatgpt,
+        ),
     ] {
         assert_eq!(bound(entry), Some(kind), "{entry}");
     }
@@ -8374,8 +8456,14 @@ fn p192_subscription_endpoint_model_without_auth_provider_uses_the_subscription(
     let cfg = Config::new_from_toml_cfg(&raw).unwrap();
     let models = resolve_model_list(&cfg, None);
     let model = &models["grok-byok"];
-    let sampling =
-        sampling_config_for_model(model, resolve_credentials(model, None), None, None, None, None);
+    let sampling = sampling_config_for_model(
+        model,
+        resolve_credentials(model, None),
+        None,
+        None,
+        None,
+        None,
+    );
     assert_eq!(sampling.subscription, None);
 }
 /// P192: the endpoint binding is the user's: a remote-catalog entry on a subscription endpoint
@@ -8385,19 +8473,29 @@ fn p192_subscription_endpoint_model_without_auth_provider_uses_the_subscription(
 fn p192_endpoint_binding_is_for_user_models_and_survives_revival() {
     use fuigo_sampler::subscription::SubscriptionKind;
     let kind = |entry: &ModelEntry| {
-        sampling_config_for_model(entry, resolve_credentials(entry, None), None, None, None, None)
-            .subscription
+        sampling_config_for_model(
+            entry,
+            resolve_credentials(entry, None),
+            None,
+            None,
+            None,
+            None,
+        )
+        .subscription
     };
-    let user: toml::Value = toml::from_str(
-        "[model.pick]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n",
-    )
-    .unwrap();
+    let user: toml::Value =
+        toml::from_str("[model.pick]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n")
+            .unwrap();
     let user = Config::new_from_toml_cfg(&user).unwrap();
     let bound = resolve_model_list(&user, None)["pick"].clone();
     assert_eq!(kind(&bound), Some(SubscriptionKind::Xai));
     let revived: ModelEntry =
         serde_json::from_value(serde_json::to_value(&bound).unwrap()).unwrap();
-    assert_eq!(kind(&revived), None, "a revived ref is untrusted until re-resolved");
+    assert_eq!(
+        kind(&revived),
+        None,
+        "a revived ref is untrusted until re-resolved"
+    );
     let again = resolve_model_list(&user, Some([("pick".to_owned(), revived.clone())].into()));
     assert_eq!(kind(&again["pick"]), Some(SubscriptionKind::Xai));
     let empty = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
@@ -8406,7 +8504,10 @@ fn p192_endpoint_binding_is_for_user_models_and_survives_revival() {
     for mut entry in [catalog, revived] {
         let models =
             resolve_model_list(&empty, Some([("remote".to_owned(), entry.clone())].into()));
-        assert!(!models.contains_key("remote"), "a catalog row on a subscription endpoint is dropped");
+        assert!(
+            !models.contains_key("remote"),
+            "a catalog row on a subscription endpoint is dropped"
+        );
         // The same through `api_base_url` only.
         entry.info.base_url = "https://api.fluxrouter.ai/v1".into();
         entry.api_base_url = Some("https://chatgpt.com/backend-api/codex/".into());
@@ -8431,24 +8532,37 @@ fn p192_binding_provenance_aliases_and_turn_selection() {
             "[model.seed]\nmodel = \"{model}\"\nbase_url = \"https://api.x.ai/v1\"\n"
         ))
         .unwrap();
-        let mut entry = resolve_model_list(&Config::new_from_toml_cfg(&raw).unwrap(), None)["seed"]
-            .clone();
+        let mut entry =
+            resolve_model_list(&Config::new_from_toml_cfg(&raw).unwrap(), None)["seed"].clone();
         entry.auth_provider = None;
         entry
     };
     let bound = |text: &str, key: &str, catalog: Option<(&str, ModelEntry)>| {
         let raw: toml::Value = toml::from_str(text).unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).unwrap();
-        let models =
-            resolve_model_list(&cfg, catalog.map(|(k, e)| [(k.to_owned(), e)].into()));
+        let models = resolve_model_list(&cfg, catalog.map(|(k, e)| [(k.to_owned(), e)].into()));
         let m = &models[key];
         sampling_config_for_model(m, resolve_credentials(m, None), None, None, None, None)
             .subscription
     };
     // A local tweak of a catalog row on the vendor endpoint: the user wrote neither field.
-    assert_eq!(bound("[model.remote]\ntemperature = 0.2\n", "remote", Some(("remote", row("grok-4.7")))), None);
+    assert_eq!(
+        bound(
+            "[model.remote]\ntemperature = 0.2\n",
+            "remote",
+            Some(("remote", row("grok-4.7")))
+        ),
+        None
+    );
     // Endpoint written, wire id from the catalog: ACP's disk-only lookup could not find it.
-    assert_eq!(bound("[model.pick]\nbase_url = \"https://api.x.ai/v1\"\n", "pick", Some(("pick", row("grok-4.7")))), None);
+    assert_eq!(
+        bound(
+            "[model.pick]\nbase_url = \"https://api.x.ai/v1\"\n",
+            "pick",
+            Some(("pick", row("grok-4.7")))
+        ),
+        None
+    );
     // Two aliases bound alike: not ambiguous.
     let raw: toml::Value = toml::from_str(
         "[model.a]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\
@@ -8458,7 +8572,10 @@ fn p192_binding_provenance_aliases_and_turn_selection() {
     .unwrap();
     let models = resolve_model_list(&Config::new_from_toml_cfg(&raw).unwrap(), None);
     let alias = from_models(&models, "grok-4.7", "https://api.x.ai/v1").unwrap();
-    assert!(alias.config.is_usable(), "identical bindings must not poison the provider");
+    assert!(
+        alias.config.is_usable(),
+        "identical bindings must not poison the provider"
+    );
     // The BYOK twin's own endpoint matches no subscription, so ACP keeps its key.
     let by_endpoint = from_models(&models, "grok-4.7", "https://api.x.ai/v1/");
     assert!(by_endpoint.is_none());
@@ -8466,9 +8583,15 @@ fn p192_binding_provenance_aliases_and_turn_selection() {
     assert!(turn_provider(Some(alias.clone()), None).is_some());
     let helper = crate::auth::AuthProviderRef::new(
         "helper".into(),
-        crate::auth::AuthProviderConfig { command: "mint".into(), ..Default::default() },
+        crate::auth::AuthProviderConfig {
+            command: "mint".into(),
+            ..Default::default()
+        },
     );
-    assert_eq!(turn_provider(None, Some(helper.clone())).map(|p| p.name), Some(helper.name));
+    assert_eq!(
+        turn_provider(None, Some(helper.clone())).map(|p| p.name),
+        Some(helper.name)
+    );
     // An unbound twin on the exact same (model, endpoint) is still ambiguous: fail closed.
     let raw: toml::Value = toml::from_str(
         "[model.a]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\
@@ -8476,7 +8599,12 @@ fn p192_binding_provenance_aliases_and_turn_selection() {
     )
     .unwrap();
     let models = resolve_model_list(&Config::new_from_toml_cfg(&raw).unwrap(), None);
-    assert!(!from_models(&models, "grok-4.7", "https://api.x.ai/v1").unwrap().config.is_usable());
+    assert!(
+        !from_models(&models, "grok-4.7", "https://api.x.ai/v1")
+            .unwrap()
+            .config
+            .is_usable()
+    );
 }
 /// P192: fuigo-config's remote-patch guard names exactly the hosts the subscriptions bind.
 #[test]
@@ -8514,11 +8642,17 @@ fn p192_global_headers_and_user_owned_catalog_base() {
     let mut row = resolve_model_list(&cfg, None)["chatgpt-subscription"].clone();
     row.auth_provider = None;
     row.info.api_backend = ApiBackend::Responses;
-    let models =
-        resolve_model_list(&cfg, Some([("chatgpt-subscription".to_owned(), row)].into()));
+    let models = resolve_model_list(
+        &cfg,
+        Some([("chatgpt-subscription".to_owned(), row)].into()),
+    );
     let s = sampling(&models, "chatgpt-subscription");
     assert_eq!(s.subscription, Some(SubscriptionKind::Chatgpt));
-    assert_eq!(s.api_backend, ApiBackend::Responses, "the user-owned row still donates its protocol");
+    assert_eq!(
+        s.api_backend,
+        ApiBackend::Responses,
+        "the user-owned row still donates its protocol"
+    );
 }
 /// P192: the ChatGPT subscription endpoint speaks only the Responses protocol (its transport
 /// accepts nothing but `POST …/codex/responses`). A ChatGPT-subscription model configured as the
@@ -8547,7 +8681,10 @@ fn p192_chatgpt_subscription_uses_the_responses_protocol() {
     }
     let grok = sampling("grok");
     assert_eq!(grok.subscription, Some(SubscriptionKind::Xai));
-    assert_eq!(grok.api_backend, models["grok"].info.api_backend, "xAI keeps its protocol");
+    assert_eq!(
+        grok.api_backend, models["grok"].info.api_backend,
+        "xAI keeps its protocol"
+    );
 }
 /// P192 (Grok HIGH): a catalog row on a subscription endpoint is kept as a base only when the
 /// merged table re-pins that key to a subscription endpoint (only the user file can); a table
@@ -8610,8 +8747,16 @@ fn p192_requirements_layer_confers_no_subscription_authority() {
     assert_eq!(models["work"].info.base_url, "https://api.fluxrouter.ai/v1");
     assert_eq!(sub("work"), None);
     assert!(!models.contains_key("planted"));
-    assert_eq!(sub("pinned"), None, "a requirements provider never carries `subscription`");
-    assert_eq!(sub("mine"), Some(SubscriptionKind::Xai), "the user's own model still binds");
+    assert_eq!(
+        sub("pinned"),
+        None,
+        "a requirements provider never carries `subscription`"
+    );
+    assert_eq!(
+        sub("mine"),
+        Some(SubscriptionKind::Xai),
+        "the user's own model still binds"
+    );
 }
 
 /// P192 (Grok r2 HIGH): Grok's exact `requirements.toml` example plants a `[model_providers.*]`
@@ -8647,14 +8792,18 @@ fn p192_non_user_model_providers_confer_no_subscription() {
         for (key, m) in &models {
             let sampling =
                 sampling_config_for_model(m, resolve_credentials(m, None), None, None, None, None);
-            assert_eq!(sampling.subscription, None, "{file}: {key} carries a subscription");
+            assert_eq!(
+                sampling.subscription, None,
+                "{file}: {key} carries a subscription"
+            );
         }
     }
 }
 #[tokio::test]
 async fn subscription_conflicting_static_key_and_command_fail_closed() {
     for extra in [r#"api_key = "fake-paid-key""#, ""] {
-        let text=format!(r#"
+        let text = format!(
+            r#"
             [auth_provider.native]
             subscription = "xai"
             command = "never-execute-this"
@@ -8663,10 +8812,29 @@ async fn subscription_conflicting_static_key_and_command_fail_closed() {
             base_url = "https://api.x.ai/v1"
             auth_provider = "native"
             {extra}
-        "#);
-        let raw:toml::Value=toml::from_str(&text).unwrap();let cfg=Config::new_from_toml_cfg(&raw).unwrap();let models=resolve_model_list(&cfg,None);let model=&models["native"];
-        let sampling=sampling_config_for_model(model,resolve_credentials(model,Some("session-secret")),None,None,None,None);
-        assert!(sampling.api_key.is_none());assert!(sampling.subscription_resolver.unwrap().resolve().await.is_err());
+        "#
+        );
+        let raw: toml::Value = toml::from_str(&text).unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        let model = &models["native"];
+        let sampling = sampling_config_for_model(
+            model,
+            resolve_credentials(model, Some("session-secret")),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(sampling.api_key.is_none());
+        assert!(
+            sampling
+                .subscription_resolver
+                .unwrap()
+                .resolve()
+                .await
+                .is_err()
+        );
     }
 }
 
@@ -8746,7 +8914,13 @@ fn subscription_explicit_local_helper_keeps_its_route_and_a_default_one_does_not
     assert_eq!(routed.max_retries, Some(4));
     // The auto-mode classifier and the session summary go through the same stamp.
     let mut classifier = auxiliary.clone();
-    stamp_session_local_sampler_fields(&mut classifier, &active, None, None, HelperModelChoice::Explicit);
+    stamp_session_local_sampler_fields(
+        &mut classifier,
+        &active,
+        None,
+        None,
+        HelperModelChoice::Explicit,
+    );
     assert_eq!(classifier.base_url, "http://127.0.0.1:11434/v1");
     assert!(classifier.subscription.is_none());
 
@@ -8795,7 +8969,13 @@ fn explicit_keyless_local_helper_keeps_its_own_route_without_a_credential() {
     let mut catalog = IndexMap::new();
     catalog.insert(
         "local-helper".to_owned(),
-        test_model_entry("local-vision", "http://127.0.0.1:11434/v1", None, None, None),
+        test_model_entry(
+            "local-vision",
+            "http://127.0.0.1:11434/v1",
+            None,
+            None,
+            None,
+        ),
     );
     let endpoints = EndpointsConfig {
         deployment_key: Some("fake-deployment-key".into()),
@@ -8809,7 +8989,8 @@ fn explicit_keyless_local_helper_keeps_its_own_route_without_a_credential() {
         false,
         None,
         None,
-        HelperModelChoice::Explicit, &crate::agent::models::EffectiveAllowlist::Unrestricted,
+        HelperModelChoice::Explicit,
+        &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("an explicit keyless local helper resolves to its own route");
     assert_eq!(explicit.base_url, "http://127.0.0.1:11434/v1");
@@ -8822,7 +9003,11 @@ fn explicit_keyless_local_helper_keeps_its_own_route_without_a_credential() {
         subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
         ..Default::default()
     };
-    assert!(!explicit_helper_fallback_refused(Some(&explicit), &active, HelperModelChoice::Explicit));
+    assert!(!explicit_helper_fallback_refused(
+        Some(&explicit),
+        &active,
+        HelperModelChoice::Explicit
+    ));
     let (_, routed) = finalize_image_describe_sampler_config(
         Some(explicit),
         &active,
@@ -8841,7 +9026,8 @@ fn explicit_keyless_local_helper_keeps_its_own_route_without_a_credential() {
         false,
         None,
         None,
-        HelperModelChoice::Default, &crate::agent::models::EffectiveAllowlist::Unrestricted,
+        HelperModelChoice::Default,
+        &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("a default falls through to the inference route");
     assert_ne!(default.base_url, "http://127.0.0.1:11434/v1");
@@ -8858,10 +9044,26 @@ fn unusable_explicit_image_helper_is_refused_only_in_a_subscription_session() {
     };
     let api = SamplerConfig::default();
     let usable = SamplerConfig::default();
-    assert!(explicit_helper_fallback_refused(None, &subscription, HelperModelChoice::Explicit));
-    assert!(!explicit_helper_fallback_refused(None, &subscription, HelperModelChoice::Default));
-    assert!(!explicit_helper_fallback_refused(None, &api, HelperModelChoice::Explicit));
-    assert!(!explicit_helper_fallback_refused(Some(&usable), &subscription, HelperModelChoice::Explicit));
+    assert!(explicit_helper_fallback_refused(
+        None,
+        &subscription,
+        HelperModelChoice::Explicit
+    ));
+    assert!(!explicit_helper_fallback_refused(
+        None,
+        &subscription,
+        HelperModelChoice::Default
+    ));
+    assert!(!explicit_helper_fallback_refused(
+        None,
+        &api,
+        HelperModelChoice::Explicit
+    ));
+    assert!(!explicit_helper_fallback_refused(
+        Some(&usable),
+        &subscription,
+        HelperModelChoice::Explicit
+    ));
 }
 
 /// P90 F6 (Astra r1 M4, r2 #4): a DEFAULT helper on another subscription, or on the same
@@ -8898,7 +9100,13 @@ fn default_helper_on_another_subscription_follows_the_active_one() {
         subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Xai),
         ..Default::default()
     };
-    stamp_session_local_sampler_fields(&mut chosen, &active, None, None, HelperModelChoice::Explicit);
+    stamp_session_local_sampler_fields(
+        &mut chosen,
+        &active,
+        None,
+        None,
+        HelperModelChoice::Explicit,
+    );
     assert_eq!(chosen.model, "grok-sub");
 }
 
@@ -8954,9 +9162,10 @@ fn image_description_helper_pairs_slug_and_choice_from_one_snapshot() {
 /// campaign-free table that travels with the raw config, never from any other read.
 #[test]
 fn runtime_resolution_takes_helper_provenance_from_its_own_snapshot() {
-    let raw: toml::Value =
-        toml::from_str("[models]\nimage_description = \"local-a\"\nsession_summary = \"campaign-ss\"\n")
-            .unwrap();
+    let raw: toml::Value = toml::from_str(
+        "[models]\nimage_description = \"local-a\"\nsession_summary = \"campaign-ss\"\n",
+    )
+    .unwrap();
     let files: toml::Value = toml::from_str("[models]\nimage_description = \"local-a\"\n").unwrap();
     let resolve = |campaign_free: Option<&toml::Value>| {
         let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
@@ -8978,14 +9187,23 @@ fn runtime_resolution_takes_helper_provenance_from_its_own_snapshot() {
     };
     let cfg = resolve(Some(&files));
     assert_eq!(cfg.image_description_model.as_deref(), Some("local-a"));
-    assert_eq!(cfg.explicit_helper_models.image_description.as_deref(), Some("local-a"));
+    assert_eq!(
+        cfg.explicit_helper_models.image_description.as_deref(),
+        Some("local-a")
+    );
     assert_eq!(cfg.explicit_helper_models.session_summary, None);
     let cfg = resolve(None);
-    assert_eq!(cfg.explicit_helper_models, crate::config::ExplicitHelperModels::default());
+    assert_eq!(
+        cfg.explicit_helper_models,
+        crate::config::ExplicitHelperModels::default()
+    );
     // `re_resolve_runtime_fields` carries the same pairing.
     let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
     cfg.re_resolve_runtime_fields(&raw, Some(&files));
-    assert_eq!(cfg.explicit_helper_models.image_description.as_deref(), Some("local-a"));
+    assert_eq!(
+        cfg.explicit_helper_models.image_description.as_deref(),
+        Some("local-a")
+    );
     cfg.re_resolve_runtime_fields(&raw, None);
     assert_eq!(cfg.explicit_helper_models.image_description, None);
 }
@@ -9036,17 +9254,45 @@ fn cached_helper_route_is_rejudged_against_the_current_session() {
 
 #[test]
 fn helper_model_choice_is_explicit_only_for_the_slug_the_user_chose() {
-    assert_eq!(HelperModelChoice::of(Some("local-helper"), "local-helper"), HelperModelChoice::Explicit);
-    assert_eq!(HelperModelChoice::of(Some("local-helper"), "grok-4.6"), HelperModelChoice::Default);
-    assert_eq!(HelperModelChoice::of(None, "grok-4.6"), HelperModelChoice::Default);
+    assert_eq!(
+        HelperModelChoice::of(Some("local-helper"), "local-helper"),
+        HelperModelChoice::Explicit
+    );
+    assert_eq!(
+        HelperModelChoice::of(Some("local-helper"), "grok-4.6"),
+        HelperModelChoice::Default
+    );
+    assert_eq!(
+        HelperModelChoice::of(None, "grok-4.6"),
+        HelperModelChoice::Default
+    );
 }
 
 #[test]
 fn subscription_auxiliary_selection_does_not_fall_back_to_api_key() {
-    let active=SamplerConfig {model:"subscription-model".into(),base_url:"https://chatgpt.com/backend-api/codex".into(),subscription:Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),..Default::default()};
-    let mut auxiliary=SamplerConfig {model:"paid-default".into(),base_url:"https://api.fluxrouter.ai/v1".into(),api_key:Some("fake-paid-key".into()),..Default::default()};
-    stamp_session_local_sampler_fields(&mut auxiliary,&active,None,None,HelperModelChoice::Default);
-    assert_eq!(auxiliary.model,active.model);assert_eq!(auxiliary.base_url,active.base_url);assert_eq!(auxiliary.subscription,active.subscription);assert!(auxiliary.api_key.is_none());
+    let active = SamplerConfig {
+        model: "subscription-model".into(),
+        base_url: "https://chatgpt.com/backend-api/codex".into(),
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
+        ..Default::default()
+    };
+    let mut auxiliary = SamplerConfig {
+        model: "paid-default".into(),
+        base_url: "https://api.fluxrouter.ai/v1".into(),
+        api_key: Some("fake-paid-key".into()),
+        ..Default::default()
+    };
+    stamp_session_local_sampler_fields(
+        &mut auxiliary,
+        &active,
+        None,
+        None,
+        HelperModelChoice::Default,
+    );
+    assert_eq!(auxiliary.model, active.model);
+    assert_eq!(auxiliary.base_url, active.base_url);
+    assert_eq!(auxiliary.subscription, active.subscription);
+    assert!(auxiliary.api_key.is_none());
 }
 
 #[test]
@@ -9109,7 +9355,10 @@ fn explicit_agent_type_on_openai_model_is_kept() {
         ));
         let info = &resolved.get("sol").expect("model should exist").info;
         assert_eq!(info.agent_type, explicit);
-        assert!(!info.agent_type_inferred, "explicit {explicit} must not be marked inferred");
+        assert!(
+            !info.agent_type_inferred,
+            "explicit {explicit} must not be marked inferred"
+        );
     }
 }
 /// The deprecated global `[models].agent_type` is a configuration too: it suppresses the OpenAI default.
@@ -9240,7 +9489,10 @@ fn benchmark_style_custom_gpt_responses_entry_resolves_to_codex_harness() {
             context_window = 400000
             "#,
     );
-    let info = &resolved.get("benchmark").expect("benchmark model should exist").info;
+    let info = &resolved
+        .get("benchmark")
+        .expect("benchmark model should exist")
+        .info;
     assert_eq!(info.api_backend, ApiBackend::Responses);
     assert_eq!(info.agent_type, OPENAI_DEFAULT_AGENT_TYPE);
     assert!(info.agent_type_inferred);
@@ -9288,14 +9540,23 @@ fn custom_gpt_5_6_entry_inherits_catalog_window_and_infers_codex() {
             "#,
     );
     for key in ["x", "terra", "luna"] {
-        let info = &resolved.get(key).unwrap_or_else(|| panic!("{key} should resolve")).info;
-        assert_eq!(info.context_window.get(), 1_050_000, "{key}: context window must come from the gpt-5.6 catalog entry");
+        let info = &resolved
+            .get(key)
+            .unwrap_or_else(|| panic!("{key} should resolve"))
+            .info;
+        assert_eq!(
+            info.context_window.get(),
+            1_050_000,
+            "{key}: context window must come from the gpt-5.6 catalog entry"
+        );
         assert_eq!(info.api_backend, ApiBackend::Responses, "{key}");
         assert_eq!(info.agent_type, OPENAI_DEFAULT_AGENT_TYPE, "{key}");
         assert!(info.agent_type_inferred, "{key}");
     }
     for slug in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
-        let entry = resolved.values().find(|e| e.info.model == slug && e.info.id.as_deref() == Some(slug))
+        let entry = resolved
+            .values()
+            .find(|e| e.info.model == slug && e.info.id.as_deref() == Some(slug))
             .unwrap_or_else(|| panic!("bundled catalog entry {slug} should exist"));
         assert_eq!(entry.info.max_completion_tokens, Some(128_000), "{slug}");
         assert!(entry.info.is_openai_model(), "{slug}");
@@ -9426,7 +9687,10 @@ fn p70a_model_extra_header_naming_the_first_party_key_is_not_resolved_from_the_s
     let _env = fuigo_test_support::EnvGuard::unset(FUIGO_API_KEY_ENV_VAR);
     let _legacy = fuigo_test_support::EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
     set_stored_api_key(None, false);
-    assert!(load_saved_api_key(home.path(), false), "the saved key is loaded");
+    assert!(
+        load_saved_api_key(home.path(), false),
+        "the saved key is loaded"
+    );
     let dm = crate::models::default_model();
     let (_, models) = resolve_models_from_toml(
         r#"
@@ -9436,10 +9700,21 @@ fn p70a_model_extra_header_naming_the_first_party_key_is_not_resolved_from_the_s
         None,
     );
     let model = models.get(dm).expect("default model should exist");
-    let sampler = sampling_config_for_model(model, resolve_credentials(model, None), None, None, None, None);
+    let sampler = sampling_config_for_model(
+        model,
+        resolve_credentials(model, None),
+        None,
+        None,
+        None,
+        None,
+    );
     let sent = sampler.extra_headers.get("X-P70a-Key").cloned();
     set_stored_api_key(None, false);
-    assert_eq!(sent.as_deref(), Some("Bearer ${FUIGO_API_KEY}"), "an extra_headers reference was resolved");
+    assert_eq!(
+        sent.as_deref(),
+        Some("Bearer ${FUIGO_API_KEY}"),
+        "an extra_headers reference was resolved"
+    );
 }
 
 fn plugins_lenient(src: &str) -> (PluginsConfig, Vec<String>) {
@@ -9449,7 +9724,8 @@ fn plugins_lenient(src: &str) -> (PluginsConfig, Vec<String>) {
 
 #[test]
 fn p157_malformed_paths_keeps_disabled_and_names_field() {
-    let (cfg, warnings) = plugins_lenient("[plugins]\npaths = \"not-a-list\"\ndisabled = [\"kept\"]\n");
+    let (cfg, warnings) =
+        plugins_lenient("[plugins]\npaths = \"not-a-list\"\ndisabled = [\"kept\"]\n");
     assert_eq!(cfg.disabled, vec!["kept".to_owned()]);
     assert!(cfg.paths.is_empty());
     assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -9463,7 +9739,10 @@ fn p157_malformed_enabled_keeps_disabled_and_paths() {
     assert_eq!(cfg.disabled, vec!["kept".to_owned()]);
     assert_eq!(cfg.paths, vec!["/p".to_owned()]);
     assert!(cfg.enabled.is_empty());
-    assert!(warnings.iter().any(|w| w.contains("enabled")), "{warnings:?}");
+    assert!(
+        warnings.iter().any(|w| w.contains("enabled")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -9472,29 +9751,43 @@ fn p157_malformed_disabled_does_not_drop_other_fields() {
         plugins_lenient("[plugins]\ndisabled = true\nenabled = [\"e\"]\nauto_discover = false\n");
     assert_eq!(cfg.enabled, vec!["e".to_owned()]);
     assert_eq!(cfg.auto_discover, Some(false));
-    assert!(warnings.iter().any(|w| w.contains("disabled")), "{warnings:?}");
+    assert!(
+        warnings.iter().any(|w| w.contains("disabled")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
 fn p157_non_string_entry_is_skipped_not_fatal() {
     let (cfg, warnings) = plugins_lenient("[plugins]\ndisabled = [\"a\", 3, \"b\"]\n");
     assert_eq!(cfg.disabled, vec!["a".to_owned(), "b".to_owned()]);
-    assert!(warnings.iter().any(|w| w.contains("disabled")), "{warnings:?}");
+    assert!(
+        warnings.iter().any(|w| w.contains("disabled")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
 fn p157_bad_auto_discover_is_named_and_ignored() {
-    let (cfg, warnings) = plugins_lenient("[plugins]\nauto_discover = \"no\"\ndisabled = [\"d\"]\n");
+    let (cfg, warnings) =
+        plugins_lenient("[plugins]\nauto_discover = \"no\"\ndisabled = [\"d\"]\n");
     assert_eq!(cfg.auto_discover, None);
     assert_eq!(cfg.disabled, vec!["d".to_owned()]);
-    assert!(warnings.iter().any(|w| w.contains("auto_discover")), "{warnings:?}");
+    assert!(
+        warnings.iter().any(|w| w.contains("auto_discover")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
 fn p157_wellformed_and_absent_tables_have_no_warnings() {
-    let (cfg, w) = plugins_lenient("[plugins]\npaths = [\"/p\"]\ndisabled = [\"d\"]\nenabled = [\"e\"]\n");
+    let (cfg, w) =
+        plugins_lenient("[plugins]\npaths = [\"/p\"]\ndisabled = [\"d\"]\nenabled = [\"e\"]\n");
     assert!(w.is_empty());
-    assert_eq!((cfg.paths.len(), cfg.disabled.len(), cfg.enabled.len()), (1, 1, 1));
+    assert_eq!(
+        (cfg.paths.len(), cfg.disabled.len(), cfg.enabled.len()),
+        (1, 1, 1)
+    );
     let (cfg, w) = plugins_lenient("x = 1\n");
     assert!(w.is_empty() && cfg.disabled.is_empty());
     let (_, w) = plugins_lenient("plugins = 3\n");
@@ -9507,7 +9800,10 @@ fn p157_wellformed_and_absent_tables_have_no_warnings() {
 fn config_telemetry_mode_strings_parse_p183r7() {
     for s in fuigo_config::TELEMETRY_MODE_STRINGS {
         assert!(TelemetryMode::parse(s).is_some(), "{s}");
-        assert!(TelemetryMode::parse(&s.to_ascii_uppercase()).is_some(), "{s}");
+        assert!(
+            TelemetryMode::parse(&s.to_ascii_uppercase()).is_some(),
+            "{s}"
+        );
     }
     for s in ["offf", "session", "metrics", "", "2"] {
         assert!(TelemetryMode::parse(s).is_none(), "{s}");
@@ -9525,7 +9821,13 @@ fn model_notice_string_in_config_reaches_acp_meta() {
     let entry = overrides.apply("m", Some(entry), &EndpointsConfig::default());
     let mut models = IndexMap::new();
     models.insert("m".to_string(), entry);
-    let meta = to_acp_model_info(&models).values().next().unwrap().meta.clone().unwrap();
+    let meta = to_acp_model_info(&models)
+        .values()
+        .next()
+        .unwrap()
+        .meta
+        .clone()
+        .unwrap();
     assert_eq!(
         meta["notice"],
         serde_json::json!({"severity": "info", "text": "preview: may change"})
@@ -9544,7 +9846,10 @@ fn model_notice_table_form_and_blank_clears() {
     let a = models["a"].apply("a", Some(a), &ep);
     assert_eq!(a.info.notice.as_ref().map(|n| n.text.as_str()), Some("old"));
     let a = models["b"].apply("a", Some(a), &ep);
-    assert_eq!(a.info.notice, None, "a blank notice clears the inherited one");
+    assert_eq!(
+        a.info.notice, None,
+        "a blank notice clears the inherited one"
+    );
 }
 
 /// A `[model.<id>]` table that customises a model (endpoint, name, window) but sets no `notice` keeps the model's own banner.
@@ -9567,7 +9872,13 @@ fn custom_model_table_keeps_the_original_notice_banner() {
     assert_eq!(entry.info.base_url, "https://custom.example/v1");
     let mut models = IndexMap::new();
     models.insert("m".to_string(), entry);
-    let meta = to_acp_model_info(&models).values().next().unwrap().meta.clone().unwrap();
+    let meta = to_acp_model_info(&models)
+        .values()
+        .next()
+        .unwrap()
+        .meta
+        .clone()
+        .unwrap();
     assert_eq!(
         meta["notice"],
         serde_json::json!({"severity": "warning", "text": "retiring soon", "label": "deprecated"})
@@ -9586,7 +9897,9 @@ fn hostile_model_notice_is_one_filtered_capped_line_in_config_and_meta() {
     table.insert("m".into(), toml::Value::Table(m));
     let mut root = toml::map::Map::new();
     root.insert("model".into(), toml::Value::Table(table));
-    let models = crate::agent::config_model_override_parse::parse_model_overrides(&toml::Value::Table(root)).models;
+    let models =
+        crate::agent::config_model_override_parse::parse_model_overrides(&toml::Value::Table(root))
+            .models;
     let text = models["m"].notice.as_ref().expect("kept").text.clone();
     for t in [text, {
         // The ACP meta scrubs again, even for an entry built without the parser.
@@ -9598,14 +9911,29 @@ fn hostile_model_notice_is_one_filtered_capped_line_in_config_and_meta() {
         });
         let mut ms = IndexMap::new();
         ms.insert("m".to_string(), entry);
-        let meta = to_acp_model_info(&ms).values().next().unwrap().meta.clone().unwrap();
+        let meta = to_acp_model_info(&ms)
+            .values()
+            .next()
+            .unwrap()
+            .meta
+            .clone()
+            .unwrap();
         assert_eq!(meta["notice"]["label"], "a b");
         meta["notice"]["text"].as_str().unwrap().to_owned()
     }] {
         assert!(t.chars().count() <= 160, "capped: {}", t.chars().count());
-        assert!(!t.chars().any(|c| c.is_control() || ('\u{202A}'..='\u{202E}').contains(&c)
-            || ('\u{2066}'..='\u{2069}').contains(&c) || c == '\u{2028}' || c == '\u{2029}'), "{t:?}");
-        assert!(t.starts_with("[2J ]0;pwn Allow? [y/n] system: evil"), "{t:?}");
+        assert!(
+            !t.chars().any(|c| c.is_control()
+                || ('\u{202A}'..='\u{202E}').contains(&c)
+                || ('\u{2066}'..='\u{2069}').contains(&c)
+                || c == '\u{2028}'
+                || c == '\u{2029}'),
+            "{t:?}"
+        );
+        assert!(
+            t.starts_with("[2J ]0;pwn Allow? [y/n] system: evil"),
+            "{t:?}"
+        );
     }
 }
 
@@ -9621,16 +9949,36 @@ async fn signed_in_subscription_models_appear_in_the_list_without_toml() {
     let home = fuigo_test_support::FuigoHome::new();
     // Nothing signed in: no subscription models.
     let before = resolve_model_list(&Config::default(), None);
-    assert!(!before.keys().any(|k| k.starts_with("xai/") || k.starts_with("chatgpt/")));
-    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7", "grok-3"]).await;
-    test_sign_in(home.path(), SubscriptionProvider::Chatgpt, "acct2", &["gpt-5.1"]).await;
+    assert!(
+        !before
+            .keys()
+            .any(|k| k.starts_with("xai/") || k.starts_with("chatgpt/"))
+    );
+    test_sign_in(
+        home.path(),
+        SubscriptionProvider::Xai,
+        "acct",
+        &["grok-4.7", "grok-3"],
+    )
+    .await;
+    test_sign_in(
+        home.path(),
+        SubscriptionProvider::Chatgpt,
+        "acct2",
+        &["gpt-5.1"],
+    )
+    .await;
     let resolved = resolve_model_list(&Config::default(), None);
-    let grok = resolved.get("xai/grok-4.7").expect("signed-in Grok model is listed");
+    let grok = resolved
+        .get("xai/grok-4.7")
+        .expect("signed-in Grok model is listed");
     assert_eq!(grok.info.model, "grok-4.7");
     assert!(resolved.contains_key("xai/grok-3") && resolved.contains_key("chatgpt/gpt-5.1"));
     // Bound to the subscription transport, with no key of any kind.
     assert_eq!(
-        grok.auth_provider.as_ref().and_then(|p| p.subscription_provider()),
+        grok.auth_provider
+            .as_ref()
+            .and_then(|p| p.subscription_provider()),
         Some(crate::auth::subscription::SubscriptionProvider::Xai)
     );
     assert!(grok.api_key.is_none() && grok.env_key.is_none());
@@ -9651,7 +9999,13 @@ async fn a_users_own_model_table_wins_over_a_signed_in_subscription_model() {
     }
     use crate::auth::subscription::{SubscriptionProvider, catalog::test_sign_in};
     let home = fuigo_test_support::FuigoHome::new();
-    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7"]).await;
+    test_sign_in(
+        home.path(),
+        SubscriptionProvider::Xai,
+        "acct",
+        &["grok-4.7"],
+    )
+    .await;
     let mut cfg = Config::default();
     cfg.config_models.insert(
         "xai/grok-4.7".to_string(),
@@ -9683,7 +10037,13 @@ async fn a_signed_in_subscription_alone_is_a_credential_so_first_run_skips_the_k
         !crate::agent::auth_method::should_advertise_fuigo_api_key(false, before.values()),
         "no credential of any kind: the picker is shown"
     );
-    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7"]).await;
+    test_sign_in(
+        home.path(),
+        SubscriptionProvider::Xai,
+        "acct",
+        &["grok-4.7"],
+    )
+    .await;
     let after = resolve_model_list(&Config::default(), None);
     assert!(
         crate::agent::auth_method::should_advertise_fuigo_api_key(false, after.values()),
@@ -9701,7 +10061,9 @@ fn user_always_approve_lock_key_is_not_reported_unused() {
         "#,
     );
     assert!(
-        !unused.iter().any(|k| k == "ui.disable_bypass_permissions_mode"),
+        !unused
+            .iter()
+            .any(|k| k == "ui.disable_bypass_permissions_mode"),
         "the user lock key must not warn as unrecognized: {unused:?}"
     );
 }
@@ -9716,7 +10078,8 @@ fn a_bad_sandbox_field_does_not_drop_the_profile() {
     assert_eq!(Some("strict"), config.profile.as_deref());
     assert_eq!(None, config.auto_allow_bash);
     assert_eq!("strict", config.resolve_profile(None, None).value);
-    let value: toml::Value = toml::from_str("[sandbox]\nprofile = 3\nauto_allow_bash = true\n").unwrap();
+    let value: toml::Value =
+        toml::from_str("[sandbox]\nprofile = 3\nauto_allow_bash = true\n").unwrap();
     let config = SandboxSettingsConfig::from_config_value(&value);
     assert_eq!(None, config.profile);
     assert_eq!(Some(true), config.auto_allow_bash);

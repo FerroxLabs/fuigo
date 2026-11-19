@@ -124,7 +124,8 @@ fn decode_managed_toml_checked(encoded: &str) -> Result<Option<toml::Value>, Str
 /// P169: the MDM layer for the managed policy engine. `None` when nothing is forced; `Some(Err)` when a forced payload
 /// does not decode, so the engine fails closed instead of reading a broken admin policy as "no policy".
 pub(crate) fn mdm_policy_layer() -> Option<Result<toml::Value, String>> {
-    static CACHED: std::sync::OnceLock<Option<Result<toml::Value, String>>> = std::sync::OnceLock::new();
+    static CACHED: std::sync::OnceLock<Option<Result<toml::Value, String>>> =
+        std::sync::OnceLock::new();
     CACHED
         .get_or_init(|| mdm_policy_layer_from(read_forced_requirements_raw))
         .clone()
@@ -265,7 +266,8 @@ mod tests {
             matches!(mdm_policy_layer_from(|| Some(None)), Some(Err(_))),
             "a forced non-string value fails closed"
         );
-        let ok = mdm_policy_layer_from(|| Some(Some(b64("allow_managed_hooks_only = true\n")))).unwrap();
+        let ok =
+            mdm_policy_layer_from(|| Some(Some(b64("allow_managed_hooks_only = true\n")))).unwrap();
         assert!(ok.unwrap().get("allow_managed_hooks_only").is_some());
         for empty in ["\n", "# only a comment\n", ""] {
             let v = mdm_policy_layer_from(|| Some(Some(b64(empty))))

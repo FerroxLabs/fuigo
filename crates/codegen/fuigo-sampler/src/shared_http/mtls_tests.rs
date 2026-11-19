@@ -39,7 +39,10 @@ fn unreadable_identity_dir_is_a_non_retryable_mtls_configuration_error() {
         matches!(&error, fuigo_sampling_types::SamplingError::MtlsConfiguration(detail) if detail.contains("tls.crt")),
         "got {error:?}"
     );
-    assert!(!error.is_retryable(), "an mTLS configuration error must not be retried");
+    assert!(
+        !error.is_retryable(),
+        "an mTLS configuration error must not be retried"
+    );
 
     std::fs::write(dir.path().join("client.crt"), "not a certificate").unwrap();
     std::fs::write(dir.path().join("client.key"), "not a key").unwrap();

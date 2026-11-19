@@ -26,9 +26,11 @@ impl WebFetchArtifactWriter {
         if let Some(writer) = session_folder.writer() {
             // Through the session's writer: it creates the folder and `web_fetch/` owner-only on first use.
             let (writer, data, extension) = (writer.clone(), bytes.to_vec(), extension.to_owned());
-            return tokio::task::spawn_blocking(move || save_locked_through(&writer, &dir, &data, &extension))
-                .await
-                .context("spawn_blocking panicked")?;
+            return tokio::task::spawn_blocking(move || {
+                save_locked_through(&writer, &dir, &data, &extension)
+            })
+            .await
+            .context("spawn_blocking panicked")?;
         }
         anyhow::bail!("no session writer: refusing to write the session folder by path")
     }
@@ -37,10 +39,19 @@ impl WebFetchArtifactWriter {
 /// The locked save through the session's writer: the allocation file is its lock sidecar (`open_lock`), an orphan
 /// temp is removed through it, and the artifact is published with its atomic replace. The number is reserved under
 /// the lock past every existing artifact, so the publish never replaces one.
-fn save_locked_through(writer: &SessionWriter, dir: &Path, data: &[u8], extension: &str) -> anyhow::Result<PathBuf> {
+fn save_locked_through(
+    writer: &SessionWriter,
+    dir: &Path,
+    data: &[u8],
+    extension: &str,
+) -> anyhow::Result<PathBuf> {
     let rel_dir = Path::new(ARTIFACT_DIR);
-    let mut allocation = writer.open_lock(rel_dir.join(ALLOCATION_FILE)).context("open allocation file")?;
-    allocation.lock_exclusive().context("lock allocation file")?;
+    let mut allocation = writer
+        .open_lock(rel_dir.join(ALLOCATION_FILE))
+        .context("open allocation file")?;
+    allocation
+        .lock_exclusive()
+        .context("lock allocation file")?;
 
     let (max_existing, total_bytes) = scan_artifacts(dir, Some(writer))?;
     let number = reserve_number(&mut allocation, max_existing)?;
@@ -48,7 +59,9 @@ fn save_locked_through(writer: &SessionWriter, dir: &Path, data: &[u8], extensio
         .checked_add(u64::try_from(data.len()).context("artifact size exceeds u64")?)
         .context("artifact byte count overflow")?;
     if new_total > MAX_TOTAL_BYTES {
-        anyhow::bail!("byte budget exceeded: {new_total}/{MAX_TOTAL_BYTES} bytes in {ARTIFACT_DIR}");
+        anyhow::bail!(
+            "byte budget exceeded: {new_total}/{MAX_TOTAL_BYTES} bytes in {ARTIFACT_DIR}"
+        );
     }
 
     let name = format!("{number}.{extension}");
@@ -59,7 +72,10 @@ fn save_locked_through(writer: &SessionWriter, dir: &Path, data: &[u8], extensio
     Ok(path)
 }
 
-#[allow(clippy::disallowed_methods, reason = "lock sidecar (design F5 5.6): the .allocation counter, opened through SessionWriter::open_lock; rewrites only that handle")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "lock sidecar (design F5 5.6): the .allocation counter, opened through SessionWriter::open_lock; rewrites only that handle"
+)]
 fn reserve_number(file: &mut std::fs::File, max_existing: u32) -> anyhow::Result<u32> {
     let stored = read_reserved_number(file)?.unwrap_or(max_existing);
     let next = stored
@@ -94,7 +110,10 @@ fn read_reserved_number(file: &mut std::fs::File) -> anyhow::Result<Option<u32>>
 }
 
 /// With the session's `writer`, an orphan temp is removed through it.
-fn scan_artifacts(dir: &Path, writer: Option<&SessionWriter>) -> Result<(u32, u64), std::io::Error> {
+fn scan_artifacts(
+    dir: &Path,
+    writer: Option<&SessionWriter>,
+) -> Result<(u32, u64), std::io::Error> {
     let mut max = 0u32;
     let mut total_bytes = 0u64;
     for entry in std::fs::read_dir(dir)? {
@@ -132,7 +151,10 @@ fn scan_artifacts(dir: &Path, writer: Option<&SessionWriter>) -> Result<(u32, u6
     Ok((max, total_bytes))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,7 +180,10 @@ mod tests {
                 .await
                 .is_err()
         );
-        let saved = writer.save(&SessionFiles::at(&session), b"recovered", "txt").await.unwrap();
+        let saved = writer
+            .save(&SessionFiles::at(&session), b"recovered", "txt")
+            .await
+            .unwrap();
 
         assert_eq!(saved.file_name().unwrap(), "7.txt");
         assert_eq!(
@@ -200,18 +225,30 @@ mod tests {
         let session_writer = SessionWriter::try_claim(id, &folder).unwrap();
         let files = SessionFiles::new(folder.clone(), Some(session_writer.clone()));
         let writer = WebFetchArtifactWriter;
-        let (saved_a, saved_b) = tokio::join!(writer.save(&files, b"a", "txt"), writer.save(&files, b"bb", "txt"));
+        let (saved_a, saved_b) = tokio::join!(
+            writer.save(&files, b"a", "txt"),
+            writer.save(&files, b"bb", "txt")
+        );
         let (saved_a, saved_b) = (saved_a.unwrap(), saved_b.unwrap());
         assert_ne!(saved_a, saved_b);
-        assert_eq!(tokio::fs::read(&saved_a).await.unwrap().len() + tokio::fs::read(&saved_b).await.unwrap().len(), 3);
         assert_eq!(
-            tokio::fs::read_to_string(folder.join(ARTIFACT_DIR).join(ALLOCATION_FILE)).await.unwrap(),
+            tokio::fs::read(&saved_a).await.unwrap().len()
+                + tokio::fs::read(&saved_b).await.unwrap().len(),
+            3
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(folder.join(ARTIFACT_DIR).join(ALLOCATION_FILE))
+                .await
+                .unwrap(),
             "0000000002"
         );
 
         session_writer.delete_tree().await.unwrap();
         assert!(writer.save(&files, b"late", "txt").await.is_err());
-        assert!(!folder.exists(), "a save after the delete recreated the session folder");
+        assert!(
+            !folder.exists(),
+            "a save after the delete recreated the session folder"
+        );
     }
 
     /// F5-C4: with no session writer a save writes nothing and returns the error.
@@ -224,6 +261,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no session writer"), "{err}");
-        assert!(!folder.exists(), "a writer-less save created the session folder");
+        assert!(
+            !folder.exists(),
+            "a writer-less save created the session folder"
+        );
     }
 }

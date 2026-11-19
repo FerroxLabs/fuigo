@@ -168,20 +168,35 @@ fn session_edit_grant_does_not_cover_a_git_hook_patch() {
         let hub = hub("always_approve");
         let mgr = manager(&cwd, vec![], hub.clone(), false);
         let ordinary = patch("*** Add File: src/a.rs\n+fn a() {}");
-        assert_eq!(decide_patch(&mgr, tmp.path(), &ordinary).await, Decision::Allow);
+        assert_eq!(
+            decide_patch(&mgr, tmp.path(), &ordinary).await,
+            Decision::Allow
+        );
         assert_eq!(hub.seen.lock().unwrap().len(), 1, "first edit prompts");
         let second = patch("*** Add File: src/b.rs\n+fn b() {}");
-        assert_eq!(decide_patch(&mgr, tmp.path(), &second).await, Decision::Allow);
+        assert_eq!(
+            decide_patch(&mgr, tmp.path(), &second).await,
+            Decision::Allow
+        );
         assert_eq!(
             hub.seen.lock().unwrap().len(),
             1,
             "an ordinary patch rides the session edit grant without a prompt"
         );
-        let mixed = patch(&format!("*** Add File: src/c.rs\n+fn c() {{}}\n{ADD_GIT_HOOK}"));
+        let mixed = patch(&format!(
+            "*** Add File: src/c.rs\n+fn c() {{}}\n{ADD_GIT_HOOK}"
+        ));
         decide_patch(&mgr, tmp.path(), &mixed).await;
         let seen = hub.seen.lock().unwrap();
-        assert_eq!(seen.len(), 2, "a patch touching a git hook must prompt despite the grant");
-        assert_eq!(seen[1]["description"], "Edit src/c.rs, .git/hooks/pre-commit");
+        assert_eq!(
+            seen.len(),
+            2,
+            "a patch touching a git hook must prompt despite the grant"
+        );
+        assert_eq!(
+            seen[1]["description"],
+            "Edit src/c.rs, .git/hooks/pre-commit"
+        );
     });
 }
 
@@ -192,11 +207,20 @@ fn deny_rule_refuses_a_patch_updating_a_denied_file() {
         std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         std::fs::write(tmp.path().join("secrets/x"), "k=1\n").unwrap();
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
-        let text = patch("*** Add File: src/ok.rs\n+ok\n*** Update File: secrets/x\n@@\n-k=1\n+k=2");
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
+        let text =
+            patch("*** Add File: src/ok.rs\n+ok\n*** Update File: secrets/x\n@@\n-k=1\n+k=2");
         let d = decide_patch(&mgr, tmp.path(), &text).await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
-        assert!(hub.seen.lock().unwrap().is_empty(), "a denied patch never prompts");
+        assert!(
+            hub.seen.lock().unwrap().is_empty(),
+            "a denied patch never prompts"
+        );
     });
 }
 
@@ -205,13 +229,21 @@ fn deny_rule_refuses_a_patch_updating_a_denied_file() {
 fn deny_rule_refuses_a_move_into_or_out_of_a_denied_path() {
     run(|tmp, cwd| async move {
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Deny, "secrets/**")], hub.clone(), true);
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            true,
+        );
         let into = patch("*** Update File: src/a.rs\n*** Move to: secrets/a.rs\n@@\n-a\n+b");
         let d = decide_patch(&mgr, tmp.path(), &into).await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "move into: got {d:?}");
         let out_of = patch("*** Update File: secrets/a.rs\n*** Move to: src/a.rs\n@@\n-a\n+b");
         let d = decide_patch(&mgr, tmp.path(), &out_of).await;
-        assert!(matches!(d, Decision::PolicyDeny(_)), "move out of: got {d:?}");
+        assert!(
+            matches!(d, Decision::PolicyDeny(_)),
+            "move out of: got {d:?}"
+        );
         assert!(hub.seen.lock().unwrap().is_empty());
     });
 }
@@ -223,9 +255,15 @@ fn deny_rule_sees_through_dot_dot_and_symlinks() {
     run(|tmp, cwd| async move {
         std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
-        std::os::unix::fs::symlink(tmp.path().join("secrets"), tmp.path().join("innocent")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("secrets"), tmp.path().join("innocent"))
+            .unwrap();
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Deny, "secrets/**")], hub.clone(), true);
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            true,
+        );
         for body in [
             "*** Add File: src/../secrets/key\n+x",
             "*** Add File: innocent/key\n+x",
@@ -242,7 +280,10 @@ fn malformed_patch_is_refused_even_in_yolo() {
     run(|tmp, cwd| async move {
         let hub = hub("approve");
         let mgr = manager(&cwd, vec![], hub.clone(), true);
-        for text in ["not a patch", "*** Begin Patch\n*** Frobnicate File: x\n*** End Patch"] {
+        for text in [
+            "not a patch",
+            "*** Begin Patch\n*** Frobnicate File: x\n*** End Patch",
+        ] {
             let d = decide_patch(&mgr, tmp.path(), text).await;
             assert!(matches!(d, Decision::PolicyDeny(_)), "{text:?}: got {d:?}");
         }
@@ -255,7 +296,12 @@ fn malformed_patch_is_refused_even_in_yolo() {
 fn ask_rule_on_one_target_prompts_listing_every_target() {
     run(|tmp, cwd| async move {
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Ask, "docs/**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Ask, "docs/**")],
+            hub.clone(),
+            false,
+        );
         mgr.set_auto_mode(true);
         let text = patch("*** Add File: src/a.rs\n+a\n*** Add File: docs/b.md\n+b");
         assert_eq!(decide_patch(&mgr, tmp.path(), &text).await, Decision::Allow);
@@ -271,15 +317,26 @@ fn ordinary_patch_under_allow_rule_or_auto_mode_does_not_prompt() {
     run(|tmp, cwd| async move {
         let text = patch("*** Add File: src/a.rs\n+a\n*** Add File: src/b.rs\n+b");
         let hub_rule = hub("reject");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Allow, "src/**")], hub_rule.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Allow, "src/**")],
+            hub_rule.clone(),
+            false,
+        );
         assert_eq!(decide_patch(&mgr, tmp.path(), &text).await, Decision::Allow);
-        assert!(hub_rule.seen.lock().unwrap().is_empty(), "allow rule covers every target");
+        assert!(
+            hub_rule.seen.lock().unwrap().is_empty(),
+            "allow rule covers every target"
+        );
 
         let hub_auto = hub("reject");
         let mgr = manager(&cwd, vec![], hub_auto.clone(), false);
         mgr.set_auto_mode(true);
         assert_eq!(decide_patch(&mgr, tmp.path(), &text).await, Decision::Allow);
-        assert!(hub_auto.seen.lock().unwrap().is_empty(), "auto mode accepts ordinary edits");
+        assert!(
+            hub_auto.seen.lock().unwrap().is_empty(),
+            "auto mode accepts ordinary edits"
+        );
     });
 }
 
@@ -289,11 +346,20 @@ fn ordinary_patch_under_allow_rule_or_auto_mode_does_not_prompt() {
 fn allow_rule_on_some_targets_does_not_allow_the_patch() {
     run(|tmp, cwd| async move {
         let hub = hub("reject");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Allow, "src/**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Allow, "src/**")],
+            hub.clone(),
+            false,
+        );
         let text = patch("*** Add File: src/a.rs\n+a\n*** Add File: build.rs\n+b");
         let d = decide_patch(&mgr, tmp.path(), &text).await;
         assert!(matches!(d, Decision::Reject(_)), "got {d:?}");
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "the unmatched build.rs must prompt");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "the unmatched build.rs must prompt"
+        );
     });
 }
 
@@ -304,10 +370,21 @@ fn allow_rule_on_some_targets_does_not_allow_the_patch() {
 fn deny_rule_follows_a_backslash_named_symlink_like_the_writer() {
     run(|tmp, cwd| async move {
         std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
-        std::os::unix::fs::symlink(tmp.path().join("secrets"), tmp.path().join("safe\\alias")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("secrets"), tmp.path().join("safe\\alias"))
+            .unwrap();
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Deny, "secrets/**")], hub.clone(), true);
-        let d = decide_patch(&mgr, tmp.path(), &patch("*** Add File: safe\\alias/key\n+x")).await;
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            true,
+        );
+        let d = decide_patch(
+            &mgr,
+            tmp.path(),
+            &patch("*** Add File: safe\\alias/key\n+x"),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
         assert!(hub.seen.lock().unwrap().is_empty());
     });
@@ -319,7 +396,12 @@ fn deny_rule_follows_a_backslash_named_symlink_like_the_writer() {
 fn allow_rule_needs_the_written_path_and_a_known_physical_path() {
     run(|tmp, cwd| async move {
         let hub = hub("reject");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Allow, "allowed/**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Allow, "allowed/**")],
+            hub.clone(),
+            false,
+        );
         let ok = patch("*** Add File: allowed/key\n+x");
         assert_eq!(decide_patch(&mgr, tmp.path(), &ok).await, Decision::Allow);
         assert!(hub.seen.lock().unwrap().is_empty());
@@ -335,16 +417,39 @@ fn allow_rule_needs_the_written_path_and_a_known_physical_path() {
 fn ask_rule_binds_over_the_session_edit_grant() {
     run(|tmp, cwd| async move {
         let hub = hub("always_approve");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Ask, "docs/**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Ask, "docs/**")],
+            hub.clone(),
+            false,
+        );
         let ordinary = patch("*** Add File: src/a.rs\n+a");
-        assert_eq!(decide_patch(&mgr, tmp.path(), &ordinary).await, Decision::Allow);
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "first edit prompts and grants the session");
+        assert_eq!(
+            decide_patch(&mgr, tmp.path(), &ordinary).await,
+            Decision::Allow
+        );
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "first edit prompts and grants the session"
+        );
         let again = patch("*** Add File: src/b.rs\n+b");
-        assert_eq!(decide_patch(&mgr, tmp.path(), &again).await, Decision::Allow);
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "the grant covers ordinary edits");
+        assert_eq!(
+            decide_patch(&mgr, tmp.path(), &again).await,
+            Decision::Allow
+        );
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "the grant covers ordinary edits"
+        );
         let docs = patch("*** Add File: src/c.rs\n+c\n*** Add File: docs/b.md\n+b");
         decide_patch(&mgr, tmp.path(), &docs).await;
-        assert_eq!(hub.seen.lock().unwrap().len(), 2, "the ask rule on docs/b.md must prompt");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            2,
+            "the ask rule on docs/b.md must prompt"
+        );
         mgr.request(PermissionRequest::new(
             AccessKind::Edit("docs/c.md".to_owned()),
             acp::ToolCallUpdate::new(
@@ -353,7 +458,11 @@ fn ask_rule_binds_over_the_session_edit_grant() {
             ),
         ))
         .await;
-        assert_eq!(hub.seen.lock().unwrap().len(), 3, "a single-file edit under the ask rule prompts too");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            3,
+            "a single-file edit under the ask rule prompts too"
+        );
     });
 }
 
@@ -368,13 +477,31 @@ fn allow_rule_does_not_cover_a_backslash_symlink_out_of_the_tree() {
         std::fs::create_dir_all(tmp.path().join("safe/alias")).unwrap();
         std::os::unix::fs::symlink(outside.path(), tmp.path().join("safe\\alias")).unwrap();
         let hub = hub("reject");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Allow, "safe/**")], hub.clone(), false);
-        let d = decide_patch(&mgr, tmp.path(), &patch("*** Add File: safe\\alias/key\n+x")).await;
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Allow, "safe/**")],
+            hub.clone(),
+            false,
+        );
+        let d = decide_patch(
+            &mgr,
+            tmp.path(),
+            &patch("*** Add File: safe\\alias/key\n+x"),
+        )
+        .await;
         assert!(matches!(d, Decision::Reject(_)), "got {d:?}");
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "the write through the symlink must prompt");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "the write through the symlink must prompt"
+        );
         let ok = patch("*** Add File: safe/alias/key\n+x");
         assert_eq!(decide_patch(&mgr, tmp.path(), &ok).await, Decision::Allow);
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "the real safe/alias stays allowed");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "the real safe/alias stays allowed"
+        );
     });
 }
 
@@ -386,7 +513,12 @@ fn allow_rule_on_the_symlink_target_alone_does_not_cover_the_link() {
         std::fs::create_dir_all(tmp.path().join("allowed")).unwrap();
         std::os::unix::fs::symlink(tmp.path().join("allowed"), tmp.path().join("link")).unwrap();
         let hub = hub("reject");
-        let mgr = manager(&cwd, vec![rule(RuleAction::Allow, "allowed/**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Allow, "allowed/**")],
+            hub.clone(),
+            false,
+        );
         let d = decide_patch(&mgr, tmp.path(), &patch("*** Add File: link/key\n+x")).await;
         assert!(matches!(d, Decision::Reject(_)), "got {d:?}");
         assert_eq!(hub.seen.lock().unwrap().len(), 1);
@@ -407,14 +539,27 @@ fn backslash_path_never_earns_an_allow_on_unix() {
         let cwd = AbsPathBuf::new(ws.clone()).unwrap();
         let hub = hub("reject");
         let allow = format!("{}/safe/**", ws.display());
-        let mgr = manager(&cwd, vec![rule(RuleAction::Allow, &allow)], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Allow, &allow)],
+            hub.clone(),
+            false,
+        );
         let sneaky = patch(&format!("*** Add File: {}\\safe/key\n+x", ws.display()));
         let d = decide_patch(&mgr, &ws, &sneaky).await;
         assert!(matches!(d, Decision::Reject(_)), "got {d:?}");
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "the backslash sibling must prompt");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "the backslash sibling must prompt"
+        );
         let real = patch(&format!("*** Add File: {}/safe/key\n+x", ws.display()));
         assert_eq!(decide_patch(&mgr, &ws, &real).await, Decision::Allow);
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "the real safe/ stays allowed");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "the real safe/ stays allowed"
+        );
     });
 }
 
@@ -429,8 +574,16 @@ fn allow_rule_through_a_symlinked_ancestor_still_allows() {
         std::os::unix::fs::symlink(root.path().join("real"), root.path().join("alias")).unwrap();
         let hub = hub("reject");
         let allow = format!("{}/alias/**", root.path().display());
-        let mgr = manager(&cwd, vec![rule(RuleAction::Allow, &allow)], hub.clone(), false);
-        let text = patch(&format!("*** Add File: {}/alias/other/key\n+x", root.path().display()));
+        let mgr = manager(
+            &cwd,
+            vec![rule(RuleAction::Allow, &allow)],
+            hub.clone(),
+            false,
+        );
+        let text = patch(&format!(
+            "*** Add File: {}/alias/other/key\n+x",
+            root.path().display()
+        ));
         assert_eq!(decide_patch(&mgr, tmp.path(), &text).await, Decision::Allow);
         assert!(hub.seen.lock().unwrap().is_empty());
     });

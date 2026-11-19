@@ -10,11 +10,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
+use fuigo_fast_worktree::{BtrfsDelegate, IgnoredFilesMode, WorkingTreeMode, WorktreeBuilder};
 use git2::{DiffOptions, Oid, Repository};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
-use fuigo_fast_worktree::{BtrfsDelegate, IgnoredFilesMode, WorkingTreeMode, WorktreeBuilder};
 
 use crate::session::git::{
     GitFileChange, change_type_from_git2_delta, find_git_root_from_path,
@@ -884,7 +884,8 @@ pub fn resolve_worktree_dir_name(base_dir: &Path, requested: Option<&str>) -> Re
 /// Fuigo home for worktree paths: the same resolver as `worktrees.db`, with a `temp_dir()/.fuigo` last resort.
 /// This is not fuigo-config's cwd-relative `.fuigo`: worktree paths need an absolute, always-writable anchor that does not move with the process cwd.
 fn fuigo_home() -> std::path::PathBuf {
-    fuigo_fast_worktree::resolve_fuigo_home().unwrap_or_else(|_| std::env::temp_dir().join(".fuigo"))
+    fuigo_fast_worktree::resolve_fuigo_home()
+        .unwrap_or_else(|_| std::env::temp_dir().join(".fuigo"))
 }
 
 /// Returns `~/.fuigo/worktrees/<repo_slug>` for the given git root.
@@ -990,7 +991,8 @@ pub(crate) fn managed_worktree_source_exact(top: &Path) -> Option<std::path::Pat
     if !top.starts_with(&root) || top == root {
         return None;
     }
-    let fuigo_fast_worktree::RegistryOpen::Opened { db, .. } = WorktreeDb::open_read_only(&home) else {
+    let fuigo_fast_worktree::RegistryOpen::Opened { db, .. } = WorktreeDb::open_read_only(&home)
+    else {
         return None;
     };
     let record = db.get(&top.to_string_lossy()).ok()??;
@@ -1270,7 +1272,8 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
     );
     let session_id_for_builder = session_id.clone();
     let btrfs_delegate = btrfs_delegate_from_env();
-    let user_provided_label = req.worktree_path.is_none() && is_user_typed_label(req.label.as_deref());
+    let user_provided_label =
+        req.worktree_path.is_none() && is_user_typed_label(req.label.as_deref());
     let label_for_meta = label_from_path(&worktree_path_str);
     let label_metadata = build_label_metadata(&label_for_meta, user_provided_label);
     let report = match tokio::task::spawn_blocking(move || {
@@ -2898,8 +2901,8 @@ pub fn clean_artifacts_mgmt(id_or_path: &str) -> Result<fuigo_fast_worktree::Cle
 pub fn worktree_auto_gc_layer_from_settings(
     s: &fuigo_config_types::WorktreeAutoGcSettings,
 ) -> WorktreeAutoGcLayer {
-    use std::collections::BTreeMap;
     use fuigo_config_types::WorktreeKindMaxAge;
+    use std::collections::BTreeMap;
 
     // Exhaustive destructure: a new settings field becomes a compile error here
     // Otherwise it would be a silently dropped knob on both the shell and workspace resolve paths
@@ -3053,7 +3056,11 @@ pub fn candidate_worktree_cwds_for_same_repo(current_cwd: &std::path::Path) -> R
     );
     // From a folder inside the repository, the same folder in each worktree is where sessions started there live
     let roots: Vec<String> = candidates.iter().skip(1).cloned().collect();
-    let same_folder = same_subfolder_candidates(&current_cwd.to_string_lossy(), &main_root.to_string_lossy(), &roots);
+    let same_folder = same_subfolder_candidates(
+        &current_cwd.to_string_lossy(),
+        &main_root.to_string_lossy(),
+        &roots,
+    );
     for (offset, path) in same_folder.into_iter().enumerate() {
         if !candidates.contains(&path) {
             candidates.insert(1 + offset, path);
@@ -3062,10 +3069,16 @@ pub fn candidate_worktree_cwds_for_same_repo(current_cwd: &std::path::Path) -> R
     // A submodule is a repository of its own, so its worktrees are none of the superproject's. The superproject's
     // worktrees each hold the same submodule at the same path: the sessions started there belong with these
     if let Some((super_root, within)) = superproject_of(&main_root) {
-        let inside = current_cwd.strip_prefix(&main_root).unwrap_or(Path::new(""));
+        let inside = current_cwd
+            .strip_prefix(&main_root)
+            .unwrap_or(Path::new(""));
         if let Ok(super_candidates) = candidate_worktree_cwds_for_same_repo(&super_root) {
             for root in super_candidates {
-                let path = Path::new(&root).join(&within).join(inside).to_string_lossy().into_owned();
+                let path = Path::new(&root)
+                    .join(&within)
+                    .join(inside)
+                    .to_string_lossy()
+                    .into_owned();
                 if !candidates.contains(&path) {
                     candidates.push(path);
                 }
@@ -3089,8 +3102,14 @@ fn superproject_of(repo_root: &Path) -> Option<(std::path::PathBuf, std::path::P
 /// The folder `current_cwd` names, relative to whichever of `main_root` or `worktree_roots` contains it, joined onto every
 /// OTHER root: the same subfolder in the main checkout and in each worktree. Empty when `current_cwd` is a root itself or
 /// is inside none of them.
-pub fn same_subfolder_candidates(current_cwd: &str, main_root: &str, worktree_roots: &[String]) -> Vec<String> {
-    let all: Vec<&str> = std::iter::once(main_root).chain(worktree_roots.iter().map(String::as_str)).collect();
+pub fn same_subfolder_candidates(
+    current_cwd: &str,
+    main_root: &str,
+    worktree_roots: &[String],
+) -> Vec<String> {
+    let all: Vec<&str> = std::iter::once(main_root)
+        .chain(worktree_roots.iter().map(String::as_str))
+        .collect();
     let cwd = Path::new(current_cwd);
     // The deepest root that contains the cwd is the checkout it is in
     let Some((home_root, relative)) = all
@@ -3105,7 +3124,12 @@ pub fn same_subfolder_candidates(current_cwd: &str, main_root: &str, worktree_ro
     }
     all.iter()
         .filter(|root| **root != home_root)
-        .map(|root| Path::new(root).join(relative).to_string_lossy().into_owned())
+        .map(|root| {
+            Path::new(root)
+                .join(relative)
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect()
 }
 
@@ -3113,13 +3137,18 @@ pub fn same_subfolder_candidates(current_cwd: &str, main_root: &str, worktree_ro
 /// a linked worktree whose git directory is that repository's, or a standalone clone that records it as its source.
 fn worktree_belongs_to_repo(worktree: &Path, main_root: &Path) -> bool {
     let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    if let Ok(marker) = std::fs::read_to_string(worktree.join(".git").join("fuigo-worktree-source")) {
+    if let Ok(marker) = std::fs::read_to_string(worktree.join(".git").join("fuigo-worktree-source"))
+    {
         let source = marker.trim();
         if !source.is_empty() {
             return canon(Path::new(source)) == canon(main_root);
         }
     }
-    let common = |path: &Path| git2::Repository::open(path).ok().map(|r| canon(r.commondir()));
+    let common = |path: &Path| {
+        git2::Repository::open(path)
+            .ok()
+            .map(|r| canon(r.commondir()))
+    };
     match (common(worktree), common(main_root)) {
         (Some(theirs), Some(ours)) => theirs == ours,
         // Cannot tell: keep it, as before
@@ -3221,7 +3250,12 @@ mod tests {
         std::fs::write(&real, "old").unwrap();
         std::os::unix::fs::symlink("real.txt", &link).unwrap();
         assert!(apply_file_content(&link, Some(&"new".to_string())).await);
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
     }
 
@@ -3234,8 +3268,16 @@ mod tests {
         let link = dir.path().join("link.txt");
         std::os::unix::fs::symlink("missing.txt", &link).unwrap();
         assert!(apply_file_content(&link, Some(&"new".to_string())).await);
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_to_string(dir.path().join("missing.txt")).unwrap(), "new");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("missing.txt")).unwrap(),
+            "new"
+        );
         let temps = fuigo_config::write_through::fault::temps_under(dir.path());
         assert_eq!(temps.len(), 1, "went through a temp: {temps:?}");
     }
@@ -3254,7 +3296,11 @@ mod tests {
         assert!(apply_file_content(&dest, Some(&"new".to_string())).await);
         let temps = fuigo_config::write_through::fault::temps_under(dir.path());
         assert_eq!(temps.len(), 1, "{temps:?}");
-        assert_eq!(temps[0].1, Some(0o600), "temp must be owner-only while it fills");
+        assert_eq!(
+            temps[0].1,
+            Some(0o600),
+            "temp must be owner-only while it fills"
+        );
         assert_eq!(
             std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777,
             0o640
@@ -4009,7 +4055,10 @@ mod tests {
         let err = resolve_worktree_dir_name(base.path(), Some("Feature X"))
             .expect_err("a taken typed name must be refused, not suffixed");
         let msg = err.to_string();
-        assert!(msg.contains("feature-x"), "message must name the worktree: {msg}");
+        assert!(
+            msg.contains("feature-x"),
+            "message must name the worktree: {msg}"
+        );
         assert!(msg.contains("already"), "{msg}");
         assert!(!base.path().join("feature-x-2").exists());
     }
@@ -4019,7 +4068,10 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         std::fs::create_dir(base.path().join("feature-x")).unwrap();
         std::fs::remove_dir(base.path().join("feature-x")).unwrap();
-        assert_eq!(resolve_worktree_dir_name(base.path(), Some("feature-x")).unwrap(), "feature-x");
+        assert_eq!(
+            resolve_worktree_dir_name(base.path(), Some("feature-x")).unwrap(),
+            "feature-x"
+        );
     }
 
     #[test]
@@ -4064,7 +4116,10 @@ mod tests {
     #[test]
     fn sanitize_label_keeps_unicode_letters() {
         assert_eq!(sanitize_label("Caf\u{e9}"), "caf\u{e9}");
-        assert_eq!(sanitize_label("\u{65e5}\u{672c}\u{8a9e} fix_1"), "\u{65e5}\u{672c}\u{8a9e}-fix-1");
+        assert_eq!(
+            sanitize_label("\u{65e5}\u{672c}\u{8a9e} fix_1"),
+            "\u{65e5}\u{672c}\u{8a9e}-fix-1"
+        );
         assert_eq!(sanitize_label("na\u{ef}ve!?"), "na\u{ef}ve");
     }
 
@@ -4076,7 +4131,6 @@ mod tests {
         assert!(out.len() <= MAX_LABEL_LEN, "{} bytes", out.len());
         assert!(out.chars().all(|c| c == '\u{e9}'));
     }
-
 }
 
 #[cfg(test)]
@@ -4095,7 +4149,11 @@ mod removal_refusal_tests {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .output()
             .expect("run git");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// A repository with one commit, and a linked worktree of it under `<home>/worktrees/demo/wt`.
@@ -4110,7 +4168,17 @@ mod removal_refusal_tests {
         git(&repo, &["commit", "-q", "-m", "init"]);
         let wt = home.join("worktrees").join("demo").join("wt");
         std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
-        git(&repo, &["worktree", "add", "-q", "-b", "feature", wt.to_str().unwrap()]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                wt.to_str().unwrap(),
+            ],
+        );
         (root, home, repo, wt)
     }
 
@@ -4127,7 +4195,11 @@ mod removal_refusal_tests {
         let reason = removal_refusal(&wt, false, None, &home).expect("refused without -f");
         assert!(reason.contains("uncommitted changes"), "{reason}");
         assert!(reason.contains("--force"), "the remedy is named: {reason}");
-        assert_eq!(removal_refusal(&wt, true, None, &home), None, "-f overrides dirty");
+        assert_eq!(
+            removal_refusal(&wt, true, None, &home),
+            None,
+            "-f overrides dirty"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -4155,12 +4227,16 @@ mod removal_refusal_tests {
         let (_root, home, repo, _wt) = fixture();
         let reason = removal_refusal(&repo.join(".git"), true, None, &home).expect(".git refused");
         assert!(reason.contains(".git"), "{reason}");
-        let reason = removal_refusal(&repo.join(".git").join("refs"), true, None, &home).expect("inside .git refused");
+        let reason = removal_refusal(&repo.join(".git").join("refs"), true, None, &home)
+            .expect("inside .git refused");
         assert!(reason.contains(".git"), "{reason}");
         let reason = removal_refusal(&repo, true, None, &home).expect("repository refused");
         assert!(reason.contains("git repository"), "{reason}");
         let bare = repo.parent().unwrap().join("bare.git");
-        git(repo.parent().unwrap(), &["init", "-q", "--bare", bare.to_str().unwrap()]);
+        git(
+            repo.parent().unwrap(),
+            &["init", "-q", "--bare", bare.to_str().unwrap()],
+        );
         let reason = removal_refusal(&bare, true, None, &home).expect("bare repository refused");
         assert!(reason.contains("git repository"), "{reason}");
     }

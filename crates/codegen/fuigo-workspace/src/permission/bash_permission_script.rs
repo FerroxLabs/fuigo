@@ -117,7 +117,8 @@ impl PermissionScript {
                         }
                         let unquoted = matches!(word.kind(), "word" | "concatenation");
                         unpinned.push(source.get(word.byte_range()).is_none_or(|spelling| {
-                            spelling.contains("$'") || (unquoted && spelling.contains(['*', '?', '[']))
+                            spelling.contains("$'")
+                                || (unquoted && spelling.contains(['*', '?', '[']))
                         }));
                         words.push(PermissionWord::Literal(value));
                         operands_safe.push(true);

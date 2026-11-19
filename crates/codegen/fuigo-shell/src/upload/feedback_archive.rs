@@ -65,8 +65,8 @@ pub(crate) fn scrub_upload_tar_gz(archive: &[u8]) -> std::io::Result<Vec<u8>> {
     use flate2::read::GzDecoder;
     use flate2::write::GzEncoder;
     const BINARY: &[&str] = &[
-        "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff", "avif", "heic", "mp4", "mov", "webm",
-        "mp3", "wav", "pdf", "gz", "tgz", "zip", "zst", "sqlite", "db", "bin",
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff", "avif", "heic", "mp4",
+        "mov", "webm", "mp3", "wav", "pdf", "gz", "tgz", "zip", "zst", "sqlite", "db", "bin",
     ];
     let mut out = Vec::new();
     {
@@ -100,10 +100,13 @@ pub(crate) fn scrub_upload_tar_gz(archive: &[u8]) -> std::io::Result<Vec<u8>> {
 /// `FUIGO_API_KEY` and legacy `FUIGO_CODE_API_KEY`, and the saved key held in memory.
 fn held_first_party_keys() -> Vec<String> {
     use crate::agent::auth_method as auth;
-    let mut keys: Vec<String> = [auth::read_fuigo_api_key_env(), auth::read_fuigo_api_key_echoable()]
-        .into_iter()
-        .filter_map(Result::ok)
-        .collect();
+    let mut keys: Vec<String> = [
+        auth::read_fuigo_api_key_env(),
+        auth::read_fuigo_api_key_echoable(),
+    ]
+    .into_iter()
+    .filter_map(Result::ok)
+    .collect();
     keys.extend(
         auth::FLUX_KEY_ENV_VARS
             .iter()
@@ -151,7 +154,10 @@ pub(crate) fn withhold_loc_identity(destination: &str, bytes: Vec<u8>) -> Vec<u8
         });
         for key in ["agentId", "agent_id"] {
             if let Some(Value::String(id)) = record.get(key).cloned() {
-                record.insert(key.into(), Value::String(destination_pseudonym(destination, &id)));
+                record.insert(
+                    key.into(),
+                    Value::String(destination_pseudonym(destination, &id)),
+                );
             }
         }
         for key in ["authorId", "author_id"] {
@@ -302,7 +308,10 @@ fn scrub_sent_credentials(buf: Vec<u8>) -> Vec<u8> {
     let mut out = Vec::with_capacity(buf.len());
     let mut changed = false;
     // A PEM block opened in one JSON record and continued in the next (Astra r4 #1).
-    let mut json = JsonScrub { recorded, pem: fuigo_secrets::PrivateKeyJoin::default() };
+    let mut json = JsonScrub {
+        recorded,
+        pem: fuigo_secrets::PrivateKeyJoin::default(),
+    };
     let mut i = 0;
     while i < lines.len() {
         if parse_json_line(lines[i]).is_some() {
@@ -328,7 +337,11 @@ fn scrub_sent_credentials(buf: Vec<u8>) -> Vec<u8> {
         let block = lines[start..i].concat();
         let keyless = scrub_utf8_stretches(&block, fuigo_secrets::redact_private_key_blocks);
         changed |= keyless.is_some();
-        for line in keyless.as_deref().unwrap_or(&block).split_inclusive(|&b| b == b'\n') {
+        for line in keyless
+            .as_deref()
+            .unwrap_or(&block)
+            .split_inclusive(|&b| b == b'\n')
+        {
             let exact = scrub_exact_line(line, recorded);
             let text = exact.as_deref().unwrap_or(line);
             match scrub_utf8_stretches(text, fuigo_secrets::redact_credential_shapes).or(exact) {
@@ -345,7 +358,9 @@ fn scrub_sent_credentials(buf: Vec<u8>) -> Vec<u8> {
 
 /// The line as a JSON value, when it is one (any JSON value: an object, an array, a bare string).
 fn parse_json_line(line: &[u8]) -> Option<serde_json::Value> {
-    let body = std::str::from_utf8(line).ok()?.trim_end_matches(['\n', '\r']);
+    let body = std::str::from_utf8(line)
+        .ok()?
+        .trim_end_matches(['\n', '\r']);
     if body.trim().is_empty() {
         return None;
     }
@@ -371,9 +386,16 @@ fn scrub_json_document(buf: &[u8], recorded: bool) -> Option<Vec<u8>> {
     }
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&exact) else {
         // Not expected (the exact scrub keeps JSON intact); never let a shape leave unscrubbed.
-        return Some(scrub_utf8_stretches(&exact, fuigo_secrets::redact_credential_shapes).unwrap_or(exact));
+        return Some(
+            scrub_utf8_stretches(&exact, fuigo_secrets::redact_credential_shapes).unwrap_or(exact),
+        );
     };
-    if !(JsonScrub { recorded, pem: fuigo_secrets::PrivateKeyJoin::default() }).value(&mut value, None) {
+    if !(JsonScrub {
+        recorded,
+        pem: fuigo_secrets::PrivateKeyJoin::default(),
+    })
+    .value(&mut value, None)
+    {
         return Some(exact);
     }
     let mut pretty = serde_json::to_vec_pretty(&value).ok()?;
@@ -418,7 +440,12 @@ impl JsonScrub {
             Value::String(s) => self.string(s, property),
             Value::Array(items) => {
                 let bytes: Option<Vec<u8>> = (!items.is_empty())
-                    .then(|| items.iter().map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok())).collect())
+                    .then(|| {
+                        items
+                            .iter()
+                            .map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+                            .collect()
+                    })
                     .flatten();
                 if let Some(bytes) = bytes {
                     let Some(scrubbed) = scrub_byte_value_run(&bytes, self.recorded) else {
@@ -427,12 +454,15 @@ impl JsonScrub {
                     *items = scrubbed.into_iter().map(Value::from).collect();
                     return true;
                 }
-                items.iter_mut().fold(false, |changed, item| self.value(item, property) | changed)
+                items
+                    .iter_mut()
+                    .fold(false, |changed, item| self.value(item, property) | changed)
             }
             Value::Object(map) => {
                 let mut changed = false;
                 // Next suffix to try per redacted base name, so k colliding names cost O(k), not O(k^2) (audit S11-F7).
-                let mut next_suffix: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                let mut next_suffix: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
                 for (name, mut item) in std::mem::take(map) {
                     changed |= self.value(&mut item, Some(&name));
                     let mut name = match fuigo_secrets::redact_credential_shapes(&name) {
@@ -583,7 +613,10 @@ pub(crate) fn open_regular_nofollow(path: &std::path::Path) -> std::io::Result<s
     Ok(file)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,7 +634,10 @@ mod tests {
         }
         let mut value = serde_json::Value::Object(map);
         let start = std::time::Instant::now();
-        let mut scrub = JsonScrub { recorded: false, pem: fuigo_secrets::PrivateKeyJoin::default() };
+        let mut scrub = JsonScrub {
+            recorded: false,
+            pem: fuigo_secrets::PrivateKeyJoin::default(),
+        };
         assert!(scrub.value(&mut value, None));
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
@@ -613,7 +649,6 @@ mod tests {
         assert!(object.contains_key("[REDACTED_SECRET]"));
         assert!(object.contains_key("[REDACTED_SECRET]#2"));
     }
-
 
     fn tar_file(bytes: &[u8], suffix: &str) -> String {
         use flate2::read::GzDecoder;
@@ -644,12 +679,20 @@ mod tests {
         );
         std::fs::write(dir.path().join(LOC_RECORDS_FILE), &records).unwrap();
         std::fs::write(dir.path().join("other.txt"), "kept").unwrap();
-        for proxy in ["https://cli-proxy.example/v1", "http://api.fluxrouter.ai/v1"] {
+        for proxy in [
+            "https://cli-proxy.example/v1",
+            "http://api.fluxrouter.ai/v1",
+        ] {
             let bytes = build_session_archive(dir.path(), "sid", proxy).unwrap();
             let loc = tar_file(&bytes, LOC_RECORDS_FILE);
-            assert!(!loc.contains(MACHINE_ID) && !loc.contains("acct-1"), "{proxy}: {loc}");
-            let lines: Vec<serde_json::Value> =
-                loc.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+            assert!(
+                !loc.contains(MACHINE_ID) && !loc.contains("acct-1"),
+                "{proxy}: {loc}"
+            );
+            let lines: Vec<serde_json::Value> = loc
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
             assert_eq!(lines.len(), 2, "the unparseable line is dropped");
             let pseudonym = fuigo_extra_ca::fluxrouter::destination_pseudonym(proxy, MACHINE_ID);
             assert_eq!(lines[0]["agentId"], pseudonym.as_str());
@@ -660,7 +703,10 @@ mod tests {
         }
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         assert_eq!(tar_file(&bytes, LOC_RECORDS_FILE), records);
-        assert_eq!(std::fs::read_to_string(dir.path().join(LOC_RECORDS_FILE)).unwrap(), records);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(LOC_RECORDS_FILE)).unwrap(),
+            records
+        );
     }
 
     fn tar_names(bytes: &[u8]) -> Vec<String> {
@@ -740,7 +786,11 @@ mod tests {
             serde_json::json!({"ts": "t", "type": "mcp_transport_decode_error", "server_name": "s", "error": "e", "sample": format!("key {KEY}")})
         );
         std::fs::write(dir.path().join("events.jsonl"), &raw_event).unwrap();
-        std::fs::write(dir.path().join("debug.log"), format!("child said {KEY}\nother line\n")).unwrap();
+        std::fs::write(
+            dir.path().join("debug.log"),
+            format!("child said {KEY}\nother line\n"),
+        )
+        .unwrap();
         // Astra r1 #1: a bash tool result keeps the command's raw output as byte values.
         let raw_output: Vec<u8> = format!("$ cat key\n{KEY}\n").into_bytes();
         let update = format!(
@@ -748,8 +798,17 @@ mod tests {
             serde_json::json!({"update": {"rawOutput": {"Bash": {"output": raw_output, "output_for_prompt": format!("{KEY}")}}}})
         );
         // Astra r2 #2: a torn record (a writer that died mid-line, then terminated by the next append) keeps the array.
-        let torn = update.trim_end().split("\"output_for_prompt\"").next().unwrap().to_owned();
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{update}{torn}\n")).unwrap();
+        let torn = update
+            .trim_end()
+            .split("\"output_for_prompt\"")
+            .next()
+            .unwrap()
+            .to_owned();
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{update}{torn}\n"),
+        )
+        .unwrap();
         // What P70a does when a server's config hands it the key.
         fuigo_telemetry::sent_credentials::record(KEY);
         fuigo_session_events::EventWriter::open_at(dir.path()).emit(
@@ -764,27 +823,48 @@ mod tests {
         let events = tar_file(&bytes, "events.jsonl");
         let log = tar_file(&bytes, "debug.log");
         for (name, text) in [("events.jsonl", &events), ("debug.log", &log)] {
-            assert!(!text.contains(KEY), "{name} in the archive holds the key: {text}");
-            assert!(text.contains("<redacted>"), "control: {name} keeps its record: {text}");
+            assert!(
+                !text.contains(KEY),
+                "{name} in the archive holds the key: {text}"
+            );
+            assert!(
+                text.contains("<redacted>"),
+                "control: {name} keeps its record: {text}"
+            );
         }
         assert_eq!(events.lines().count(), 2, "{events}");
         for line in events.lines() {
-            serde_json::from_str::<serde_json::Value>(line).expect("each archived event is still JSON");
+            serde_json::from_str::<serde_json::Value>(line)
+                .expect("each archived event is still JSON");
         }
         assert!(log.ends_with("other line\n"), "{log}");
         let archived_updates = tar_file(&bytes, "updates.jsonl");
-        let key_as_byte_values: String = KEY.bytes().map(|b| b.to_string()).collect::<Vec<_>>().join(",");
-        assert!(!archived_updates.contains(&key_as_byte_values), "a byte array keeps the key: {archived_updates}");
+        let key_as_byte_values: String = KEY
+            .bytes()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            !archived_updates.contains(&key_as_byte_values),
+            "a byte array keeps the key: {archived_updates}"
+        );
         assert_eq!(archived_updates.lines().count(), 2, "{archived_updates}");
-        let update: serde_json::Value = serde_json::from_str(archived_updates.lines().next().unwrap())
-            .expect("the archived update is still JSON");
+        let update: serde_json::Value =
+            serde_json::from_str(archived_updates.lines().next().unwrap())
+                .expect("the archived update is still JSON");
         let bash = &update["update"]["rawOutput"]["Bash"];
-        let output: Vec<u8> = serde_json::from_value(bash["output"].clone()).expect("still byte values");
+        let output: Vec<u8> =
+            serde_json::from_value(bash["output"].clone()).expect("still byte values");
         let output = String::from_utf8(output).unwrap();
-        assert_eq!(output, "$ cat key\n<redacted>\n", "the raw output bytes are scrubbed");
+        assert_eq!(
+            output, "$ cat key\n<redacted>\n",
+            "the raw output bytes are scrubbed"
+        );
         assert_eq!(bash["output_for_prompt"], "<redacted>");
         assert!(
-            std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap().starts_with(&raw_event),
+            std::fs::read_to_string(dir.path().join("events.jsonl"))
+                .unwrap()
+                .starts_with(&raw_event),
             "the file on disk is not rewritten"
         );
     }
@@ -813,20 +893,35 @@ mod tests {
             )
             .replace(KEY, "[key]")
             .replace(LEGACY, "[legacy]");
-            assert!(output.status.success(), "isolated P113 archive probe failed: {text}");
-            assert!(text.contains("test result: ok. 1 passed"), "the child must run exactly one test: {text}");
+            assert!(
+                output.status.success(),
+                "isolated P113 archive probe failed: {text}"
+            );
+            assert!(
+                text.contains("test result: ok. 1 passed"),
+                "the child must run exactly one test: {text}"
+            );
             return;
         }
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("updates.jsonl"),
-            format!("{}\n", serde_json::json!({"text": format!("server echoed {KEY} and {LEGACY}")})),
+            format!(
+                "{}\n",
+                serde_json::json!({"text": format!("server echoed {KEY} and {LEGACY}")})
+            ),
         )
         .unwrap();
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         let updates = tar_file(&bytes, "updates.jsonl");
-        assert!(!updates.contains(KEY) && !updates.contains(LEGACY), "the archive holds a held key");
-        assert!(updates.contains("server echoed <redacted> and <redacted>"), "control: {updates}");
+        assert!(
+            !updates.contains(KEY) && !updates.contains(LEGACY),
+            "the archive holds a held key"
+        );
+        assert!(
+            updates.contains("server echoed <redacted> and <redacted>"),
+            "control: {updates}"
+        );
     }
 
     /// P113 r3 (receipt R113, Not met 2): a credential this process neither sent nor holds (an old, rotated key echoed
@@ -840,9 +935,15 @@ mod tests {
         let fuigo = format!("{}{}", "fuigo-", "p113FakeOldFirstPartyKey9z8y7x");
         let github = format!("{}{}", "ghp_", "p113FakeGithubTokenAbCdEf0123456789");
         let aws = format!("{}{}", "AKIA", "P113FAKEROTATED7");
-        let jwt = format!("{}.{}.{}", "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJwMTEzIn0", "p113FakeSignature_0123");
+        let jwt = format!(
+            "{}.{}.{}",
+            "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJwMTEzIn0", "p113FakeSignature_0123"
+        );
         let pem_body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\np113FakePemBodyLineTwo0123456789";
-        let pem = format!("-----BEGIN {0}-----\n{pem_body}\n-----END {0}-----", "PRIVATE KEY");
+        let pem = format!(
+            "-----BEGIN {0}-----\n{pem_body}\n-----END {0}-----",
+            "PRIVATE KEY"
+        );
         let ordinary = [
             "task-0123456789abcdefghijklmn finished",
             "disk-usage is 42%",
@@ -857,7 +958,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("debug.log"),
-            format!("{}\nold key {openai} and {fuigo}\n{pem}\nexport AWS_ACCESS_KEY_ID={aws}\n", ordinary.join("\n")),
+            format!(
+                "{}\nold key {openai} and {fuigo}\n{pem}\nexport AWS_ACCESS_KEY_ID={aws}\n",
+                ordinary.join("\n")
+            ),
         )
         .unwrap();
         let raw_output: Vec<u8> = format!("$ env\nGITHUB_TOKEN={github}\n").into_bytes();
@@ -877,26 +981,48 @@ mod tests {
         let log = tar_file(&bytes, "debug.log");
         let updates = tar_file(&bytes, "updates.jsonl");
         for secret in [&openai, &fuigo, &github, &aws, &jwt] {
-            assert!(!log.contains(secret.as_str()) && !updates.contains(secret.as_str()), "a key-shaped string left the archive");
+            assert!(
+                !log.contains(secret.as_str()) && !updates.contains(secret.as_str()),
+                "a key-shaped string left the archive"
+            );
         }
-        assert!(!log.contains("p113FakePemBody"), "the PEM block left the archive: {log}");
+        assert!(
+            !log.contains("p113FakePemBody"),
+            "the PEM block left the archive: {log}"
+        );
         for line in ordinary {
-            assert!(log.contains(line), "ordinary log text was rewritten: {line:?} in {log}");
+            assert!(
+                log.contains(line),
+                "ordinary log text was rewritten: {line:?} in {log}"
+            );
         }
         let lines: Vec<serde_json::Value> = updates
             .lines()
             .map(|l| serde_json::from_str(l).expect("each archived update is still JSON"))
             .collect();
         assert_eq!(lines.len(), 3, "{updates}");
-        assert!(!updates.contains("p113FakePassw0rd"), "a secret assignment left the archive: {updates}");
+        assert!(
+            !updates.contains("p113FakePassw0rd"),
+            "a secret assignment left the archive: {updates}"
+        );
         assert_eq!(lines[2]["cfg"], "password=[REDACTED_SECRET]\" end");
         let output: Vec<u8> =
-            serde_json::from_value(lines[0]["update"]["rawOutput"]["Bash"]["output"].clone()).expect("still byte values");
+            serde_json::from_value(lines[0]["update"]["rawOutput"]["Bash"]["output"].clone())
+                .expect("still byte values");
         let output = String::from_utf8(output).unwrap();
-        assert!(output.starts_with("$ env\nGITHUB_TOKEN=") && !output.contains("p113Fake"), "raw output bytes: {output}");
-        assert_eq!(lines[1]["notes"], serde_json::json!(ordinary), "ordinary JSON text was rewritten");
         assert!(
-            std::fs::read_to_string(dir.path().join("debug.log")).unwrap().contains(&openai),
+            output.starts_with("$ env\nGITHUB_TOKEN=") && !output.contains("p113Fake"),
+            "raw output bytes: {output}"
+        );
+        assert_eq!(
+            lines[1]["notes"],
+            serde_json::json!(ordinary),
+            "ordinary JSON text was rewritten"
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("debug.log"))
+                .unwrap()
+                .contains(&openai),
             "the file on disk is not rewritten"
         );
     }
@@ -924,7 +1050,11 @@ mod tests {
         fuigo_telemetry::sent_credentials::record(recorded);
         let spaced = format!(
             "[{}]",
-            recorded.bytes().map(|b| b.to_string()).collect::<Vec<_>>().join(", ")
+            recorded
+                .bytes()
+                .map(|b| b.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let records = [
             serde_json::json!({"update": {"rawOutput": {"Bash": {"output": raw_output}}}}).to_string(),
@@ -936,7 +1066,11 @@ mod tests {
             serde_json::json!({"between": "kept"}).to_string(),
             serde_json::json!({"tail": "-----END PRIVATE KEY----- done"}).to_string(),
         ];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
         // #8: a pretty-printed document (no single line of it is JSON).
         let summary = serde_json::to_string_pretty(&serde_json::json!({
             "session_summary": "password=p113FakePrettyPassw0rd\" end",
@@ -953,34 +1087,68 @@ mod tests {
             let mut found = Vec::new();
             for entry in archive.entries().unwrap() {
                 let mut entry = entry.unwrap();
-                if entry.path().unwrap().to_string_lossy().ends_with("debug.log") {
+                if entry
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .ends_with("debug.log")
+                {
                     entry.read_to_end(&mut found).unwrap();
                 }
             }
             found
         };
         let log_text = String::from_utf8_lossy(&archived_log);
-        assert!(!log_text.contains(&old), "#3: the key after a stray byte left the archive");
-        assert!(archived_log.starts_with(b"bin \xff then "), "#3: the stray byte is kept");
-        assert!(!log_text.contains("p113FakeTornBody"), "#6: the torn PEM body left the archive");
+        assert!(
+            !log_text.contains(&old),
+            "#3: the key after a stray byte left the archive"
+        );
+        assert!(
+            archived_log.starts_with(b"bin \xff then "),
+            "#3: the stray byte is kept"
+        );
+        assert!(
+            !log_text.contains("p113FakeTornBody"),
+            "#6: the torn PEM body left the archive"
+        );
         let updates = tar_file(&bytes, "updates.jsonl");
         let lines: Vec<serde_json::Value> = updates
             .lines()
             .map(|l| serde_json::from_str(l).expect("#7: each archived record is still JSON"))
             .collect();
         assert_eq!(lines.len(), 6, "#7: no record was spliced away: {updates}");
-        let output: Vec<u8> = serde_json::from_value(lines[0]["update"]["rawOutput"]["Bash"]["output"].clone()).unwrap();
-        assert!(output.starts_with(b"\xfe ") && !String::from_utf8_lossy(&output).contains(&old), "#3: byte array");
-        assert!(!updates.contains(&named), "#4: the property name left the archive: {updates}");
+        let output: Vec<u8> =
+            serde_json::from_value(lines[0]["update"]["rawOutput"]["Bash"]["output"].clone())
+                .unwrap();
+        assert!(
+            output.starts_with(b"\xfe ") && !String::from_utf8_lossy(&output).contains(&old),
+            "#3: byte array"
+        );
+        assert!(
+            !updates.contains(&named),
+            "#4: the property name left the archive: {updates}"
+        );
         let spaced_bytes: Vec<u8> = serde_json::from_value(lines[2]["spaced"].clone()).unwrap();
-        assert_eq!(spaced_bytes, b"<redacted>", "#5: the spaced byte array keeps the recorded key");
-        assert!(!updates.contains("p113FakeTornBody"), "#6: the torn PEM body in JSON left the archive");
+        assert_eq!(
+            spaced_bytes, b"<redacted>",
+            "#5: the spaced byte array keeps the recorded key"
+        );
+        assert!(
+            !updates.contains("p113FakeTornBody"),
+            "#6: the torn PEM body in JSON left the archive"
+        );
         assert_eq!(lines[4]["between"], "kept", "#7");
         let archived_summary = tar_file(&bytes, "summary.json");
         let summary: serde_json::Value =
             serde_json::from_str(&archived_summary).expect("#8: the pretty document is still JSON");
-        assert!(!archived_summary.contains("p113FakePretty"), "#8: {archived_summary}");
-        assert_eq!(summary["session_summary"], "password=[REDACTED_SECRET]\" end");
+        assert!(
+            !archived_summary.contains("p113FakePretty"),
+            "#8: {archived_summary}"
+        );
+        assert_eq!(
+            summary["session_summary"],
+            "password=[REDACTED_SECRET]\" end"
+        );
     }
 
     /// P113 Astra r4 #1/#3-#6: a PEM block split over JSON strings (one record, or consecutive records), a byte array
@@ -988,7 +1156,10 @@ mod tests {
     /// the ordinary line after a torn block.
     #[test]
     fn p113_archive_scrub_holds_on_the_astra_r4_cases() {
-        let body = format!("{}{}", "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC", "p113FakeSplitBody0123456789abcdef");
+        let body = format!(
+            "{}{}",
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC", "p113FakeSplitBody0123456789abcdef"
+        );
         let (begin, end) = ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----");
         let first = format!("{}{}", "sk-proj-", "p113FakeNameOne0aB1cD2eF3gH4iJ5kL");
         let second = format!("{}{}", "sk-proj-", "p113FakeNameTwo0aB1cD2eF3gH4iJ5kL");
@@ -1006,9 +1177,18 @@ mod tests {
             ])})
             .to_string(),
         ];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
-        let summary = serde_json::to_string_pretty(&serde_json::json!({"bytes": recorded.as_bytes()})).unwrap();
-        assert!(summary.lines().count() > 3, "the array is spread over lines: {summary}");
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
+        let summary =
+            serde_json::to_string_pretty(&serde_json::json!({"bytes": recorded.as_bytes()}))
+                .unwrap();
+        assert!(
+            summary.lines().count() > 3,
+            "the array is spread over lines: {summary}"
+        );
         std::fs::write(dir.path().join("summary.json"), &summary).unwrap();
         std::fs::write(
             dir.path().join("debug.log"),
@@ -1018,20 +1198,35 @@ mod tests {
 
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         let updates = tar_file(&bytes, "updates.jsonl");
-        assert!(!updates.contains("p113FakeSplitBody"), "#1: a split PEM body left the archive: {updates}");
-        let lines: Vec<serde_json::Value> =
-            updates.lines().map(|l| serde_json::from_str(l).expect("still JSON")).collect();
+        assert!(
+            !updates.contains("p113FakeSplitBody"),
+            "#1: a split PEM body left the archive: {updates}"
+        );
+        let lines: Vec<serde_json::Value> = updates
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("still JSON"))
+            .collect();
         assert_eq!(lines.len(), 5, "{updates}");
         assert_eq!(lines[3]["o"], "[REDACTED_SECRET] done");
         let env = lines[4]["env"].as_object().unwrap();
         assert_eq!(env.len(), 2, "#5: two redacted names kept apart: {env:?}");
         assert!(!updates.contains("p113FakeName"), "{updates}");
-        let summary: serde_json::Value = serde_json::from_str(&tar_file(&bytes, "summary.json")).unwrap();
+        let summary: serde_json::Value =
+            serde_json::from_str(&tar_file(&bytes, "summary.json")).unwrap();
         let archived: Vec<u8> = serde_json::from_value(summary["bytes"].clone()).unwrap();
-        assert_eq!(archived, b"<redacted>", "#3: the spread byte array keeps the recorded key");
+        assert_eq!(
+            archived, b"<redacted>",
+            "#3: the spread byte array keeps the recorded key"
+        );
         let log = tar_file(&bytes, "debug.log");
-        assert!(!log.contains("p113FakeIndented"), "#4: the indented torn body left the archive: {log}");
-        assert!(log.ends_with("\nrequest failed: timeout\n"), "#6: the ordinary line was eaten: {log}");
+        assert!(
+            !log.contains("p113FakeIndented"),
+            "#4: the indented torn body left the archive: {log}"
+        );
+        assert!(
+            log.ends_with("\nrequest failed: timeout\n"),
+            "#6: the ordinary line was eaten: {log}"
+        );
     }
 
     /// One `session/update` record the way `updates.jsonl` writes it: the envelope strings (`method`, `sessionId`,
@@ -1072,19 +1267,46 @@ mod tests {
             p120_chunk_record(8, "p120TornE"),
             p120_chunk_record(9, "Moving on to something else."),
         ];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         let updates = tar_file(&bytes, "updates.jsonl");
-        for fragment in ["p120SplitA", "p120SplitB", "p120SplitC", "p120TornD", "p120TornE"] {
-            assert!(!updates.contains(fragment), "{fragment} of a split key left the archive: {updates}");
+        for fragment in [
+            "p120SplitA",
+            "p120SplitB",
+            "p120SplitC",
+            "p120TornD",
+            "p120TornE",
+        ] {
+            assert!(
+                !updates.contains(fragment),
+                "{fragment} of a split key left the archive: {updates}"
+            );
         }
-        let lines: Vec<serde_json::Value> =
-            updates.lines().map(|l| serde_json::from_str(l).expect("still JSON")).collect();
+        let lines: Vec<serde_json::Value> = updates
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("still JSON"))
+            .collect();
         assert_eq!(lines.len(), 9, "{updates}");
-        assert!(updates.contains("session/update"), "the envelope is kept: {updates}");
-        assert!(updates.contains("agent_message_chunk"), "the envelope is kept: {updates}");
-        assert_eq!(lines[4]["params"]["update"]["content"]["text"], "[REDACTED_SECRET]\nThat was the key.");
-        assert_eq!(lines[8]["params"]["update"]["content"]["text"], "Moving on to something else.");
+        assert!(
+            updates.contains("session/update"),
+            "the envelope is kept: {updates}"
+        );
+        assert!(
+            updates.contains("agent_message_chunk"),
+            "the envelope is kept: {updates}"
+        );
+        assert_eq!(
+            lines[4]["params"]["update"]["content"]["text"],
+            "[REDACTED_SECRET]\nThat was the key."
+        );
+        assert_eq!(
+            lines[8]["params"]["update"]["content"]["text"],
+            "Moving on to something else."
+        );
     }
 
     /// P120 (R113 r5 #3): a torn key body followed on its line by terminal colour codes, in a JSON string (alone, or
@@ -1094,11 +1316,18 @@ mod tests {
         let begin = "-----BEGIN PRIVATE KEY-----";
         let dir = tempfile::tempdir().unwrap();
         let records = [
-            p120_chunk_record(1, &format!("{begin}\nMIIEp120AnsiOne0123456789abcdefghij\u{1b}[0m")),
+            p120_chunk_record(
+                1,
+                &format!("{begin}\nMIIEp120AnsiOne0123456789abcdefghij\u{1b}[0m"),
+            ),
             p120_chunk_record(2, &format!("\u{1b}[31m{begin}\u{1b}[0m\n")),
             p120_chunk_record(3, "\u{1b}[32mMIIEp120AnsiTwo0123456789abcdefghij\u{1b}[0m"),
         ];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
         std::fs::write(
             dir.path().join("debug.log"),
             format!("{begin}\nMIIEp120AnsiThree0123456789abcdefghij\u{1b}[0m\nafter the key\n"),
@@ -1108,10 +1337,19 @@ mod tests {
         let updates = tar_file(&bytes, "updates.jsonl");
         let log = tar_file(&bytes, "debug.log");
         for fragment in ["p120AnsiOne", "p120AnsiTwo"] {
-            assert!(!updates.contains(fragment), "{fragment} left the archive: {updates}");
+            assert!(
+                !updates.contains(fragment),
+                "{fragment} left the archive: {updates}"
+            );
         }
-        assert!(!log.contains("p120AnsiThree"), "a torn body followed by colour codes left the archive: {log}");
-        assert!(log.ends_with("after the key\n"), "the ordinary line after the key is kept: {log}");
+        assert!(
+            !log.contains("p120AnsiThree"),
+            "a torn body followed by colour codes left the archive: {log}"
+        );
+        assert!(
+            log.ends_with("after the key\n"),
+            "the ordinary line after the key is kept: {log}"
+        );
     }
 
     /// P120 (R113 r5 #4): a long alphanumeric string after a BEGIN marker that is not followed by a key (the marker is
@@ -1123,17 +1361,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bare = |text: &str| serde_json::json!({"text": text}).to_string();
         let records = [
-            bare(&format!("The docs show {begin} as the first line of a key file.")),
+            bare(&format!(
+                "The docs show {begin} as the first line of a key file."
+            )),
             bare(digest),
             bare(&format!("{begin}\n")),
             bare("That marker had no key after it, sorry."),
             bare(digest),
         ];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         let updates = tar_file(&bytes, "updates.jsonl");
-        let lines: Vec<serde_json::Value> =
-            updates.lines().map(|l| serde_json::from_str(l).expect("still JSON")).collect();
+        let lines: Vec<serde_json::Value> = updates
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("still JSON"))
+            .collect();
         assert_eq!(lines.len(), 5, "{updates}");
         for n in [1, 4] {
             assert_eq!(lines[n]["text"], digest, "record {n}: {updates}");
@@ -1151,10 +1397,17 @@ mod tests {
             serde_json::json!({"a": format!("{begin}\n")}).to_string(),
             serde_json::json!({"b": "MIIEp120PropertyBodyTwoBBBBBBBB", "z": "kept here"}).to_string(),
         ];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         let updates = tar_file(&bytes, "updates.jsonl");
-        assert!(!updates.contains("p120PropertyBody"), "a body under another property left the archive: {updates}");
+        assert!(
+            !updates.contains("p120PropertyBody"),
+            "a body under another property left the archive: {updates}"
+        );
         assert!(updates.contains("\"z\":\"kept here\""), "{updates}");
     }
 
@@ -1170,10 +1423,17 @@ mod tests {
             p120_chunk_record(5, " KEY-----\n"),
             p120_chunk_record(6, "MIIEp120MarkerSplitBodyDDDDDDDD"),
         ];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         let updates = tar_file(&bytes, "updates.jsonl");
-        assert!(!updates.contains("p120MarkerSplitBody"), "a body after a split marker left the archive: {updates}");
+        assert!(
+            !updates.contains("p120MarkerSplitBody"),
+            "a body after a split marker left the archive: {updates}"
+        );
     }
 
     /// P120 (Astra r1 #4): a short ordinary word after an opening marker closes the block; the long string after it
@@ -1183,12 +1443,22 @@ mod tests {
         let digest = "d41d8cd98f00b204e9800998ecf8427ep120Digest0123456789";
         let dir = tempfile::tempdir().unwrap();
         let bare = |text: &str| serde_json::json!({"text": text}).to_string();
-        let records = [bare("-----BEGIN PRIVATE KEY-----\n"), bare("Sorry"), bare(digest)];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
+        let records = [
+            bare("-----BEGIN PRIVATE KEY-----\n"),
+            bare("Sorry"),
+            bare(digest),
+        ];
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         let updates = tar_file(&bytes, "updates.jsonl");
-        let lines: Vec<serde_json::Value> =
-            updates.lines().map(|l| serde_json::from_str(l).expect("still JSON")).collect();
+        let lines: Vec<serde_json::Value> = updates
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("still JSON"))
+            .collect();
         assert_eq!(lines[1]["text"], "Sorry", "{updates}");
         assert_eq!(lines[2]["text"], digest, "{updates}");
     }
@@ -1216,16 +1486,31 @@ mod tests {
             bare(digest),
             serde_json::json!({"a": format!("{begin}\n"), "b": "Thanks for waiting here", "c": digest}).to_string(),
         ];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         let updates = tar_file(&bytes, "updates.jsonl");
         for fragment in ["p120AlphaChunk", "p120ThreePiece"] {
-            assert!(!updates.contains(fragment), "{fragment} left the archive: {updates}");
+            assert!(
+                !updates.contains(fragment),
+                "{fragment} left the archive: {updates}"
+            );
         }
-        let lines: Vec<serde_json::Value> =
-            updates.lines().map(|l| serde_json::from_str(l).expect("still JSON")).collect();
-        assert_eq!(lines[11]["text"], digest, "a digest after coloured prose: {updates}");
-        assert_eq!(lines[12]["c"], digest, "a digest after prose under another property: {updates}");
+        let lines: Vec<serde_json::Value> = updates
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("still JSON"))
+            .collect();
+        assert_eq!(
+            lines[11]["text"], digest,
+            "a digest after coloured prose: {updates}"
+        );
+        assert_eq!(
+            lines[12]["c"], digest,
+            "a digest after prose under another property: {updates}"
+        );
     }
 
     /// P120 (Astra r3 #1, #2, #5, #6): short chunks under another property or starting with one letter, a delimiter split
@@ -1259,14 +1544,23 @@ mod tests {
             bare("MISSING"),
             bare(digest),
         ];
-        std::fs::write(dir.path().join("updates.jsonl"), format!("{}\n", records.join("\n"))).unwrap();
+        std::fs::write(
+            dir.path().join("updates.jsonl"),
+            format!("{}\n", records.join("\n")),
+        )
+        .unwrap();
         let bytes = build_session_archive(dir.path(), "sid", FLUX).unwrap();
         let updates = tar_file(&bytes, "updates.jsonl");
         for fragment in ["p120ShortOther", "p120OneLetterFirst", "p120DelimiterSplit"] {
-            assert!(!updates.contains(fragment), "{fragment} left the archive: {updates}");
+            assert!(
+                !updates.contains(fragment),
+                "{fragment} left the archive: {updates}"
+            );
         }
-        let lines: Vec<serde_json::Value> =
-            updates.lines().map(|l| serde_json::from_str(l).expect("still JSON")).collect();
+        let lines: Vec<serde_json::Value> = updates
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("still JSON"))
+            .collect();
         assert_eq!(lines[11]["text"], "Sorry\u{1b}[0m", "{updates}");
         assert_eq!(lines[12]["text"], digest, "{updates}");
         assert_eq!(lines[14]["text"], "MISSING", "{updates}");
@@ -1296,7 +1590,7 @@ mod tests {
         use flate2::Compression;
         use flate2::write::GzEncoder;
         const SENT: &str = "fuigo-p149-SYNTH-memory-archive-key1";
-        const GHP: &str = "ghp_p149SYNTHp149SYNTHp149SYNTHp149SYNTH";
+        const GHP: &str = concat!("gh", "p_p149SYNTHp149SYNTHp149SYNTHp149SYNTH");
         const PEM_BODY: &str = "MIIEp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHAA";
         fuigo_telemetry::sent_credentials::record(SENT);
         let memory = format!(
@@ -1306,7 +1600,10 @@ mod tests {
         let mut gz = Vec::new();
         {
             let mut b = tar::Builder::new(GzEncoder::new(&mut gz, Compression::default()));
-            for (name, data) in [("memory/MEMORY.md", memory.as_bytes()), ("memory/shot.png", image.as_slice())] {
+            for (name, data) in [
+                ("memory/MEMORY.md", memory.as_bytes()),
+                ("memory/shot.png", image.as_slice()),
+            ] {
                 let mut h = tar::Header::new_gnu();
                 h.set_size(data.len() as u64);
                 h.set_mode(0o600);
@@ -1329,8 +1626,17 @@ mod tests {
         for secret in [SENT, GHP, PEM_BODY] {
             assert!(!md.contains(secret), "MEMORY.md carries {secret}: {md}");
         }
-        assert!(md.contains("# Notes") && md.contains("<redacted>"), "control: {md}");
-        assert_eq!(members["memory/shot.png"], image, "an image member is kept byte for byte");
-        assert!(scrub_upload_tar_gz(b"not a gzip").is_err(), "an unreadable archive is an error, not a pass-through");
+        assert!(
+            md.contains("# Notes") && md.contains("<redacted>"),
+            "control: {md}"
+        );
+        assert_eq!(
+            members["memory/shot.png"], image,
+            "an image member is kept byte for byte"
+        );
+        assert!(
+            scrub_upload_tar_gz(b"not a gzip").is_err(),
+            "an unreadable archive is an error, not a pass-through"
+        );
     }
 }

@@ -159,15 +159,27 @@ impl std::fmt::Debug for TelemetryConfig {
         } = self;
         f.debug_struct("TelemetryConfig")
             .field("enabled", enabled)
-            .field("events_url", &events_url.as_deref().map(fuigo_auth::redact_url))
-            .field("events_api_key", &events_api_key.as_ref().map(|_| "<redacted>"))
-            .field("mixpanel_token", &mixpanel_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "events_url",
+                &events_url.as_deref().map(fuigo_auth::redact_url),
+            )
+            .field(
+                "events_api_key",
+                &events_api_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "mixpanel_token",
+                &mixpanel_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("mixpanel_enabled", mixpanel_enabled)
             .field("trace_upload", trace_upload)
             .field("otel_enabled", otel_enabled)
             .field("otel_metrics_exporter", otel_metrics_exporter)
             .field("otel_logs_exporter", otel_logs_exporter)
-            .field("otel_endpoint", &otel_endpoint.as_deref().map(fuigo_auth::redact_url))
+            .field(
+                "otel_endpoint",
+                &otel_endpoint.as_deref().map(fuigo_auth::redact_url),
+            )
             .field("otel_protocol", otel_protocol)
             .field("otel_certificate", otel_certificate)
             .field("otel_client_certificate", otel_client_certificate)
@@ -306,12 +318,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }

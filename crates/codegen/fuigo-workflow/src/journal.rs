@@ -520,7 +520,8 @@ fn tighten_owner_only(file: &std::fs::File) {
 
 fn create_new_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
     create_parent_owner_only(path)?;
-    let mut file = owner_only(std::fs::OpenOptions::new().write(true).create_new(true)).open(path)?;
+    let mut file =
+        owner_only(std::fs::OpenOptions::new().write(true).create_new(true)).open(path)?;
     file.write_all(content)?;
     file.sync_all()?;
     #[cfg(unix)]
@@ -621,7 +622,11 @@ mod tests {
     #[test]
     fn created_journal_with_no_step_reloads_as_v2_and_dispatches() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("workflows").join("wf_x").join("journal.jsonl");
+        let path = dir
+            .path()
+            .join("workflows")
+            .join("wf_x")
+            .join("journal.jsonl");
         let created = Journal::create(path.clone()).unwrap();
         assert!(created.is_empty());
         drop(created);
@@ -641,7 +646,10 @@ mod tests {
         let content = std::fs::read(&path).unwrap();
         assert!(content.starts_with(V2_HEADER));
         assert_eq!(
-            content[V2_HEADER.len()..].iter().filter(|b| **b == b'\n').count(),
+            content[V2_HEADER.len()..]
+                .iter()
+                .filter(|b| **b == b'\n')
+                .count(),
             1,
             "resume appends after the one header; it must not write a second"
         );
@@ -662,7 +670,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("workflows").join("wf_x").join("journal.jsonl");
+        let path = dir
+            .path()
+            .join("workflows")
+            .join("wf_x")
+            .join("journal.jsonl");
         let sidecar = path.with_extension("dispatch-v2.jsonl");
         drop(Journal::create(path.clone()).unwrap());
         assert_eq!(mode(&path), 0o600, "new journal");
@@ -684,7 +696,8 @@ mod tests {
     fn create_refuses_an_existing_journal_or_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal.jsonl");
-        let legacy = "{\"seq\":0,\"kind\":\"log\",\"req_hash\":\"x\",\"result\":null,\"at_ms\":1}\n";
+        let legacy =
+            "{\"seq\":0,\"kind\":\"log\",\"req_hash\":\"x\",\"result\":null,\"at_ms\":1}\n";
         std::fs::write(&path, legacy).unwrap();
         assert!(matches!(
             Journal::create(path.clone()),
@@ -724,7 +737,10 @@ mod tests {
             journal.dispatch(0, "spawn_agent", "hash"),
             Err(JournalError::LegacyBoundary)
         ));
-        assert!(!missing.exists(), "a refused boundary must not write a header");
+        assert!(
+            !missing.exists(),
+            "a refused boundary must not write a header"
+        );
 
         let empty = dir.path().join("empty.jsonl");
         std::fs::write(&empty, b"").unwrap();

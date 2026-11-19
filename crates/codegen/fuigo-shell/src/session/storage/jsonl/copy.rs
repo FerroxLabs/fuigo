@@ -23,7 +23,10 @@ use crate::session::storage::{
     filter_rewind_by, rewind_step_for_line, truncate_for_prompt_by,
 };
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "copy_tests.rs"]
 mod tests;
@@ -175,7 +178,10 @@ struct UpdateLineWriter<'a> {
 }
 
 impl<'a> UpdateLineWriter<'a> {
-    #[allow(clippy::disallowed_methods, reason = "fork staging dir sessions/<cwd>/.fork-staging-*, beside any session folder (F5-A comments at copy.rs:1187); both copy_updates_streaming callers pass a staged path; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "fork staging dir sessions/<cwd>/.fork-staging-*, beside any session folder (F5-A comments at copy.rs:1187); both copy_updates_streaming callers pass a staged path; not inside a session folder"
+    )]
     fn try_new(
         target: &Path,
         source: &'a Path,
@@ -276,7 +282,8 @@ fn copy_updates_streaming(
             })?;
         }
         Some(target_idx) => {
-            let survivors = surviving_line_indexes(BufReader::new((&mut file).take(limit)), target_idx)?;
+            let survivors =
+                surviving_line_indexes(BufReader::new((&mut file).take(limit)), target_idx)?;
             file.seek(io::SeekFrom::Start(0))?;
             let mut survivors = survivors.into_iter().peekable();
             for_each_jsonl_line(BufReader::new(file.take(limit)), |index, line| {
@@ -303,8 +310,11 @@ impl JsonlStorageAdapter {
         target_info: &Info,
         options: CopySessionOptions,
     ) -> io::Result<CopySessionResult> {
-        let target = fuigo_session_writer::SessionWriter::try_claim(target_info.id.0.to_string(), self.session_dir(target_info))
-            .map_err(|_busy| io::Error::other(crate::session::session_writer_lock::OPEN_HERE))?;
+        let target = fuigo_session_writer::SessionWriter::try_claim(
+            target_info.id.0.to_string(),
+            self.session_dir(target_info),
+        )
+        .map_err(|_busy| io::Error::other(crate::session::session_writer_lock::OPEN_HERE))?;
         self.copy_session_data_as_sync(source_info, target_info, options, &target)
     }
 
@@ -349,15 +359,22 @@ impl JsonlStorageAdapter {
         // rewrite that lands in between (and keeps those bytes as its prefix) cannot make them look current (Astra r8 #1).
         let chat_bytes_seen = snapshot.chat_bytes;
         let chat_seen = chat_bytes_seen.as_deref().map(chat_fingerprint_of);
-        let (mut chat_to_copy, mut skipped_chat_lines): (Vec<ConversationItem>, usize) = match chat_bytes_seen.as_deref() {
-            // The source is read as an unowned reader (design F5 §5.7): its `.corrupt` copy is made only when no live
-            // writer owns it (a resident parent's own actor does that).
-            Some(bytes) => {
-                let repair = super::super::Access::Reader.repair_writer(&source_info.id.0, &self.session_dir(source_info));
-                self.read_chat_history_counting_from_bytes(&source_chat_path, bytes, chat_format_version, repair.as_deref())?
-            }
-            None => (Vec::new(), 0),
-        };
+        let (mut chat_to_copy, mut skipped_chat_lines): (Vec<ConversationItem>, usize) =
+            match chat_bytes_seen.as_deref() {
+                // The source is read as an unowned reader (design F5 §5.7): its `.corrupt` copy is made only when no live
+                // writer owns it (a resident parent's own actor does that).
+                Some(bytes) => {
+                    let repair = super::super::Access::Reader
+                        .repair_writer(&source_info.id.0, &self.session_dir(source_info));
+                    self.read_chat_history_counting_from_bytes(
+                        &source_chat_path,
+                        bytes,
+                        chat_format_version,
+                        repair.as_deref(),
+                    )?
+                }
+                None => (Vec::new(), 0),
+            };
         #[cfg(test)]
         after_source_chat_read();
         // A source whose latest compaction committed without its chat_history.jsonl rewrite landing is copied with the
@@ -374,7 +391,9 @@ impl JsonlStorageAdapter {
         // history repaired the way its own load repairs it (P96): a tool result whose call was lost would make the provider
         // reject every request of the fork. The source's file is not touched (it stays the evidence), so the child needs no
         // `.pre-repair` backup of its own (P123, K14).
-        if skipped_chat_lines > 0 || super::load_repair::quarantine_of_earlier_load(&source_chat_path).is_some() {
+        if skipped_chat_lines > 0
+            || super::load_repair::quarantine_of_earlier_load(&source_chat_path).is_some()
+        {
             let report = fuigo_chat_state::compaction_utils::repair_history(&mut chat_to_copy);
             if report.changed() {
                 tracing::warn!(
@@ -396,7 +415,10 @@ impl JsonlStorageAdapter {
         let staged_cut = match options.target_prompt_index {
             Some(target_idx) if !options.fork_filter => {
                 let staging = self.fork_staging_dir(target_info)?;
-                let staged_updates = staging.dir.path().join(crate::session::storage::UPDATES_FILE);
+                let staged_updates = staging
+                    .dir
+                    .path()
+                    .join(crate::session::storage::UPDATES_FILE);
                 let copied = copy_updates_streaming(
                     &self.updates_file(source_info),
                     &staged_updates,
@@ -428,7 +450,10 @@ impl JsonlStorageAdapter {
             // A whole copy stages the transcript too, so the coherence check below runs before the target exists.
             None if !options.fork_filter => {
                 let staging = self.fork_staging_dir(target_info)?;
-                let staged_updates = staging.dir.path().join(crate::session::storage::UPDATES_FILE);
+                let staged_updates = staging
+                    .dir
+                    .path()
+                    .join(crate::session::storage::UPDATES_FILE);
                 let copied = copy_updates_streaming(
                     &self.updates_file(source_info),
                     &staged_updates,
@@ -441,8 +466,14 @@ impl JsonlStorageAdapter {
             None => None,
         };
         let compaction_crossed = staged_cut.is_some()
-            && !compaction_checkpoint_files(&self.updates_file(source_info), (snapshot.updates_len, None))?.is_empty();
-        if compaction_crossed || !chat_file_still_starts_with(&source_chat_path, chat_seen.as_ref())? {
+            && !compaction_checkpoint_files(
+                &self.updates_file(source_info),
+                (snapshot.updates_len, None),
+            )?
+            .is_empty();
+        if compaction_crossed
+            || !chat_file_still_starts_with(&source_chat_path, chat_seen.as_ref())?
+        {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 format!(
@@ -464,7 +495,10 @@ impl JsonlStorageAdapter {
             target.replace_atomic_sync(rel_in(target, &self.updates_file(target_info))?, b"")?;
             CopiedUpdates::default()
         } else if let Some((staging, staged_updates, copied)) = staged_cut {
-            target.move_in_sync(&staged_updates, rel_in(target, &self.updates_file(target_info))?)?;
+            target.move_in_sync(
+                &staged_updates,
+                rel_in(target, &self.updates_file(target_info))?,
+            )?;
             drop(staging);
             copied
         } else {
@@ -537,7 +571,10 @@ impl JsonlStorageAdapter {
             },
         );
         let summary_bytes = serde_json::to_vec_pretty(&target_summary).map_err(invalid_data)?;
-        target.replace_atomic_sync(rel_in(target, &self.summary_file(target_info))?, &summary_bytes)?;
+        target.replace_atomic_sync(
+            rel_in(target, &self.summary_file(target_info))?,
+            &summary_bytes,
+        )?;
 
         let plan_copied = copy_sidecar_file(
             target,
@@ -623,7 +660,9 @@ impl JsonlStorageAdapter {
                 0
             };
             let watermark = crate::session::helpers::session_summary::TITLE_REFRESH_WATERMARK_FILE;
-            if let Err(error) = target.replace_atomic_sync(watermark, child_idx.to_string().as_bytes()) {
+            if let Err(error) =
+                target.replace_atomic_sync(watermark, child_idx.to_string().as_bytes())
+            {
                 tracing::warn!(%error, "failed to persist the fork's title refresh watermark");
             }
         }
@@ -695,7 +734,11 @@ impl JsonlStorageAdapter {
     /// longer than [`SNAPSHOT_LOCK_WAIT`] refuses the copy as retryable.
     /// A copy that keeps no transcript (`fork_filter`, a subagent's context) takes the chat history's lock only: it neither
     /// reads nor depends on the transcript, so a stuck transcript writer must not fail it.
-    fn snapshot_source(&self, source_info: &Info, with_transcript: bool) -> io::Result<SourceSnapshot> {
+    fn snapshot_source(
+        &self,
+        source_info: &Info,
+        with_transcript: bool,
+    ) -> io::Result<SourceSnapshot> {
         let chat_path = self.chat_file(source_info);
         let updates_path = self.updates_file(source_info);
         // The source's lock sidecars open through the source's writer (design F5 §5.5, §5.6; box B6).
@@ -703,13 +746,23 @@ impl JsonlStorageAdapter {
         let mut held = Vec::new();
         if with_transcript {
             // The turn-start lock first: no prompt is between its transcript echo and its chat item while it is held.
-            let pair = crate::session::storage::snapshot_lock::lock_path(&self.session_dir(source_info));
-            let opener = crate::session::storage::snapshot_lock::Opener::Source(source_writer.as_ref());
-            if let Some(lock) = crate::session::storage::snapshot_lock::acquire_blocking_as(opener, &pair, &updates_path)? {
+            let pair =
+                crate::session::storage::snapshot_lock::lock_path(&self.session_dir(source_info));
+            let opener =
+                crate::session::storage::snapshot_lock::Opener::Source(source_writer.as_ref());
+            if let Some(lock) = crate::session::storage::snapshot_lock::acquire_blocking_as(
+                opener,
+                &pair,
+                &updates_path,
+            )? {
                 held.push(lock);
             }
         }
-        let locked: &[&std::path::PathBuf] = if with_transcript { &[&chat_path, &updates_path] } else { &[&chat_path] };
+        let locked: &[&std::path::PathBuf] = if with_transcript {
+            &[&chat_path, &updates_path]
+        } else {
+            &[&chat_path]
+        };
         for path in locked {
             if let Some(lock) = lock_append_for_snapshot(source_writer.as_ref(), path)? {
                 held.push(lock);
@@ -725,7 +778,11 @@ impl JsonlStorageAdapter {
             Err(error) => Err(error),
         };
         let chat_len = len_of(&chat_path)?;
-        let updates_len = if with_transcript { len_of(&updates_path)?.unwrap_or(0) } else { 0 };
+        let updates_len = if with_transcript {
+            len_of(&updates_path)?.unwrap_or(0)
+        } else {
+            0
+        };
         drop(held);
         drop(source_writer);
         #[cfg(test)]
@@ -747,7 +804,10 @@ impl JsonlStorageAdapter {
                 }
             }
         };
-        Ok(SourceSnapshot { chat_bytes, updates_len })
+        Ok(SourceSnapshot {
+            chat_bytes,
+            updates_len,
+        })
     }
 
     /// The writer a fork's snapshot opens its source's lock sidecars with (design F5 §5.5, §5.6): this adapter's own;
@@ -776,7 +836,8 @@ fn lock_append_for_snapshot(
     path: &Path,
 ) -> io::Result<Option<super::HeldLock>> {
     let lock_path = path.with_extension("jsonl.lock");
-    let lock = match crate::session::storage::snapshot_lock::open_source_sidecar(writer, &lock_path) {
+    let lock = match crate::session::storage::snapshot_lock::open_source_sidecar(writer, &lock_path)
+    {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
         Err(error) => {
@@ -790,7 +851,9 @@ fn lock_append_for_snapshot(
             Ok(()) => return Ok(Some(super::HeldLock::new(lock))),
             Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
                 #[cfg(test)]
-                crate::session::storage::snapshot_lock::CONTENDED.lock().insert(lock_path.clone());
+                crate::session::storage::snapshot_lock::CONTENDED
+                    .lock()
+                    .insert(lock_path.clone());
                 if std::time::Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::Interrupted,
@@ -815,7 +878,11 @@ impl JsonlStorageAdapter {
     ///
     /// The claim is the exclusive creation of the target's (still empty) `summary.json`; the copy writes the summary
     /// itself last. Any of the files a session is made of already being there means the id is taken.
-    fn claim_copy_target(&self, target_info: &Info, target: &fuigo_session_writer::SessionWriter) -> io::Result<()> {
+    fn claim_copy_target(
+        &self,
+        target_info: &Info,
+        target: &fuigo_session_writer::SessionWriter,
+    ) -> io::Result<()> {
         let taken = |path: &Path| {
             io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -875,15 +942,18 @@ impl JsonlStorageAdapter {
             Err(error) => Some(error),
         };
         // The cut holds no rewind markers (the copy drops rewound branches), so its latest marker is its live one.
-        let cut_latest = crate::session::helpers::replay::find_latest_compaction_checkpoint(cut_updates)
-            .map(|latest| latest.map(|info| info.checkpoint_id));
-        let source_latest = latest_live_compaction_id(&self.updates_file(source_info), source_updates_len);
-        let same_compaction = matches!((&cut_latest, &source_latest), (Ok(cut), Ok(source)) if cut == source);
+        let cut_latest =
+            crate::session::helpers::replay::find_latest_compaction_checkpoint(cut_updates)
+                .map(|latest| latest.map(|info| info.checkpoint_id));
+        let source_latest =
+            latest_live_compaction_id(&self.updates_file(source_info), source_updates_len);
+        let same_compaction =
+            matches!((&cut_latest, &source_latest), (Ok(cut), Ok(source)) if cut == source);
         // Truncating a history that starts from a compaction finds its cut by prompt markers, and turns written before
         // prompt markers existed (unmarked) cannot be placed on the transcript's prompt axis. So the truncation is
         // accepted only when the point it cuts at is proven to be the transcript's cut (see `marked_cut_is_exact`).
-        let boundary_provable =
-            !matches!(&cut_latest, Ok(Some(_))) || marked_cut_is_exact(source_chat, target_prompt_index);
+        let boundary_provable = !matches!(&cut_latest, Ok(Some(_)))
+            || marked_cut_is_exact(source_chat, target_prompt_index);
         let exact = same_compaction && boundary_provable;
         if exact {
             if let Some(error) = &replay_error {
@@ -906,7 +976,9 @@ impl JsonlStorageAdapter {
                     "{}the saved history has no prompt markers to cut it by",
                     replay_error
                         .as_ref()
-                        .map(|error| format!("its compaction checkpoint cannot be replayed ({error}) and "))
+                        .map(|error| format!(
+                            "its compaction checkpoint cannot be replayed ({error}) and "
+                        ))
                         .unwrap_or_default()
                 ),
                 ". Nothing was created. Fork the whole session instead.",
@@ -920,7 +992,8 @@ impl JsonlStorageAdapter {
                 SUMMARY_AFTER_CUT,
             ),
             (None, Ok(_), Ok(_)) => (
-                "it lies before the compaction the session's current history starts from".to_string(),
+                "it lies before the compaction the session's current history starts from"
+                    .to_string(),
                 SUMMARY_AFTER_CUT,
             ),
         };
@@ -940,7 +1013,10 @@ impl JsonlStorageAdapter {
 /// when it does not exist. Streams the file; only lines that mention a compaction checkpoint are parsed. Only the
 /// bytes in `range` (from, to) are read: the copy's snapshot is the first `to` bytes, and what was appended after
 /// it is the tail the coherence check looks at (P123).
-fn compaction_checkpoint_files(updates: &Path, range: (u64, Option<u64>)) -> io::Result<BTreeSet<String>> {
+fn compaction_checkpoint_files(
+    updates: &Path,
+    range: (u64, Option<u64>),
+) -> io::Result<BTreeSet<String>> {
     let mut files = BTreeSet::new();
     let mut file = match std::fs::File::open(updates) {
         Ok(file) => file,
@@ -954,7 +1030,8 @@ fn compaction_checkpoint_files(updates: &Path, range: (u64, Option<u64>)) -> io:
         if let Ok(text) = std::str::from_utf8(line)
             && text.contains("compaction_checkpoint")
             && let Ok(SessionUpdate::Fuigo(notification)) = SessionUpdateEnvelope::from_str(text)
-            && let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) = notification.update
+            && let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) =
+                notification.update
         {
             files.insert(info.checkpoint_file);
         }
@@ -975,7 +1052,10 @@ fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
 /// Length and SHA-256 of `bytes`.
 fn chat_fingerprint_of(bytes: &[u8]) -> (u64, String) {
     use sha2::Digest;
-    (bytes.len() as u64, format!("{:x}", sha2::Sha256::digest(bytes)))
+    (
+        bytes.len() as u64,
+        format!("{:x}", sha2::Sha256::digest(bytes)),
+    )
 }
 
 /// Length and SHA-256 of `path`, or `None` when it does not exist.
@@ -995,7 +1075,8 @@ fn chat_file_still_starts_with(path: &Path, seen: Option<&(u64, String)>) -> io:
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    Ok(bytes.len() as u64 >= *len && format!("{:x}", sha2::Sha256::digest(&bytes[..*len as usize])) == *sha)
+    Ok(bytes.len() as u64 >= *len
+        && format!("{:x}", sha2::Sha256::digest(&bytes[..*len as usize])) == *sha)
 }
 
 /// Whether truncating `chat` (a history that starts from a compaction) for a fork at `target_prompt_index` keeps
@@ -1060,7 +1141,10 @@ fn latest_live_compaction_id(updates: &Path, limit: u64) -> io::Result<Option<St
                 },
                 SessionUpdate::Acp(_) => None,
             });
-        records.push(LineRecord { step, checkpoint_id });
+        records.push(LineRecord {
+            step,
+            checkpoint_id,
+        });
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(filter_rewind_by(records, |record| record.step)
@@ -1099,7 +1183,10 @@ struct ForkStaging {
 struct CreatedCwdDir(Option<PathBuf>);
 
 impl Drop for CreatedCwdDir {
-    #[allow(clippy::disallowed_methods, reason = "an empty cwd directory this fork made, not a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "an empty cwd directory this fork made, not a session folder"
+    )]
     fn drop(&mut self) {
         if let Some(dir) = self.0.take() {
             let _ = std::fs::remove_dir(&dir); // F5-A: an empty cwd directory this fork made, not a session folder
@@ -1110,7 +1197,10 @@ impl Drop for CreatedCwdDir {
 /// Create `dir` and say whether THIS call made `dir`: parents first (owner-only ones for the sessions tree, plain ones
 /// for a caller-owned explicit directory, whose ancestors keep their permissions), then one exclusive `create_dir`, so
 /// a directory another process makes first is never claimed.
-#[allow(clippy::disallowed_methods, reason = "the cwd directory `sessions/<cwd>/` holds session folders; it is not one.; claim_cwd_dir creates the cwd dir sessions/<cwd>/ or an explicit dir's ancestors; parents of session folders; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the cwd directory `sessions/<cwd>/` holds session folders; it is not one.; claim_cwd_dir creates the cwd dir sessions/<cwd>/ or an explicit dir's ancestors; parents of session folders; not inside a session folder"
+)]
 fn claim_cwd_dir(dir: &Path, owner_only_parents: bool) -> io::Result<bool> {
     if let Some(parent) = dir.parent() {
         if owner_only_parents {
@@ -1142,13 +1232,17 @@ impl JsonlStorageAdapter {
                 let cwd_dir = crate::util::fuigo_home::sessions_cwd_dir_in(root, &target_info.cwd);
                 let claimed = claim_cwd_dir(&cwd_dir, true)?;
                 let created = CreatedCwdDir(claimed.then_some(cwd_dir));
-                let parent = crate::util::fuigo_home::ensure_sessions_cwd_dir_in(root, &target_info.cwd)?;
+                let parent =
+                    crate::util::fuigo_home::ensure_sessions_cwd_dir_in(root, &target_info.cwd)?;
                 (parent, created)
             }
             super::SessionDirMode::Explicit(dir) => {
                 let parent = dir.parent().map_or_else(|| dir.clone(), Path::to_path_buf);
                 let claimed = claim_cwd_dir(&parent, false)?;
-                (parent.clone(), CreatedCwdDir(claimed.then(|| parent.clone())))
+                (
+                    parent.clone(),
+                    CreatedCwdDir(claimed.then(|| parent.clone())),
+                )
             }
         };
         remove_stale_fork_staging(&parent);
@@ -1160,7 +1254,10 @@ impl JsonlStorageAdapter {
             // `created` drops here, removing a directory this call made.
             Err(error) => Err(io::Error::new(
                 error.kind(),
-                format!("cannot create the fork's staging directory in {}: {error}", parent.display()),
+                format!(
+                    "cannot create the fork's staging directory in {}: {error}",
+                    parent.display()
+                ),
             )),
         }
     }
@@ -1170,24 +1267,37 @@ impl JsonlStorageAdapter {
 /// when it is old AND its lock file opens AND its lock is free: a live copy holds its lock for as long as it runs,
 /// however long that is (a suspended process included). One without a lock file is kept (its copy may not have made
 /// it yet).
-#[allow(clippy::disallowed_methods, reason = "a dead copy's staging directory in `sessions/<cwd>/`, not a session folder.")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a dead copy's staging directory in `sessions/<cwd>/`, not a session folder."
+)]
 fn remove_stale_fork_staging(parent: &Path) {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
     for entry in entries.flatten() {
-        let old = entry.file_name().to_string_lossy().starts_with(FORK_STAGING_PREFIX)
+        let old = entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(FORK_STAGING_PREFIX)
             && entry.file_type().is_ok_and(|kind| kind.is_dir())
             && entry
                 .metadata()
                 .and_then(|meta| meta.modified())
-                .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > STALE_FORK_STAGING_AGE));
+                .is_ok_and(|modified| {
+                    modified
+                        .elapsed()
+                        .is_ok_and(|age| age > STALE_FORK_STAGING_AGE)
+                });
         if !old {
             continue;
         }
         // Only positive evidence that its copy is gone counts: the lock file opens (read-only, so its permissions do not
         // matter) and its lock is free. A directory whose lock cannot be opened or taken is kept (P114 r2 #4).
-        let Ok(lock) = std::fs::OpenOptions::new().read(true).open(entry.path().join(FORK_STAGING_LOCK)) else {
+        let Ok(lock) = std::fs::OpenOptions::new()
+            .read(true)
+            .open(entry.path().join(FORK_STAGING_LOCK))
+        else {
             continue;
         };
         if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
@@ -1203,7 +1313,10 @@ fn remove_stale_fork_staging(parent: &Path) {
 
 /// A private directory in `parent` for a staged cut, locked for as long as the returned guard lives: the transcript is
 /// session content, so other local users must not be able to read it while it is staged (owner-only on Unix).
-#[allow(clippy::disallowed_methods, reason = "fork staging in `sessions/<cwd>/`, beside (never inside) any session folder: no session's writer owns it, and the target folder must not exist before the coherence check (P111). Moved in by `move_in` (§5.3).")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "fork staging in `sessions/<cwd>/`, beside (never inside) any session folder: no session's writer owns it, and the target folder must not exist before the coherence check (P111). Moved in by `move_in` (§5.3)."
+)]
 fn private_staging_dir(parent: &Path) -> io::Result<ForkStaging> {
     let mut builder = tempfile::Builder::new();
     builder.prefix(FORK_STAGING_PREFIX);
@@ -1221,19 +1334,33 @@ fn private_staging_dir(parent: &Path) -> io::Result<ForkStaging> {
     let initializing = dir.path().join(FORK_STAGING_LOCK_INIT);
     // F5-A: the staging directory's own lock, outside any session folder.
     let lock = fuigo_config::owner_only_file_options(
-        std::fs::OpenOptions::new().read(true).write(true).create_new(true),
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true),
     )
     .open(&initializing)?;
     fs2::FileExt::lock_exclusive(&lock)?;
     let lock = super::HeldLock::new(lock);
     std::fs::rename(&initializing, dir.path().join(FORK_STAGING_LOCK))?; // F5-A: staging lock, outside any session folder
-    Ok(ForkStaging { _lock: lock, dir, _created_cwd_dir: CreatedCwdDir(None) })
+    Ok(ForkStaging {
+        _lock: lock,
+        dir,
+        _created_cwd_dir: CreatedCwdDir(None),
+    })
 }
 
 /// `path` relative to `target`'s folder: every write into the fork target names its file this way (design F5 §5.3).
-fn rel_in<'p>(target: &fuigo_session_writer::SessionWriter, path: &'p Path) -> io::Result<&'p Path> {
+fn rel_in<'p>(
+    target: &fuigo_session_writer::SessionWriter,
+    path: &'p Path,
+) -> io::Result<&'p Path> {
     path.strip_prefix(target.dir()).map_err(|_| {
-        io::Error::other(format!("{} is outside the fork target {}", path.display(), target.dir().display()))
+        io::Error::other(format!(
+            "{} is outside the fork target {}",
+            path.display(),
+            target.dir().display()
+        ))
     })
 }
 
@@ -1342,7 +1469,10 @@ fn fork_summary(
 
 /// Remove `announced_failed_servers` from a copied `announcement_state.json`, preserving every other field (including ones this build doesn't know).
 /// A file that doesn't parse is left as copied: the next persist rewrites it.
-fn clear_announced_failure_episodes(target: &fuigo_session_writer::SessionWriter, path: &Path) -> io::Result<()> {
+fn clear_announced_failure_episodes(
+    target: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+) -> io::Result<()> {
     let bytes = std::fs::read(path)?;
     let Ok(mut state) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(());
@@ -1359,7 +1489,11 @@ fn clear_announced_failure_episodes(target: &fuigo_session_writer::SessionWriter
     )
 }
 
-fn clip_copied_signals_turns(target: &fuigo_session_writer::SessionWriter, path: &Path, max_turn: u32) -> io::Result<()> {
+fn clip_copied_signals_turns(
+    target: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+    max_turn: u32,
+) -> io::Result<()> {
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1538,7 +1672,10 @@ fn copy_referenced_checkpoints(
         }
         // Read through the checkpoint reader, which never follows a symlink even one swapped in after the check
         // above (P146); a file it refuses is skipped like a missing one.
-        let bytes = match crate::extensions::notification::read_contained_checkpoint(source_session_dir, checkpoint_file) {
+        let bytes = match crate::extensions::notification::read_contained_checkpoint(
+            source_session_dir,
+            checkpoint_file,
+        ) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 tracing::warn!(path = %src.display(), session_id = %source_id, %error,

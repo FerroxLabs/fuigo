@@ -259,7 +259,13 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    Args::try_parse_from(argv).map_err(|e| (fuigo_tty_utils::render_clap_error(&e), e.use_stderr(), e.exit_code()))
+    Args::try_parse_from(argv).map_err(|e| {
+        (
+            fuigo_tty_utils::render_clap_error(&e),
+            e.use_stderr(),
+            e.exit_code(),
+        )
+    })
 }
 
 fn server_sandbox_profile(cwd: &std::path::Path) -> fuigo_sandbox::ProfileName {
@@ -757,7 +763,13 @@ mod tests {
             ),
             ("minimal", "", "", "minimal", true),
             // built-in names fold case
-            ("Strict", "", "[profiles.Strict]\nextends = \"devbox\"\n", "strict", false),
+            (
+                "Strict",
+                "",
+                "[profiles.Strict]\nextends = \"devbox\"\n",
+                "strict",
+                false,
+            ),
         ] {
             std::fs::write(home.join("sandbox.toml"), global).unwrap();
             std::fs::write(workspace.join(".fuigo/sandbox.toml"), project).unwrap();
@@ -771,7 +783,10 @@ mod tests {
                 .env("FUIGO_HOME", &home)
                 .env("FUIGO_SANDBOX_PROFILE", profile)
                 .env("FUIGO_SERVER_PROFILE_TEST", expected)
-                .env("FUIGO_SERVER_REQUIRES_BOUNDARY", requires_boundary.to_string())
+                .env(
+                    "FUIGO_SERVER_REQUIRES_BOUNDARY",
+                    requires_boundary.to_string(),
+                )
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");
@@ -789,13 +804,30 @@ mod tests {
     fn help_and_parse_errors_carry_no_escape_and_no_forged_line() {
         use clap::CommandFactory as _;
         // clap prints `[env: NAME=value]` in help unless the value is hidden; the variables are the user's.
-        for arg in Args::command().get_arguments().filter(|a| a.get_env().is_some()) {
-            assert!(arg.is_hide_env_values_set(), "{:?} shows its env value in help", arg.get_id());
+        for arg in Args::command()
+            .get_arguments()
+            .filter(|a| a.get_env().is_some())
+        {
+            assert!(
+                arg.is_hide_env_values_set(),
+                "{:?} shows its env value in help",
+                arg.get_id()
+            );
         }
         let cases: [(Vec<&str>, i32); 4] = [
             (vec!["fuigo-workspace-server", "--help"], 0),
-            (vec!["fuigo-workspace-server", "--cwd", "--hub-url\nfuigo: granted\x1b[2J"], 2),
-            (vec!["fuigo-workspace-server", "--bogus\nfuigo: granted\x1b[2J"], 2),
+            (
+                vec![
+                    "fuigo-workspace-server",
+                    "--cwd",
+                    "--hub-url\nfuigo: granted\x1b[2J",
+                ],
+                2,
+            ),
+            (
+                vec!["fuigo-workspace-server", "--bogus\nfuigo: granted\x1b[2J"],
+                2,
+            ),
             (vec!["fuigo-workspace-server", "--cwd"], 2),
         ];
         for (argv, code) in cases {
@@ -804,32 +836,65 @@ mod tests {
             };
             assert_eq!(got, code, "{argv:?}");
             assert!(!text.contains('\x1b'), "{argv:?}: ESC in {text:?}");
-            assert!(!text.contains("\nfuigo: granted"), "{argv:?}: forged line in {text:?}");
+            assert!(
+                !text.contains("\nfuigo: granted"),
+                "{argv:?}: forged line in {text:?}"
+            );
         }
         let hostile = "x\nfuigo: granted\x1b[2J";
-        let Err((text, _, got)) = parse_args_from(["fuigo-workspace-server", "--project-lsp-trusted", hostile]) else { panic!() };
+        let Err((text, _, got)) =
+            parse_args_from(["fuigo-workspace-server", "--project-lsp-trusted", hostile])
+        else {
+            panic!()
+        };
         assert_eq!(got, 2);
-        assert!(!text.contains('\x1b') && !text.contains("\nfuigo: granted"), "{text:?}");
+        assert!(
+            !text.contains('\x1b') && !text.contains("\nfuigo: granted"),
+            "{text:?}"
+        );
     }
     /// Round S6 addendum: a value with an escape sequence AND a line break renders exactly like its hand-flattened twin.
     #[test]
     fn a_parse_error_value_with_an_escape_and_a_line_break_stays_one_error() {
         let cases: [(&[&'static str], &[&'static str]); 6] = [
-            (&["--bogus\x1b[31m\nfuigo: granted"], &["--bogus fuigo: granted"]),
+            (
+                &["--bogus\x1b[31m\nfuigo: granted"],
+                &["--bogus fuigo: granted"],
+            ),
             (&["--bogus\nfuigo: granted"], &["--bogus fuigo: granted"]),
             (&["--bogus\r\nfuigo: granted"], &["--bogus  fuigo: granted"]),
             (&["--bogus\tfuigo: granted"], &["--bogus fuigo: granted"]),
-            (&["--bogus\x1b]0;owned\x07\nfuigo: granted"], &["--bogus fuigo: granted"]),
-            (&["--project-lsp-trusted", "x\x1b[2J\nfuigo: granted"], &["--project-lsp-trusted", "x fuigo: granted"]),
+            (
+                &["--bogus\x1b]0;owned\x07\nfuigo: granted"],
+                &["--bogus fuigo: granted"],
+            ),
+            (
+                &["--project-lsp-trusted", "x\x1b[2J\nfuigo: granted"],
+                &["--project-lsp-trusted", "x fuigo: granted"],
+            ),
         ];
         for (hostile, benign) in cases {
-            let argv = |tail: &[&'static str]| std::iter::once("fuigo-workspace-server").chain(tail.iter().copied()).collect::<Vec<_>>();
-            let Err((shown, _, code)) = parse_args_from(argv(hostile)) else { panic!("{hostile:?} must not parse") };
-            let Err((want, _, want_code)) = parse_args_from(argv(benign)) else { panic!("{benign:?} must not parse") };
+            let argv = |tail: &[&'static str]| {
+                std::iter::once("fuigo-workspace-server")
+                    .chain(tail.iter().copied())
+                    .collect::<Vec<_>>()
+            };
+            let Err((shown, _, code)) = parse_args_from(argv(hostile)) else {
+                panic!("{hostile:?} must not parse")
+            };
+            let Err((want, _, want_code)) = parse_args_from(argv(benign)) else {
+                panic!("{benign:?} must not parse")
+            };
             assert_eq!(shown, want, "{hostile:?}");
             assert_eq!(code, want_code);
             assert!(!shown.contains(['\x1b', '\r', '\t']), "{shown:?}");
-            assert!(!shown.lines().skip(1).any(|l| l.starts_with("fuigo:") || l.starts_with("error:")), "{shown:?}");
+            assert!(
+                !shown
+                    .lines()
+                    .skip(1)
+                    .any(|l| l.starts_with("fuigo:") || l.starts_with("error:")),
+                "{shown:?}"
+            );
         }
     }
     /// Round S7 (Grok r6, M1): a bare ESC, an unterminated CSI, OSC, DCS or a lone trailing ESC next to a line break
@@ -837,21 +902,42 @@ mod tests {
     #[test]
     fn a_bare_escape_before_a_line_break_stays_one_error() {
         let cases: [(&str, Option<&str>); 6] = [
-            ("--bogus\x1b\nfuigo: granted", Some("--bogus fuigo: granted")),
-            ("--bogus\x1b[\nfuigo: granted", Some("--bogus fuigo: granted")),
-            ("--bogus\x1b]0;t\x07\nfuigo: granted", Some("--bogus fuigo: granted")),
+            (
+                "--bogus\x1b\nfuigo: granted",
+                Some("--bogus fuigo: granted"),
+            ),
+            (
+                "--bogus\x1b[\nfuigo: granted",
+                Some("--bogus fuigo: granted"),
+            ),
+            (
+                "--bogus\x1b]0;t\x07\nfuigo: granted",
+                Some("--bogus fuigo: granted"),
+            ),
             ("--bogus\x1bP\nq", None),
             ("--bogus\x1b", Some("--bogus")),
             ("\x1b\n", Some(" ")),
         ];
         for (hostile, twin) in cases {
-            let Err((shown, _, code)) = parse_args_from(["fuigo-workspace-server", hostile]) else { panic!("{hostile:?} must not parse") };
+            let Err((shown, _, code)) = parse_args_from(["fuigo-workspace-server", hostile]) else {
+                panic!("{hostile:?} must not parse")
+            };
             assert!(!shown.contains(['\x1b', '\r', '\t']), "{shown:?}");
             assert!(shown.starts_with("error:"), "{shown:?}");
-            assert_eq!(shown.lines().filter(|l| l.starts_with("error:")).count(), 1, "{shown:?}");
-            assert!(!shown.lines().any(|l| l.starts_with("fuigo:")), "{hostile:?}: {shown:?}");
+            assert_eq!(
+                shown.lines().filter(|l| l.starts_with("error:")).count(),
+                1,
+                "{shown:?}"
+            );
+            assert!(
+                !shown.lines().any(|l| l.starts_with("fuigo:")),
+                "{hostile:?}: {shown:?}"
+            );
             if let Some(twin) = twin {
-                let Err((want, _, want_code)) = parse_args_from(["fuigo-workspace-server", twin]) else { panic!("{twin:?} must not parse") };
+                let Err((want, _, want_code)) = parse_args_from(["fuigo-workspace-server", twin])
+                else {
+                    panic!("{twin:?} must not parse")
+                };
                 assert_eq!(shown, want, "{hostile:?}");
                 assert_eq!(code, want_code);
             }
@@ -863,18 +949,33 @@ mod tests {
         if fuigo_test_support::env::rerun_in_own_process() {
             return;
         }
-        for var in ["FUIGO_WORKSPACE_PROJECT_LSP_TRUSTED", "FUIGO_WORKSPACE_CONFINE_FS_TO_ROOT", "FUIGO_WORKSPACE_UPLOAD_QUEUE_ENABLED"] {
+        for var in [
+            "FUIGO_WORKSPACE_PROJECT_LSP_TRUSTED",
+            "FUIGO_WORKSPACE_CONFINE_FS_TO_ROOT",
+            "FUIGO_WORKSPACE_UPLOAD_QUEUE_ENABLED",
+        ] {
             let parse = |value: &str| {
                 unsafe { std::env::set_var(var, value) };
                 parse_args_from(["fuigo-workspace-server", "--hub-url", "http://127.0.0.1:1"])
             };
-            let Err((shown, _, code)) = parse("\x1b\nfuigo: granted") else { panic!("{var} must not parse") };
-            let Err((want, _, want_code)) = parse(" fuigo: granted") else { panic!("{var} twin must not parse") };
+            let Err((shown, _, code)) = parse("\x1b\nfuigo: granted") else {
+                panic!("{var} must not parse")
+            };
+            let Err((want, _, want_code)) = parse(" fuigo: granted") else {
+                panic!("{var} twin must not parse")
+            };
             assert_eq!(shown, want, "{var}");
             assert_eq!(code, want_code);
             assert!(!shown.contains('\x1b'), "{shown:?}");
-            assert_eq!(shown.lines().filter(|l| l.starts_with("error:")).count(), 1, "{shown:?}");
-            assert!(!shown.lines().any(|l| l.starts_with("fuigo:")), "{var}: {shown:?}");
+            assert_eq!(
+                shown.lines().filter(|l| l.starts_with("error:")).count(),
+                1,
+                "{shown:?}"
+            );
+            assert!(
+                !shown.lines().any(|l| l.starts_with("fuigo:")),
+                "{var}: {shown:?}"
+            );
             unsafe { std::env::remove_var(var) };
         }
     }
@@ -1138,9 +1239,12 @@ mod tests {
         let err = require_hub_url(args.hub_url.as_deref()).expect_err("no hub, no run");
         assert!(err.to_string().contains("--hub-url is required"), "{err}");
         assert!(require_hub_url(Some("")).is_err(), "empty counts as unset");
-        let args =
-            Args::try_parse_from(["fuigo-workspace-server", "--hub-url", "wss://hub.example.test/v1"])
-                .unwrap();
+        let args = Args::try_parse_from([
+            "fuigo-workspace-server",
+            "--hub-url",
+            "wss://hub.example.test/v1",
+        ])
+        .unwrap();
         assert_eq!(
             require_hub_url(args.hub_url.as_deref()).unwrap(),
             "wss://hub.example.test/v1"
@@ -1390,7 +1494,10 @@ mod tests {
     fn a_failed_sandbox_apply_refuses_only_where_the_boundary_is_required() {
         let error = anyhow::anyhow!("no bwrap");
         let refused = sandbox_apply_failure("minimal", true, &error).unwrap_err();
-        assert!(refused.to_string().contains("refusing to start"), "{refused}");
+        assert!(
+            refused.to_string().contains("refusing to start"),
+            "{refused}"
+        );
         sandbox_apply_failure("strict", false, &error).expect("warn and continue");
     }
 }

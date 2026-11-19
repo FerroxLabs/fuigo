@@ -201,12 +201,11 @@ pub fn merge_hooks(
             added,
         });
     }
-    let contents = serde_json::to_string_pretty(&root).map_err(|source| {
-        MigrationError::JsonSerialize {
+    let contents =
+        serde_json::to_string_pretty(&root).map_err(|source| MigrationError::JsonSerialize {
             path: target.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
     Ok(HooksMerge {
         contents: Some(contents),
         added,

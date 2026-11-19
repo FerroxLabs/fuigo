@@ -40,13 +40,23 @@ fn concurrent_writers_lose_no_401_count() {
     // A writer that waited the full 200 ms and went on unlocked can lose an update through no fault of the lock:
     // that is a stalled test machine, not a lost update under the lock, so say so before the counts are judged.
     let unlocked = test_clock::unlocked_updates(&path);
-    assert_eq!(unlocked, 0, "MISSED LOCK: {unlocked} update(s) ran without the lock (it could not be opened or never freed); a lost count would be that, not the lock failing");
+    assert_eq!(
+        unlocked, 0,
+        "MISSED LOCK: {unlocked} update(s) ran without the lock (it could not be opened or never freed); a lost count would be that, not the lock failing"
+    );
     let store = RouteMemory::at(path).load();
     assert_eq!(store.models_401_url.len(), 1);
-    assert_eq!(store.models_401_url[0].n, 200, "every one of the 200 updates is counted");
+    assert_eq!(
+        store.models_401_url[0].n, 200,
+        "every one of the 200 updates is counted"
+    );
     let mut per: Vec<u32> = store.models_401.iter().map(|e| e.n).collect();
     per.sort();
-    assert_eq!(per, vec![100, 100], "and each credential's own count is complete");
+    assert_eq!(
+        per,
+        vec![100, 100],
+        "and each credential's own count is complete"
+    );
 }
 
 /// A home that cannot be written (a path under a regular FILE; works as root too): inside one process the URL cap and
@@ -61,13 +71,30 @@ fn an_unwritable_home_still_holds_the_cap_inside_one_process() {
     for k in 0..3 {
         mem.note_models_401(URL, &[&format!("fuigo-test-not-a-key-{k}")], T0 + k);
     }
-    assert!(!mem.path().exists(), "precondition: nothing could be written");
+    assert!(
+        !mem.path().exists(),
+        "precondition: nothing could be written"
+    );
     let w = mem.models_wait(URL, &["fuigo-test-not-a-key-new"], T0 + 10);
-    assert!(w.is_some(), "three rejected credentials: the URL wait holds for a new one in this process");
-    assert!(mem.models_wait(URL, &["fuigo-test-not-a-key-0"], T0 + 10).is_some(), "own wait holds");
+    assert!(
+        w.is_some(),
+        "three rejected credentials: the URL wait holds for a new one in this process"
+    );
+    assert!(
+        mem.models_wait(URL, &["fuigo-test-not-a-key-0"], T0 + 10)
+            .is_some(),
+        "own wait holds"
+    );
     mem.clear_all_models_401(T0 + 11);
-    assert!(mem.models_wait(URL, &["fuigo-test-not-a-key-new"], T0 + 11).is_none(), "a sign-in clears it");
-    assert!(mem.models_wait(URL, &["fuigo-test-not-a-key-0"], T0 + 11).is_none());
+    assert!(
+        mem.models_wait(URL, &["fuigo-test-not-a-key-new"], T0 + 11)
+            .is_none(),
+        "a sign-in clears it"
+    );
+    assert!(
+        mem.models_wait(URL, &["fuigo-test-not-a-key-0"], T0 + 11)
+            .is_none()
+    );
 }
 
 /// A lock file that cannot be opened never blocks and never crashes: the update proceeds without it.
@@ -79,7 +106,11 @@ fn a_lock_that_cannot_be_opened_does_not_block_the_update() {
     std::fs::create_dir(dir.path().join(LOCK_NAME)).unwrap(); // a directory where the lock file should be
     let mem = RouteMemory::at(path);
     mem.note_models_401(URL, &["fuigo-test-not-a-key-a"], T0);
-    assert!(mem.models_wait(URL, &["fuigo-test-not-a-key-a"], T0 + 1).is_some(), "written without the lock");
+    assert!(
+        mem.models_wait(URL, &["fuigo-test-not-a-key-a"], T0 + 1)
+            .is_some(),
+        "written without the lock"
+    );
 }
 
 /// A lock held by someone else for longer than the wait: proceed without it, at most ~0.2 s late.
@@ -94,8 +125,14 @@ fn a_lock_held_too_long_is_given_up_on() {
     let mem = RouteMemory::at(path);
     let start = std::time::Instant::now();
     mem.note_models_401(URL, &["fuigo-test-not-a-key-a"], T0);
-    assert!(start.elapsed() < std::time::Duration::from_secs(2), "bounded wait");
-    assert!(mem.models_wait(URL, &["fuigo-test-not-a-key-a"], T0 + 1).is_some());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "bounded wait"
+    );
+    assert!(
+        mem.models_wait(URL, &["fuigo-test-not-a-key-a"], T0 + 1)
+            .is_some()
+    );
     holder.unlock().unwrap();
 }
 
@@ -112,11 +149,25 @@ fn a_row_another_process_cleared_is_dropped_after_a_good_read() {
         b.note_models_401(URL, &[&format!("fuigo-test-not-a-key-{k}")], T0 + k);
     }
     let seen = a.stamp();
-    let held: Vec<Unsaved> = b.load().models_401_url.into_iter().map(|e| Unsaved { path: path.clone(), url_level: true, e, seen }).collect();
+    let held: Vec<Unsaved> = b
+        .load()
+        .models_401_url
+        .into_iter()
+        .map(|e| Unsaved {
+            path: path.clone(),
+            url_level: true,
+            e,
+            seen,
+        })
+        .collect();
     unsaved().extend(held);
     // Another process rewrites the file without the row (a longer file, so the stamp differs for certain).
     std::fs::write(&path, br#"{"models_401":[],"models_401_url":[]}"#).unwrap();
-    assert!(a.models_wait(URL, &["fuigo-test-not-a-key-new"], T0 + 10).is_none(), "cleared elsewhere: not waiting");
+    assert!(
+        a.models_wait(URL, &["fuigo-test-not-a-key-new"], T0 + 10)
+            .is_none(),
+        "cleared elsewhere: not waiting"
+    );
 }
 
 /// The opposite: our write failed, nobody else wrote, the file is readable but unchanged since: the wait stays.
@@ -128,7 +179,16 @@ fn a_row_nobody_cleared_stays_when_the_file_is_unchanged() {
     std::fs::write(&path, br#"{}"#).unwrap();
     let a = RouteMemory::at(path.clone());
     let uh = hash(&["models-401-url-v1", &normalise(URL).unwrap()]);
-    unsaved().push(Unsaved { path: path.clone(), url_level: true, e: Rejected { h: uh, n: 3, t: T0 }, seen: a.stamp() });
-    assert!(a.models_wait(URL, &["fuigo-test-not-a-key-new"], T0 + 10).is_some(), "still held");
+    unsaved().push(Unsaved {
+        path: path.clone(),
+        url_level: true,
+        e: Rejected { h: uh, n: 3, t: T0 },
+        seen: a.stamp(),
+    });
+    assert!(
+        a.models_wait(URL, &["fuigo-test-not-a-key-new"], T0 + 10)
+            .is_some(),
+        "still held"
+    );
     unsaved().retain(|u| u.path != path);
 }

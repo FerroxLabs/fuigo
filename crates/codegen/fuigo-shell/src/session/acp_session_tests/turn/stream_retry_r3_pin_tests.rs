@@ -38,7 +38,8 @@ async fn blocked_loop() -> BlockedLoop {
     let (gateway_tx, wire) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     super::support::drain_persistence(persistence_rx);
-    let (mut actor, events) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let (mut actor, events) =
+        create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
     // Command hooks run with the workspace root as their working directory
     actor.hook_resolved_workspace_root = std::env::temp_dir().to_string_lossy().into_owned();
     BlockedLoop {
@@ -49,7 +50,9 @@ async fn blocked_loop() -> BlockedLoop {
 }
 
 /// The `_fuigo` rail as the client received it so far: (kind, `eventId` counter).
-fn fuigo_rail(wire: &mut UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> Vec<(&'static str, u64)> {
+fn fuigo_rail(
+    wire: &mut UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>,
+) -> Vec<(&'static str, u64)> {
     let mut rail = Vec::new();
     while let Ok(msg) = wire.try_recv() {
         let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
@@ -75,7 +78,12 @@ fn fuigo_rail(wire: &mut UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>) -> 
             .and_then(|v| v.as_str())
             .and_then(|id| id.rsplit('-').next())
             .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or_else(|| panic!("a `_fuigo` notification carries a numeric eventId: {:?}", notification.meta));
+            .unwrap_or_else(|| {
+                panic!(
+                    "a `_fuigo` notification carries a numeric eventId: {:?}",
+                    notification.meta
+                )
+            });
         rail.push((kind, seq));
     }
     rail
@@ -181,8 +189,8 @@ fn p188_failed_retry_state_and_its_agent_error_hook_run_on_the_caller() {
             let dir = tempfile::tempdir().expect("tempdir");
             let hook_out = dir.path().join("agent_error.json");
             let command = format!("cat > '{}'", hook_out.display());
-            let registry =
-                fuigo_hooks::discovery::registry_from_specs_deduped(vec![fuigo_hooks::config::HookSpec {
+            let registry = fuigo_hooks::discovery::registry_from_specs_deduped(vec![
+                fuigo_hooks::config::HookSpec {
                     name: "p188-agent-error-probe".to_string(),
                     event: fuigo_hooks::event::HookEventName::Notification,
                     handler_type: fuigo_hooks::config::HandlerType::Command,
@@ -200,7 +208,8 @@ fn p188_failed_retry_state_and_its_agent_error_hook_run_on_the_caller() {
                     source_dir: dir.path().to_path_buf(),
                     extra_env: std::collections::HashMap::new(),
                     layer: fuigo_hooks::config::HookProvenance::Requirements,
-                }]);
+                },
+            ]);
             let mut blocked = blocked_loop().await;
             *blocked.actor.hook_registry.borrow_mut() = Some(Arc::new(registry));
 
@@ -227,9 +236,13 @@ fn p188_failed_retry_state_and_its_agent_error_hook_run_on_the_caller() {
                     queued_ordered += 1;
                 }
             }
-            assert_eq!(queued_ordered, 0, "a terminal state is never queued as an ordered `_fuigo` update");
-            let payload = std::fs::read_to_string(&hook_out)
-                .expect("the agent_error notification hook ran on the caller, before the send returned");
+            assert_eq!(
+                queued_ordered, 0,
+                "a terminal state is never queued as an ordered `_fuigo` update"
+            );
+            let payload = std::fs::read_to_string(&hook_out).expect(
+                "the agent_error notification hook ran on the caller, before the send returned",
+            );
             assert!(payload.contains("agent_error"), "{payload}");
             assert!(payload.contains("p188 terminal failure"), "{payload}");
         })
@@ -249,13 +262,21 @@ fn p188_goal_summary_stream_start_is_claimed_not_raw_wall_clock() {
             assert_eq!(actor.unaccepted_output.claim_stream_start(ahead), ahead);
 
             let summary = actor.claim_out_of_band_stream_start();
-            assert_eq!(summary, ahead + 1, "the summary's id is past the attempt's, never the raw clock");
+            assert_eq!(
+                summary,
+                ahead + 1,
+                "the summary's id is past the attempt's, never the raw clock"
+            );
             let meta = actor
                 .chat_state_handle
                 .get_notification_meta()
                 .await
                 .expect("notification meta");
-            assert_eq!(meta.stream_start_ms, Some(summary), "the summary's chunks carry the claimed id");
+            assert_eq!(
+                meta.stream_start_ms,
+                Some(summary),
+                "the summary's chunks carry the claimed id"
+            );
             assert_eq!(
                 actor.unaccepted_output.claim_stream_start(ahead + 1),
                 ahead + 2,

@@ -620,7 +620,8 @@ async fn handle_notification(
                     .persistence
                     .tx
                     .send(PersistenceMsg::PlanModeState(snapshot));
-                emit_current_mode_update(config, fuigo_tools::types::SessionMode::Plan.as_id()).await;
+                emit_current_mode_update(config, fuigo_tools::types::SessionMode::Plan.as_id())
+                    .await;
             }
             tracing::info!(
                 tool_call_id = %entered.tool_call_id,

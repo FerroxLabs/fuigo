@@ -16,8 +16,8 @@
 //! silently evicts another test's execution record from the process-global registry).
 
 use super::disk_full_tests::{
-    actor_with_mock_sampler, actor_with_mock_sampler_configured, block_on_session, current_thread_local, run_prompt,
-    spawn_persistence_stub,
+    actor_with_mock_sampler, actor_with_mock_sampler_configured, block_on_session,
+    current_thread_local, run_prompt, spawn_persistence_stub,
 };
 use super::support::*;
 use super::*;
@@ -193,7 +193,10 @@ fn unknown_usage_under_a_token_budget_refuses_the_prompt_as_a_budget_denial() {
     );
     let denial = assert_budget_denial(&run, ExecutionBudgetRule::TokenUsageUnknown);
     assert!(denial.unknown_usage);
-    assert_eq!(denial.total_tokens_used, 0, "nothing reported, nothing counted");
+    assert_eq!(
+        denial.total_tokens_used, 0,
+        "nothing reported, nothing counted"
+    );
 }
 
 /// The output-token budget is caught by the turn loop one step before admission; it reports as the
@@ -255,21 +258,40 @@ fn a_side_question_under_a_spent_budget_is_refused_as_its_own_denial() {
             let (persistence_tx, persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             spawn_persistence_stub(persistence_rx, || Ok(()));
-            let actor = actor_with_mock_sampler(
-                &server, RUN, persistence_tx, gateway_tx, Some(4), None,
-            )
-            .await;
+            let actor =
+                actor_with_mock_sampler(&server, RUN, persistence_tx, gateway_tx, Some(4), None)
+                    .await;
             let execution = Execution::open(
-                &actor.notifications.persistence_tx, RUN, RUN, RUN, 9, None, Some(4),
-                TokenLimits { total: Some(100), output: None, initial_total: 0 }, None,
+                &actor.notifications.persistence_tx,
+                RUN,
+                RUN,
+                RUN,
+                9,
+                None,
+                Some(4),
+                TokenLimits {
+                    total: Some(100),
+                    output: None,
+                    initial_total: 0,
+                },
+                None,
             )
             .await
             .expect("execution is durable");
             let turn_request = execution.begin_turn_request();
             let earlier = uuid::Uuid::new_v4().to_string();
-            execution.admit(RequestPurpose::Work, earlier.clone()).await.unwrap();
             execution
-                .settle(earlier, Some(TokenUsage { total_tokens: 120, ..Default::default() }))
+                .admit(RequestPurpose::Work, earlier.clone())
+                .await
+                .unwrap();
+            execution
+                .settle(
+                    earlier,
+                    Some(TokenUsage {
+                        total_tokens: 120,
+                        ..Default::default()
+                    }),
+                )
                 .await
                 .unwrap();
             let before = server.request_count();
@@ -304,7 +326,10 @@ fn a_side_question_under_a_spent_budget_is_refused_as_its_own_denial() {
 /// `TokenUsageUnknown`, whose remedy is about usage, not about raising the grant.
 #[test]
 fn a_workflow_child_with_its_output_grant_closed_is_refused_as_the_same_denial() {
-    for (run, usage_unknown) in [("p02e-child-grant", false), ("p02e-child-grant-unknown", true)] {
+    for (run, usage_unknown) in [
+        ("p02e-child-grant", false),
+        ("p02e-child-grant-unknown", true),
+    ] {
         let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
         let sink = cell.clone();
         block_on_session(move || {
@@ -329,7 +354,12 @@ fn a_workflow_child_with_its_output_grant_closed_is_refused_as_the_same_denial()
                     grant.record_reported_output(40);
                 }
                 let actor = actor_with_mock_sampler_configured(
-                    &server, run, persistence_tx, gateway_tx, None, None,
+                    &server,
+                    run,
+                    persistence_tx,
+                    gateway_tx,
+                    None,
+                    None,
                     move |actor| actor.tool_context.task_output_token_budget = Some(grant),
                 )
                 .await;
@@ -339,7 +369,10 @@ fn a_workflow_child_with_its_output_grant_closed_is_refused_as_the_same_denial()
                 if let Some(execution) = Execution::current(run) {
                     execution.release(run);
                 }
-                *sink.lock().unwrap() = Some(BudgetedRun { result, model_requests });
+                *sink.lock().unwrap() = Some(BudgetedRun {
+                    result,
+                    model_requests,
+                });
             });
         });
         let run_result = cell.lock().unwrap().take().expect("a result");
@@ -347,9 +380,14 @@ fn a_workflow_child_with_its_output_grant_closed_is_refused_as_the_same_denial()
             let denial = assert_budget_denial(&run_result, ExecutionBudgetRule::TokenUsageUnknown);
             assert!(denial.unknown_usage, "{run}");
         } else {
-            let denial = assert_budget_denial(&run_result, ExecutionBudgetRule::OutputTokensExhausted);
+            let denial =
+                assert_budget_denial(&run_result, ExecutionBudgetRule::OutputTokensExhausted);
             assert_eq!(
-                (denial.output_token_limit, denial.output_tokens_used, denial.unknown_usage),
+                (
+                    denial.output_token_limit,
+                    denial.output_tokens_used,
+                    denial.unknown_usage
+                ),
                 (Some(40), 40, false),
                 "{run}"
             );

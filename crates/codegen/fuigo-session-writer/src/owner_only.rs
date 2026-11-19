@@ -18,7 +18,10 @@
 //! `fuigo-shell-base`, which this leaf crate cannot depend on. The items are `pub` and hidden only while `fuigo-shell`'s
 //! call sites still use them through its old module path; once they write through [`crate::SessionWriter`] (F5-C) this
 //! module becomes private to the crate, as the design requires.
-#![allow(clippy::disallowed_methods, reason = "the choke point: owner-only open/create/write/copy used by the writer and its lock (design F5 5.1)")]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "the choke point: owner-only open/create/write/copy used by the writer and its lock (design F5 5.1)"
+)]
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -33,7 +36,9 @@ pub fn owner_only(options: &mut OpenOptions) -> &mut OpenOptions {
         // (audit S12-F7). Only the final component; the session folder itself may live behind a link.
         // O_NONBLOCK: opening a FIFO planted at the name fails (ENXIO) instead of waiting for a reader; on a regular
         // file it changes nothing (review L18).
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     options
 }
@@ -143,7 +148,10 @@ pub fn open(options: &mut OpenOptions, path: &Path) -> io::Result<File> {
 
 /// `File::create` for a session file.
 pub fn create(path: &Path) -> io::Result<File> {
-    open(OpenOptions::new().write(true).create(true).truncate(true), path)
+    open(
+        OpenOptions::new().write(true).create(true).truncate(true),
+        path,
+    )
 }
 
 /// `std::fs::write` for a session file.
@@ -162,18 +170,26 @@ pub fn copy(src: &Path, dst: &Path) -> io::Result<u64> {
 /// [`copy`] on the blocking pool.
 pub async fn copy_async(src: &Path, dst: &Path) -> io::Result<u64> {
     let (src, dst) = (src.to_path_buf(), dst.to_path_buf());
-    tokio::task::spawn_blocking(move || copy(&src, &dst)).await.map_err(io::Error::other)?
+    tokio::task::spawn_blocking(move || copy(&src, &dst))
+        .await
+        .map_err(io::Error::other)?
 }
 
 /// `tokio::fs::write` for a session file.
-pub async fn write_async(path: impl AsRef<Path>, bytes: impl AsRef<[u8]> + Send + 'static) -> io::Result<()> {
+pub async fn write_async(
+    path: impl AsRef<Path>,
+    bytes: impl AsRef<[u8]> + Send + 'static,
+) -> io::Result<()> {
     let path = path.as_ref().to_path_buf();
     tokio::task::spawn_blocking(move || write(&path, bytes))
         .await
         .map_err(io::Error::other)?
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -189,7 +205,10 @@ mod tests {
         let created = owner_only(OpenOptions::new().write(true).create_new(true)).open(&path);
         unsafe { libc::umask(previous) };
         created.unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -200,7 +219,10 @@ mod tests {
         std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(copy(&src, &dst).unwrap(), 7);
         assert_eq!(std::fs::read(&dst).unwrap(), b"content");
-        assert_eq!(std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -221,7 +243,11 @@ mod tests {
                 },
             );
         }
-        assert_eq!(warnings.load(Ordering::SeqCst), 1, "one warning for the process, not one per open");
+        assert_eq!(
+            warnings.load(Ordering::SeqCst),
+            1,
+            "one warning for the process, not one per open"
+        );
     }
 
     /// Review L18: a FIFO planted at a session file's name is refused without blocking the open on a reader.
@@ -235,11 +261,15 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let target = fifo.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(open(OpenOptions::new().append(true).create(true), &target).map(|_| ()));
+            let _ =
+                tx.send(open(OpenOptions::new().append(true).create(true), &target).map(|_| ()));
         });
         let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
         // Free a blocked open so the test thread does not outlive the test.
-        let _ = std::fs::OpenOptions::new().read(true).write(true).open(&fifo);
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo);
         let result = outcome.expect("the open must not wait for a reader");
         assert!(result.is_err(), "a FIFO is not a session file");
     }
@@ -249,8 +279,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let _fail = test_seam::FailChmod::new();
-        let mut file = open(OpenOptions::new().read(true).create(true).append(true), &path)
-            .expect("a refused fchmod must not fail the open");
+        let mut file = open(
+            OpenOptions::new().read(true).create(true).append(true),
+            &path,
+        )
+        .expect("a refused fchmod must not fail the open");
         io::Write::write_all(&mut file, b"{}\n").unwrap();
         write(&dir.path().join("w"), b"x").expect("write");
         create(&dir.path().join("c")).expect("create");

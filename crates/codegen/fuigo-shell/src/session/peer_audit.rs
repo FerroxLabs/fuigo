@@ -95,12 +95,19 @@ impl Outcome {
 pub(crate) fn clean(s: &str) -> String {
     let ok = !s.is_empty()
         && s.chars().count() <= MAX_FIELD_CHARS
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
     if ok {
         s.to_owned()
     } else {
         let d = Sha256::digest(s.as_bytes());
-        format!("sha256:{}", d.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>())
+        format!(
+            "sha256:{}",
+            d.iter()
+                .take(8)
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        )
     }
 }
 
@@ -153,7 +160,10 @@ impl Event {
         c: &crate::session::peer_integrity::Change,
         t: u64,
     ) -> Self {
-        let short = |h: &Option<String>| h.as_deref().map_or_else(|| "absent".to_owned(), |h| h.chars().take(16).collect());
+        let short = |h: &Option<String>| {
+            h.as_deref()
+                .map_or_else(|| "absent".to_owned(), |h| h.chars().take(16).collect())
+        };
         Self {
             t,
             msg: Some(clean(&crate::session::peer_integrity::path_hash(&c.path))),
@@ -163,7 +173,11 @@ impl Event {
             mode: None,
             bytes: 0,
             outcome: Outcome::IntegrityChanged,
-            reason: Some(clean(&format!("chg:{}:{}", short(&c.old_hash), short(&c.new_hash)))),
+            reason: Some(clean(&format!(
+                "chg:{}:{}",
+                short(&c.old_hash),
+                short(&c.new_hash)
+            ))),
         }
     }
 
@@ -190,11 +204,23 @@ impl Event {
     }
 
     fn agg_key(&self) -> AggKey {
-        (self.from_host.clone(), self.from_session.clone(), self.to_session.clone(), self.outcome, self.reason.clone())
+        (
+            self.from_host.clone(),
+            self.from_session.clone(),
+            self.to_session.clone(),
+            self.outcome,
+            self.reason.clone(),
+        )
     }
 }
 
-type AggKey = (Option<String>, Option<String>, Option<String>, Outcome, Option<String>);
+type AggKey = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Outcome,
+    Option<String>,
+);
 
 /// The written line. Field order is the documented order; a test pins the key set.
 #[derive(Serialize)]
@@ -253,7 +279,12 @@ pub(crate) struct AuditCore {
 }
 
 impl AuditCore {
-    pub(crate) fn new(dir: PathBuf, cap: u64, fail: Option<Arc<AtomicBool>>, errors: Arc<AtomicU64>) -> Self {
+    pub(crate) fn new(
+        dir: PathBuf,
+        cap: u64,
+        fail: Option<Arc<AtomicBool>>,
+        errors: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             dir,
             cap,
@@ -283,7 +314,13 @@ impl AuditCore {
             if let Some(a) = self.agg.get_mut(&key) {
                 a.count += 1;
             } else if self.agg.len() < MAX_AGG_KEYS {
-                self.agg.insert(key, Agg { first: ev, count: 1 });
+                self.agg.insert(
+                    key,
+                    Agg {
+                        first: ev,
+                        count: 1,
+                    },
+                );
             } else {
                 self.suppressed += 1;
             }
@@ -357,7 +394,11 @@ impl AuditCore {
     }
 
     fn append(&mut self, line: &str) -> io::Result<()> {
-        if self.fail.as_ref().is_some_and(|f| f.load(Ordering::Relaxed)) {
+        if self
+            .fail
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
             return Err(io::Error::new(io::ErrorKind::StorageFull, "injected"));
         }
         self.ensure_open()?;
@@ -368,7 +409,10 @@ impl AuditCore {
         if len > 0 && len + line.len() as u64 > self.limit() {
             self.rotate(line.len() as u64)?;
         }
-        let file = self.file.as_mut().ok_or_else(|| io::Error::other("no file"))?;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("no file"))?;
         // One write call per line on an O_APPEND handle: lines from several processes never interleave.
         file.write_all(line.as_bytes())
     }
@@ -385,7 +429,10 @@ impl AuditCore {
     }
 
     /// Rotate under the cross-process lock; re-check the size under it so two processes cannot both rotate.
-    #[allow(clippy::disallowed_methods, reason = "<FUIGO_HOME>/peer-audit.jsonl, .1 rotation and .peer-audit.lock (sink dir is fuigo_home()); not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "<FUIGO_HOME>/peer-audit.jsonl, .1 rotation and .peer-audit.lock (sink dir is fuigo_home()); not inside a session folder"
+    )]
     fn rotate(&mut self, incoming: u64) -> io::Result<()> {
         let path = self.path();
         let _lock = fuigo_config::fs_atomic::lock_file_for_write(&self.dir.join(LOCK_NAME))?;
@@ -407,7 +454,8 @@ fn same_file(open: Option<&File>, path: &Path) -> bool {
     let (Some(f), Ok(p)) = (open, std::fs::symlink_metadata(path)) else {
         return false;
     };
-    f.metadata().is_ok_and(|m| m.ino() == p.ino() && m.dev() == p.dev())
+    f.metadata()
+        .is_ok_and(|m| m.ino() == p.ino() && m.dev() == p.dev())
 }
 
 #[cfg(not(unix))]
@@ -415,7 +463,10 @@ fn same_file(open: Option<&File>, path: &Path) -> bool {
     open.is_some() && path.exists()
 }
 
-#[allow(clippy::disallowed_methods, reason = "<FUIGO_HOME>/peer-audit.jsonl, .1 rotation and .peer-audit.lock (sink dir is fuigo_home()); not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "<FUIGO_HOME>/peer-audit.jsonl, .1 rotation and .peer-audit.lock (sink dir is fuigo_home()); not inside a session folder"
+)]
 fn open_owner_only(path: &Path) -> io::Result<File> {
     let mut o = OpenOptions::new();
     o.create(true).append(true);
@@ -463,12 +514,23 @@ impl Sink {
         Some(s)
     }
 
-    pub(crate) fn spawn(dir: PathBuf, cap: u64, fail: Option<Arc<AtomicBool>>) -> Option<Arc<Sink>> {
+    pub(crate) fn spawn(
+        dir: PathBuf,
+        cap: u64,
+        fail: Option<Arc<AtomicBool>>,
+    ) -> Option<Arc<Sink>> {
         let (tx, rx) = sync_channel::<Msg>(QUEUE_CAP);
         let errors = Arc::new(AtomicU64::new(0));
         let core = AuditCore::new(dir, cap, fail, errors.clone());
-        std::thread::Builder::new().name("peer-audit".into()).spawn(move || writer_loop(core, rx)).ok()?;
-        Some(Arc::new(Sink { tx, dropped: AtomicU64::new(0), errors }))
+        std::thread::Builder::new()
+            .name("peer-audit".into())
+            .spawn(move || writer_loop(core, rx))
+            .ok()?;
+        Some(Arc::new(Sink {
+            tx,
+            dropped: AtomicU64::new(0),
+            errors,
+        }))
     }
 
     pub(crate) fn submit(&self, ev: Event) {
@@ -503,7 +565,10 @@ impl Sink {
 }
 
 fn wall_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn writer_loop(mut core: AuditCore, rx: Receiver<Msg>) {
@@ -579,7 +644,10 @@ impl AuditCtx {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "peer_audit_tests.rs"]
 mod tests;

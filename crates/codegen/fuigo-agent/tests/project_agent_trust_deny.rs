@@ -42,7 +42,10 @@ fn a_denying_hook_keeps_project_agents_out() {
             .iter()
             .any(|e| e.name == "reviewer")
     );
-    assert!(CALLS.load(Ordering::SeqCst) >= 1, "the hook must be consulted");
+    assert!(
+        CALLS.load(Ordering::SeqCst) >= 1,
+        "the hook must be consulted"
+    );
     assert!(
         SEEN.lock().unwrap().iter().any(|p| p == repo.path()),
         "the hook must be asked about the lookup's cwd"

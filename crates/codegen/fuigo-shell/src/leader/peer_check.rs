@@ -53,7 +53,11 @@ pub(crate) enum Side {
 /// seam and the debug log. Proves the peer's OS user equals ours and nothing more (see [`peer_is_same_user`]);
 /// a failed credential query refuses.
 #[cfg(unix)]
-pub(crate) fn verdict_for(side: Side, stream: &tokio::net::UnixStream, key_path: &Path) -> PeerVerdict {
+pub(crate) fn verdict_for(
+    side: Side,
+    stream: &tokio::net::UnixStream,
+    key_path: &Path,
+) -> PeerVerdict {
     let socket_path = key_path;
     let ours = our_uid();
     #[cfg(test)]
@@ -63,8 +67,14 @@ pub(crate) fn verdict_for(side: Side, stream: &tokio::net::UnixStream, key_path:
     let verdict = peer_is_same_user(ours, peer.as_ref().map(|uid| *uid));
     if verdict == PeerVerdict::Refuse {
         match &peer {
-            Ok(uid) => tracing::debug!(?side, peer_uid = *uid, "Refusing a peer of another user account"),
-            Err(e) => tracing::debug!(?side, error = %e, "Refusing a peer whose account could not be determined"),
+            Ok(uid) => tracing::debug!(
+                ?side,
+                peer_uid = *uid,
+                "Refusing a peer of another user account"
+            ),
+            Err(e) => {
+                tracing::debug!(?side, error = %e, "Refusing a peer whose account could not be determined")
+            }
         }
     }
     verdict
@@ -102,7 +112,10 @@ pub(super) fn client_accepts(stream: &LeaderStream, socket_path: &Path) -> bool 
 /// `umask` (process-wide) no other thread's file creation is affected.
 /// Not leader specific: `bind` is the only listener-specific part. [`bind_private`] is the leader's use.
 #[cfg(unix)]
-#[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder"
+)]
 pub(crate) fn bind_private_with<L>(
     path: &Path,
     bind: impl FnOnce(&Path) -> std::io::Result<L>,
@@ -129,7 +142,8 @@ pub(crate) fn bind_private_with<L>(
             Err(e) => return Err(e),
         }
     }
-    let dir = dir.ok_or_else(|| std::io::Error::other("could not create a private bind directory"))?;
+    let dir =
+        dir.ok_or_else(|| std::io::Error::other("could not create a private bind directory"))?;
     let result = (|| {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         let temp_sock = dir.join("s");
@@ -175,7 +189,10 @@ pub(super) mod seam {
     static SEAMS: Mutex<Vec<(Side, PathBuf, Inject)>> = Mutex::new(Vec::new());
 
     pub(crate) fn set(side: Side, path: &Path, inject: Inject) {
-        SEAMS.lock().unwrap().push((side, path.to_path_buf(), inject));
+        SEAMS
+            .lock()
+            .unwrap()
+            .push((side, path.to_path_buf(), inject));
     }
 
     pub(super) fn query(side: Side, path: &Path, ours: u32) -> Option<std::io::Result<u32>> {

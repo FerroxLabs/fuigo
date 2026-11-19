@@ -3,9 +3,9 @@
 use crate::error::{UpstreamError, is_upstream_slug};
 use chrono::{DateTime, Utc};
 use regex::Regex;
-use std::sync::LazyLock;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
@@ -134,14 +134,17 @@ fn first_text(text: &str, rules: &[(&[&str], &'static str)]) -> Option<&'static 
         .map(|(_, r)| *r)
 }
 fn text_wait(text: &str, now: DateTime<Utc>) -> Option<u64> {
-    static WAITS: LazyLock<[Regex; 3]> = LazyLock::new(|| [
-        r"Retry in (\d+)s",
-        r"Retry after (\d+) seconds?",
-        r"[Tt]ry again in (\d+) ?s(?:econds)?",
-    ].map(|pattern| Regex::new(pattern).unwrap()));
-    static RESET_TIME: LazyLock<Regex> = LazyLock::new(|| Regex::new(
-        r"Limit resets at: (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) UTC"
-    ).unwrap());
+    static WAITS: LazyLock<[Regex; 3]> = LazyLock::new(|| {
+        [
+            r"Retry in (\d+)s",
+            r"Retry after (\d+) seconds?",
+            r"[Tt]ry again in (\d+) ?s(?:econds)?",
+        ]
+        .map(|pattern| Regex::new(pattern).unwrap())
+    });
+    static RESET_TIME: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"Limit resets at: (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) UTC").unwrap()
+    });
     for pattern in WAITS.iter() {
         if let Some(m) = pattern.captures(text) {
             return Some(m[1].parse::<u64>().unwrap_or(u64::MAX));
@@ -296,21 +299,16 @@ pub fn decide(s: &Signals) -> Classification {
         || RATE_TEXT.iter().any(|t| s.text.contains(t));
     // ACTION_STEPS: terminal status, final code, terminal text, hold, transient,
     // known-wait 429, unknown 429, 5xx. First match wins.
-    let action = if matches!(s.status, 401 | 402 | 403) {
-        Action::Stop
-    } else if s
-        .codes
-        .iter()
-        .any(|c| FINAL_ORDER.iter().any(|(k, _)| c == k))
-    {
-        Action::Stop
-    } else if terminal_text {
+    let terminal = matches!(s.status, 401..=403)
+        || s.codes
+            .iter()
+            .any(|c| FINAL_ORDER.iter().any(|(k, _)| c == k))
+        || terminal_text;
+    let action = if terminal {
         Action::Stop
     } else if held {
         Action::RetryOnce
-    } else if transient {
-        Action::Backoff
-    } else if s.status == 429 && s.wait.is_some() {
+    } else if transient || (s.status == 429 && s.wait.is_some()) {
         Action::Backoff
     } else if s.status == 429 {
         Action::Pause
@@ -363,16 +361,21 @@ pub fn is_flux_routed(request_url: &reqwest::Url, configured_flux_base: Option<&
 
 /// Off-Flux requests retain the parent's retry and recovery policy in full.
 pub fn decide_for_request(s: &Signals, flux_routed: bool) -> Classification {
-    if !flux_routed { return Classification::pass(); }
+    if !flux_routed {
+        return Classification::pass();
+    }
     decide(s)
 }
 
 impl Classification {
     pub fn pass() -> Self {
-        Self { reason: "other".into(), action: Action::Pass, wait: "-".into() }
+        Self {
+            reason: "other".into(),
+            action: Action::Pass,
+            wait: "-".into(),
+        }
     }
 }
-
 
 pub fn classify(
     endpoint: &str,
@@ -455,9 +458,7 @@ pub fn fuigo_upstream(status: u16, headers: &Value, body: &Value) -> UpstreamErr
             }),
         resets_at: resets
             .as_str()
-            .filter(|s| {
-                RESET_DATE.is_match(s)
-            })
+            .filter(|s| RESET_DATE.is_match(s))
             .map(str::to_owned),
     }
 }
@@ -612,4 +613,5 @@ pub fn key_rejected_mark(reason: &str) -> bool {
     reason == "keyRevoked"
 }
 
-pub(crate) static RESET_DATE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$").unwrap());
+pub(crate) static RESET_DATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$").unwrap());

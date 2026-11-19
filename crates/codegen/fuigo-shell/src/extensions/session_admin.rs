@@ -153,9 +153,11 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 
     // 1.0.30 P30-DIRECT: a session open in another window is that window's to change (one open in this process is
     // not "elsewhere"). Held for the local writes only, not the cloud sync after them.
-    let writer_lock = crate::session::session_writer_lock::acquire(&crate::session::persistence::session_dir(&info))
-        .await
-        .map_err(|_| crate::session::session_writer_lock::rename_held_elsewhere_error())?;
+    let writer_lock = crate::session::session_writer_lock::acquire(
+        &crate::session::persistence::session_dir(&info),
+    )
+    .await
+    .map_err(|_| crate::session::session_writer_lock::rename_held_elsewhere_error())?;
 
     // Update the session title in local storage
     let storage = JsonlStorageAdapter::default();
@@ -191,7 +193,9 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
                 Some(&writer),
                 crate::session::helpers::session_summary::TITLE_REFRESH_TURNS.len(),
             ),
-            Err(_busy) => tracing::debug!("session became resident; its actor persists the title refresh watermark"),
+            Err(_busy) => tracing::debug!(
+                "session became resident; its actor persists the title refresh watermark"
+            ),
         }
     }
     drop(writer_lock);
@@ -263,9 +267,11 @@ async fn reset_session_title_to_auto(
 
     // 1.0.30 P30-DIRECT: a session open in another window is that window's to change (one open in this process is
     // not "elsewhere"). Held for the local writes only, not the cloud sync after them.
-    let writer_lock = crate::session::session_writer_lock::acquire(&crate::session::persistence::session_dir(&info))
-        .await
-        .map_err(|_| crate::session::session_writer_lock::rename_held_elsewhere_error())?;
+    let writer_lock = crate::session::session_writer_lock::acquire(
+        &crate::session::persistence::session_dir(&info),
+    )
+    .await
+    .map_err(|_| crate::session::session_writer_lock::rename_held_elsewhere_error())?;
 
     let storage = JsonlStorageAdapter::default();
     let cleared = storage.reset_title_to_auto(&info).await.map_err(|e| {
@@ -290,11 +296,15 @@ async fn reset_session_title_to_auto(
                 info.id.to_string(),
                 crate::session::persistence::session_dir(&info),
             ) {
-                Ok(writer) => crate::session::helpers::session_summary::save_title_refresh_watermark(
-                    Some(&writer),
-                    0,
+                Ok(writer) => {
+                    crate::session::helpers::session_summary::save_title_refresh_watermark(
+                        Some(&writer),
+                        0,
+                    )
+                }
+                Err(_busy) => tracing::debug!(
+                    "session became resident; its actor persists the title refresh watermark"
                 ),
-                Err(_busy) => tracing::debug!("session became resident; its actor persists the title refresh watermark"),
             }
         }
         drop(writer_lock);
@@ -443,9 +453,9 @@ fn rename_conversation_error(e: crate::remote::ConvError, conversation_id: &str)
         not_configured @ ConvError::NotConfigured => {
             crate::acp_error::invalid_request(not_configured.to_string())
         }
-        ConvError::Http { status: 404 } => crate::acp_error::invalid_request(format!(
-            "conversation not found: {conversation_id}"
-        )),
+        ConvError::Http { status: 404 } => {
+            crate::acp_error::invalid_request(format!("conversation not found: {conversation_id}"))
+        }
         other => {
             crate::acp_error::internal_error(format!("chat conversation rename failed: {other}"))
         }
@@ -616,7 +626,9 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
         (seed, merged)
     });
     for notice in notice_scope.notes() {
-        let _ = handle.cmd_tx.send(SessionCommand::NotifyConfigNotice { notice });
+        let _ = handle
+            .cmd_tx
+            .send(SessionCommand::NotifyConfigNotice { notice });
     }
 
     // Store the admitted (not raw) client set: hot-reloads re-merge from this seed
@@ -624,7 +636,9 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
     // P141 (Astra r1, r2): the actor's plugin reload re-merges its own copy of the seed, so it gets the new one too, and
     // BEFORE the update: the actor handles commands in order, so no plugin reload can re-merge the old seed once this
     // update is queued (MCP initialization runs asynchronously and a `ReloadPlugins` may be handled meanwhile).
-    let _ = handle.cmd_tx.send(SessionCommand::SetClientMcpSeed { seed: seed.clone() });
+    let _ = handle
+        .cmd_tx
+        .send(SessionCommand::SetClientMcpSeed { seed: seed.clone() });
     agent.with_resident_mut(&params.session_id, |h| {
         h.initial_client_mcp_servers = seed;
     });
@@ -1063,7 +1077,8 @@ mod sanitize_rename_title_tests {
         );
         // A flag with tag text hidden after it keeps only the black flag
         assert_eq!(
-            sanitize_rename_title("\u{1f3f4}\u{e0069}\u{e0067}\u{e006e}\u{e0020}\u{e0061}").as_ref(),
+            sanitize_rename_title("\u{1f3f4}\u{e0069}\u{e0067}\u{e006e}\u{e0020}\u{e0061}")
+                .as_ref(),
             "\u{1f3f4}"
         );
     }
@@ -1075,7 +1090,8 @@ mod sanitize_rename_title_tests {
         let title = format!("{}{scotland}", "a".repeat(MAX_TITLE_SCALARS - 3));
         let out = sanitize_and_cap_title(&title).unwrap();
         assert!(
-            !out.chars().any(|c| ('\u{e0020}'..='\u{e007f}').contains(&c)),
+            !out.chars()
+                .any(|c| ('\u{e0020}'..='\u{e007f}').contains(&c)),
             "partial tags survived: {out:?}"
         );
         // A flag that fits whole is kept

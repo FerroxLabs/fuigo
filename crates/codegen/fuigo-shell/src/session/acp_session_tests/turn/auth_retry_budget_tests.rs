@@ -246,7 +246,9 @@ async fn session_token_actor(
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.sampler_handle = sampler_handle;
     actor.auth_manager = Some(auth_manager);
-    if shape.parent_message_child { actor.startup_hints.parent_session_id = Some("parent-test".into()); }
+    if shape.parent_message_child {
+        actor.startup_hints.parent_session_id = Some("parent-test".into());
+    }
     actor.auth_method_id = test_auth_method_id("cached_token");
     if shape.is_subagent {
         actor.startup_hints.is_subagent = true;
@@ -517,22 +519,38 @@ fn park_disabled_recovered_401_still_resubmits() {
 /// Exercises the current A2.1 prompt boundary against the real turn loop.
 #[test]
 fn authenticated_401_stops_after_one_refresh_and_resubmit() {
-    if !p42_child("authenticated_401_stops_after_one_refresh_and_resubmit") { return; }
+    if !p42_child("authenticated_401_stops_after_one_refresh_and_resubmit") {
+        return;
+    }
     on_session_stack(|| {
         run_current_thread(false, || async {
-            let server = MockInferenceServer::start_with_required_auth(vec![MockModelEntry::new("test")], "never-issued-token").await.unwrap();
-            let refresher = Arc::new(WakeGapRefresher { calls: Arc::new(AtomicU32::new(0)), fail_pre_request:false, mint_ttl:chrono::Duration::hours(1) });
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("test")],
+                "never-issued-token",
+            )
+            .await
+            .unwrap();
+            let refresher = Arc::new(WakeGapRefresher {
+                calls: Arc::new(AtomicU32::new(0)),
+                fail_pre_request: false,
+                mint_ttl: chrono::Duration::hours(1),
+            });
             let (_dir, am) = expired_auth_manager(refresher);
             let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
-            let error = run_prompt_with_cap(&actor, "one-refresh", 86_400).await.expect_err("second 401 is terminal");
-            assert_eq!(error.data.unwrap()["upstream"]["http_status"],401);
+            let error = run_prompt_with_cap(&actor, "one-refresh", 86_400)
+                .await
+                .expect_err("second 401 is terminal");
+            assert_eq!(error.data.unwrap()["upstream"]["http_status"], 401);
             let requests = inference_requests(&server);
             assert_eq!(requests.len(), 2, "initial plus the sole resubmit");
-            assert!(requests.iter().all(|r| r.authorization.as_deref()==Some(&format!("Bearer {FRESH_TOKEN}"))));
+            assert!(
+                requests
+                    .iter()
+                    .all(|r| r.authorization.as_deref() == Some(&format!("Bearer {FRESH_TOKEN}")))
+            );
             assert!(terminal_failure(&updates).is_some());
-            assert_eq!(actor.refusal_prompt.lock().unwrap().refreshes,1);
-            assert_eq!(retrying_updates(&updates).len(),1);
-
+            assert_eq!(actor.refusal_prompt.lock().unwrap().refreshes, 1);
+            assert_eq!(retrying_updates(&updates).len(), 1);
         });
     });
 }
@@ -604,26 +622,55 @@ fn land_fresh_token_after(actor: &Arc<SessionActor>, updates: &FuigoUpdates, aft
 /// Exercises the current A2.1 prompt boundary against the real turn loop.
 #[test]
 fn failed_refresh_credential_less_401_parks_once_then_terminates() {
-    if !p42_child("failed_refresh_credential_less_401_parks_once_then_terminates") { return; }
+    if !p42_child("failed_refresh_credential_less_401_parks_once_then_terminates") {
+        return;
+    }
     on_session_stack(|| {
         run_current_thread(false, || async {
-            let server = MockInferenceServer::start_with_required_auth(vec![MockModelEntry::new("test")], FRESH_TOKEN).await.unwrap();
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("test")],
+                FRESH_TOKEN,
+            )
+            .await
+            .unwrap();
             let refresher = Arc::new(DeferredRefreshNeverLands::default());
             let rejected = refresher.server_rejected_calls.clone();
             let preflight = refresher.pre_request_calls.clone();
             let (_dir, am) = expired_auth_manager(refresher);
             let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
-            let error = run_prompt_with_cap(&actor, "bounded-refusal", 86_400).await.expect_err("failed refresh must terminate");
+            let error = run_prompt_with_cap(&actor, "bounded-refusal", 86_400)
+                .await
+                .expect_err("failed refresh must terminate");
             assert_eq!(error.data.as_ref().unwrap()["upstream"]["http_status"], 401);
-            assert_eq!(inference_requests(&server).len(), 2, "one parked credential-less resubmit");
+            assert_eq!(
+                inference_requests(&server).len(),
+                2,
+                "one parked credential-less resubmit"
+            );
             assert!(terminal_failure(&updates).is_some());
-            assert_eq!(reauth_parks(&updates), 1, "the park counts as the sole resubmit");
+            assert_eq!(
+                reauth_parks(&updates),
+                1,
+                "the park counts as the sole resubmit"
+            );
             assert_eq!(actor.refusal_prompt.lock().unwrap().refreshes, 1);
-            assert_eq!(actor.refusal_prompt.lock().unwrap().state, fuigo_sampling_types::refusal::PromptState::Terminal);
-            let calls = (rejected.load(Ordering::SeqCst), preflight.load(Ordering::SeqCst));
+            assert_eq!(
+                actor.refusal_prompt.lock().unwrap().state,
+                fuigo_sampling_types::refusal::PromptState::Terminal
+            );
+            let calls = (
+                rejected.load(Ordering::SeqCst),
+                preflight.load(Ordering::SeqCst),
+            );
             actor.prepare_sampler_for_turn().await;
-            assert_eq!((rejected.load(Ordering::SeqCst), preflight.load(Ordering::SeqCst)), calls, "terminal prepares cannot refresh");
-
+            assert_eq!(
+                (
+                    rejected.load(Ordering::SeqCst),
+                    preflight.load(Ordering::SeqCst)
+                ),
+                calls,
+                "terminal prepares cannot refresh"
+            );
         });
     });
 }
@@ -631,28 +678,63 @@ fn failed_refresh_credential_less_401_parks_once_then_terminates() {
 /// Exercises the current A2.1 prompt boundary against the real turn loop.
 #[test]
 fn failed_refresh_parked_resubmit_5xx_is_terminal() {
-    if !p42_child("failed_refresh_parked_resubmit_5xx_is_terminal") { return; }
+    if !p42_child("failed_refresh_parked_resubmit_5xx_is_terminal") {
+        return;
+    }
     on_session_stack(|| {
         run_current_thread(false, || async {
-            let server = MockInferenceServer::start_with_required_auth(vec![MockModelEntry::new("test")], FRESH_TOKEN).await.unwrap();
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("test")],
+                FRESH_TOKEN,
+            )
+            .await
+            .unwrap();
             let refresher = Arc::new(DeferredRefreshNeverLands::default());
             let rejected = refresher.server_rejected_calls.clone();
             let preflight = refresher.pre_request_calls.clone();
             let (_dir, am) = expired_auth_manager(refresher);
             let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
-            server.enqueue_response("/v1/responses", ScriptedResponse::json(401, serde_json::json!({"error":"missing API key"})));
-            server.enqueue_response("/v1/responses", ScriptedResponse::json(502, serde_json::json!({"error":"bad gateway"})));
-            let error = run_prompt_with_cap(&actor, "bounded-refusal", 86_400).await.expect_err("failed refresh must terminate");
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::json(401, serde_json::json!({"error":"missing API key"})),
+            );
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::json(502, serde_json::json!({"error":"bad gateway"})),
+            );
+            let error = run_prompt_with_cap(&actor, "bounded-refusal", 86_400)
+                .await
+                .expect_err("failed refresh must terminate");
             assert_eq!(error.data.as_ref().unwrap()["upstream"]["http_status"], 502);
-            assert_eq!(inference_requests(&server).len(), 2, "one parked credential-less resubmit");
+            assert_eq!(
+                inference_requests(&server).len(),
+                2,
+                "one parked credential-less resubmit"
+            );
             assert!(terminal_failure(&updates).is_some());
-            assert_eq!(reauth_parks(&updates), 1, "the park counts as the sole resubmit");
+            assert_eq!(
+                reauth_parks(&updates),
+                1,
+                "the park counts as the sole resubmit"
+            );
             assert_eq!(actor.refusal_prompt.lock().unwrap().refreshes, 1);
-            assert_eq!(actor.refusal_prompt.lock().unwrap().state, fuigo_sampling_types::refusal::PromptState::Terminal);
-            let calls = (rejected.load(Ordering::SeqCst), preflight.load(Ordering::SeqCst));
+            assert_eq!(
+                actor.refusal_prompt.lock().unwrap().state,
+                fuigo_sampling_types::refusal::PromptState::Terminal
+            );
+            let calls = (
+                rejected.load(Ordering::SeqCst),
+                preflight.load(Ordering::SeqCst),
+            );
             actor.prepare_sampler_for_turn().await;
-            assert_eq!((rejected.load(Ordering::SeqCst), preflight.load(Ordering::SeqCst)), calls, "terminal prepares cannot refresh");
-
+            assert_eq!(
+                (
+                    rejected.load(Ordering::SeqCst),
+                    preflight.load(Ordering::SeqCst)
+                ),
+                calls,
+                "terminal prepares cannot refresh"
+            );
         });
     });
 }
@@ -702,9 +784,12 @@ fn parked_429_wait_does_not_drive_refreshes() {
             )
             .await
             .expect("turn must finish within timeout");
-            assert!(outcome.is_err(), "Flux unknown 429 is terminal even for a parked subagent");
+            assert!(
+                outcome.is_err(),
+                "Flux unknown 429 is terminal even for a parked subagent"
+            );
             assert_eq!(budget.attempts_used(), 0);
-            assert_eq!(inference_requests(&server).len(),1);
+            assert_eq!(inference_requests(&server).len(), 1);
             // The expired token makes every prepare observable: a re-prepare
             // during the wait would dispatch at least one preflight refresh.
             assert_eq!(
@@ -779,7 +864,10 @@ fn parked_turn_does_not_respawn_two_pass_prefire() {
             land_fresh_token_after(&actor, &updates, Duration::from_secs(30));
 
             let outcome = run_prompt_with_cap(&actor, "parked-prefire", 86_400).await;
-            assert!(outcome.is_err(), "failed refresh must terminate: {outcome:?}");
+            assert!(
+                outcome.is_err(),
+                "failed refresh must terminate: {outcome:?}"
+            );
 
             // Pass-1 sends: /responses requests without the foreground turn header.
             let pass1_sends = inference_requests(&server)
@@ -849,7 +937,11 @@ fn parked_turn_past_compact_threshold_does_not_auto_compact() {
 
             let outcome = run_prompt_with_cap(&actor, "parked-no-auto-compact", 86_400).await;
             assert_eq!(reauth_parks(&updates), 1);
-            assert_eq!(inference_requests(&server).len(), 2, "one initial POST and one parked resubmit");
+            assert_eq!(
+                inference_requests(&server).len(),
+                2,
+                "one initial POST and one parked resubmit"
+            );
             assert!(
                 outcome.is_err(),
                 "failed refresh must terminate before auto-compaction: {outcome:?}"
@@ -875,35 +967,74 @@ fn parked_turn_past_compact_threshold_does_not_auto_compact() {
 /// Exercises the current A2.1 prompt boundary against the real turn loop.
 #[test]
 fn late_token_landing_cannot_resubmit_a_terminal_401() {
-    if !p42_child("late_token_landing_cannot_resubmit_a_terminal_401") { return; }
+    if !p42_child("late_token_landing_cannot_resubmit_a_terminal_401") {
+        return;
+    }
     on_session_stack(|| {
         run_current_thread(false, || async {
-            let server = MockInferenceServer::start_with_required_auth(vec![MockModelEntry::new("test")], FRESH_TOKEN).await.unwrap();
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("test")],
+                FRESH_TOKEN,
+            )
+            .await
+            .unwrap();
             let refresher = Arc::new(DeferredRefreshNeverLands::default());
             let rejected = refresher.server_rejected_calls.clone();
             let preflight = refresher.pre_request_calls.clone();
             let (_dir, am) = expired_auth_manager(refresher);
             let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
-            let error = run_prompt_with_cap(&actor, "bounded-refusal", 86_400).await.expect_err("failed refresh must terminate");
+            let error = run_prompt_with_cap(&actor, "bounded-refusal", 86_400)
+                .await
+                .expect_err("failed refresh must terminate");
             assert_eq!(error.data.as_ref().unwrap()["upstream"]["http_status"], 401);
-            assert_eq!(inference_requests(&server).len(), 2, "one parked credential-less resubmit");
+            assert_eq!(
+                inference_requests(&server).len(),
+                2,
+                "one parked credential-less resubmit"
+            );
             assert!(terminal_failure(&updates).is_some());
-            assert_eq!(reauth_parks(&updates), 1, "the park counts as the sole resubmit");
+            assert_eq!(
+                reauth_parks(&updates),
+                1,
+                "the park counts as the sole resubmit"
+            );
             assert_eq!(actor.refusal_prompt.lock().unwrap().refreshes, 1);
-            assert_eq!(actor.refusal_prompt.lock().unwrap().state, fuigo_sampling_types::refusal::PromptState::Terminal);
-            let calls = (rejected.load(Ordering::SeqCst), preflight.load(Ordering::SeqCst));
+            assert_eq!(
+                actor.refusal_prompt.lock().unwrap().state,
+                fuigo_sampling_types::refusal::PromptState::Terminal
+            );
+            let calls = (
+                rejected.load(Ordering::SeqCst),
+                preflight.load(Ordering::SeqCst),
+            );
             actor.prepare_sampler_for_turn().await;
-            assert_eq!((rejected.load(Ordering::SeqCst), preflight.load(Ordering::SeqCst)), calls, "terminal prepares cannot refresh");
+            assert_eq!(
+                (
+                    rejected.load(Ordering::SeqCst),
+                    preflight.load(Ordering::SeqCst)
+                ),
+                calls,
+                "terminal prepares cannot refresh"
+            );
             actor.auth_manager.as_ref().unwrap().hot_swap(FuigoAuth {
-                key: FRESH_TOKEN.into(), auth_mode: AuthMode::Oidc,
+                key: FRESH_TOKEN.into(),
+                auth_mode: AuthMode::Oidc,
                 refresh_token: Some("rt-new".into()),
-                expires_at: Some(chrono::Utc::now()+chrono::Duration::hours(1)),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
                 ..FuigoAuth::test_default()
             });
-            actor.auth_manager.as_ref().unwrap().refresh_notifier().notify_waiters();
+            actor
+                .auth_manager
+                .as_ref()
+                .unwrap()
+                .refresh_notifier()
+                .notify_waiters();
             tokio::time::sleep(Duration::from_millis(50)).await;
-            assert_eq!(inference_requests(&server).len(), 2, "token notification cannot resurrect a terminal prompt");
-
+            assert_eq!(
+                inference_requests(&server).len(),
+                2,
+                "token notification cannot resurrect a terminal prompt"
+            );
         });
     });
 }
@@ -911,52 +1042,125 @@ fn late_token_landing_cannot_resubmit_a_terminal_401() {
 /// Exercises the current A2.1 prompt boundary against the real turn loop.
 #[test]
 fn never_recovering_401_terminates_before_runaway_budget() {
-    if !p42_child("never_recovering_401_terminates_before_runaway_budget") { return; }
+    if !p42_child("never_recovering_401_terminates_before_runaway_budget") {
+        return;
+    }
     on_session_stack(|| {
         run_current_thread(false, || async {
-            let server = MockInferenceServer::start_with_required_auth(vec![MockModelEntry::new("test")], FRESH_TOKEN).await.unwrap();
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("test")],
+                FRESH_TOKEN,
+            )
+            .await
+            .unwrap();
             let refresher = Arc::new(DeferredRefreshNeverLands::default());
             let rejected = refresher.server_rejected_calls.clone();
             let preflight = refresher.pre_request_calls.clone();
             let (_dir, am) = expired_auth_manager(refresher);
             let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
-            let error = run_prompt_with_cap(&actor, "bounded-refusal", 86_400).await.expect_err("failed refresh must terminate");
+            let error = run_prompt_with_cap(&actor, "bounded-refusal", 86_400)
+                .await
+                .expect_err("failed refresh must terminate");
             assert_eq!(error.data.as_ref().unwrap()["upstream"]["http_status"], 401);
-            assert_eq!(inference_requests(&server).len(), 2, "one parked credential-less resubmit");
+            assert_eq!(
+                inference_requests(&server).len(),
+                2,
+                "one parked credential-less resubmit"
+            );
             assert!(terminal_failure(&updates).is_some());
-            assert_eq!(reauth_parks(&updates), 1, "the park counts as the sole resubmit");
+            assert_eq!(
+                reauth_parks(&updates),
+                1,
+                "the park counts as the sole resubmit"
+            );
             assert_eq!(actor.refusal_prompt.lock().unwrap().refreshes, 1);
-            assert_eq!(actor.refusal_prompt.lock().unwrap().state, fuigo_sampling_types::refusal::PromptState::Terminal);
-            let calls = (rejected.load(Ordering::SeqCst), preflight.load(Ordering::SeqCst));
+            assert_eq!(
+                actor.refusal_prompt.lock().unwrap().state,
+                fuigo_sampling_types::refusal::PromptState::Terminal
+            );
+            let calls = (
+                rejected.load(Ordering::SeqCst),
+                preflight.load(Ordering::SeqCst),
+            );
             actor.prepare_sampler_for_turn().await;
-            assert_eq!((rejected.load(Ordering::SeqCst), preflight.load(Ordering::SeqCst)), calls, "terminal prepares cannot refresh");
-
+            assert_eq!(
+                (
+                    rejected.load(Ordering::SeqCst),
+                    preflight.load(Ordering::SeqCst)
+                ),
+                calls,
+                "terminal prepares cannot refresh"
+            );
         });
     });
 }
 
 #[test]
 fn r2_parent_message_reopens_terminal_child() {
-    if !p42_child("r2_parent_message_reopens_terminal_child") { return; }
+    if !p42_child("r2_parent_message_reopens_terminal_child") {
+        return;
+    }
     on_session_stack(|| {
         run_current_thread(false, || async {
-            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")]).await.unwrap();
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .unwrap();
             let (_dir, am) = expired_auth_manager(Arc::new(DeferredRefreshNeverLands::default()));
-            let (actor, _) = session_token_actor(&server, am, ActorShape { is_subagent: true, parent_message_child: true, ..Default::default() }).await;
-            server.enqueue_response("/v1/responses", ScriptedResponse::json(402, serde_json::json!({"error":{"message":"refused"}})));
+            let (actor, _) = session_token_actor(
+                &server,
+                am,
+                ActorShape {
+                    is_subagent: true,
+                    parent_message_child: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::json(402, serde_json::json!({"error":{"message":"refused"}})),
+            );
             assert!(run_prompt(&actor, "child-first").await.is_err());
-            assert_eq!(actor.refusal_prompt.lock().unwrap().state, fuigo_sampling_types::refusal::PromptState::Terminal);
+            assert_eq!(
+                actor.refusal_prompt.lock().unwrap().state,
+                fuigo_sampling_types::refusal::PromptState::Terminal
+            );
             let before = inference_requests(&server).len();
-            server.enqueue_response("/v1/responses", ScriptedResponse::json(402, serde_json::json!({"error":{"message":"refused again"}})));
-            let result = actor.handle_turn_input(super::turn_task::TurnInputRequest {
-                prompt_id: "parent-instruction".into(),
-                input_origin: InputOrigin::new(crate::session::PromptOrigin::ParentAgentMessage { message_id: "instruction".into(), sender_session_id: "parent-test".into() }),
-                prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new("continue"))],
-                prompt_mode: PromptMode::Agent, trace_gcs_config: None, artifact_tracker: None,
-                client_identifier: None, screen_mode: None, verbatim: false, send_now: false,
-                json_schema: None, persist_ack: None, parsed_prompt_tx: None, traceparent: None,
-            }).await;
-            assert_eq!(inference_requests(&server).len() - before, 1, "a parent instruction must make one new child POST");
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::json(
+                    402,
+                    serde_json::json!({"error":{"message":"refused again"}}),
+                ),
+            );
+            let result = actor
+                .handle_turn_input(super::turn_task::TurnInputRequest {
+                    prompt_id: "parent-instruction".into(),
+                    input_origin: InputOrigin::new(
+                        crate::session::PromptOrigin::ParentAgentMessage {
+                            message_id: "instruction".into(),
+                            sender_session_id: "parent-test".into(),
+                        },
+                    ),
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new("continue"))],
+                    prompt_mode: PromptMode::Agent,
+                    trace_gcs_config: None,
+                    artifact_tracker: None,
+                    client_identifier: None,
+                    screen_mode: None,
+                    verbatim: false,
+                    send_now: false,
+                    json_schema: None,
+                    persist_ack: None,
+                    parsed_prompt_tx: None,
+                    traceparent: None,
+                })
+                .await;
+            assert_eq!(
+                inference_requests(&server).len() - before,
+                1,
+                "a parent instruction must make one new child POST"
+            );
             let error = result.expect_err("the parent must receive the real refusal");
             assert_eq!(error.data.as_ref().unwrap()["upstream"]["http_status"], 402);
         });

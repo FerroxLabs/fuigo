@@ -649,8 +649,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         .min(self.completed_order.len());
                     self.completed_order.insert(at, subagent_id.clone());
                 }
-                self.spawn_ready
-                    .reject(&subagent_id, ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+                self.spawn_ready.reject(
+                    &subagent_id,
+                    ActiveAgentMessageOutcome::NotActiveOrFinalizing,
+                );
             }
         }
     }

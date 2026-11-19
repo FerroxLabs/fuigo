@@ -441,7 +441,10 @@ impl AgentView {
             && let Some(session_id) = self.session.session_id.clone()
         {
             self.pending_effects
-                .push(crate::app::actions::Effect::CancelBtw { session_id, request_id });
+                .push(crate::app::actions::Effect::CancelBtw {
+                    session_id,
+                    request_id,
+                });
         }
         self.minimal_btw_lifecycle = None;
         self.btw_focused = false;

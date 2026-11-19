@@ -507,8 +507,7 @@ async fn effective_peer_mode_sees_plan_and_runtime_toggles() {
         .run_until(async {
             let (gateway_tx, _grx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _prx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             install_real_permissions(&mut actor);
 

@@ -12,14 +12,15 @@ use std::sync::{Arc, Mutex};
 
 use fuigo_peer::limits::{LIST_PAGE_ROWS, MAX_ID_BYTES, MAX_LIST_ROWS};
 use fuigo_peer::{
-    Address, BoundedId, DeliveryOutcome, Envelope, HostId, NoticeKind, RejectReason, SessionRow, is_valid_display_name,
+    Address, BoundedId, DeliveryOutcome, Envelope, HostId, NoticeKind, RejectReason, SessionRow,
+    is_valid_display_name,
 };
 
 use super::conn::InboxHost;
 use super::watch::{SentWatch, WatchTable};
-use crate::session::peer_watch::NoticeOut;
 use crate::session::message_delivery::{MessageDeliveryHandle, PeerGate};
 use crate::session::peer_admission::PeerSubmit;
+use crate::session::peer_watch::NoticeOut;
 
 /// Why a session could not be registered. Fixed variants only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +75,12 @@ struct Sent {
 impl Inner {
     /// The session's own sender-side watches go with it.
     fn watches_of_session_removed(&mut self, session_id: &str) {
-        for w in self.watches.snapshot().into_iter().filter(|w| w.session_id == session_id) {
+        for w in self
+            .watches
+            .snapshot()
+            .into_iter()
+            .filter(|w| w.session_id == session_id)
+        {
             self.watches.remove(&w.message_id);
         }
     }
@@ -94,7 +100,11 @@ pub(crate) struct PeerDirectory {
 
 impl PeerDirectory {
     pub(crate) fn new(host_id: HostId) -> Arc<Self> {
-        Arc::new(Self { host_id, inner: Mutex::new(Inner::default()), watch_total: Arc::default() })
+        Arc::new(Self {
+            host_id,
+            inner: Mutex::new(Inner::default()),
+            watch_total: Arc::default(),
+        })
     }
 
     pub(crate) fn host_id(&self) -> &HostId {
@@ -102,7 +112,9 @@ impl PeerDirectory {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn set_notice_sink(&self, sink: NoticeSink) {
@@ -125,15 +137,26 @@ impl PeerDirectory {
             return Err(RegisterError::Full);
         }
         let gate = handle.peer_gate().clone();
-        let next = g.counters.get(session_id).copied().unwrap_or(0).saturating_add(1);
-        let address =
-            Address::new(self.host_id.as_str(), session_id, next).map_err(|_| RegisterError::BadSessionId)?;
+        let next = g
+            .counters
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let address = Address::new(self.host_id.as_str(), session_id, next)
+            .map_err(|_| RegisterError::BadSessionId)?;
         g.counters.insert(session_id.to_owned(), next);
         // A new incarnation starts with no sent ids: the previous session's ids are not its own.
         g.sent.remove(session_id);
         g.live.insert(
             session_id.to_owned(),
-            Entry { incarnation: next, handle, name: name.to_owned(), session_ref: session_ref.to_owned(), gate },
+            Entry {
+                incarnation: next,
+                handle,
+                name: name.to_owned(),
+                session_ref: session_ref.to_owned(),
+                gate,
+            },
         );
         Ok(address)
     }
@@ -147,11 +170,23 @@ impl PeerDirectory {
     /// Remember that `session_id` sent `message_id` to `target` (packet 9 calls this before it sends). A notice is accepted only
     /// for a recorded id AND only from the host `target` names (S9.3). `watch` also records the watch (packet 11). Bounded: the
     /// oldest id goes first.
-    pub(crate) fn note_sent_to(&self, session_id: &str, message_id: &str, target: &Address, watch: bool) {
+    pub(crate) fn note_sent_to(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        target: &Address,
+        watch: bool,
+    ) {
         self.note_sent_inner(session_id, message_id, Some(target.clone()), watch);
     }
 
-    fn note_sent_inner(&self, session_id: &str, message_id: &str, target: Option<Address>, watch: bool) {
+    fn note_sent_inner(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        target: Option<Address>,
+        watch: bool,
+    ) {
         let pushed_out = {
             let mut g = self.lock();
             if !g.live.contains_key(session_id) {
@@ -165,7 +200,12 @@ impl PeerDirectory {
             if ring.len() >= SENT_IDS_PER_SESSION {
                 ring.pop_front();
             }
-            ring.push_back(Sent { id: message_id.to_owned(), target: target.clone(), watch, released_seen: false });
+            ring.push_back(Sent {
+                id: message_id.to_owned(),
+                target: target.clone(),
+                watch,
+                released_seen: false,
+            });
             match (watch, target) {
                 (true, Some(target)) => g.watches.add(SentWatch {
                     session_id: session_id.to_owned(),
@@ -200,7 +240,10 @@ impl PeerDirectory {
 
     /// Whether the session `a` names is registered here under that incarnation.
     pub(super) fn target_alive(&self, a: &Address) -> bool {
-        self.lock().live.get(a.session_id()).is_some_and(|e| e.incarnation == a.incarnation())
+        self.lock()
+            .live
+            .get(a.session_id())
+            .is_some_and(|e| e.incarnation == a.incarnation())
     }
 
     pub(crate) fn set_notice_out(&self, tx: NoticeOut) {
@@ -217,14 +260,24 @@ impl PeerDirectory {
 
     /// The host is shutting down: every outstanding watch or hold record of every session is told `exited` (S9.2).
     pub(crate) fn announce_exit(&self) {
-        let books: Vec<_> = self.lock().live.values().map(|e| e.handle.clone()).collect();
+        let books: Vec<_> = self
+            .lock()
+            .live
+            .values()
+            .map(|e| e.handle.clone())
+            .collect();
         for h in books {
             h.peer_gate().watches.end_all(NoticeKind::Exited);
         }
     }
 
     /// A local verdict for a session's own record (`None` = `outcome unknown`): the record is consumed and the session told.
-    pub(super) fn notify_local(&self, session_id: &str, message_id: &str, kind: Option<NoticeKind>) {
+    pub(super) fn notify_local(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        kind: Option<NoticeKind>,
+    ) {
         let (handle, target) = {
             let mut g = self.lock();
             g.watches.remove(message_id);
@@ -235,13 +288,22 @@ impl PeerDirectory {
             (g.live.get(session_id).map(|e| e.handle.clone()), target)
         };
         if let Some(h) = handle {
-            h.record_sent_notice_wake(message_id, kind, target.map_or_else(|| "(unknown)".to_owned(), |t| t.to_string()));
+            h.record_sent_notice_wake(
+                message_id,
+                kind,
+                target.map_or_else(|| "(unknown)".to_owned(), |t| t.to_string()),
+            );
         }
     }
 
     /// Deliver a typed notice to the session that sent `message_id`, when the notice comes from the host that message went to
     /// (`peer`); anything else is dropped (acknowledged, no effect).
-    pub(super) fn route_notice(&self, message_id: &BoundedId, kind: NoticeKind, peer: Option<&HostId>) {
+    pub(super) fn route_notice(
+        &self,
+        message_id: &BoundedId,
+        kind: NoticeKind,
+        peer: Option<&HostId>,
+    ) {
         // A remote client is attached: acknowledged and dropped, never delivered into a session. The sent id stays, so the
         // notice can still be consumed after detach.
         if crate::peer_inbox::driver::remote_attached() {
@@ -255,7 +317,9 @@ impl PeerDirectory {
             let hit = g.sent.iter().find_map(|(sid, ring)| {
                 let s = ring.iter().find(|s| {
                     s.id == message_id.as_str()
-                        && s.target.as_ref().is_none_or(|t| peer.is_some_and(|p| *p == HostId::of(t)))
+                        && s.target
+                            .as_ref()
+                            .is_none_or(|t| peer.is_some_and(|p| *p == HostId::of(t)))
                 })?;
                 Some((sid.clone(), s.target.clone(), s.watch, s.released_seen))
             });
@@ -266,7 +330,11 @@ impl PeerDirectory {
                     if released_seen {
                         return None;
                     }
-                    if let Some(s) = g.sent.get_mut(&sid).and_then(|ring| ring.iter_mut().find(|m| m.id == message_id.as_str())) {
+                    if let Some(s) = g
+                        .sent
+                        .get_mut(&sid)
+                        .and_then(|ring| ring.iter_mut().find(|m| m.id == message_id.as_str()))
+                    {
                         s.released_seen = true;
                     }
                 } else {
@@ -312,11 +380,22 @@ impl PeerDirectory {
             .filter(|(_, e)| e.gate.is_opted_in())
             .filter_map(|(id, e)| {
                 let address = Address::new(self.host_id.as_str(), id, e.incarnation).ok()?;
-                Some(SessionRow { address, name: e.name.clone(), session_ref: e.session_ref.clone() })
+                Some(SessionRow {
+                    address,
+                    name: e.name.clone(),
+                    session_ref: e.session_ref.clone(),
+                })
             })
             .collect();
         let more = offered.len() > start.saturating_add(LIST_PAGE_ROWS);
-        (offered.into_iter().skip(start).take(LIST_PAGE_ROWS).collect(), more)
+        (
+            offered
+                .into_iter()
+                .skip(start)
+                .take(LIST_PAGE_ROWS)
+                .collect(),
+            more,
+        )
     }
 
     /// The handle for `to` when it names THIS host and the session's CURRENT incarnation; else `None`.
@@ -339,11 +418,17 @@ pub(crate) struct ConnHost {
 
 impl ConnHost {
     pub(crate) fn new(dir: Arc<PeerDirectory>) -> Self {
-        Self { dir, peer: Mutex::new(None) }
+        Self {
+            dir,
+            peer: Mutex::new(None),
+        }
     }
 
     fn peer(&self) -> Option<HostId> {
-        self.peer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.peer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -411,27 +496,40 @@ impl InboxHost for ConnHost {
             // A plain record is registered before the send: a held message tells its sender when it is released, expires or is
             // refused (S9.3), and a delivered one lets an explicit refusal (the model's tool) reach the sender while its turn
             // runs. It is dropped silently when that turn ends.
-            let Some(out) = out else { return self.send(to, envelope).await };
+            let Some(out) = out else {
+                return self.send(to, envelope).await;
+            };
             book.register_plain(&id, &from, &out);
-            let guard = UnsettledWatch { gate: handle.peer_gate().clone(), id: id.clone(), armed: true };
+            let guard = UnsettledWatch {
+                gate: handle.peer_gate().clone(),
+                id: id.clone(),
+                armed: true,
+            };
             let outcome = self.send(to, envelope).await;
             let held = matches!(outcome, DeliveryOutcome::Held { .. });
-            let rejected_now = !matches!(outcome, DeliveryOutcome::Delivered {} | DeliveryOutcome::Held { .. });
+            let rejected_now = !matches!(
+                outcome,
+                DeliveryOutcome::Delivered {} | DeliveryOutcome::Held { .. }
+            );
             book.settled(&id, &from, held, rejected_now, &out);
             guard.disarm();
             return outcome;
         }
         // A watch needs a way to send its notice, a free slot (per session: the sender's own oldest ends `unavailable`, else
         // `rate_limited`; per host: refused).
-        let Some(out) = out else { return rejected(RejectReason::Unavailable) };
+        let Some(out) = out else {
+            return rejected(RejectReason::Unavailable);
+        };
         if envelope.body.is_empty() {
             // Watch-only: the SAME gate as a message (ingress allowance, then the admission decision for this sender). Only an
             // admitted one registers a watch; a would-be hold is refused; nothing is inserted into the conversation.
             return match handle.probe_peer_watch(envelope).await {
-                PeerSubmit::Outcome(DeliveryOutcome::Delivered {}) => match book.watch_only(&id, &from, &out, &self.dir.watch_total) {
-                    Ok(()) => DeliveryOutcome::Watching {},
-                    Err(reason) => rejected(reason),
-                },
+                PeerSubmit::Outcome(DeliveryOutcome::Delivered {}) => {
+                    match book.watch_only(&id, &from, &out, &self.dir.watch_total) {
+                        Ok(()) => DeliveryOutcome::Watching {},
+                        Err(reason) => rejected(reason),
+                    }
+                }
                 PeerSubmit::Outcome(o @ DeliveryOutcome::Rejected { .. }) => o,
                 PeerSubmit::Outcome(_) => rejected(RejectReason::PolicyRefused),
                 PeerSubmit::Invalid => rejected(RejectReason::TooLarge),
@@ -442,17 +540,31 @@ impl InboxHost for ConnHost {
             return rejected(reason);
         }
         // From here until `settled` the record is unbound: if this future is dropped the guard removes it.
-        let guard = UnsettledWatch { gate: handle.peer_gate().clone(), id: id.clone(), armed: true };
+        let guard = UnsettledWatch {
+            gate: handle.peer_gate().clone(),
+            id: id.clone(),
+            armed: true,
+        };
         let outcome = self.send(to, envelope).await;
-        let (held, rejected_now) =
-            (matches!(outcome, DeliveryOutcome::Held { .. }), !matches!(outcome, DeliveryOutcome::Delivered {} | DeliveryOutcome::Held { .. }));
+        let (held, rejected_now) = (
+            matches!(outcome, DeliveryOutcome::Held { .. }),
+            !matches!(
+                outcome,
+                DeliveryOutcome::Delivered {} | DeliveryOutcome::Held { .. }
+            ),
+        );
         book.settled(&id, &from, held, rejected_now, &out);
         guard.disarm();
-        if matches!(outcome, DeliveryOutcome::Delivered {}) { DeliveryOutcome::Watching {} } else { outcome }
+        if matches!(outcome, DeliveryOutcome::Delivered {}) {
+            DeliveryOutcome::Watching {}
+        } else {
+            outcome
+        }
     }
 
     async fn notice(&self, message_id: BoundedId, kind: NoticeKind) {
-        self.dir.route_notice(&message_id, kind, self.peer().as_ref());
+        self.dir
+            .route_notice(&message_id, kind, self.peer().as_ref());
         let (sink, peer) = (self.dir.lock().notice_sink.clone(), self.peer());
         if let (Some(sink), Some(peer)) = (sink, peer) {
             sink(&peer, &message_id, kind);
@@ -460,6 +572,9 @@ impl InboxHost for ConnHost {
     }
 
     fn peer_hello(&self, host: &HostId) {
-        *self.peer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host.clone());
+        *self
+            .peer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host.clone());
     }
 }

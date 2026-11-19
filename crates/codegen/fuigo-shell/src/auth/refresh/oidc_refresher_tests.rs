@@ -1458,7 +1458,10 @@ async fn refused_token_endpoint_is_a_verdict_that_keeps_the_credential() {
             assert!(text.contains("issuer's https origin"), "{text}");
             assert!(text.contains("redirect"), "{text}");
             assert!(text.contains("stored sign-in is kept"), "{text}");
-            assert!(!text.contains("127.0.0.1") && !text.contains("stored-refresh"), "{text}");
+            assert!(
+                !text.contains("127.0.0.1") && !text.contains("stored-refresh"),
+                "{text}"
+            );
         }
         other => panic!("expected a refusal verdict, got: {other:?}"),
     }
@@ -1497,7 +1500,11 @@ async fn start_issuer_with_redirecting_token_endpoint() -> (
         let bodies = bodies.clone();
         move |body: String| {
             bodies.lock().push(body);
-            async { axum::Json(serde_json::json!({"access_token": "collector-access", "expires_in": 3600})) }
+            async {
+                axum::Json(
+                    serde_json::json!({"access_token": "collector-access", "expires_in": 3600}),
+                )
+            }
         }
     });
     let posts = Arc::new(AtomicUsize::new(0));
@@ -1544,7 +1551,10 @@ async fn start_issuer_with_redirecting_token_endpoint() -> (
     (issuer, posts, discoveries, bodies, handles)
 }
 
-fn manager_with_stored_oidc(dir: &std::path::Path, issuer: &str) -> (Arc<AuthManager>, std::path::PathBuf) {
+fn manager_with_stored_oidc(
+    dir: &std::path::Path,
+    issuer: &str,
+) -> (Arc<AuthManager>, std::path::PathBuf) {
     let cfg = FuigoComConfig::default();
     let mut store = crate::auth::model::AuthStore::new();
     store.insert(cfg.auth_scope(), expired_stored_oidc_auth(issuer));
@@ -1558,8 +1568,14 @@ fn manager_with_stored_oidc(dir: &std::path::Path, issuer: &str) -> (Arc<AuthMan
 
 fn assert_refusal_verdict(error: &crate::auth::error::AuthError, attempt: u32) {
     let text = error.to_string();
-    assert!(text.contains("issuer's https origin"), "attempt {attempt}: {text}");
-    assert!(text.contains("stored sign-in is kept"), "attempt {attempt}: {text}");
+    assert!(
+        text.contains("issuer's https origin"),
+        "attempt {attempt}: {text}"
+    );
+    assert!(
+        text.contains("stored sign-in is kept"),
+        "attempt {attempt}: {text}"
+    );
     assert!(
         matches!(
             error,
@@ -1645,10 +1661,20 @@ async fn redirecting_token_endpoint_receives_the_refresh_token_once_per_verdict(
         1,
         "the refresh token was resent to the redirecting token endpoint"
     );
-    assert!(discoveries.load(Ordering::SeqCst) <= 1, "the refusal was re-decided");
-    assert!(bodies.lock().is_empty(), "the redirect was followed: {:?}", bodies.lock());
+    assert!(
+        discoveries.load(Ordering::SeqCst) <= 1,
+        "the refusal was re-decided"
+    );
+    assert!(
+        bodies.lock().is_empty(),
+        "the redirect was followed: {:?}",
+        bodies.lock()
+    );
     let raw = std::fs::read_to_string(&auth_path).unwrap();
-    assert!(raw.contains("stored-refresh"), "auth.json lost the refresh token");
+    assert!(
+        raw.contains("stored-refresh"),
+        "auth.json lost the refresh token"
+    );
     // Astra r1 #3: a turn that fails on this credential tells the user why (the remedy's advice is the tail of
     // the turn error), without a sign-in prompt, and the session keeps its stored sign-in.
     let remedy = mgr.auth_remedy();
@@ -1656,7 +1682,10 @@ async fn redirecting_token_endpoint_receives_the_refresh_token_once_per_verdict(
     assert!(remedy.keeps_session() && !remedy.is_self_healing());
     assert_eq!(remedy.turn_error_type(), "auth_transient");
     let advice = remedy.advice().expect("the refusal is the advice");
-    assert!(advice.contains("issuer's https origin") && advice.contains("stored sign-in is kept"), "{advice}");
+    assert!(
+        advice.contains("issuer's https origin") && advice.contains("stored sign-in is kept"),
+        "{advice}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

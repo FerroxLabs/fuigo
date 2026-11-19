@@ -85,21 +85,37 @@ mod tests {
             Some(RouteKind::Flux),
         )
         .expect("a note");
-        assert!(note.contains("flux-auto") && note.contains("Flux Router"), "{note}");
-        assert!(note.contains("Grok subscription") && note.contains("/model"), "{note}");
+        assert!(
+            note.contains("flux-auto") && note.contains("Flux Router"),
+            "{note}"
+        );
+        assert!(
+            note.contains("Grok subscription") && note.contains("/model"),
+            "{note}"
+        );
         assert!(!note.to_lowercase().contains("needs an api key"), "{note}");
     }
 
     #[test]
     fn nothing_to_say_when_the_default_is_usable_unset_or_alone() {
-        let ready = FluxState::Saved { masked: "••••1234".into() };
+        let ready = FluxState::Saved {
+            masked: "••••1234".into(),
+        };
         assert_eq!(
-            unusable_default_note(&status(ready, true), Some("flux-auto"), Some(RouteKind::Flux)),
+            unusable_default_note(
+                &status(ready, true),
+                Some("flux-auto"),
+                Some(RouteKind::Flux)
+            ),
             None,
             "Flux is set up"
         );
         assert_eq!(
-            unusable_default_note(&status(FluxState::NotSet, true), None, Some(RouteKind::Flux)),
+            unusable_default_note(
+                &status(FluxState::NotSet, true),
+                None,
+                Some(RouteKind::Flux)
+            ),
             None,
             "an unset default is chosen by Fuigo, not blamed on the user"
         );
@@ -113,7 +129,11 @@ mod tests {
             "a subscription default is reachable"
         );
         assert_eq!(
-            unusable_default_note(&status(FluxState::NotSet, false), Some("flux-auto"), Some(RouteKind::Flux)),
+            unusable_default_note(
+                &status(FluxState::NotSet, false),
+                Some("flux-auto"),
+                Some(RouteKind::Flux)
+            ),
             None,
             "nothing else is connected: the picker is the answer, not a warning"
         );

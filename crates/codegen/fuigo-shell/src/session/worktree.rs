@@ -417,7 +417,9 @@ async fn resume_local_session_in_worktree(
         Ok(meta) => meta,
         Err(e) => {
             cleanup_worktree_on_failure(resolved_source_cwd, &wt_resp.worktree_path).await;
-            return Err(anyhow::anyhow!("Failed to store the fork's launch policy marker: {e}"));
+            return Err(anyhow::anyhow!(
+                "Failed to store the fork's launch policy marker: {e}"
+            ));
         }
     };
     Ok(ResumeSessionInWorktreeResponse {
@@ -436,7 +438,10 @@ async fn resume_local_session_in_worktree(
     })
 }
 /// Run session rehydration: recreate the git worktree at the exact path and restore all session state using the original session ID.
-#[allow(clippy::disallowed_methods, reason = "worktree dir creation; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "worktree dir creation; not inside a session folder"
+)]
 pub(crate) async fn rehydrate_session_in_worktree(
     req: &RehydrateSessionRequest,
     #[allow(unused_variables)] ops: &fuigo_workspace::WorkspaceOps,
@@ -548,7 +553,10 @@ pub(crate) async fn rehydrate_session_in_worktree(
         warnings,
     })
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

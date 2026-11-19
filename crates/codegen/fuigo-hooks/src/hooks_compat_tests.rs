@@ -77,9 +77,14 @@ fn path_with(dir: &Path) -> String {
 
 /// The runner result of one hook, with a real child process.
 async fn run(spec: &HookSpec) -> HookRunnerResult {
-    run_command_hook(spec, &envelope("compat-run"), &ctx("compat-run"), GateKind::Observe)
-        .await
-        .0
+    run_command_hook(
+        spec,
+        &envelope("compat-run"),
+        &ctx("compat-run"),
+        GateKind::Observe,
+    )
+    .await
+    .0
 }
 
 #[tokio::test]
@@ -96,7 +101,10 @@ async fn bash_hook_using_its_own_vars_runs_and_sees_plugin_root_expanded() {
         serde_json::json!({"type": "command", "shell": "bash", "command": command}),
     );
     let result = run(&spec).await;
-    assert!(matches!(result, HookRunnerResult::Success), "got {result:?}");
+    assert!(
+        matches!(result, HookRunnerResult::Success),
+        "got {result:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap(),
         format!("two-x {}", dir.path().display())
@@ -123,10 +131,16 @@ async fn command_with_args_runs_a_binary_from_path_with_expanded_args() {
     );
     spec.extra_env.insert("PATH".into(), path_with(&bin));
     let result = run(&spec).await;
-    assert!(matches!(result, HookRunnerResult::Success), "got {result:?}");
+    assert!(
+        matches!(result, HookRunnerResult::Success),
+        "got {result:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(&out).unwrap(),
-        format!("{}/scripts/start.mjs|literal ${{NOT_OURS}}|", dir.path().display())
+        format!(
+            "{}/scripts/start.mjs|literal ${{NOT_OURS}}|",
+            dir.path().display()
+        )
     );
 }
 
@@ -134,10 +148,19 @@ async fn command_with_args_runs_a_binary_from_path_with_expanded_args() {
 async fn dot_slash_command_resolves_against_the_plugin_root_not_the_hooks_dir() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("ran");
-    write_exec(&dir.path().join("x.sh"), &format!("echo yes > {}", out.display()));
-    let spec = plugin_spec(dir.path(), serde_json::json!({"type": "command", "command": "./x.sh"}));
+    write_exec(
+        &dir.path().join("x.sh"),
+        &format!("echo yes > {}", out.display()),
+    );
+    let spec = plugin_spec(
+        dir.path(),
+        serde_json::json!({"type": "command", "command": "./x.sh"}),
+    );
     let result = run(&spec).await;
-    assert!(matches!(result, HookRunnerResult::Success), "got {result:?}");
+    assert!(
+        matches!(result, HookRunnerResult::Success),
+        "got {result:?}"
+    );
     assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "yes");
 }
 
@@ -167,13 +190,20 @@ async fn a_config_failure_is_reported_once_per_session_across_many_calls() {
             }
         }
     }
-    assert_eq!((failed, skipped), (1, 5), "one notice, then silently skipped");
+    assert_eq!(
+        (failed, skipped),
+        (1, 5),
+        "one notice, then silently skipped"
+    );
 }
 
 #[tokio::test]
 async fn a_runtime_failure_keeps_running_and_is_never_skipped() {
     let dir = tempfile::tempdir().unwrap();
-    let spec = plugin_spec(dir.path(), serde_json::json!({"type": "command", "command": "exit 3"}));
+    let spec = plugin_spec(
+        dir.path(),
+        serde_json::json!({"type": "command", "command": "exit 3"}),
+    );
     let registry = registry(vec![spec]);
     let session = "compat-runtime";
     for _ in 0..3 {
@@ -184,7 +214,10 @@ async fn a_runtime_failure_keeps_running_and_is_never_skipped() {
             &ctx(session),
         )
         .await;
-        assert!(matches!(results[0], HookRunResult::Failed { .. }), "{results:?}");
+        assert!(
+            matches!(results[0], HookRunResult::Failed { .. }),
+            "{results:?}"
+        );
     }
 }
 
@@ -232,11 +265,30 @@ async fn a_blocking_denial_stays_visible_and_is_never_silenced_by_a_config_failu
             "round {round}: the denial still blocks: {:?}",
             result.decision
         );
-        let blocked = result.results.iter().filter(|r| matches!(r, HookRunResult::Blocked { .. })).count();
-        let failed = result.results.iter().filter(|r| matches!(r, HookRunResult::Failed { .. })).count();
-        let skipped = result.results.iter().filter(|r| matches!(r, HookRunResult::Skipped { .. })).count();
-        assert_eq!(blocked, 1, "round {round}: the denial is reported (inline) every time");
-        assert_eq!((failed, skipped), if round == 0 { (1, 0) } else { (0, 1) }, "round {round}");
+        let blocked = result
+            .results
+            .iter()
+            .filter(|r| matches!(r, HookRunResult::Blocked { .. }))
+            .count();
+        let failed = result
+            .results
+            .iter()
+            .filter(|r| matches!(r, HookRunResult::Failed { .. }))
+            .count();
+        let skipped = result
+            .results
+            .iter()
+            .filter(|r| matches!(r, HookRunResult::Skipped { .. }))
+            .count();
+        assert_eq!(
+            blocked, 1,
+            "round {round}: the denial is reported (inline) every time"
+        );
+        assert_eq!(
+            (failed, skipped),
+            if round == 0 { (1, 0) } else { (0, 1) },
+            "round {round}"
+        );
     }
     assert!(
         crate::health::runtime_failure_for(session, "plugin/compat/denier").is_none(),
@@ -269,19 +321,44 @@ async fn startup_validation_finds_config_failures_once_and_the_first_prompt_is_a
     assert_eq!(problems.len(), 2, "{problems:?}");
     let notice = crate::health::grouped_notice(&problems).unwrap();
     assert!(notice.starts_with("2 plugin hooks can't run: "), "{notice}");
-    assert!(notice.contains("compat (compat-no-such-binary-xyz not found)"), "{notice}");
-    assert!(notice.contains("other (needs CLAUDE_PLUGIN_DATA)"), "{notice}");
+    assert!(
+        notice.contains("compat (compat-no-such-binary-xyz not found)"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("other (needs CLAUDE_PLUGIN_DATA)"),
+        "{notice}"
+    );
     assert!(notice.ends_with(". /hooks for details."), "{notice}");
 
     assert!(
         crate::health::validate_registry(&registry, "/tmp", session).is_empty(),
         "already known: no second notice"
     );
-    let results = dispatch_non_blocking(&registry, HookEventName::SessionStart, &envelope(session), &ctx(session)).await;
-    let failed = results.iter().filter(|r| matches!(r, HookRunResult::Failed { .. })).count();
-    let skipped = results.iter().filter(|r| matches!(r, HookRunResult::Skipped { .. })).count();
-    let ok = results.iter().filter(|r| matches!(r, HookRunResult::Success { .. })).count();
-    assert_eq!((failed, skipped, ok), (0, 2, 1), "nothing fails loudly on the first prompt: {results:?}");
+    let results = dispatch_non_blocking(
+        &registry,
+        HookEventName::SessionStart,
+        &envelope(session),
+        &ctx(session),
+    )
+    .await;
+    let failed = results
+        .iter()
+        .filter(|r| matches!(r, HookRunResult::Failed { .. }))
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|r| matches!(r, HookRunResult::Skipped { .. }))
+        .count();
+    let ok = results
+        .iter()
+        .filter(|r| matches!(r, HookRunResult::Success { .. }))
+        .count();
+    assert_eq!(
+        (failed, skipped, ok),
+        (0, 2, 1),
+        "nothing fails loudly on the first prompt: {results:?}"
+    );
 }
 
 #[tokio::test]
@@ -304,17 +381,33 @@ async fn a_known_placeholder_that_is_not_set_in_args_is_a_config_failure_naming_
 #[tokio::test]
 async fn a_runtime_failure_is_listed_as_failing_with_its_last_error_until_a_good_run() {
     let dir = tempfile::tempdir().unwrap();
-    let spec = plugin_spec(dir.path(), serde_json::json!({"type": "command", "command": "echo broke >&2; exit 3"}));
+    let spec = plugin_spec(
+        dir.path(),
+        serde_json::json!({"type": "command", "command": "echo broke >&2; exit 3"}),
+    );
     let registry = registry(vec![spec.clone()]);
     let session = "compat-failing";
     let disabled = crate::trust::DisabledHooks::from_names([]);
     let before = crate::health::diagnose(&spec, session, "/tmp", &disabled);
     assert_eq!(before.state, crate::health::DiagState::Ok);
 
-    dispatch_non_blocking(&registry, HookEventName::SessionStart, &envelope(session), &ctx(session)).await;
+    dispatch_non_blocking(
+        &registry,
+        HookEventName::SessionStart,
+        &envelope(session),
+        &ctx(session),
+    )
+    .await;
     let after = crate::health::diagnose(&spec, session, "/tmp", &disabled);
     assert_eq!(after.state, crate::health::DiagState::Failing);
-    assert!(after.reason.as_deref().unwrap_or_default().contains("broke"), "{after:?}");
+    assert!(
+        after
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("broke"),
+        "{after:?}"
+    );
     assert!(after.fix_hint.is_some());
     assert_eq!(after.source, "compat");
 }
@@ -323,7 +416,10 @@ async fn a_runtime_failure_is_listed_as_failing_with_its_last_error_until_a_good
 async fn a_bare_script_beside_a_users_own_hook_file_still_runs() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("ran");
-    write_exec(&dir.path().join("mine.sh"), &format!("echo yes > {}", out.display()));
+    write_exec(
+        &dir.path().join("mine.sh"),
+        &format!("echo yes > {}", out.display()),
+    );
     let json = serde_json::json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "mine.sh"}]}]}});
     let (mut specs, errors) = parse_hook_file(&json.to_string(), &dir.path().join("hooks.json"));
     assert!(errors.is_empty());
@@ -339,11 +435,20 @@ fn args_survive_a_serde_round_trip_so_a_remote_workspace_runs_the_same_command()
         dir.path(),
         serde_json::json!({"type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/a.mjs", "--x"]}),
     );
-    assert_eq!(spec.args.as_deref(), Some(&["${CLAUDE_PLUGIN_ROOT}/a.mjs".to_string(), "--x".to_string()][..]));
+    assert_eq!(
+        spec.args.as_deref(),
+        Some(&["${CLAUDE_PLUGIN_ROOT}/a.mjs".to_string(), "--x".to_string()][..])
+    );
     let back: HookSpec = serde_json::from_value(serde_json::to_value(&spec).unwrap()).unwrap();
     assert_eq!(back.args, spec.args);
-    let shell = plugin_spec(dir.path(), serde_json::json!({"type": "command", "command": "echo hi"}));
-    assert!(serde_json::to_value(&shell).unwrap().get("args").is_none(), "the shell form adds nothing to the wire");
+    let shell = plugin_spec(
+        dir.path(),
+        serde_json::json!({"type": "command", "command": "echo hi"}),
+    );
+    assert!(
+        serde_json::to_value(&shell).unwrap().get("args").is_none(),
+        "the shell form adds nothing to the wire"
+    );
 }
 
 // ---- HOOKS-COMPAT-B: the hook's "shell" field ----
@@ -358,15 +463,25 @@ async fn shell_zero(handler_shell: Option<&str>) -> String {
     }
     let spec = plugin_spec(dir.path(), handler);
     let result = run(&spec).await;
-    assert!(matches!(result, HookRunnerResult::Success), "got {result:?}");
+    assert!(
+        matches!(result, HookRunnerResult::Success),
+        "got {result:?}"
+    );
     std::fs::read_to_string(&out).unwrap()
 }
 
 #[tokio::test]
 async fn shell_bash_runs_the_command_in_bash_and_an_absent_field_keeps_sh() {
     let with_bash = shell_zero(Some("bash")).await;
-    assert!(with_bash.ends_with("bash"), "shell:bash must run in bash, ran in {with_bash:?}");
-    assert_eq!(shell_zero(None).await, "sh", "no field keeps the existing `sh -c`");
+    assert!(
+        with_bash.ends_with("bash"),
+        "shell:bash must run in bash, ran in {with_bash:?}"
+    );
+    assert_eq!(
+        shell_zero(None).await,
+        "sh",
+        "no field keeps the existing `sh -c`"
+    );
 }
 
 #[tokio::test]
@@ -378,9 +493,15 @@ async fn a_bash_only_construct_runs_with_shell_bash() {
         "arr=(a b c); if [[ ${{#arr[@]}} -eq 3 && $BASH_VERSION != '' ]]; then printf yes > {}; fi",
         out.display()
     );
-    let spec = plugin_spec(dir.path(), serde_json::json!({"type": "command", "shell": "bash", "command": command}));
+    let spec = plugin_spec(
+        dir.path(),
+        serde_json::json!({"type": "command", "shell": "bash", "command": command}),
+    );
     let result = run(&spec).await;
-    assert!(matches!(result, HookRunnerResult::Success), "got {result:?}");
+    assert!(
+        matches!(result, HookRunnerResult::Success),
+        "got {result:?}"
+    );
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "yes");
 }
 
@@ -396,41 +517,82 @@ async fn a_missing_shell_is_a_config_failure_with_a_hint_and_never_a_silent_sh()
     let HookRunnerResult::Failed(error) = run(&spec).await else {
         panic!("a missing bash must fail the hook");
     };
-    assert!(crate::health::is_config_failure(&error), "must be a CONFIG failure, got {error:?}");
+    assert!(
+        crate::health::is_config_failure(&error),
+        "must be a CONFIG failure, got {error:?}"
+    );
     assert!(error.contains("bash not found"), "{error:?}");
-    assert!(!out.exists(), "the command must not have run under a fallback shell");
-    assert_eq!(crate::health::short_reason(crate::health::config_failure_detail(&error)), "bash not found");
+    assert!(
+        !out.exists(),
+        "the command must not have run under a fallback shell"
+    );
+    assert_eq!(
+        crate::health::short_reason(crate::health::config_failure_detail(&error)),
+        "bash not found"
+    );
 }
 
 #[tokio::test]
 async fn a_shell_that_is_not_a_plain_name_is_a_config_failure() {
-    for bad in ["/bin/bash", "my shell", "bash;id", "", "-c", "../bash", "bash\nx"] {
+    for bad in [
+        "/bin/bash",
+        "my shell",
+        "bash;id",
+        "",
+        "-c",
+        "../bash",
+        "bash\nx",
+    ] {
         let dir = tempfile::tempdir().unwrap();
-        let spec = plugin_spec(dir.path(), serde_json::json!({"type": "command", "shell": bad, "command": "echo $HOME"}));
+        let spec = plugin_spec(
+            dir.path(),
+            serde_json::json!({"type": "command", "shell": bad, "command": "echo $HOME"}),
+        );
         let HookRunnerResult::Failed(error) = run(&spec).await else {
             panic!("shell {bad:?} must be refused");
         };
-        assert!(crate::health::is_config_failure(&error), "{bad:?}: {error:?}");
-        assert!(error.contains("unsupported \"shell\""), "{bad:?}: {error:?}");
+        assert!(
+            crate::health::is_config_failure(&error),
+            "{bad:?}: {error:?}"
+        );
+        assert!(
+            error.contains("unsupported \"shell\""),
+            "{bad:?}: {error:?}"
+        );
     }
 }
 
 #[test]
 fn shell_survives_a_serde_round_trip_and_is_absent_when_unset() {
     let dir = tempfile::tempdir().unwrap();
-    let spec = plugin_spec(dir.path(), serde_json::json!({"type": "command", "shell": "bash", "command": "echo $A"}));
+    let spec = plugin_spec(
+        dir.path(),
+        serde_json::json!({"type": "command", "shell": "bash", "command": "echo $A"}),
+    );
     let value = serde_json::to_value(&spec).unwrap();
     assert_eq!(value.get("shell").and_then(|v| v.as_str()), Some("bash"));
     let back: HookSpec = serde_json::from_value(value).unwrap();
-    assert_eq!(serde_json::to_value(&back).unwrap().get("shell").and_then(|v| v.as_str()), Some("bash"));
-    let plain = plugin_spec(dir.path(), serde_json::json!({"type": "command", "command": "echo $A"}));
+    assert_eq!(
+        serde_json::to_value(&back)
+            .unwrap()
+            .get("shell")
+            .and_then(|v| v.as_str()),
+        Some("bash")
+    );
+    let plain = plugin_spec(
+        dir.path(),
+        serde_json::json!({"type": "command", "command": "echo $A"}),
+    );
     assert!(serde_json::to_value(&plain).unwrap().get("shell").is_none());
 }
 
 /// The real claude-mem 13.28.0 `hooks/hooks.json` (copied verbatim), every hook of it, with the plugin's scripts and `node` stubbed.
 #[tokio::test]
 async fn the_real_claude_mem_hooks_run_end_to_end_in_bash() {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!("hooks_compat_fixtures/claude-mem-13.28.0-hooks.json")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "hooks_compat_fixtures/claude-mem-13.28.0-hooks.json"
+    ))
+    .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let scripts = dir.path().join("scripts");
     std::fs::create_dir_all(&scripts).unwrap();
@@ -440,7 +602,10 @@ async fn the_real_claude_mem_hooks_run_end_to_end_in_bash() {
     let bin = dir.path().join(".nvm/versions/node/v99.0.0/bin");
     std::fs::create_dir_all(&bin).unwrap();
     let log = dir.path().join("node.log");
-    write_exec(&bin.join("node"), &format!("printf '%s\\n' \"$*\" >> {}", log.display()));
+    write_exec(
+        &bin.join("node"),
+        &format!("printf '%s\\n' \"$*\" >> {}", log.display()),
+    );
     let mut ran = 0;
     for (event, groups) in fixture["hooks"].as_object().unwrap() {
         // Fuigo has no `Setup` event, so the plugin's Setup hook is not loaded (as before this packet).
@@ -449,21 +614,34 @@ async fn the_real_claude_mem_hooks_run_end_to_end_in_bash() {
         }
         for group in groups.as_array().unwrap() {
             for handler in group["hooks"].as_array().unwrap() {
-                assert_eq!(handler["shell"], "bash", "the fixture is the bash-shell plugin");
+                assert_eq!(
+                    handler["shell"], "bash",
+                    "the fixture is the bash-shell plugin"
+                );
                 // `$HOME` and `$PATH` in a command are expanded when the hook file is loaded, so the hook's own `env` supplies them there.
                 let mut handler = handler.clone();
                 handler["env"] = serde_json::json!({"PATH": "/usr/bin:/bin", "HOME": dir.path().display().to_string()});
                 let spec = plugin_spec_for(dir.path(), event, handler);
                 let result = run(&spec).await;
-                assert!(matches!(result, HookRunnerResult::Success), "{event}: got {result:?}");
+                assert!(
+                    matches!(result, HookRunnerResult::Success),
+                    "{event}: got {result:?}"
+                );
                 ran += 1;
             }
         }
     }
     assert_eq!(ran, 7);
     let calls = std::fs::read_to_string(&log).unwrap();
-    assert_eq!(calls.lines().count(), 7, "every hook reached its node worker: {calls}");
-    let want = format!("{0}/scripts/bun-runner.js {0}/scripts/worker-service.cjs ", dir.path().display());
+    assert_eq!(
+        calls.lines().count(),
+        7,
+        "every hook reached its node worker: {calls}"
+    );
+    let want = format!(
+        "{0}/scripts/bun-runner.js {0}/scripts/worker-service.cjs ",
+        dir.path().display()
+    );
     assert!(calls.lines().all(|l| l.starts_with(&want)), "{calls}");
 }
 

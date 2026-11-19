@@ -53,7 +53,8 @@ pub async fn create_id_token_source(
     }
 
     if let Some(credentials) = &config.credentials {
-        return id_token_source_from_credentials(&config.custom_claims, credentials, audience).await;
+        return id_token_source_from_credentials(&config.custom_claims, credentials, audience)
+            .await;
     }
 
     match project().await? {
@@ -85,7 +86,9 @@ pub(crate) async fn id_token_source_from_credentials(
             Ok(Box::new(source))
         }
         // TODO: support impersonation and external account
-        _ => Err(error::Error::UnsupportedAccountType(credentials.tp.to_string())),
+        _ => Err(error::Error::UnsupportedAccountType(
+            credentials.tp.to_string(),
+        )),
     }?;
     let token = ts.token().await?;
     Ok(Box::new(ReuseTokenSource::new(ts, token)))

@@ -1,5 +1,5 @@
-use google_cloud_metadata::transport::RequestPolicyExt;
 use async_trait::async_trait;
+use google_cloud_metadata::transport::RequestPolicyExt;
 use urlencoding::encode;
 
 use google_cloud_metadata::{METADATA_FLAVOR_KEY, METADATA_GOOGLE, METADATA_HOST_ENV, METADATA_IP};

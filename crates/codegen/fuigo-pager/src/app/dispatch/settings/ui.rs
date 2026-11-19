@@ -2,7 +2,6 @@
 
 use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
-    set_subagent_model_inheritance_inner,
     set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
     set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
     set_confirm_before_rewind_inner, set_contextual_hint_inner, set_default_model_inner,
@@ -11,10 +10,11 @@ use super::setters::{
     set_hunk_tracker_mode_inner, set_invert_scroll_inner, set_keep_text_selection_inner,
     set_max_thoughts_width_inner, set_multiline_mode, set_page_flip_on_send_inner,
     set_prompt_suggestions_inner, set_remember_tool_approvals_inner, set_render_mermaid_inner,
-    set_respect_manual_folds_inner, set_screen_mode_inner, set_tool_density_inner, set_scroll_lines_inner,
+    set_respect_manual_folds_inner, set_screen_mode_inner, set_scroll_lines_inner,
     set_scroll_mode_inner, set_scroll_speed_inner, set_show_thinking_blocks_inner,
-    set_show_tips_inner, set_simple_mode_inner, set_theme_inner, set_timeline_inner,
-    set_timestamps, set_timestamps_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
+    set_show_tips_inner, set_simple_mode_inner, set_subagent_model_inheritance_inner,
+    set_theme_inner, set_timeline_inner, set_timestamps, set_timestamps_inner,
+    set_tool_density_inner, set_vim_mode_inner, set_voice_capture_mode_inner,
     set_voice_keybind_enabled_inner, set_voice_stt_language_inner,
 };
 use crate::app::actions::{Action, Effect};

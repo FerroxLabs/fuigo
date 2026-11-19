@@ -46,8 +46,8 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
             self.0.push_str(&format!(" {}={value:?}", field.name()));
         }
     }
-    impl<S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>> tracing_subscriber::Layer<S>
-        for Capture
+    impl<S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>>
+        tracing_subscriber::Layer<S> for Capture
     {
         fn on_new_span(
             &self,
@@ -69,7 +69,11 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
             values.record(&mut Render(&mut line));
             self.0.lock().unwrap().push(line);
         }
-        fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
             let mut line = event.metadata().name().to_owned();
             event.record(&mut Render(&mut line));
             self.0.lock().unwrap().push(line);
@@ -129,7 +133,9 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
         base_url: format!("http://{addr}/v1?key={}", SECRETS[0]),
         api_backend: ApiBackend::Responses,
         api_key: Some(SECRETS[4].to_owned()),
-        query_params: [("sig".to_owned(), SECRETS[1].to_owned())].into_iter().collect(),
+        query_params: [("sig".to_owned(), SECRETS[1].to_owned())]
+            .into_iter()
+            .collect(),
         extra_headers: [
             ("Cookie".to_owned(), format!("session={}", SECRETS[2])),
             ("x-credential".to_owned(), SECRETS[3].to_owned()),
@@ -141,7 +147,10 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
         ..minimal_config()
     };
     let client = SamplingClient::new(client_config.clone()).unwrap();
-    let request = rs::CreateResponse { input: rs::InputParam::Text("hi".to_owned()), ..Default::default() };
+    let request = rs::CreateResponse {
+        input: rs::InputParam::Text("hi".to_owned()),
+        ..Default::default()
+    };
 
     // 401 on the stream call (the path that logs the request URL and headers).
     let err = client
@@ -149,11 +158,20 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
         .await
         .err()
         .expect("the 401 is an error");
-    assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "control: the request reached the server");
-    assert!(matches!(err, SamplingError::Auth { .. }), "control: a 401, not a pre-dispatch failure: {err:?}");
+    assert!(
+        hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "control: the request reached the server"
+    );
+    assert!(
+        matches!(err, SamplingError::Auth { .. }),
+        "control: a 401, not a pre-dispatch failure: {err:?}"
+    );
     // 500 on the unary call.
     status.store(500, std::sync::atomic::Ordering::SeqCst);
-    let e = client.create_response(CreateResponseWrapper::new(request.clone())).await.expect_err("a 500 is an error");
+    let e = client
+        .create_response(CreateResponseWrapper::new(request.clone()))
+        .await
+        .expect_err("a 500 is an error");
     assert!(matches!(e, SamplingError::Api { .. }), "control: {e:?}");
     // A malformed 2xx body.
     status.store(299, std::sync::atomic::Ordering::SeqCst);
@@ -167,16 +185,29 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
         .create_response_stream(CreateResponseWrapper::new(request.clone()))
         .await
         .expect("a 200 stream opens");
-    let stream_err = futures_util::StreamExt::next(&mut stream).await.expect("an item").expect_err("a malformed event");
+    let stream_err = futures_util::StreamExt::next(&mut stream)
+        .await
+        .expect("an item")
+        .expect_err("a malformed event");
     // A malformed chunk in a Chat Completions stream.
     status.store(201, std::sync::atomic::Ordering::SeqCst);
-    let chat_client =
-        SamplingClient::new(SamplerConfig { api_backend: ApiBackend::ChatCompletions, ..client_config.clone() }).unwrap();
-    let chat_request: ChatCompletionRequest =
-        serde_json::from_value(serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] }))
-            .expect("chat request");
-    let (mut chunks, _) = chat_client.chat_completion_stream(chat_request).await.expect("a 200 stream opens");
-    let chat_err = futures_util::StreamExt::next(&mut chunks).await.expect("an item").expect_err("a malformed chunk");
+    let chat_client = SamplingClient::new(SamplerConfig {
+        api_backend: ApiBackend::ChatCompletions,
+        ..client_config.clone()
+    })
+    .unwrap();
+    let chat_request: ChatCompletionRequest = serde_json::from_value(
+        serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] }),
+    )
+    .expect("chat request");
+    let (mut chunks, _) = chat_client
+        .chat_completion_stream(chat_request)
+        .await
+        .expect("a 200 stream opens");
+    let chat_err = futures_util::StreamExt::next(&mut chunks)
+        .await
+        .expect("an item")
+        .expect_err("a malformed chunk");
     server.abort();
     // A transport failure: reqwest's error text names the request URL, and the client logs that text.
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -186,7 +217,9 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
     let offline = SamplingClient::new(SamplerConfig {
         base_url: format!("http://{closed_addr}/tenant(p70)/v1?key={}", SECRETS[0]),
         api_backend: ApiBackend::Responses,
-        query_params: [("sig".to_owned(), SECRETS[1].to_owned())].into_iter().collect(),
+        query_params: [("sig".to_owned(), SECRETS[1].to_owned())]
+            .into_iter()
+            .collect(),
         ..minimal_config()
     })
     .unwrap();
@@ -195,7 +228,10 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
         .await
         .err()
         .expect("a refused connection is an error");
-    assert!(matches!(transport, SamplingError::Http(_)), "control: a transport failure: {transport:?}");
+    assert!(
+        matches!(transport, SamplingError::Http(_)),
+        "control: a transport failure: {transport:?}"
+    );
 
     // serde errors: category and position only, in the error and in its log line.
     // (the body of a Responses event is an internally tagged enum: serde reports no position for it)
@@ -204,36 +240,79 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
         ("responses event", &stream_err, STREAM_MARK, false),
         ("chat chunk", &chat_err, CHAT_MARK, true),
     ] {
-        assert!(matches!(error, SamplingError::Serialization(_)), "control ({what}): {error:?}");
+        assert!(
+            matches!(error, SamplingError::Serialization(_)),
+            "control ({what}): {error:?}"
+        );
         let shown = error.to_string();
-        let summary = shown.strip_prefix("serialization error: ").unwrap_or_else(|| panic!("{what}: {shown}"));
-        let (category, position) = summary.split_once(" error").unwrap_or_else(|| panic!("{what}: {shown}"));
-        assert!(["Data", "Syntax", "Eof", "Io"].contains(&category), "{what}: a category is shown: {shown}");
+        let summary = shown
+            .strip_prefix("serialization error: ")
+            .unwrap_or_else(|| panic!("{what}: {shown}"));
+        let (category, position) = summary
+            .split_once(" error")
+            .unwrap_or_else(|| panic!("{what}: {shown}"));
+        assert!(
+            ["Data", "Syntax", "Eof", "Io"].contains(&category),
+            "{what}: a category is shown: {shown}"
+        );
         if positioned {
-            let column = position.strip_prefix(" at line 1 column ").unwrap_or_else(|| panic!("{what}: {shown}"));
-            assert!(column.parse::<u32>().is_ok_and(|c| c > 0), "{what}: a position is shown: {shown}");
+            let column = position
+                .strip_prefix(" at line 1 column ")
+                .unwrap_or_else(|| panic!("{what}: {shown}"));
+            assert!(
+                column.parse::<u32>().is_ok_and(|c| c > 0),
+                "{what}: a position is shown: {shown}"
+            );
         } else {
             assert_eq!(position, "", "{what}: nothing but the category: {shown}");
         }
-        assert!(!format!("{shown} {error:?}").contains("MARK"), "{what}: the error quotes the body ({mark})");
+        assert!(
+            !format!("{shown} {error:?}").contains("MARK"),
+            "{what}: the error quotes the body ({mark})"
+        );
     }
     let records = captured.lock().unwrap().clone();
     let logs = records.join("\n");
-    let failures: Vec<&String> = records.iter().filter(|r| r.contains("Failed to deserialize")).collect();
-    assert_eq!(failures.len(), 3, "control: each deserialization failure was logged once: {failures:?}");
+    let failures: Vec<&String> = records
+        .iter()
+        .filter(|r| r.contains("Failed to deserialize"))
+        .collect();
+    assert_eq!(
+        failures.len(),
+        3,
+        "control: each deserialization failure was logged once: {failures:?}"
+    );
     for record in failures {
-        assert!(record.contains(" error") && record.contains("body_len="), "{record}");
-        assert!(!record.contains("MARK"), "a deserialization failure logged the body: {record}");
+        assert!(
+            record.contains(" error") && record.contains("body_len="),
+            "{record}"
+        );
+        assert!(
+            !record.contains("MARK"),
+            "a deserialization failure logged the body: {record}"
+        );
     }
     // Nothing else logs a unary response body either. (Stream chunks are logged by the `sse_chunk` event, which
     // P70a does not change.)
-    assert!(!logs.contains(BODY_MARK), "the malformed 2xx body was logged: {logs}");
+    assert!(
+        !logs.contains(BODY_MARK),
+        "the malformed 2xx body was logged: {logs}"
+    );
 
-    assert!(logs.contains("/v1/responses"), "control: the endpoint was logged: {logs}");
+    assert!(
+        logs.contains("/v1/responses"),
+        "control: the endpoint was logged: {logs}"
+    );
     for name in ["cookie", "x-credential", "accept-encoding", "authorization"] {
-        assert!(logs.contains(&format!("header_name={name}")), "control: the header name {name} was logged: {logs}");
+        assert!(
+            logs.contains(&format!("header_name={name}")),
+            "control: the header name {name} was logged: {logs}"
+        );
     }
-    assert!(!logs.contains("header_value"), "a header value field was logged: {logs}");
+    assert!(
+        !logs.contains("header_value"),
+        "a header value field was logged: {logs}"
+    );
     let dispatch_failure = records
         .iter()
         .find(|r| r.contains("HTTP dispatch failed"))
@@ -246,7 +325,10 @@ async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no
         let chars: Vec<char> = secret.chars().collect();
         for w in chars.windows(8) {
             let frag: String = w.iter().collect();
-            assert!(!logs.contains(&frag), "the sampler logged {frag:?} of a credential: {logs}");
+            assert!(
+                !logs.contains(&frag),
+                "the sampler logged {frag:?} of a credential: {logs}"
+            );
         }
     }
 }

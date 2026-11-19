@@ -187,7 +187,10 @@ mod tests {
             "::ffff:10.0.0.1",
         ] {
             let ip: IpAddr = value.parse().unwrap();
-            assert!(is_non_public_ip(ip), "{value} must be treated as non-public");
+            assert!(
+                is_non_public_ip(ip),
+                "{value} must be treated as non-public"
+            );
             assert!(is_blocked_for_host(ip, "example.com", true), "{value}");
         }
         for value in ["2606:4700:4700::1111", "64:ff9b::8.8.8.8", "::ffff:8.8.8.8"] {

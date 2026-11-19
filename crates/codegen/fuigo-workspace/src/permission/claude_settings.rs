@@ -49,7 +49,11 @@ impl std::fmt::Debug for ClaudeSettings {
             .field("permissions", permissions)
             .field("default_mode", default_mode)
             .field("additional_directories", additional_directories)
-            .field("env", &env.as_ref().map(|m| m.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>()))
+            .field(
+                "env",
+                &env.as_ref()
+                    .map(|m| m.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>()),
+            )
             .finish()
     }
 }
@@ -569,7 +573,9 @@ fn read_settings_text(path: &Path) -> std::io::Result<Option<String>> {
 
 /// A rule or error text with control characters removed: it comes from a project file and is shown to the user.
 fn printable(text: &str) -> String {
-    text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Rules shown per file before the rest are only counted.
@@ -611,12 +617,24 @@ pub fn permission_load_warnings(cwd: &Path, project_trusted: bool) -> Vec<String
             continue;
         };
         let mut bad: Vec<String> = Vec::new();
-        for (label, action) in [("allow", RuleAction::Allow), ("deny", RuleAction::Deny), ("ask", RuleAction::Ask)] {
+        for (label, action) in [
+            ("allow", RuleAction::Allow),
+            ("deny", RuleAction::Deny),
+            ("ask", RuleAction::Ask),
+        ] {
             let (entries, problems) = extract_string_array(perms.get(label));
-            bad.extend(problems.into_iter().map(|p| format!("permissions.{label}: {}", printable(&p))));
+            bad.extend(
+                problems
+                    .into_iter()
+                    .map(|p| format!("permissions.{label}: {}", printable(&p))),
+            );
             for rule in entries {
                 if let Err(e) = parse_permission_rule(&rule, action) {
-                    bad.push(format!("`{}` ({})", printable(&rule), printable(&e.to_string())));
+                    bad.push(format!(
+                        "`{}` ({})",
+                        printable(&rule),
+                        printable(&e.to_string())
+                    ));
                 }
             }
         }
@@ -626,7 +644,11 @@ pub fn permission_load_warnings(cwd: &Path, project_trusted: bool) -> Vec<String
         let total = bad.len();
         let more = total.saturating_sub(MAX_REPORTED_RULES);
         bad.truncate(MAX_REPORTED_RULES);
-        let noun = if total == 1 { "permission rule" } else { "permission rules" };
+        let noun = if total == 1 {
+            "permission rule"
+        } else {
+            "permission rules"
+        };
         let mut note = format!("{total} {noun} in {shown} did not load: {}", bad.join("; "));
         if more > 0 {
             note.push_str(&format!("; and {more} more"));

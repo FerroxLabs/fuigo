@@ -70,7 +70,10 @@ pub(crate) struct MarkedWord {
 }
 
 /// [`normalise_word_marking_globs`] over a parsed word node's source text.
-pub(crate) fn normalise_word_node_marking_globs(node: Node<'_>, src: &str) -> Result<Vec<MarkedWord>, Unresolved> {
+pub(crate) fn normalise_word_node_marking_globs(
+    node: Node<'_>,
+    src: &str,
+) -> Result<Vec<MarkedWord>, Unresolved> {
     match node.utf8_text(src.as_bytes()) {
         Ok(text) => normalise_word_marking_globs(text),
         Err(_) => Err(Unresolved::Malformed),
@@ -126,7 +129,9 @@ pub(crate) fn normalise_word_marking_globs(raw: &str) -> Result<Vec<MarkedWord>,
 #[cfg(test)]
 pub(crate) fn normalise_word(raw: &str) -> NormalisedWord {
     match normalise_word_marking_globs(raw) {
-        Ok(words) if words.iter().any(|w| w.glob != GlobMark::Literal) => NormalisedWord::Unresolved(Unresolved::Glob),
+        Ok(words) if words.iter().any(|w| w.glob != GlobMark::Literal) => {
+            NormalisedWord::Unresolved(Unresolved::Glob)
+        }
         Ok(words) => NormalisedWord::Words(words.into_iter().map(|w| w.text).collect()),
         Err(reason) => NormalisedWord::Unresolved(reason),
     }
@@ -150,7 +155,9 @@ fn glob_mark(word: &[Char]) -> GlobMark {
     match word.first() {
         Some(first) if first.ch == '-' => GlobMark::OptionCapable,
         Some(first) if !first.quoted && matches!(first.ch, '*' | '?') => GlobMark::OptionCapable,
-        Some(first) if !first.quoted && first.ch == '[' && word[1..].iter().any(|c| c.ch == ']') => {
+        Some(first)
+            if !first.quoted && first.ch == '[' && word[1..].iter().any(|c| c.ch == ']') =>
+        {
             GlobMark::OptionCapable
         }
         _ => GlobMark::Anchored,
@@ -334,7 +341,10 @@ fn brace_expand(word: &[Char], out: &mut Vec<Vec<Char>>, level: usize) -> Result
             let mut bounds = vec![start];
             bounds.extend(commas);
             bounds.push(end);
-            bounds.windows(2).map(|pair| word[pair[0] + 1..pair[1]].to_vec()).collect()
+            bounds
+                .windows(2)
+                .map(|pair| word[pair[0] + 1..pair[1]].to_vec())
+                .collect()
         };
         for alternative in alternatives {
             let mut next = word[..start].to_vec();
@@ -390,9 +400,17 @@ fn sequence(body: &str) -> Result<Option<Vec<String>>, Unresolved> {
             let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
             digits.len() > 1 && digits.starts_with('0')
         };
-        let width = if padded(parts[0]) || padded(parts[1]) { parts[0].len().max(parts[1].len()) } else { 0 };
+        let width = if padded(parts[0]) || padded(parts[1]) {
+            parts[0].len().max(parts[1].len())
+        } else {
+            0
+        };
         return Ok(Some(steps(from, to, step, |at| {
-            let digits = format!("{:0>width$}", at.abs(), width = width.saturating_sub(usize::from(at < 0)));
+            let digits = format!(
+                "{:0>width$}",
+                at.abs(),
+                width = width.saturating_sub(usize::from(at < 0))
+            );
             if at < 0 { format!("-{digits}") } else { digits }
         })));
     }
@@ -407,7 +425,9 @@ fn sequence(body: &str) -> Result<Option<Vec<String>>, Unresolved> {
         if count(from, to) > WORD_CAP as i128 {
             return Err(Unresolved::OverCap);
         }
-        return Ok(Some(steps(from, to, step, |at| char::from(at as u8).to_string())));
+        return Ok(Some(steps(from, to, step, |at| {
+            char::from(at as u8).to_string()
+        })));
     }
     Ok(None)
 }
@@ -430,8 +450,8 @@ fn steps(from: i128, to: i128, step: i128, render: impl Fn(i128) -> String) -> V
 #[cfg(test)]
 mod tests {
     use super::{
-        GlobMark, NormalisedWord, Unresolved, WORD_CAP, normalise_word, normalise_word_keeping_globs,
-        normalise_word_marking_globs,
+        GlobMark, NormalisedWord, Unresolved, WORD_CAP, normalise_word,
+        normalise_word_keeping_globs, normalise_word_marking_globs,
     };
 
     fn words(raw: &str) -> Vec<String> {
@@ -450,7 +470,15 @@ mod tests {
 
     #[test]
     fn plain_words_are_unchanged() {
-        for raw in ["ls", "-la", "src/main.rs", "--color=auto", "42", "a,b", "a}b"] {
+        for raw in [
+            "ls",
+            "-la",
+            "src/main.rs",
+            "--color=auto",
+            "42",
+            "a,b",
+            "a}b",
+        ] {
             assert_eq!(words(raw), vec![raw.to_owned()]);
         }
     }
@@ -513,12 +541,18 @@ mod tests {
     #[test]
     fn brace_expansion_over_the_cap_is_unresolved() {
         assert_eq!(words(&format!("{{1..{WORD_CAP}}}")).len(), WORD_CAP);
-        assert_eq!(unresolved(&format!("{{1..{}}}", WORD_CAP + 1)), Unresolved::OverCap);
+        assert_eq!(
+            unresolved(&format!("{{1..{}}}", WORD_CAP + 1)),
+            Unresolved::OverCap
+        );
         assert_eq!(unresolved("{1..99999999999999999999}"), Unresolved::OverCap);
         assert_eq!(unresolved("{A..z}{a,b}"), Unresolved::OverCap);
         // 4 * 4 * 4 = 64 fits; one more factor does not.
         assert_eq!(words("{a,b,c,d}{a,b,c,d}{a,b,c,d}").len(), 64);
-        assert_eq!(unresolved("{a,b,c,d}{a,b,c,d}{a,b,c,d}{a,b}"), Unresolved::OverCap);
+        assert_eq!(
+            unresolved("{a,b,c,d}{a,b,c,d}{a,b,c,d}{a,b}"),
+            Unresolved::OverCap
+        );
     }
 
     /// u35 r2: nesting depth and the number of expansion steps are capped before any alternative is copied, so a deep
@@ -526,12 +560,21 @@ mod tests {
     #[test]
     fn brace_nesting_and_steps_are_capped() {
         let nest = |depth: usize| format!("{}a{}", "{".repeat(depth), ",b}".repeat(depth));
-        assert_eq!(words(&nest(super::BRACE_DEPTH_CAP)).len(), super::BRACE_DEPTH_CAP + 1);
-        assert_eq!(unresolved(&nest(super::BRACE_DEPTH_CAP + 1)), Unresolved::OverCap);
+        assert_eq!(
+            words(&nest(super::BRACE_DEPTH_CAP)).len(),
+            super::BRACE_DEPTH_CAP + 1
+        );
+        assert_eq!(
+            unresolved(&nest(super::BRACE_DEPTH_CAP + 1)),
+            Unresolved::OverCap
+        );
         assert_eq!(unresolved(&nest(5000)), Unresolved::OverCap);
         // Many sibling groups of one alternative each never reach the word cap, only the step cap.
         assert_eq!(unresolved(&"{1..1}".repeat(5000)), Unresolved::OverCap);
-        assert_eq!(unresolved(&format!("{{{}}}", vec!["a"; 5000].join(","))), Unresolved::OverCap);
+        assert_eq!(
+            unresolved(&format!("{{{}}}", vec!["a"; 5000].join(","))),
+            Unresolved::OverCap
+        );
     }
 
     #[test]
@@ -551,10 +594,22 @@ mod tests {
     #[test]
     fn keeping_globs_returns_the_pattern() {
         let keep = |raw| normalise_word_keeping_globs(raw);
-        assert_eq!(keep("src/*.rs"), NormalisedWord::Words(vec!["src/*.rs".to_owned()]));
-        assert_eq!(keep("'s'rc/{a,b}*"), NormalisedWord::Words(vec!["src/a*".to_owned(), "src/b*".to_owned()]));
-        assert_eq!(keep("$X*"), NormalisedWord::Unresolved(Unresolved::Expansion));
-        assert_eq!(keep("{1..99999}"), NormalisedWord::Unresolved(Unresolved::OverCap));
+        assert_eq!(
+            keep("src/*.rs"),
+            NormalisedWord::Words(vec!["src/*.rs".to_owned()])
+        );
+        assert_eq!(
+            keep("'s'rc/{a,b}*"),
+            NormalisedWord::Words(vec!["src/a*".to_owned(), "src/b*".to_owned()])
+        );
+        assert_eq!(
+            keep("$X*"),
+            NormalisedWord::Unresolved(Unresolved::Expansion)
+        );
+        assert_eq!(
+            keep("{1..99999}"),
+            NormalisedWord::Unresolved(Unresolved::OverCap)
+        );
     }
 
     #[test]
@@ -573,7 +628,11 @@ mod tests {
     }
 
     fn marks(raw: &str) -> Vec<GlobMark> {
-        normalise_word_marking_globs(raw).unwrap().into_iter().map(|w| w.glob).collect()
+        normalise_word_marking_globs(raw)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.glob)
+            .collect()
     }
 
     #[test]

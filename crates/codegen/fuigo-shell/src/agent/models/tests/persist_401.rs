@@ -4,8 +4,8 @@
 use super::*;
 use crate::auth::api_key_probe::probe_fuigo_api_key;
 use crate::auth::api_key_route_memory::test_clock;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 const KEY: &str = "fuigo-test-not-a-key";
 const T0: u64 = 1_800_000_000;
@@ -48,13 +48,23 @@ impl Mock {
                 );
             }
         });
-        Self { port, log, models_status, stop }
+        Self {
+            port,
+            log,
+            models_status,
+            stop,
+        }
     }
     fn base(&self) -> String {
         format!("http://127.0.0.1:{}/v1", self.port)
     }
     fn count(&self, path: &str) -> usize {
-        self.log.lock().unwrap().iter().filter(|l| l.ends_with(path) && l.starts_with("GET")).count()
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.ends_with(path) && l.starts_with("GET"))
+            .count()
     }
 }
 impl Drop for Mock {
@@ -80,7 +90,11 @@ impl World {
         test_clock::NOW.store(T0, Ordering::SeqCst);
         test_clock::PROBE_MEMORY_OFF.store(false, Ordering::SeqCst);
         test_clock::MODELS_MEMORY_OFF.store(false, Ordering::SeqCst);
-        Self { _home: home, _env: env, mock: Mock::start() }
+        Self {
+            _home: home,
+            _env: env,
+            mock: Mock::start(),
+        }
     }
     fn file(&self) -> std::path::PathBuf {
         fuigo_dirs::fuigo_home().join("api-key-probe-state.json")
@@ -89,7 +103,9 @@ impl World {
         test_clock::NOW.store(T0 + secs, Ordering::SeqCst);
     }
     fn entries(&self) -> Vec<serde_json::Value> {
-        let Ok(b) = std::fs::read(self.file()) else { return vec![] };
+        let Ok(b) = std::fs::read(self.file()) else {
+            return vec![];
+        };
         let v: serde_json::Value = serde_json::from_slice(&b).unwrap_or_default();
         v["models_401"].as_array().cloned().unwrap_or_default()
     }
@@ -107,9 +123,15 @@ impl World {
         let _ = tokio::task::spawn_blocking(move || prefetch_models_blocking(&eps, None, fa)).await;
         let tmp = tempfile::TempDir::new().unwrap();
         let auth_manager = Arc::new(AuthManager::new(tmp.path(), FuigoComConfig::default()));
-        let mgr = ModelsManagerBuilder::new(None, IndexMap::new(), acp::ModelId::new("default"), auth_manager, cfg)
-            .cache(test_cache_manager(tmp.path()))
-            .build();
+        let mgr = ModelsManagerBuilder::new(
+            None,
+            IndexMap::new(),
+            acp::ModelId::new("default"),
+            auth_manager,
+            cfg,
+        )
+        .cache(test_cache_manager(tmp.path()))
+        .build();
         mgr.fetch_and_apply_inner(true).await;
     }
 }
@@ -128,14 +150,22 @@ async fn a_new_process_inside_the_wait_sends_nothing_and_the_table_climbs() {
         let before = w.mock.count("/v1/models");
         w.at(t);
         w.start_process(false).await;
-        assert_eq!(w.mock.count("/v1/models") - before, 1, "attempt {i}: one request per start that is due");
+        assert_eq!(
+            w.mock.count("/v1/models") - before,
+            1,
+            "attempt {i}: one request per start that is due"
+        );
         let e = w.entries();
         assert_eq!(e.len(), 1, "attempt {i}: one entry");
         assert_eq!(e[0]["n"].as_u64(), Some(i as u64 + 1), "attempt {i}: count");
         let before = w.mock.count("/v1/models");
         w.at(t + wait * 60 - 1);
         w.start_process(false).await;
-        assert_eq!(w.mock.count("/v1/models"), before, "attempt {i}: a start inside the wait sends nothing");
+        assert_eq!(
+            w.mock.count("/v1/models"),
+            before,
+            "attempt {i}: a start inside the wait sends nothing"
+        );
         t += wait * 60 + 1;
     }
 }
@@ -189,10 +219,16 @@ async fn a_different_credential_fetches_at_once() {
     w.at(5);
     let _other = EnvGuard::set("FUIGO_API_KEY", "fuigo-test-not-a-key-2");
     w.start_process(false).await;
-    assert!(w.mock.count("/v1/models") > n, "another key has its own (empty) memory");
+    assert!(
+        w.mock.count("/v1/models") > n,
+        "another key has its own (empty) memory"
+    );
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test]
 #[serial]
 async fn unreadable_future_dated_and_older_files_never_block() {
@@ -203,9 +239,17 @@ async fn unreadable_future_dated_and_older_files_never_block() {
     std::fs::write(w.file(), b"{ not json").unwrap();
     w.start_process(false).await;
     assert_eq!(w.mock.count("/v1/models"), 1, "a corrupt file is no memory");
-    assert_eq!(w.entries().len(), 1, "and it is overwritten with a valid file");
+    assert_eq!(
+        w.entries().len(),
+        1,
+        "and it is overwritten with a valid file"
+    );
     // A file written by part A alone (no models_401 field) parses and keeps its lists.
-    std::fs::write(w.file(), br#"{"unsupported":[{"h":"aa","t":1800000001}],"verdicts":[]}"#).unwrap();
+    std::fs::write(
+        w.file(),
+        br#"{"unsupported":[{"h":"aa","t":1800000001}],"verdicts":[]}"#,
+    )
+    .unwrap();
     w.at(1);
     w.start_process(false).await;
     assert_eq!(w.mock.count("/v1/models"), 2);
@@ -215,7 +259,11 @@ async fn unreadable_future_dated_and_older_files_never_block() {
     w.at(0);
     let before = w.mock.count("/v1/models");
     w.start_process(false).await;
-    assert_eq!(w.mock.count("/v1/models") - before, 1, "a future-dated entry is ignored");
+    assert_eq!(
+        w.mock.count("/v1/models") - before,
+        1,
+        "a future-dated entry is ignored"
+    );
     // Oversized file: no memory.
     std::fs::write(w.file(), vec![b' '; 70 * 1024]).unwrap();
     let before = w.mock.count("/v1/models");
@@ -233,8 +281,17 @@ async fn the_file_holds_no_key_no_url_and_no_response_data() {
     w.start_process(true).await;
     let bytes = std::fs::read(w.file()).unwrap();
     let text = String::from_utf8_lossy(&bytes);
-    for bad in [KEY, "127.0.0.1", "http", "bad key", &w.mock.port.to_string()] {
-        assert!(!text.contains(bad), "the memory file must not contain {bad:?}");
+    for bad in [
+        KEY,
+        "127.0.0.1",
+        "http",
+        "bad key",
+        &w.mock.port.to_string(),
+    ] {
+        assert!(
+            !text.contains(bad),
+            "the memory file must not contain {bad:?}"
+        );
     }
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let e = &v["models_401"][0];
@@ -251,7 +308,11 @@ async fn fifty_six_starts_in_an_hour_before_and_after() {
         return;
     }
     let mut rows = Vec::new();
-    for (name, probe_off, models_off) in [("BEFORE (no memory)", true, true), ("A+B (no disk backoff)", false, true), ("A+B+C", false, false)] {
+    for (name, probe_off, models_off) in [
+        ("BEFORE (no memory)", true, true),
+        ("A+B (no disk backoff)", false, true),
+        ("A+B+C", false, false),
+    ] {
         let w = World::new();
         test_clock::PROBE_MEMORY_OFF.store(probe_off, Ordering::SeqCst);
         test_clock::MODELS_MEMORY_OFF.store(models_off, Ordering::SeqCst);
@@ -260,12 +321,27 @@ async fn fifty_six_starts_in_an_hour_before_and_after() {
             w.start_process(true).await;
         }
         let (p, m) = (w.mock.count("/v1/api-key"), w.mock.count("/v1/models"));
-        eprintln!("SIM60 {name}: /v1/api-key={p} /v1/models={m} total={}", w.mock.log.lock().unwrap().len());
+        eprintln!(
+            "SIM60 {name}: /v1/api-key={p} /v1/models={m} total={}",
+            w.mock.log.lock().unwrap().len()
+        );
         rows.push((p, m));
     }
-    assert_eq!(rows[0], (56, 112), "before: a probe and two model requests per start");
-    assert_eq!(rows[1], (1, 112), "A+B: the probe is remembered, every start still fetches twice");
-    assert_eq!(rows[2], (1, 6), "A+B+C: one attempt each time the wait expires (starts 0,1,3,7,15,30)");
+    assert_eq!(
+        rows[0],
+        (56, 112),
+        "before: a probe and two model requests per start"
+    );
+    assert_eq!(
+        rows[1],
+        (1, 112),
+        "A+B: the probe is remembered, every start still fetches twice"
+    );
+    assert_eq!(
+        rows[2],
+        (1, 6),
+        "A+B+C: one attempt each time the wait expires (starts 0,1,3,7,15,30)"
+    );
 }
 
 /// An auth command that returns a NEW rejected token every call must not restart the fast loop: 56 starts, 65 s apart,
@@ -289,9 +365,15 @@ async fn a_flapping_credential_is_capped_by_the_url_level_table() {
     }
     let total = w.mock.count("/v1/models");
     eprintln!("FLAP60: 56 starts with 56 different rejected keys -> {total} /v1/models requests");
-    assert_eq!(first_three, 3, "a credential never seen before fetches at once while the URL count is below 3");
+    assert_eq!(
+        first_three, 3,
+        "a credential never seen before fetches at once while the URL count is below 3"
+    );
     // 3 free; then URL counts 3.. give waits 1, 2, 4, 8, 16, 30 min: starts at 195, 325+, ...
-    assert_eq!(total, 8, "starts 0,1,2 free, then 3,5,9,17,32 on the URL table");
+    assert_eq!(
+        total, 8,
+        "starts 0,1,2 free, then 3,5,9,17,32 on the URL table"
+    );
 }
 
 /// A successful sign-in clears the URL-level run and every credential's run: the next fetch happens at once.
@@ -311,12 +393,20 @@ async fn a_successful_sign_in_clears_the_url_level_entry() {
     w.at(3 * 130 + 60);
     let _key = EnvGuard::set("FUIGO_API_KEY", "fuigo-test-not-a-key-new");
     w.start_process(false).await;
-    assert_eq!(w.mock.count("/v1/models"), n, "the URL-level wait holds a new unseen token");
+    assert_eq!(
+        w.mock.count("/v1/models"),
+        n,
+        "the URL-level wait holds a new unseen token"
+    );
     crate::auth::api_key_route_memory::RouteMemory::models_location()
         .unwrap()
         .clear_all_models_401(crate::auth::api_key_route_memory::unix_now());
     w.start_process(false).await;
-    assert_eq!(w.mock.count("/v1/models"), n + 1, "after a sign-in the next fetch is at once");
+    assert_eq!(
+        w.mock.count("/v1/models"),
+        n + 1,
+        "after a sign-in the next fetch is at once"
+    );
     assert!(w.entries().len() <= 1);
 }
 
@@ -324,7 +414,6 @@ async fn a_successful_sign_in_clears_the_url_level_entry() {
 #[tokio::test(start_paused = true)]
 #[serial]
 async fn a_cache_hit_does_not_clear_the_wait() {
-    
     let _api_key = api_key_env_unset();
     let (mgr, calls) = cached_after_reject_manager();
     mgr.fetch_and_apply_inner(true).await;
@@ -332,19 +421,37 @@ async fn a_cache_hit_does_not_clear_the_wait() {
     tokio::time::sleep(std::time::Duration::from_secs(61)).await;
     mgr.fetch_and_apply_inner(true).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    assert_eq!(mgr.inner.auth_gate.lock().rejections, 1, "a cache hit leaves the rejection run alone");
+    assert_eq!(
+        mgr.inner.auth_gate.lock().rejections,
+        1,
+        "a cache hit leaves the rejection run alone"
+    );
 }
 
 /// First answer 401, every later one a fresh-cache hit.
 struct RejectThenCached(Arc<std::sync::atomic::AtomicUsize>);
 impl ModelsEndpoint for RejectThenCached {
-    fn fetch_models(&self, _e: config::EndpointsConfig, _a: Option<FuigoAuth>, _f: ModelFetchAuth) -> ModelsFetchFuture {
+    fn fetch_models(
+        &self,
+        _e: config::EndpointsConfig,
+        _a: Option<FuigoAuth>,
+        _f: ModelFetchAuth,
+    ) -> ModelsFetchFuture {
         Box::pin(async { None })
     }
-    fn fetch_models_outcome(&self, _e: config::EndpointsConfig, _a: Option<FuigoAuth>, _f: ModelFetchAuth) -> ModelsOutcomeFuture {
+    fn fetch_models_outcome(
+        &self,
+        _e: config::EndpointsConfig,
+        _a: Option<FuigoAuth>,
+        _f: ModelFetchAuth,
+    ) -> ModelsOutcomeFuture {
         let n = self.0.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
-            if n == 0 { ModelsFetchOutcome::AuthRejected } else { ModelsFetchOutcome::Cached(IndexMap::new()) }
+            if n == 0 {
+                ModelsFetchOutcome::AuthRejected
+            } else {
+                ModelsFetchOutcome::Cached(IndexMap::new())
+            }
         })
     }
 }
@@ -352,10 +459,16 @@ fn cached_after_reject_manager() -> (ModelsManager, Arc<std::sync::atomic::Atomi
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let tmp = tempfile::TempDir::new().unwrap();
     let auth_manager = Arc::new(AuthManager::new(tmp.path(), FuigoComConfig::default()));
-    let mgr = ModelsManagerBuilder::new(None, IndexMap::new(), acp::ModelId::new("default"), auth_manager, config::Config::default())
-        .endpoint(Arc::new(RejectThenCached(calls.clone())))
-        .cache(test_cache_manager(tmp.path()))
-        .build();
+    let mgr = ModelsManagerBuilder::new(
+        None,
+        IndexMap::new(),
+        acp::ModelId::new("default"),
+        auth_manager,
+        config::Config::default(),
+    )
+    .endpoint(Arc::new(RejectThenCached(calls.clone())))
+    .cache(test_cache_manager(tmp.path()))
+    .build();
     (mgr, calls)
 }
 
@@ -363,10 +476,20 @@ fn cached_after_reject_manager() -> (ModelsManager, Arc<std::sync::atomic::Atomi
 
 struct NoNet;
 impl ModelsEndpoint for NoNet {
-    fn fetch_models(&self, _e: config::EndpointsConfig, _a: Option<FuigoAuth>, _f: ModelFetchAuth) -> ModelsFetchFuture {
+    fn fetch_models(
+        &self,
+        _e: config::EndpointsConfig,
+        _a: Option<FuigoAuth>,
+        _f: ModelFetchAuth,
+    ) -> ModelsFetchFuture {
         Box::pin(async { None })
     }
-    fn fetch_models_outcome(&self, _e: config::EndpointsConfig, _a: Option<FuigoAuth>, _f: ModelFetchAuth) -> ModelsOutcomeFuture {
+    fn fetch_models_outcome(
+        &self,
+        _e: config::EndpointsConfig,
+        _a: Option<FuigoAuth>,
+        _f: ModelFetchAuth,
+    ) -> ModelsOutcomeFuture {
         Box::pin(async { ModelsFetchOutcome::Unavailable })
     }
 }
@@ -382,7 +505,9 @@ impl World {
         self.at(140);
     }
     fn url_entries(&self) -> usize {
-        let Ok(b) = std::fs::read(self.file()) else { return 0 };
+        let Ok(b) = std::fs::read(self.file()) else {
+            return 0;
+        };
         let v: serde_json::Value = serde_json::from_slice(&b).unwrap_or_default();
         v["models_401_url"].as_array().map_or(0, |a| a.len())
     }
@@ -391,14 +516,23 @@ impl World {
         let tmp = tempfile::TempDir::new().unwrap();
         let auth_manager = Arc::new(AuthManager::new(tmp.path(), FuigoComConfig::default()));
         if let Some(t) = first_token {
-            auth_manager.hot_swap(FuigoAuth { key: t.to_owned(), ..FuigoAuth::test_default() });
+            auth_manager.hot_swap(FuigoAuth {
+                key: t.to_owned(),
+                ..FuigoAuth::test_default()
+            });
         }
         let mut cfg = config::Config::default();
         cfg.endpoints.fuigo_api_base_url = self.mock.base();
-        let mgr = ModelsManagerBuilder::new(None, IndexMap::new(), acp::ModelId::new("default"), auth_manager.clone(), cfg)
-            .endpoint(Arc::new(NoNet))
-            .cache(test_cache_manager(tmp.path()))
-            .build();
+        let mgr = ModelsManagerBuilder::new(
+            None,
+            IndexMap::new(),
+            acp::ModelId::new("default"),
+            auth_manager.clone(),
+            cfg,
+        )
+        .endpoint(Arc::new(NoNet))
+        .cache(test_cache_manager(tmp.path()))
+        .build();
         std::mem::forget(tmp);
         (mgr, auth_manager)
     }
@@ -414,15 +548,34 @@ async fn an_auth_file_change_to_a_new_credential_clears_the_url_wait() {
     let w = World::new();
     w.url_wait_running().await;
     let (mgr, am) = w.manager(Some("fuigo-test-not-a-token-old"));
-    assert_eq!(w.url_entries(), 1, "precondition: the URL-level entry exists");
+    assert_eq!(
+        w.url_entries(),
+        1,
+        "precondition: the URL-level entry exists"
+    );
     let n = w.mock.count("/v1/models");
     w.start_process(false).await;
-    assert_eq!(w.mock.count("/v1/models"), n, "precondition: the URL wait holds");
-    am.hot_swap(FuigoAuth { key: "fuigo-test-not-a-token-new".into(), ..FuigoAuth::test_default() });
+    assert_eq!(
+        w.mock.count("/v1/models"),
+        n,
+        "precondition: the URL wait holds"
+    );
+    am.hot_swap(FuigoAuth {
+        key: "fuigo-test-not-a-token-new".into(),
+        ..FuigoAuth::test_default()
+    });
     mgr.on_auth_changed().await;
-    assert_eq!(w.url_entries(), 0, "a new credential is a sign-in: the URL entry is gone");
+    assert_eq!(
+        w.url_entries(),
+        0,
+        "a new credential is a sign-in: the URL entry is gone"
+    );
     w.start_process(false).await;
-    assert_eq!(w.mock.count("/v1/models"), n + 1, "the next background fetch happens at once");
+    assert_eq!(
+        w.mock.count("/v1/models"),
+        n + 1,
+        "the next background fetch happens at once"
+    );
 }
 
 /// (ii) The watcher also fires for unrelated rewrites of `auth.json`: the SAME credential must not clear the wait.
@@ -435,10 +588,17 @@ async fn an_auth_file_touch_with_the_same_credential_keeps_the_url_wait() {
     let w = World::new();
     w.url_wait_running().await;
     let (mgr, am) = w.manager(Some("fuigo-test-not-a-token-old"));
-    am.hot_swap(FuigoAuth { key: "fuigo-test-not-a-token-old".into(), ..FuigoAuth::test_default() });
+    am.hot_swap(FuigoAuth {
+        key: "fuigo-test-not-a-token-old".into(),
+        ..FuigoAuth::test_default()
+    });
     mgr.on_auth_changed().await;
     mgr.on_auth_changed().await;
-    assert_eq!(w.url_entries(), 1, "the same credential does not clear the URL entry");
+    assert_eq!(
+        w.url_entries(),
+        1,
+        "the same credential does not clear the URL entry"
+    );
     let n = w.mock.count("/v1/models");
     w.start_process(false).await;
     assert_eq!(w.mock.count("/v1/models"), n, "and the wait still holds");
@@ -455,10 +615,21 @@ async fn the_subscription_unblock_refresh_clears_the_wait_only_for_a_new_token()
     w.url_wait_running().await;
     let (mgr, am) = w.manager(Some("fuigo-test-not-a-token-old"));
     mgr.on_auth_changed().await;
-    assert_eq!(w.url_entries(), 1, "refresh gave back the same token: still waiting");
-    am.hot_swap(FuigoAuth { key: "fuigo-test-not-a-token-reissued".into(), ..FuigoAuth::test_default() });
+    assert_eq!(
+        w.url_entries(),
+        1,
+        "refresh gave back the same token: still waiting"
+    );
+    am.hot_swap(FuigoAuth {
+        key: "fuigo-test-not-a-token-reissued".into(),
+        ..FuigoAuth::test_default()
+    });
     mgr.on_auth_changed().await;
-    assert_eq!(w.url_entries(), 0, "a re-issued token is a new credential: cleared");
+    assert_eq!(
+        w.url_entries(),
+        0,
+        "a re-issued token is a new credential: cleared"
+    );
 }
 
 /// Signing out (no credential left) is not a sign-in.

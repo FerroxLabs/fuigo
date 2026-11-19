@@ -315,7 +315,11 @@ where
     {
         Ok(file) => file,
         Err(err) => {
-            fuigo_tty_utils::cli_eprintln!("Failed to open chrome trace file {}: {}", fuigo_tty_utils::untrusted(path.display()), fuigo_tty_utils::untrusted(err));
+            fuigo_tty_utils::cli_eprintln!(
+                "Failed to open chrome trace file {}: {}",
+                fuigo_tty_utils::untrusted(path.display()),
+                fuigo_tty_utils::untrusted(err)
+            );
             return build_log_layer(InstrumentationMode::Disabled);
         }
     };
@@ -393,7 +397,9 @@ pub fn install_panic_hook() {
         use std::io::IsTerminal;
         let thread = std::thread::current();
         match scrubbed_panic_line(thread.name(), location.as_deref(), &message) {
-            Some(line) if std::io::stderr().is_terminal() => fuigo_tty_utils::best_effort_stderr::eprint_line(&line),
+            Some(line) if std::io::stderr().is_terminal() => {
+                fuigo_tty_utils::best_effort_stderr::eprint_line(&line)
+            }
             _ => default_hook(info),
         }
     }));
@@ -401,7 +407,11 @@ pub fn install_panic_hook() {
 
 /// The panic line with the message passed through the terminal line filter, or `None` when the filter changes nothing
 /// (the default hook can then print it as it always did).
-fn scrubbed_panic_line(thread: Option<&str>, location: Option<&str>, message: &str) -> Option<String> {
+fn scrubbed_panic_line(
+    thread: Option<&str>,
+    location: Option<&str>,
+    message: &str,
+) -> Option<String> {
     let shown = fuigo_tty_utils::scrub_terminal_text(message);
     if shown == message {
         return None;
@@ -790,8 +800,16 @@ mod panic_line_tests {
     /// and the location kept; a clean payload is left to the default hook.
     #[test]
     fn a_hostile_panic_payload_is_filtered_and_a_clean_one_is_left_alone() {
-        let line = scrubbed_panic_line(Some("main"), Some("src/a.rs:1:2"), "bad \x1b]0;owned\x07 \x1b[2J\nsecond").unwrap();
-        assert_eq!(line, "thread 'main' panicked at src/a.rs:1:2:\nbad  ]0;owned   [2J\nsecond");
+        let line = scrubbed_panic_line(
+            Some("main"),
+            Some("src/a.rs:1:2"),
+            "bad \x1b]0;owned\x07 \x1b[2J\nsecond",
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            "thread 'main' panicked at src/a.rs:1:2:\nbad  ]0;owned   [2J\nsecond"
+        );
         assert!(scrubbed_panic_line(Some("main"), None, "plain message").is_none());
     }
 
@@ -799,6 +817,9 @@ mod panic_line_tests {
     #[test]
     fn a_colour_only_panic_payload_is_filtered() {
         let line = scrubbed_panic_line(Some("main"), None, "\x1b[30mhidden\x1b[0m").unwrap();
-        assert_eq!(line, "thread 'main' panicked at <unknown>:\n [30mhidden [0m");
+        assert_eq!(
+            line,
+            "thread 'main' panicked at <unknown>:\n [30mhidden [0m"
+        );
     }
 }

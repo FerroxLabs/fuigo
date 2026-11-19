@@ -49,28 +49,45 @@ fn point_indices(path: &Path) -> Vec<u64> {
 }
 
 /// `fuigo/rewind/execute`; an error response is returned as `Err` instead of failing the test.
-async fn rewind(conn: &acp::ClientSideConnection, session: &acp::SessionId, target: usize) -> Result<Value, String> {
+async fn rewind(
+    conn: &acp::ClientSideConnection,
+    session: &acp::SessionId,
+    target: usize,
+) -> Result<Value, String> {
     let params = json!({ "sessionId": session.to_string(), "targetPromptIndex": target, "force": true, "mode": "all" });
-    let raw = serde_json::value::RawValue::from_string(params.to_string()).expect("serialize ext params");
+    let raw =
+        serde_json::value::RawValue::from_string(params.to_string()).expect("serialize ext params");
     match tokio::time::timeout(
         RPC_TIMEOUT,
-        conn.ext_method(acp::ExtRequest::new("fuigo/rewind/execute", std::sync::Arc::from(raw))),
+        conn.ext_method(acp::ExtRequest::new(
+            "fuigo/rewind/execute",
+            std::sync::Arc::from(raw),
+        )),
     )
     .await
     {
         Err(_) => Err("fuigo/rewind/execute timed out".into()),
         Ok(Err(e)) => Err(format!("{e}")),
-        Ok(Ok(resp)) => serde_json::from_str(resp.0.get()).map_err(|e| format!("bad response: {e}")),
+        Ok(Ok(resp)) => {
+            serde_json::from_str(resp.0.get()).map_err(|e| format!("bad response: {e}"))
+        }
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_rewind_whose_rewind_points_cannot_be_rewritten_is_refused_with_nothing_changed() {
     run_agent_test(|cwd, mock| async move {
-        let conn = connect_client(AutoApproveClient, "p146-lock", spawn_agent_local_with_config(agent_config()))
-            .await
-            .0;
+        let conn = connect_client(
+            AutoApproveClient,
+            "p146-lock",
+            spawn_agent_local_with_config(agent_config()),
+        )
+        .await
+        .0;
         let session = new_session(&conn, &cwd).await;
         for i in 0..3 {
             let step = mock.expect_response(
@@ -84,7 +101,11 @@ fn a_rewind_whose_rewind_points_cannot_be_rewritten_is_refused_with_nothing_chan
         let dir = session_dir(&session, &cwd);
         let points_path = dir.join("rewind_points.jsonl");
         let chat_path = dir.join("chat_history.jsonl");
-        assert_eq!(point_indices(&points_path), vec![0, 1, 2], "fixture: one rewind point per prompt");
+        assert_eq!(
+            point_indices(&points_path),
+            vec![0, 1, 2],
+            "fixture: one rewind point per prompt"
+        );
 
         // Another Fuigo process is stuck inside its rewrite: it holds the rewrite lock past the rewind's wait (10 s).
         let holder = std::fs::OpenOptions::new()
@@ -98,7 +119,9 @@ fn a_rewind_whose_rewind_points_cannot_be_rewritten_is_refused_with_nothing_chan
         let points_before = std::fs::read(&points_path).expect("read rewind points");
         let chat_before = std::fs::read(&chat_path).expect("read chat history");
 
-        let refused = rewind(&conn, &session, 1).await.expect("rewind/execute answers");
+        let refused = rewind(&conn, &session, 1)
+            .await
+            .expect("rewind/execute answers");
         let points_after_refusal = std::fs::read(&points_path).expect("read rewind points");
         let chat_after_refusal = std::fs::read(&chat_path).expect("read chat history");
         fs2::FileExt::unlock(&holder).expect("release the rewrite lock");
@@ -129,27 +152,35 @@ fn a_rewind_whose_rewind_points_cannot_be_rewritten_is_refused_with_nothing_chan
             .open(dir.join("rewind_points.jsonl.lock"))
             .expect("open the append lock");
         fs2::FileExt::try_lock_exclusive(&appender).expect("hold the append lock");
-        let late = rewind(&conn, &session, 1).await.expect("rewind/execute answers");
+        let late = rewind(&conn, &session, 1)
+            .await
+            .expect("rewind/execute answers");
         let points_after_late = std::fs::read(&points_path).expect("read rewind points");
         let chat_after_late = std::fs::read(&chat_path).expect("read chat history");
         fs2::FileExt::unlock(&appender).expect("release the append lock");
         drop(appender);
         let error = late["error"].as_str().unwrap_or_default();
         if late["success"] != false || !error.contains("Nothing was changed") {
-            failures.push(format!("a rewind whose rewrite could not run was not refused: {late}"));
+            failures.push(format!(
+                "a rewind whose rewrite could not run was not refused: {late}"
+            ));
         }
         if points_after_late != points_before || chat_after_late != chat_before {
             failures.push("a rewind whose rewrite could not run changed rewind_points.jsonl or chat_history.jsonl".into());
         }
 
         // The locks are free again: the same rewind goes through, and its rewrite has landed when it answers.
-        let retried = rewind(&conn, &session, 1).await.expect("rewind/execute answers");
+        let retried = rewind(&conn, &session, 1)
+            .await
+            .expect("rewind/execute answers");
         if retried["success"] != true {
             failures.push(format!("the retried rewind failed: {retried}"));
         }
         let left = point_indices(&points_path);
         if left != vec![0] {
-            failures.push(format!("after the retried rewind rewind_points.jsonl holds prompts {left:?}, expected [0]"));
+            failures.push(format!(
+                "after the retried rewind rewind_points.jsonl holds prompts {left:?}, expected [0]"
+            ));
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     });

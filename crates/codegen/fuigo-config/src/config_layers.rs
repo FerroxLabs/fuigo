@@ -510,7 +510,8 @@ mod tests {
     fn p192_non_user_layers_cannot_plant_a_subscription_model_provider() {
         let xai = "[models]\ndefault = \"planted\"\n\n[model_providers.planted]\nbase_url = \"https://api.x.ai/v1\"\n\n[model_providers.planted.auth]\nsubscription = \"xai\"\n\n[model.planted]\nmodel = \"grok-4.7\"\nmodel_provider = \"planted\"\n";
         let chatgpt = "[models]\ndefault = \"planted\"\n\n[model_providers.planted]\napi_base_url = \"https://chatgpt.com/backend-api/codex\"\n\n[model_providers.planted.auth]\nsubscription = \"chatgpt\"\n\n[model.planted]\nmodel = \"gpt-5.5\"\nmodel_provider = \"planted\"\n";
-        let user = "[model.work]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n";
+        let user =
+            "[model.work]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n";
         for layer in [xai, chatgpt] {
             for layers in [
                 ConfigLayers {
@@ -597,13 +598,22 @@ mod tests {
             assert_eq!(sub["auth"]["subscription"].as_str(), Some("xai"));
             assert!(sub["auth"].get("command").is_none());
             assert!(sub.get("auth_provider").is_none());
-            assert_eq!(sub["context_window"].as_integer(), Some(1000), "other fields still merge");
+            assert_eq!(
+                sub["context_window"].as_integer(),
+                Some(1000),
+                "other fields still merge"
+            );
             assert_eq!(
                 providers["gw"]["base_url"].as_str(),
                 Some("https://api.fluxrouter.ai/v1"),
                 "a provider a user subscription model routes through keeps the user's URL"
             );
-            assert!(p192_model(&merged, "borrow").unwrap().get("model_provider").is_none());
+            assert!(
+                p192_model(&merged, "borrow")
+                    .unwrap()
+                    .get("model_provider")
+                    .is_none()
+            );
             assert_eq!(
                 p192_model(&merged, "work").unwrap()["model_provider"].as_str(),
                 Some("sub")
@@ -783,7 +793,6 @@ mod tests {
         assert_eq!(layers.effective_config_with_campaigns(&[], &none), clamped);
     }
 
-
     /// P192 (Grok r3 LOW): every non-user layer that can reach a user subscription model.
     fn p192_requirement_layers(user: &str, req: &str) -> Vec<ConfigLayers> {
         vec![
@@ -811,9 +820,14 @@ mod tests {
         let user = "[model.mine]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\napi_backend = \"chat_completions\"\n";
         let req = "[model.mine]\napi_backend = \"responses\"\n";
         for layers in p192_requirement_layers(user, req) {
-            for merged in [layers.effective_config_base(), layers.effective_config_disk_only()] {
+            for merged in [
+                layers.effective_config_base(),
+                layers.effective_config_disk_only(),
+            ] {
                 assert_eq!(
-                    p192_model(&merged, "mine").and_then(|m| m.get("api_backend")).and_then(|v| v.as_str()),
+                    p192_model(&merged, "mine")
+                        .and_then(|m| m.get("api_backend"))
+                        .and_then(|v| v.as_str()),
                     Some("chat_completions"),
                 );
             }
@@ -826,10 +840,19 @@ mod tests {
         let user = "[model.mine]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\n[model.mine.query_params]\nmine = \"1\"\n";
         let req = "[model.mine.query_params]\nplanted = \"1\"\n";
         for layers in p192_requirement_layers(user, req) {
-            for merged in [layers.effective_config_base(), layers.effective_config_disk_only()] {
+            for merged in [
+                layers.effective_config_base(),
+                layers.effective_config_disk_only(),
+            ] {
                 let params = p192_model(&merged, "mine").and_then(|m| m.get("query_params"));
-                assert_eq!(params.and_then(|p| p.get("mine")).and_then(|v| v.as_str()), Some("1"));
-                assert!(params.and_then(|p| p.get("planted")).is_none(), "{params:?}");
+                assert_eq!(
+                    params.and_then(|p| p.get("mine")).and_then(|v| v.as_str()),
+                    Some("1")
+                );
+                assert!(
+                    params.and_then(|p| p.get("planted")).is_none(),
+                    "{params:?}"
+                );
             }
         }
     }
@@ -840,9 +863,15 @@ mod tests {
         let user = "[model_providers.sub]\nbase_url = \"https://api.x.ai/v1\"\napi_backend = \"chat_completions\"\n\n[model_providers.sub.query_params]\nmine = \"1\"\n\n[model.work]\nmodel = \"grok-4.7\"\nmodel_provider = \"sub\"\n";
         let req = "[model_providers.sub]\napi_backend = \"responses\"\n\n[model_providers.sub.query_params]\nplanted = \"1\"\n";
         for layers in p192_requirement_layers(user, req) {
-            for merged in [layers.effective_config_base(), layers.effective_config_disk_only()] {
+            for merged in [
+                layers.effective_config_base(),
+                layers.effective_config_disk_only(),
+            ] {
                 let sub = &merged["model_providers"]["sub"];
-                assert_eq!(sub.get("api_backend").and_then(|v| v.as_str()), Some("chat_completions"));
+                assert_eq!(
+                    sub.get("api_backend").and_then(|v| v.as_str()),
+                    Some("chat_completions")
+                );
                 assert!(sub["query_params"].get("planted").is_none(), "{sub:?}");
                 assert_eq!(sub["query_params"]["mine"].as_str(), Some("1"));
             }

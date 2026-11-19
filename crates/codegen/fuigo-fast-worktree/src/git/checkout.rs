@@ -77,8 +77,12 @@ fn linked_worktree_source(worktree: &Path) -> Option<PathBuf> {
 ///
 /// u35 t3 (Astra r2 H3): a standalone worktree Fuigo is still creating has its own `.git` directory and no database
 /// record yet; while its [`fuigo_tty_utils::WorktreeCreation`] lives it is judged on the source it is built from.
-pub(crate) fn git_command_judged(run_dir: &Path) -> Result<Command, fuigo_tty_utils::RepoUntrusted> {
-    match linked_worktree_source(run_dir).or_else(|| fuigo_tty_utils::worktree_creation_source(run_dir)) {
+pub(crate) fn git_command_judged(
+    run_dir: &Path,
+) -> Result<Command, fuigo_tty_utils::RepoUntrusted> {
+    match linked_worktree_source(run_dir)
+        .or_else(|| fuigo_tty_utils::worktree_creation_source(run_dir))
+    {
         Some(source) => git_command_for_source(&source, run_dir),
         None => fuigo_tty_utils::git_command_in(run_dir),
     }
@@ -92,7 +96,9 @@ pub(crate) fn git_command_for_source(
     run_dir: &Path,
 ) -> Result<Command, fuigo_tty_utils::RepoUntrusted> {
     if !fuigo_tty_utils::repo_exec_allowed(source_repo) {
-        return Err(fuigo_tty_utils::RepoUntrusted { dir: source_repo.to_path_buf() });
+        return Err(fuigo_tty_utils::RepoUntrusted {
+            dir: source_repo.to_path_buf(),
+        });
     }
     fuigo_tty_utils::git_command_for_worktree(source_repo, run_dir, &managed_root_for(run_dir))
         .or_else(|_| fuigo_tty_utils::git_command_in(run_dir))
@@ -538,10 +544,12 @@ pub fn dropped_uninitialised_gitlinks(
     before
         .iter()
         .filter(|(_, path)| !kept.contains(path.as_str()))
-        .filter(|(_, path)| match std::fs::read_dir(worktree_path.join(path)) {
-            Ok(mut entries) => entries.next().is_none(),
-            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-        })
+        .filter(
+            |(_, path)| match std::fs::read_dir(worktree_path.join(path)) {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            },
+        )
         .filter(|(_, path)| !submodule_is_initialised(worktree_path, path))
         .cloned()
         .collect()
@@ -870,8 +878,8 @@ fn rehydrate_worktree_from_ref_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use fuigo_test_utils::git::{git_commit_all, init_git_repo};
+    use tempfile::TempDir;
 
     #[test]
     fn test_git_reset_hard_command() {
@@ -1096,7 +1104,10 @@ mod tests {
         init_git_repo(&repo);
         std::fs::write(repo.join("tracked.txt"), "original").unwrap();
         git_t(&repo, &["add", "tracked.txt"]);
-        git_t(&repo, &["submodule", "add", sub.to_str().unwrap(), "libs/sub"]);
+        git_t(
+            &repo,
+            &["submodule", "add", sub.to_str().unwrap(), "libs/sub"],
+        );
         git_t(&repo, &["commit", "-m", "initial with a submodule"]);
         repo
     }
@@ -1147,7 +1158,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let repo = repo_with_initialised_submodule(&temp);
         let wt = temp.path().join("linked");
-        git_t(&repo, &["worktree", "add", "--detach", wt.to_str().unwrap()]);
+        git_t(
+            &repo,
+            &["worktree", "add", "--detach", wt.to_str().unwrap()],
+        );
         // The shared config says initialised, but this worktree never checked it out.
         assert!(snapshot_has_gitlink(&wt, "linked-uninit"));
     }
@@ -1784,11 +1798,25 @@ mod p120_tests {
         let out = dir.join("hook-env.txt");
         let run = |args: &[&str]| {
             let output = git_command().current_dir(&dir).args(args).output().unwrap();
-            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         };
         run(&["init", "-q"]);
         probe::write_env_dump_script(&dir.join(".git/hooks/pre-commit"), &out);
-        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "x"]);
+        run(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "x",
+        ]);
         let dump = std::fs::read_to_string(&out).expect("the pre-commit hook ran");
         probe::assert_clean(&dump, &[]);
         let _ = std::fs::remove_dir_all(&dir);

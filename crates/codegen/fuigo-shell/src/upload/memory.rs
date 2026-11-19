@@ -130,7 +130,8 @@ pub(crate) fn memory_upload_skip_reason(
 /// (the `UploadWait` contract): past it the turn records a miss while the
 /// build finishes detached and uploads best-effort.
 pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext, wait: UploadWait) {
-    if let Some(reason) = memory_upload_skip_reason(ctx.session_registry_enabled, ctx.memory_enabled)
+    if let Some(reason) =
+        memory_upload_skip_reason(ctx.session_registry_enabled, ctx.memory_enabled)
     {
         tracing::debug!(reason, "memory upload skipped");
         super::manifest::skip_artifact(&ctx.artifact_tracker, "memory.tar.gz", reason);
@@ -247,7 +248,10 @@ pub(crate) async fn upload_built_memory_archive(
     .await;
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "memory_tests.rs"]
 mod tests;

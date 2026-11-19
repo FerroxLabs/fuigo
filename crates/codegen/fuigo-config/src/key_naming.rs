@@ -66,7 +66,11 @@ fn normalize(path: &Path) -> PathBuf {
 fn canonical(path: &Path) -> PathBuf {
     // Astra P147 r1: an existing path is resolved by the OS as written, so `link/..` follows the link first (a lexical
     // `..` would drop the link and judge the wrong directory).
-    let abs = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(path) };
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
     if let Ok(real) = dunce::canonicalize(&abs) {
         return real;
     }
@@ -103,7 +107,8 @@ fn resolved(path: &Path) -> PathBuf {
 }
 
 /// The user-level and managed config files that may name the saved key, by name.
-pub(crate) const TRUSTED_CONFIG_FILES: [&str; 3] = ["config.toml", "managed_config.toml", "requirements.toml"];
+pub(crate) const TRUSTED_CONFIG_FILES: [&str; 3] =
+    ["config.toml", "managed_config.toml", "requirements.toml"];
 
 /// The system-directory (`/etc/fuigo`) files that may name the saved key: the two Fuigo reads there.
 pub(crate) const TRUSTED_SYSTEM_FILES: [&str; 2] = ["managed_config.toml", "requirements.toml"];
@@ -164,7 +169,9 @@ pub fn hook_file_may_name_saved_key_in(path: &Path, user_home: Option<&Path>) ->
         // make their files the user's.
         path.starts_with(&hooks)
             && path != hooks
-            && !["worktrees", "plugins"].iter().any(|d| path.starts_with(resolved(&user.join(d))))
+            && !["worktrees", "plugins"]
+                .iter()
+                .any(|d| path.starts_with(resolved(&user.join(d))))
     })
 }
 
@@ -172,13 +179,24 @@ pub fn hook_file_may_name_saved_key_in(path: &Path, user_home: Option<&Path>) ->
 /// OAuth client-secret variable (`oauth_client_secret_env_var`, `[oauth] client_secret_env_var`) and a model's `env_key`,
 /// in either spelling. An arbitrary map entry that happens to end in `_ENV_VAR` is a value, not a selector.
 fn is_name_key(key: &str) -> bool {
-    let norm: String = key.chars().filter(|c| *c != '_' && *c != '-').collect::<String>().to_ascii_lowercase();
-    matches!(norm.as_str(), "bearertokenenvvar" | "oauthclientsecretenvvar" | "clientsecretenvvar" | "envkey")
+    let norm: String = key
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        norm.as_str(),
+        "bearertokenenvvar" | "oauthclientsecretenvvar" | "clientsecretenvvar" | "envkey"
+    )
 }
 
 /// Whether `s` is the saved key's name. Windows environment names are case-insensitive, so there a case variant is too.
 fn is_key_name(s: &str) -> bool {
-    if cfg!(windows) { s.eq_ignore_ascii_case(FIRST_PARTY_KEY_ENV_VAR) } else { s == FIRST_PARTY_KEY_ENV_VAR }
+    if cfg!(windows) {
+        s.eq_ignore_ascii_case(FIRST_PARTY_KEY_ENV_VAR)
+    } else {
+        s == FIRST_PARTY_KEY_ENV_VAR
+    }
 }
 
 /// Whether a credential selector (the NAME of a variable, as `bearer_token_env_var` holds it) names the saved key: the
@@ -189,7 +207,8 @@ pub fn names_saved_key(selector: &str) -> bool {
 
 /// The saved key's value as config that names it sees it now (saved or exported), if any and not empty.
 fn saved_key_value() -> Option<String> {
-    crate::credential_env::resolve_credential_env_var(FIRST_PARTY_KEY_ENV_VAR).filter(|key| !key.is_empty())
+    crate::credential_env::resolve_credential_env_var(FIRST_PARTY_KEY_ENV_VAR)
+        .filter(|key| !key.is_empty())
 }
 
 /// Whether `value` holds the saved key (P136): the key itself or text containing it (a credential a definition from an
@@ -203,13 +222,25 @@ pub fn holds_saved_key(value: &str) -> bool {
 /// Remove the saved key's VALUE from every string of ONE server's definition (JSON), recording a refusal for each
 /// (P136, Astra r1 #3): a definition from an untrusted source whose text only became the key after expansion (a
 /// persisted `${SWITCH:-$}{FUIGO_API_KEY}` loaded with the key exported) holds no reference any more, only the value.
-pub fn refuse_key_values_in_server_json(value: &mut serde_json::Value, file: &str) -> Vec<RefusedKeyReference> {
-    fn walk(v: &mut serde_json::Value, path: &str, key: &str, file: &str, out: &mut Vec<RefusedKeyReference>) {
+pub fn refuse_key_values_in_server_json(
+    value: &mut serde_json::Value,
+    file: &str,
+) -> Vec<RefusedKeyReference> {
+    fn walk(
+        v: &mut serde_json::Value,
+        path: &str,
+        key: &str,
+        file: &str,
+        out: &mut Vec<RefusedKeyReference>,
+    ) {
         match v {
             serde_json::Value::String(s) => {
                 if s.contains(key) {
                     *s = s.replace(key, "");
-                    out.push(RefusedKeyReference { file: file.to_owned(), key: path.to_owned() });
+                    out.push(RefusedKeyReference {
+                        file: file.to_owned(),
+                        key: path.to_owned(),
+                    });
                 }
             }
             serde_json::Value::Array(items) => {
@@ -219,7 +250,11 @@ pub fn refuse_key_values_in_server_json(value: &mut serde_json::Value, file: &st
             }
             serde_json::Value::Object(map) => {
                 for (k, item) in map.iter_mut() {
-                    let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                    let child = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
                     walk(item, &child, key, file, out);
                 }
             }
@@ -257,7 +292,10 @@ pub fn refuse_key_references_in_str(text: &str) -> Option<String> {
 }
 
 fn refuse_once(text: &str) -> Option<String> {
-    if !text.to_ascii_lowercase().contains(&FIRST_PARTY_KEY_ENV_VAR.to_ascii_lowercase()) {
+    if !text
+        .to_ascii_lowercase()
+        .contains(&FIRST_PARTY_KEY_ENV_VAR.to_ascii_lowercase())
+    {
         return None;
     }
     let mut out = String::with_capacity(text.len());
@@ -269,7 +307,11 @@ fn refuse_once(text: &str) -> Option<String> {
         let after = &rest[dollar + run..];
         let braced = after.starts_with('{');
         let inner = if braced { &after[1..] } else { after };
-        let inner = if braced { inner.strip_prefix(['#', '!']).unwrap_or(inner) } else { inner };
+        let inner = if braced {
+            inner.strip_prefix(['#', '!']).unwrap_or(inner)
+        } else {
+            inner
+        };
         let names = starts_with_key_name(inner).is_some_and(|tail| !tail.starts_with(is_ident));
         if run % 2 == 1 && names {
             out.push_str(&"$".repeat(run - 1));
@@ -329,7 +371,10 @@ fn scrub_str_value(
 ) -> bool {
     let selector = selector_ok && is_name_key(key_name);
     if selector && is_key_name(value.trim()) {
-        out.push(RefusedKeyReference { file: file.to_owned(), key: key_path.to_owned() });
+        out.push(RefusedKeyReference {
+            file: file.to_owned(),
+            key: key_path.to_owned(),
+        });
         return true;
     }
     let mut hit = false;
@@ -347,7 +392,10 @@ fn scrub_str_value(
         }
     }
     if hit {
-        out.push(RefusedKeyReference { file: file.to_owned(), key: key_path.to_owned() });
+        out.push(RefusedKeyReference {
+            file: file.to_owned(),
+            key: key_path.to_owned(),
+        });
         // Removing a reference can leave the bare name as the whole value of a selector (`FUI${FUIGO_API_KEY}GO_API_KEY`).
         if selector && is_key_name(value.trim()) {
             return true;
@@ -361,8 +409,18 @@ fn lower_find(value: &str, lower_name: &str) -> Option<usize> {
 }
 
 /// Refuse every reference to the saved key in a TOML source. `file` labels the notes.
-pub fn refuse_key_references_in_toml(value: &mut toml::Value, file: &str) -> Vec<RefusedKeyReference> {
-    fn walk(v: &mut toml::Value, path: &str, name: &str, ctx: Ctx, file: &str, out: &mut Vec<RefusedKeyReference>) {
+pub fn refuse_key_references_in_toml(
+    value: &mut toml::Value,
+    file: &str,
+) -> Vec<RefusedKeyReference> {
+    fn walk(
+        v: &mut toml::Value,
+        path: &str,
+        name: &str,
+        ctx: Ctx,
+        file: &str,
+        out: &mut Vec<RefusedKeyReference>,
+    ) {
         let selector_ok = ctx != Ctx::ValueMap;
         match v {
             toml::Value::String(s) => {
@@ -387,7 +445,11 @@ pub fn refuse_key_references_in_toml(value: &mut toml::Value, file: &str) -> Vec
             toml::Value::Table(table) => {
                 let mut drop = Vec::new();
                 for (k, item) in table.iter_mut() {
-                    let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                    let child = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
                     let child_ctx = ctx.child(k);
                     if let toml::Value::String(s) = item
                         && scrub_str_value(s, &child, file, k, ctx != Ctx::ValueMap, out)
@@ -412,17 +474,34 @@ pub fn refuse_key_references_in_toml(value: &mut toml::Value, file: &str) -> Vec
 }
 
 /// Refuse every reference to the saved key in a JSON source (`.mcp.json`, a plugin manifest).
-pub fn refuse_key_references_in_json(value: &mut serde_json::Value, file: &str) -> Vec<RefusedKeyReference> {
+pub fn refuse_key_references_in_json(
+    value: &mut serde_json::Value,
+    file: &str,
+) -> Vec<RefusedKeyReference> {
     refuse_json_at(value, file, Ctx::Root)
 }
 
 /// [`refuse_key_references_in_json`] for ONE server's definition, the shape after every layer has been applied.
-pub fn refuse_key_references_in_server_json(value: &mut serde_json::Value, file: &str) -> Vec<RefusedKeyReference> {
+pub fn refuse_key_references_in_server_json(
+    value: &mut serde_json::Value,
+    file: &str,
+) -> Vec<RefusedKeyReference> {
     refuse_json_at(value, file, Ctx::Server)
 }
 
-fn refuse_json_at(value: &mut serde_json::Value, file: &str, start: Ctx) -> Vec<RefusedKeyReference> {
-    fn walk(v: &mut serde_json::Value, path: &str, name: &str, ctx: Ctx, file: &str, out: &mut Vec<RefusedKeyReference>) {
+fn refuse_json_at(
+    value: &mut serde_json::Value,
+    file: &str,
+    start: Ctx,
+) -> Vec<RefusedKeyReference> {
+    fn walk(
+        v: &mut serde_json::Value,
+        path: &str,
+        name: &str,
+        ctx: Ctx,
+        file: &str,
+        out: &mut Vec<RefusedKeyReference>,
+    ) {
         let selector_ok = ctx != Ctx::ValueMap;
         match v {
             serde_json::Value::String(s) => {
@@ -447,7 +526,11 @@ fn refuse_json_at(value: &mut serde_json::Value, file: &str, start: Ctx) -> Vec<
             serde_json::Value::Object(map) => {
                 let mut drop = Vec::new();
                 for (k, item) in map.iter_mut() {
-                    let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                    let child = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
                     let child_ctx = ctx.child(k);
                     if let serde_json::Value::String(s) = item {
                         if scrub_str_value(s, &child, file, k, ctx != Ctx::ValueMap, out) {
@@ -491,7 +574,9 @@ pub fn refuse_composed_key_references_in_server_json(
         let mut current = text.to_owned();
         for _ in 0..COMPOSE_PASSES {
             current = expand(&current);
-            if refuse_key_references_in_str(&current).is_some() || (selector && is_key_name(current.trim())) {
+            if refuse_key_references_in_str(&current).is_some()
+                || (selector && is_key_name(current.trim()))
+            {
                 return true;
             }
         }
@@ -510,7 +595,10 @@ pub fn refuse_composed_key_references_in_server_json(
             serde_json::Value::String(s) => {
                 let selector = ctx != Ctx::ValueMap && is_name_key(name);
                 if composes(s, expand, selector) {
-                    out.push(RefusedKeyReference { file: file.to_owned(), key: path.to_owned() });
+                    out.push(RefusedKeyReference {
+                        file: file.to_owned(),
+                        key: path.to_owned(),
+                    });
                     if selector {
                         return true;
                     }
@@ -521,7 +609,15 @@ pub fn refuse_composed_key_references_in_server_json(
             serde_json::Value::Array(items) => {
                 let mut keep = Vec::with_capacity(items.len());
                 for (i, mut item) in std::mem::take(items).into_iter().enumerate() {
-                    if !walk(&mut item, &format!("{path}[{i}]"), name, ctx, file, expand, out) {
+                    if !walk(
+                        &mut item,
+                        &format!("{path}[{i}]"),
+                        name,
+                        ctx,
+                        file,
+                        expand,
+                        out,
+                    ) {
                         keep.push(item);
                     }
                 }
@@ -531,7 +627,11 @@ pub fn refuse_composed_key_references_in_server_json(
             serde_json::Value::Object(map) => {
                 let mut drop = Vec::new();
                 for (k, item) in map.iter_mut() {
-                    let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                    let child = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
                     if walk(item, &child, k, ctx.child(k), file, expand, out) {
                         drop.push(k.clone());
                     }
@@ -557,7 +657,11 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
     let mut json = serde_json::to_value(&server).ok()?;
-    let name = json.get("name").and_then(|n| n.as_str()).unwrap_or("?").to_owned();
+    let name = json
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("?")
+        .to_owned();
     let label = format!("MCP server `{name}` {origin}");
     let mut refused = refuse_key_references_in_server_json(&mut json, &label);
     // P138 b-1: and the key's VALUE, as the config final gate does. A client that holds the key (the pager with it
@@ -633,7 +737,11 @@ impl NoticeScope {
         if open.len() >= MAX_OPEN_SCOPES {
             open.remove(0);
         }
-        open.push(ScopeNotes { id, notes: Vec::new(), more: 0 });
+        open.push(ScopeNotes {
+            id,
+            notes: Vec::new(),
+            more: 0,
+        });
         Self(id)
     }
 
@@ -658,7 +766,10 @@ impl NoticeScope {
     /// `fut` with every refusal recorded while it is polled belonging to this scope. Work it hands to another task or
     /// thread is outside the scope unless that work enters it ([`NoticeScope::current`], [`NoticeScope::enter`]).
     pub fn scoped<F: std::future::Future>(self, fut: F) -> InNoticeScope<F> {
-        InNoticeScope { scope: self, inner: Box::pin(fut) }
+        InNoticeScope {
+            scope: self,
+            inner: Box::pin(fut),
+        }
     }
 
     /// A guard that closes this scope when dropped, whether or not its notes were collected before (collecting is
@@ -673,7 +784,9 @@ impl NoticeScope {
         let Some(at) = open.iter().position(|s| s.id == self.0) else {
             return Vec::new();
         };
-        let ScopeNotes { mut notes, more, .. } = open.remove(at);
+        let ScopeNotes {
+            mut notes, more, ..
+        } = open.remove(at);
         if more > 0 {
             notes.push(format!(
                 "{more} more notices were not shown; the log lists them."
@@ -702,7 +815,10 @@ pub struct InNoticeScope<F> {
 impl<F: std::future::Future> std::future::Future for InNoticeScope<F> {
     type Output = F::Output;
 
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<F::Output> {
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
         let _entered = self.scope.enter();
         self.inner.as_mut().poll(cx)
     }
@@ -789,7 +905,11 @@ pub fn report_campaign_refusals(refusals: &[RefusedKeyReference]) {
 /// [`report_refusals`] for a server added through `/mcps` or an ACP client's `mcp/upsert`: the notes say so and give
 /// the remedy that fits that source ([`RefusedKeyReference::note_for_added_server`]).
 pub fn report_added_server_refusals(refusals: &[RefusedKeyReference]) {
-    record_notes(refusals.iter().map(RefusedKeyReference::note_for_added_server));
+    record_notes(
+        refusals
+            .iter()
+            .map(RefusedKeyReference::note_for_added_server),
+    );
 }
 
 /// Path helper for callers that label a source by file.
@@ -813,7 +933,10 @@ fn mark_servers_toml(v: &mut toml::Value) {
                 {
                     for (_, server) in servers.iter_mut() {
                         if let toml::Value::Table(server) = server {
-                            server.insert(UNTRUSTED_SOURCE_MARKER.to_owned(), toml::Value::Boolean(true));
+                            server.insert(
+                                UNTRUSTED_SOURCE_MARKER.to_owned(),
+                                toml::Value::Boolean(true),
+                            );
                         }
                     }
                 } else {
@@ -835,7 +958,10 @@ fn mark_servers_json(v: &mut serde_json::Value) {
                 {
                     for server in servers.values_mut() {
                         if let serde_json::Value::Object(server) = server {
-                            server.insert(UNTRUSTED_SOURCE_MARKER.to_owned(), serde_json::Value::Bool(true));
+                            server.insert(
+                                UNTRUSTED_SOURCE_MARKER.to_owned(),
+                                serde_json::Value::Bool(true),
+                            );
                         }
                     }
                 } else {

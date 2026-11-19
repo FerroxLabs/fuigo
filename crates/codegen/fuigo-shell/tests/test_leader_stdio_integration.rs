@@ -718,7 +718,10 @@ async fn test_runtime_profile_creates_missing_parent_directory_end_to_end() {
     handle.cancel.cancel();
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test]
 async fn test_runtime_profile_rejects_output_collision_end_to_end() {
     let temp = TempDir::new().unwrap();
@@ -1340,7 +1343,11 @@ async fn test_capabilities_not_injected_into_non_session_new() {
 
     // The only `_meta` the leader may add to a prompt is its ownership verdict (1.0.30 P30-LEADER r8), never capabilities
     if let Some(meta) = json["params"].get("_meta") {
-        let keys: Vec<&String> = meta.as_object().expect("_meta is an object").keys().collect();
+        let keys: Vec<&String> = meta
+            .as_object()
+            .expect("_meta is an object")
+            .keys()
+            .collect();
         assert_eq!(
             keys,
             vec!["fuigo/leaderOwnerState"],
@@ -2270,7 +2277,10 @@ async fn test_initialize_response_model_patched_by_request_id() {
 
     // The unrelated response arrives first; it must pass through untouched and must not disarm the patch.
     response_tx
-        .send(serde_json::json!({"jsonrpc": "2.0", "id": ping_ns, "result": {"pong": true}}).to_string())
+        .send(
+            serde_json::json!({"jsonrpc": "2.0", "id": ping_ns, "result": {"pong": true}})
+                .to_string(),
+        )
         .unwrap();
     let ping_resp: serde_json::Value = serde_json::from_str(
         &tokio::time::timeout(Duration::from_secs(2), client.recv())
@@ -2296,7 +2306,9 @@ async fn test_initialize_response_model_patched_by_request_id() {
         }
     });
     response_tx
-        .send(serde_json::json!({"jsonrpc": "2.0", "id": init_ns, "result": init_result}).to_string())
+        .send(
+            serde_json::json!({"jsonrpc": "2.0", "id": init_ns, "result": init_result}).to_string(),
+        )
         .unwrap();
     let init_resp: serde_json::Value = serde_json::from_str(
         &tokio::time::timeout(Duration::from_secs(2), client.recv())
@@ -2563,7 +2575,10 @@ async fn production_leader_first_message(client_version: &str, wait: Duration) -
     )
     .await
     .unwrap();
-    let msg = tokio::time::timeout(wait, client.recv()).await.ok().flatten();
+    let msg = tokio::time::timeout(wait, client.recv())
+        .await
+        .ok()
+        .flatten();
     client.cancel();
     cancel.cancel();
     msg
@@ -2588,7 +2603,8 @@ async fn test_production_leader_does_not_warn_a_same_release_client() {
         fuigo_version::VERSION.to_string(),
         format!("{} (abcdef123456)", fuigo_version::VERSION),
     ] {
-        let msg = production_leader_first_message(&client_version, Duration::from_millis(500)).await;
+        let msg =
+            production_leader_first_message(&client_version, Duration::from_millis(500)).await;
         assert!(
             !msg.as_deref().unwrap_or("").contains("version_mismatch"),
             "client {client_version:?} must not be warned, got {msg:?}"
@@ -2787,20 +2803,27 @@ async fn test_stop_leader_for_downgrade_stops_a_newer_leader() {
 
     // 0.0.0-0 is strictly older than any released leader version.
     let result = stop_leader_for_downgrade(sock_path, "0.0.0-0").await;
-    assert!(matches!(result, DowngradeStopResult::Stopping { .. }), "{result:?}");
+    assert!(
+        matches!(result, DowngradeStopResult::Stopping { .. }),
+        "{result:?}"
+    );
 
     tokio::time::timeout(Duration::from_secs(5), shutdown_reason_rx.changed())
         .await
         .expect("timeout waiting for ShuttingDown after the downgrade stop")
         .expect("watch sender dropped");
-    assert_eq!(*shutdown_reason_rx.borrow(), Some(ShutdownReason::AutoUpdate));
+    assert_eq!(
+        *shutdown_reason_rx.borrow(),
+        Some(ShutdownReason::AutoUpdate)
+    );
 }
 
 /// P124: a leader that is not newer than the installed version is never stopped by `StopForDowngrade`.
 #[tokio::test]
 async fn test_stop_leader_for_downgrade_leaves_a_not_newer_leader_alone() {
     use fuigo_shell::leader::{
-        ClientCapabilities, ClientMode, DowngradeStopResult, LeaderClient, stop_leader_for_downgrade,
+        ClientCapabilities, ClientMode, DowngradeStopResult, LeaderClient,
+        stop_leader_for_downgrade,
     };
 
     let temp = TempDir::new().unwrap();
@@ -2819,9 +2842,16 @@ async fn test_stop_leader_for_downgrade_leaves_a_not_newer_leader_alone() {
     let shutdown_reason_rx = client.shutting_down_reason();
 
     let result = stop_leader_for_downgrade(sock_path, "999.0.0").await;
-    assert!(matches!(result, DowngradeStopResult::Declined(_)), "{result:?}");
+    assert!(
+        matches!(result, DowngradeStopResult::Declined(_)),
+        "{result:?}"
+    );
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(*shutdown_reason_rx.borrow(), None, "a declined stop must not shut the leader down");
+    assert_eq!(
+        *shutdown_reason_rx.borrow(),
+        None,
+        "a declined stop must not shut the leader down"
+    );
 }
 
 /// The bounded-grace drain waits while the agent is busy and only relaunches once it goes idle.
@@ -3010,7 +3040,10 @@ async fn test_leader_code_nav_isolation_end_to_end() {
 ///
 /// This test couples readiness to a file lock (matching production) so holding the lock while connecting would deadlock.
 /// Existing tests missed this because they drove readiness via a bare `watch::channel`.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test]
 async fn test_lock_released_before_connect_prevents_deadlock() {
     use fs2::FileExt;
@@ -3700,7 +3733,10 @@ async fn p130_relay_refusal_during_session_new_reaches_the_creating_client() {
         .expect("timeout waiting for the session/new response")
         .expect("closed");
     let first: serde_json::Value = serde_json::from_str(&first).unwrap();
-    assert_eq!(first["result"]["sessionId"], "sess-p130", "the response comes first: {first}");
+    assert_eq!(
+        first["result"]["sessionId"], "sess-p130",
+        "the response comes first: {first}"
+    );
     let second = tokio::time::timeout(Duration::from_secs(2), creator.recv())
         .await
         .expect("the relay refusal never reached the client that created the session")
@@ -3708,13 +3744,18 @@ async fn p130_relay_refusal_during_session_new_reaches_the_creating_client() {
     let second: serde_json::Value = serde_json::from_str(&second).unwrap();
     assert_eq!(
         second["method"],
-        format!("_{}", fuigo_shell::agent::relay_opt_in::RELAY_REFUSED_METHOD)
+        format!(
+            "_{}",
+            fuigo_shell::agent::relay_opt_in::RELAY_REFUSED_METHOD
+        )
     );
     assert_eq!(second["params"]["sessionId"], "sess-p130");
 
     // Not leaked to a client that does not own the session.
     assert!(
-        tokio::time::timeout(Duration::from_millis(300), bystander.recv()).await.is_err(),
+        tokio::time::timeout(Duration::from_millis(300), bystander.recv())
+            .await
+            .is_err(),
         "another client must not receive the creator's refusal"
     );
     creator.cancel();
@@ -3749,12 +3790,22 @@ async fn p130_held_relay_refusal_goes_only_to_the_client_that_subscribes() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     // `other` talks about a different session: gets nothing.
     other
-        .send(r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-else"}}"#.to_string())
+        .send(
+            r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-else"}}"#
+                .to_string(),
+        )
         .unwrap();
-    assert!(tokio::time::timeout(Duration::from_millis(300), other.recv()).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), other.recv())
+            .await
+            .is_err()
+    );
     // `owner` sends a message for the session: now it is told.
     owner
-        .send(r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-held"}}"#.to_string())
+        .send(
+            r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-held"}}"#
+                .to_string(),
+        )
         .unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), owner.recv())
         .await
@@ -3790,7 +3841,9 @@ async fn p130_stale_held_refusal_is_not_replayed_on_session_load() {
     let forwarded = acp_rx.recv().await.unwrap();
     assert!(forwarded.contains("session/load"), "{forwarded}");
     assert!(
-        tokio::time::timeout(Duration::from_millis(400), client.recv()).await.is_err(),
+        tokio::time::timeout(Duration::from_millis(400), client.recv())
+            .await
+            .is_err(),
         "a stale held refusal was replayed on session/load"
     );
     client.cancel();

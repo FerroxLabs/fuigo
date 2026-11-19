@@ -30,7 +30,8 @@ pub const FUIGO_API_KEY_ENV_VAR: &str = "FUIGO_API_KEY";
 /// This is the ONE list (`fuigo_secrets::provider_key_env_vars::FLUXROUTER`): discovery, `login --status`, the picker,
 /// the runtime resolver and the child-environment denylist all take it from there, so the names cannot drift apart
 /// again (`FLUX_API_KEY` was once reported "ready" by `login --status` while the runtime ignored it).
-pub const FLUX_KEY_ENV_VARS: &[&str] = fuigo_tools::util::shell_env_policy::provider_key_env_vars::FLUXROUTER;
+pub const FLUX_KEY_ENV_VARS: &[&str] =
+    fuigo_tools::util::shell_env_policy::provider_key_env_vars::FLUXROUTER;
 
 /// Legacy env var name.
 /// Checked as a fallback when `FUIGO_API_KEY` is not set, so existing deployments that use the old name keep working.
@@ -90,7 +91,10 @@ struct StoredApiKey {
 /// P70: this replaced `set_var("FUIGO_API_KEY", <saved key>)`. The key is read where the env copy used to be found
 /// and never placed in the agent's environment (Contract E.2: an injected env key, checked here, still takes
 /// precedence, and a later one still outranks it).
-pub(crate) fn load_saved_api_key(fuigo_home: &std::path::Path, api_key_auth_disabled: bool) -> bool {
+pub(crate) fn load_saved_api_key(
+    fuigo_home: &std::path::Path,
+    api_key_auth_disabled: bool,
+) -> bool {
     if api_key_auth_disabled || read_fuigo_api_key_env().is_ok() {
         return false;
     }
@@ -146,7 +150,8 @@ pub(crate) fn read_named_key_env_for_config(name: &str) -> Option<String> {
 pub(crate) fn set_stored_api_key(key: Option<String>, shadows_env: bool) {
     *STORED_API_KEY
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = key.map(|key| StoredApiKey { key, shadows_env });
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        key.map(|key| StoredApiKey { key, shadows_env });
 }
 
 fn stored_api_key() -> Option<StoredApiKey> {
@@ -266,7 +271,9 @@ pub(crate) fn parse_runtime_api_key_meta(
     };
     let key = match fields.get("key") {
         None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(key)) if !key.trim().is_empty() => Some(key.trim().to_owned()),
+        Some(serde_json::Value::String(key)) if !key.trim().is_empty() => {
+            Some(key.trim().to_owned())
+        }
         Some(_) => return Err(SHAPE),
     };
     let persist = match fields.get("persist") {
@@ -757,8 +764,12 @@ mod tests {
     fn runtime_api_key_meta_parses_the_documented_shape() {
         let none = parse_runtime_api_key_meta(None).expect("absent meta is fine");
         assert!(none.key.is_none() && !none.persist);
-        let unrelated = serde_json::json!({ "headless": true }).as_object().cloned().unwrap();
-        let unrelated = parse_runtime_api_key_meta(Some(&unrelated)).expect("other meta keys are ignored");
+        let unrelated = serde_json::json!({ "headless": true })
+            .as_object()
+            .cloned()
+            .unwrap();
+        let unrelated =
+            parse_runtime_api_key_meta(Some(&unrelated)).expect("other meta keys are ignored");
         assert!(unrelated.key.is_none() && !unrelated.persist);
         let full = parse_runtime_api_key_meta(Some(&meta(
             serde_json::json!({ "key": format!("  {FAKE_RUNTIME_KEY}\n"), "persist": true, "future": 1 }),
@@ -766,8 +777,9 @@ mod tests {
         .expect("full carrier");
         assert_eq!(full.key.as_deref(), Some(FAKE_RUNTIME_KEY));
         assert!(full.persist);
-        let persist_only = parse_runtime_api_key_meta(Some(&meta(serde_json::json!({ "persist": true }))))
-            .expect("persist without a key adopts the ambient key");
+        let persist_only =
+            parse_runtime_api_key_meta(Some(&meta(serde_json::json!({ "persist": true }))))
+                .expect("persist without a key adopts the ambient key");
         assert!(persist_only.key.is_none() && persist_only.persist);
     }
 
@@ -786,8 +798,14 @@ mod tests {
             let Err(reason) = parse_runtime_api_key_meta(Some(&meta(bad.clone()))) else {
                 panic!("accepted a malformed carrier: {bad}");
             };
-            assert!(!reason.contains(FAKE_RUNTIME_KEY), "the error quoted the key: {reason}");
-            assert!(reason.contains(RUNTIME_API_KEY_META), "the error names the field: {reason}");
+            assert!(
+                !reason.contains(FAKE_RUNTIME_KEY),
+                "the error quoted the key: {reason}"
+            );
+            assert!(
+                reason.contains(RUNTIME_API_KEY_META),
+                "the error names the field: {reason}"
+            );
         }
     }
 
@@ -796,9 +814,11 @@ mod tests {
     #[test]
     #[serial]
     fn runtime_api_key_precedes_the_env_key_without_entering_the_environment() {
-        let _env = fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p08-unit-env-key-FAKE");
+        let _env =
+            fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p08-unit-env-key-FAKE");
         let _legacy = fuigo_test_support::EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
-        let _other = fuigo_test_support::EnvGuard::set("P08_UNIT_PROVIDER_KEY", "p08-unit-provider-FAKE");
+        let _other =
+            fuigo_test_support::EnvGuard::set("P08_UNIT_PROVIDER_KEY", "p08-unit-provider-FAKE");
         let replaced = set_runtime_api_key(Some(FAKE_RUNTIME_KEY.to_owned()));
         let read = read_fuigo_api_key_env();
         let from_environment = read_fuigo_api_key_echoable();
@@ -809,19 +829,41 @@ mod tests {
         let other = crate::agent::config::EnvKeys::single("P08_UNIT_PROVIDER_KEY").resolve_value();
         let is_runtime = is_runtime_api_key(&format!(" {FAKE_RUNTIME_KEY} "));
         let cleared = set_runtime_api_key(None);
-        assert!(replaced.is_none(), "precondition: no runtime key before the test");
-        assert_eq!(cleared.as_deref(), Some(FAKE_RUNTIME_KEY), "clearing returns the key it replaced");
+        assert!(
+            replaced.is_none(),
+            "precondition: no runtime key before the test"
+        );
+        assert_eq!(
+            cleared.as_deref(),
+            Some(FAKE_RUNTIME_KEY),
+            "clearing returns the key it replaced"
+        );
         assert_eq!(read.as_deref(), Ok(FAKE_RUNTIME_KEY));
         assert_eq!(from_environment.as_deref(), Ok("p08-unit-env-key-FAKE"));
-        assert!(!in_environment, "the runtime key was placed in the process environment");
-        assert_eq!(mapped.as_deref(), Some(FAKE_RUNTIME_KEY), "env_key = FUIGO_API_KEY bypassed the runtime key");
+        assert!(
+            !in_environment,
+            "the runtime key was placed in the process environment"
+        );
+        assert_eq!(
+            mapped.as_deref(),
+            Some(FAKE_RUNTIME_KEY),
+            "env_key = FUIGO_API_KEY bypassed the runtime key"
+        );
         assert_eq!(mapped_legacy.as_deref(), Some(FAKE_RUNTIME_KEY));
         assert_eq!(other.as_deref(), Some("p08-unit-provider-FAKE"));
         assert!(is_runtime);
-        assert!(!is_runtime_api_key(FAKE_RUNTIME_KEY), "no runtime key once cleared");
-        assert_eq!(read_fuigo_api_key_env().as_deref(), Ok("p08-unit-env-key-FAKE"));
+        assert!(
+            !is_runtime_api_key(FAKE_RUNTIME_KEY),
+            "no runtime key once cleared"
+        );
         assert_eq!(
-            crate::agent::config::EnvKeys::single(FUIGO_API_KEY_ENV_VAR).resolve_value().as_deref(),
+            read_fuigo_api_key_env().as_deref(),
+            Ok("p08-unit-env-key-FAKE")
+        );
+        assert_eq!(
+            crate::agent::config::EnvKeys::single(FUIGO_API_KEY_ENV_VAR)
+                .resolve_value()
+                .as_deref(),
             Some("p08-unit-env-key-FAKE")
         );
     }
@@ -835,9 +877,16 @@ mod tests {
         const STORED: &str = "p70-unit-stored-key-FAKE";
         let _env = fuigo_test_support::EnvGuard::unset(FUIGO_API_KEY_ENV_VAR);
         let _legacy = fuigo_test_support::EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
-        assert!(set_runtime_api_key(None).is_none(), "precondition: no runtime key");
+        assert!(
+            set_runtime_api_key(None).is_none(),
+            "precondition: no runtime key"
+        );
         set_stored_api_key(Some(STORED.to_owned()), false);
-        let alone = (read_fuigo_api_key_env(), read_fuigo_api_key_echoable(), read_named_key_env(FUIGO_API_KEY_ENV_VAR));
+        let alone = (
+            read_fuigo_api_key_env(),
+            read_fuigo_api_key_echoable(),
+            read_named_key_env(FUIGO_API_KEY_ENV_VAR),
+        );
         let legacy_name = read_named_key_env(LEGACY_FUIGO_API_KEY_ENV_VAR);
         let in_environment = std::env::vars().any(|(_, v)| v.contains(STORED));
         let has = has_fuigo_api_key_env();
@@ -858,22 +907,39 @@ mod tests {
         set_stored_api_key(None, false);
         let cleared = read_fuigo_api_key_env();
         assert_eq!(alone.0.as_deref(), Ok(STORED));
-        assert_eq!(alone.1.as_deref(), Ok(STORED), "getApiKey returns the saved key, as it did from the env");
-        assert_eq!(alone.2.as_deref(), Some(STORED), "env_key = FUIGO_API_KEY saw the env copy");
+        assert_eq!(
+            alone.1.as_deref(),
+            Ok(STORED),
+            "getApiKey returns the saved key, as it did from the env"
+        );
+        assert_eq!(
+            alone.2.as_deref(),
+            Some(STORED),
+            "env_key = FUIGO_API_KEY saw the env copy"
+        );
         assert_eq!(legacy_name, None, "the legacy name never saw the copy");
-        assert!(!in_environment, "the stored key was placed in the process environment");
+        assert!(
+            !in_environment,
+            "the stored key was placed in the process environment"
+        );
         assert!(has);
         assert_eq!(env_wins.as_deref(), Ok("p70-unit-env-FAKE"));
         assert_eq!(shadowing.0.as_deref(), Ok(STORED));
         assert_eq!(shadowing.1.as_deref(), Ok(STORED));
         assert_eq!(with_runtime.0.as_deref(), Ok(FAKE_RUNTIME_KEY));
-        assert_eq!(with_runtime.1.as_deref(), Ok(STORED), "the runtime key is never echoed");
+        assert_eq!(
+            with_runtime.1.as_deref(),
+            Ok(STORED),
+            "the runtime key is never echoed"
+        );
         assert!(cleared.is_err());
     }
 
     /// No variable of the process environment holds `secret` (under any name).
     fn env_holds(secret: &str) -> Option<String> {
-        std::env::vars().find(|(_, v)| v.contains(secret)).map(|(k, _)| k)
+        std::env::vars()
+            .find(|(_, v)| v.contains(secret))
+            .map(|(k, _)| k)
     }
 
     /// P70 (P08 proposal 4): `initialize` loads a key saved in `auth.json` into memory, never into the environment;
@@ -887,28 +953,47 @@ mod tests {
         crate::auth::store_api_key(home.path(), SAVED).expect("seed auth.json");
         let _env = fuigo_test_support::EnvGuard::unset(FUIGO_API_KEY_ENV_VAR);
         let _legacy = fuigo_test_support::EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
-        assert!(set_runtime_api_key(None).is_none(), "precondition: no runtime key");
+        assert!(
+            set_runtime_api_key(None).is_none(),
+            "precondition: no runtime key"
+        );
         set_stored_api_key(None, false);
 
         let disabled = load_saved_api_key(home.path(), true);
         let after_disabled = read_fuigo_api_key_env();
         let loaded = load_saved_api_key(home.path(), false);
         let leaked = env_holds(SAVED);
-        let read = (read_fuigo_api_key_env(), read_named_key_env(FUIGO_API_KEY_ENV_VAR));
+        let read = (
+            read_fuigo_api_key_env(),
+            read_named_key_env(FUIGO_API_KEY_ENV_VAR),
+        );
         set_stored_api_key(None, false);
         let with_env = {
-            let _e = fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p70-unit-injected-FAKE");
-            (load_saved_api_key(home.path(), false), read_fuigo_api_key_env())
+            let _e =
+                fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p70-unit-injected-FAKE");
+            (
+                load_saved_api_key(home.path(), false),
+                read_fuigo_api_key_env(),
+            )
         };
         let after_env = read_fuigo_api_key_env();
         set_stored_api_key(None, false);
 
-        assert!(!disabled && after_disabled.is_err(), "a disabled policy loads nothing");
+        assert!(
+            !disabled && after_disabled.is_err(),
+            "a disabled policy loads nothing"
+        );
         assert!(loaded, "the saved key is loaded");
-        assert_eq!(leaked, None, "the saved key entered the process environment");
+        assert_eq!(
+            leaked, None,
+            "the saved key entered the process environment"
+        );
         assert_eq!(read.0.as_deref(), Ok(SAVED));
         assert_eq!(read.1.as_deref(), Some(SAVED));
-        assert!(!with_env.0, "an env key present at initialize means nothing is loaded");
+        assert!(
+            !with_env.0,
+            "an env key present at initialize means nothing is loaded"
+        );
         assert_eq!(with_env.1.as_deref(), Ok("p70-unit-injected-FAKE"));
         assert!(after_env.is_err(), "nothing was stored behind the env key");
     }
@@ -924,9 +1009,15 @@ mod tests {
         crate::auth::store_api_key(home.path(), SAVED).expect("seed auth.json");
         let _env = fuigo_test_support::EnvGuard::unset(FUIGO_API_KEY_ENV_VAR);
         let _legacy = fuigo_test_support::EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
-        assert!(set_runtime_api_key(None).is_none(), "precondition: no runtime key");
+        assert!(
+            set_runtime_api_key(None).is_none(),
+            "precondition: no runtime key"
+        );
         set_stored_api_key(None, false);
-        assert!(load_saved_api_key(home.path(), false), "the saved key is loaded");
+        assert!(
+            load_saved_api_key(home.path(), false),
+            "the saved key is loaded"
+        );
         let server = fuigo_config_types::McpServerConfig {
             transport: fuigo_config_types::McpServerTransportConfig::StreamableHttp {
                 url: "https://mcp.p70.invalid/mcp".into(),
@@ -948,12 +1039,15 @@ mod tests {
             untrusted_source: false,
             campaign_source: false,
         };
-        let bearer = |server: &fuigo_config_types::McpServerConfig| match server.to_acp_mcp_server("p70a") {
-            Some(acp::McpServer::Http(http)) => {
-                http.headers.iter().find(|h| h.name == "Authorization").map(|h| h.value.clone())
-            }
-            other => panic!("an HTTP MCP server: {}", other.is_some()),
-        };
+        let bearer =
+            |server: &fuigo_config_types::McpServerConfig| match server.to_acp_mcp_server("p70a") {
+                Some(acp::McpServer::Http(http)) => http
+                    .headers
+                    .iter()
+                    .find(|h| h.name == "Authorization")
+                    .map(|h| h.value.clone()),
+                other => panic!("an HTTP MCP server: {}", other.is_some()),
+            };
         let saved = bearer(&server);
         let _ = set_runtime_api_key(Some(FAKE_RUNTIME_KEY.to_owned()));
         let with_runtime = bearer(&server);
@@ -961,8 +1055,16 @@ mod tests {
         set_stored_api_key(None, false);
         assert_eq!(saved.as_deref(), Some(format!("Bearer {SAVED}").as_str()));
         // P148: the user's saved key keeps priority over a key a client authenticated with.
-        assert_eq!(with_runtime.as_deref(), Some(format!("Bearer {SAVED}").as_str()), "the runtime key displaced the saved key");
-        assert_eq!(read_named_key_env_for_config(LEGACY_FUIGO_API_KEY_ENV_VAR), None, "the legacy name never saw the copy");
+        assert_eq!(
+            with_runtime.as_deref(),
+            Some(format!("Bearer {SAVED}").as_str()),
+            "the runtime key displaced the saved key"
+        );
+        assert_eq!(
+            read_named_key_env_for_config(LEGACY_FUIGO_API_KEY_ENV_VAR),
+            None,
+            "the legacy name never saw the copy"
+        );
     }
 
     /// P148: a `${FUIGO_API_KEY}` reference in a trusted config resolves to the key a client authenticated with when the
@@ -978,7 +1080,8 @@ mod tests {
         let only_runtime = read_named_key_env_for_config(FUIGO_API_KEY_ENV_VAR);
         let legacy = read_named_key_env_for_config(LEGACY_FUIGO_API_KEY_ENV_VAR);
         let exported = {
-            let _e = fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p148-unit-exported-FAKE");
+            let _e =
+                fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p148-unit-exported-FAKE");
             read_named_key_env_for_config(FUIGO_API_KEY_ENV_VAR)
         };
         set_stored_api_key(Some("p148-unit-saved-FAKE".to_owned()), false);
@@ -986,10 +1089,25 @@ mod tests {
         set_stored_api_key(None, false);
         let _ = set_runtime_api_key(None);
         let nothing = read_named_key_env_for_config(FUIGO_API_KEY_ENV_VAR);
-        assert_eq!(only_runtime.as_deref(), Some(FAKE_RUNTIME_KEY), "no user key: the authenticated key stands in");
-        assert_eq!(legacy, None, "the legacy name never sees the authenticated key");
-        assert_eq!(exported.as_deref(), Some("p148-unit-exported-FAKE"), "an exported key keeps priority");
-        assert_eq!(saved.as_deref(), Some("p148-unit-saved-FAKE"), "a saved key keeps priority");
+        assert_eq!(
+            only_runtime.as_deref(),
+            Some(FAKE_RUNTIME_KEY),
+            "no user key: the authenticated key stands in"
+        );
+        assert_eq!(
+            legacy, None,
+            "the legacy name never sees the authenticated key"
+        );
+        assert_eq!(
+            exported.as_deref(),
+            Some("p148-unit-exported-FAKE"),
+            "an exported key keeps priority"
+        );
+        assert_eq!(
+            saved.as_deref(),
+            Some("p148-unit-saved-FAKE"),
+            "a saved key keeps priority"
+        );
         assert_eq!(nothing, None);
     }
 
@@ -1003,20 +1121,27 @@ mod tests {
     /// `/proc/self/environ` on Linux).
     #[test]
     #[serial]
-    fn explicit_key_reference_in_config_resolves_to_the_saved_key_without_entering_the_environment() {
+    fn explicit_key_reference_in_config_resolves_to_the_saved_key_without_entering_the_environment()
+    {
         const SAVED: &str = "p70a-unit-reference-saved-FAKE";
         const SET: &str = "p70a-unit-reference-set-FAKE";
         let home = tempfile::tempdir().expect("tempdir");
         crate::auth::store_api_key(home.path(), SAVED).expect("seed auth.json");
         let _env = fuigo_test_support::EnvGuard::unset(FUIGO_API_KEY_ENV_VAR);
         let _legacy = fuigo_test_support::EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
-        assert!(set_runtime_api_key(None).is_none(), "precondition: no runtime key");
+        assert!(
+            set_runtime_api_key(None).is_none(),
+            "precondition: no runtime key"
+        );
         set_stored_api_key(None, false);
         let load = crate::config::expand_env_vars_in_string;
         let resolve = |s: &str| fuigo_config::resolve_first_party_key_references(s).into_owned();
         let template = "Bearer ${FUIGO_API_KEY} $FUIGO_API_KEY ${FUIGO_CODE_API_KEY}";
 
-        assert!(load_saved_api_key(home.path(), false), "the saved key is loaded");
+        assert!(
+            load_saved_api_key(home.path(), false),
+            "the saved key is loaded"
+        );
         let loaded = load(template);
         let resolved = resolve(&loaded);
         let model_api_key = crate::agent::config::first_own_credential(Some(&loaded), None);
@@ -1024,34 +1149,65 @@ mod tests {
         let with_runtime = resolve("${FUIGO_API_KEY}");
         let _ = set_runtime_api_key(None);
         let exported_at_load = {
-            let _e = fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p70a-unit-exported-FAKE");
+            let _e =
+                fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p70a-unit-exported-FAKE");
             load("${FUIGO_API_KEY}")
         };
         let leaked = env_holds(SAVED);
         #[cfg(target_os = "linux")]
-        let in_proc_environ = String::from_utf8_lossy(&std::fs::read("/proc/self/environ").expect("environ"))
-            .contains(SAVED);
+        let in_proc_environ =
+            String::from_utf8_lossy(&std::fs::read("/proc/self/environ").expect("environ"))
+                .contains(SAVED);
         #[cfg(not(target_os = "linux"))]
         let in_proc_environ = false;
         apply_set_api_key(Some(SET));
         let set_over_exported = {
-            let _e = fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p70a-unit-exported-FAKE");
+            let _e =
+                fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p70a-unit-exported-FAKE");
             resolve("${FUIGO_API_KEY}")
         };
         let set_leaked = env_holds(SET);
         set_stored_api_key(None, false);
         let nothing = resolve("${FUIGO_API_KEY}");
 
-        assert_eq!(loaded, template, "config loading resolved an unexported reference");
-        assert_eq!(resolved, format!("Bearer {SAVED} {SAVED} ${{FUIGO_CODE_API_KEY}}"));
-        assert_eq!(model_api_key.as_deref(), Some(resolved.as_str()), "a model api_key naming the key");
-        assert_eq!(with_runtime, SAVED, "P148: the saved key keeps priority over an authenticated one");
-        assert_eq!(exported_at_load, "p70a-unit-exported-FAKE", "an exported key expands at load, as before");
-        assert_eq!(set_over_exported, SET, "a setApiKey key wins over an exported one, as the old set_var did");
-        assert_eq!(leaked, None, "the saved key entered the process environment");
-        assert_eq!(set_leaked, None, "the setApiKey key entered the process environment");
+        assert_eq!(
+            loaded, template,
+            "config loading resolved an unexported reference"
+        );
+        assert_eq!(
+            resolved,
+            format!("Bearer {SAVED} {SAVED} ${{FUIGO_CODE_API_KEY}}")
+        );
+        assert_eq!(
+            model_api_key.as_deref(),
+            Some(resolved.as_str()),
+            "a model api_key naming the key"
+        );
+        assert_eq!(
+            with_runtime, SAVED,
+            "P148: the saved key keeps priority over an authenticated one"
+        );
+        assert_eq!(
+            exported_at_load, "p70a-unit-exported-FAKE",
+            "an exported key expands at load, as before"
+        );
+        assert_eq!(
+            set_over_exported, SET,
+            "a setApiKey key wins over an exported one, as the old set_var did"
+        );
+        assert_eq!(
+            leaked, None,
+            "the saved key entered the process environment"
+        );
+        assert_eq!(
+            set_leaked, None,
+            "the setApiKey key entered the process environment"
+        );
         assert!(!in_proc_environ, "the saved key is in /proc/self/environ");
-        assert_eq!(nothing, "${FUIGO_API_KEY}", "with no key the reference is left as written");
+        assert_eq!(
+            nothing, "${FUIGO_API_KEY}",
+            "with no key the reference is left as written"
+        );
     }
 
     /// P70: `fuigo/setApiKey` holds the key in memory ahead of an env key (the old `set_var` overwrote it) and never
@@ -1060,18 +1216,35 @@ mod tests {
     #[serial]
     fn set_api_key_holds_the_key_in_memory_ahead_of_the_env_key() {
         const SET: &str = "p70-unit-setapikey-FAKE";
-        let _env = fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p70-unit-injected-FAKE");
+        let _env =
+            fuigo_test_support::EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "p70-unit-injected-FAKE");
         let _legacy = fuigo_test_support::EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
-        assert!(set_runtime_api_key(None).is_none(), "precondition: no runtime key");
+        assert!(
+            set_runtime_api_key(None).is_none(),
+            "precondition: no runtime key"
+        );
         apply_set_api_key(Some(SET));
         let leaked = env_holds(SET);
         let read = (read_fuigo_api_key_env(), read_fuigo_api_key_echoable());
         apply_set_api_key(None);
-        let cleared = (read_fuigo_api_key_env(), std::env::var(FUIGO_API_KEY_ENV_VAR));
-        assert_eq!(leaked, None, "the setApiKey key entered the process environment");
-        assert_eq!(read.0.as_deref(), Ok(SET), "the set key outranks the env key, as the old set_var did");
+        let cleared = (
+            read_fuigo_api_key_env(),
+            std::env::var(FUIGO_API_KEY_ENV_VAR),
+        );
+        assert_eq!(
+            leaked, None,
+            "the setApiKey key entered the process environment"
+        );
+        assert_eq!(
+            read.0.as_deref(),
+            Ok(SET),
+            "the set key outranks the env key, as the old set_var did"
+        );
         assert_eq!(read.1.as_deref(), Ok(SET));
-        assert!(cleared.0.is_err() && cleared.1.is_err(), "a clear drops the stored key and FUIGO_API_KEY");
+        assert!(
+            cleared.0.is_err() && cleared.1.is_err(),
+            "a clear drops the stored key and FUIGO_API_KEY"
+        );
     }
 
     /// The capability advert names the channel and carries no credential.
@@ -1624,7 +1797,11 @@ mod tests {
     fn flux_key_precedence_is_fuigo_then_legacy_then_flux() {
         assert_eq!(
             FLUX_KEY_ENV_VARS,
-            [FUIGO_API_KEY_ENV_VAR, LEGACY_FUIGO_API_KEY_ENV_VAR, FLUX_NAME],
+            [
+                FUIGO_API_KEY_ENV_VAR,
+                LEGACY_FUIGO_API_KEY_ENV_VAR,
+                FLUX_NAME
+            ],
             "the one list names the three variables in precedence order"
         );
         let _cleared = flux_env_cleared();
@@ -1632,7 +1809,10 @@ mod tests {
         assert_eq!(read_fuigo_api_key_env().as_deref(), Ok("flux-key"));
         let _legacy = EnvGuard::set(LEGACY_FUIGO_API_KEY_ENV_VAR, "legacy-key");
         assert_eq!(read_fuigo_api_key_env().as_deref(), Ok("legacy-key"));
-        assert_eq!(flux_key_env_var_in_use(), Some(LEGACY_FUIGO_API_KEY_ENV_VAR));
+        assert_eq!(
+            flux_key_env_var_in_use(),
+            Some(LEGACY_FUIGO_API_KEY_ENV_VAR)
+        );
         let _first = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "fuigo-key");
         assert_eq!(read_fuigo_api_key_env().as_deref(), Ok("fuigo-key"));
         assert_eq!(flux_key_env_var_in_use(), Some(FUIGO_API_KEY_ENV_VAR));
@@ -1648,7 +1828,10 @@ mod tests {
         assert_eq!(read_fuigo_api_key_env().as_deref(), Ok(FLUX_VALUE));
         assert_eq!(flux_key_env_var_in_use(), Some(FLUX_NAME));
         let _no_flux = EnvGuard::unset(FLUX_NAME);
-        assert!(read_fuigo_api_key_env().is_err(), "a blank key alone is no key");
+        assert!(
+            read_fuigo_api_key_env().is_err(),
+            "a blank key alone is no key"
+        );
         assert_eq!(flux_key_env_var_in_use(), None);
     }
 
@@ -1658,7 +1841,11 @@ mod tests {
     #[serial]
     fn login_status_and_the_runtime_agree_on_which_variable_wins() {
         let home = tempfile::tempdir().unwrap();
-        let values = [("FUIGO_API_KEY", "sk-fuigo-unit-AAAAAAAAAAAAAAA"), ("FUIGO_CODE_API_KEY", "sk-legacy-unit-AAAAAAAAAAAAA"), (FLUX_NAME, FLUX_VALUE)];
+        let values = [
+            ("FUIGO_API_KEY", "sk-fuigo-unit-AAAAAAAAAAAAAAA"),
+            ("FUIGO_CODE_API_KEY", "sk-legacy-unit-AAAAAAAAAAAAA"),
+            (FLUX_NAME, FLUX_VALUE),
+        ];
         for mask in 1u8..8 {
             let _cleared = flux_env_cleared();
             let _set: Vec<EnvGuard> = values
@@ -1679,7 +1866,11 @@ mod tests {
             );
             let runtime = read_fuigo_api_key_env().expect("a key is set");
             let winner = status.flux_env_var().expect("status reports a key");
-            assert_eq!(std::env::var(winner).as_deref(), Ok(runtime.as_str()), "mask {mask:#05b}");
+            assert_eq!(
+                std::env::var(winner).as_deref(),
+                Ok(runtime.as_str()),
+                "mask {mask:#05b}"
+            );
             assert!(has_fuigo_api_key_env());
         }
     }

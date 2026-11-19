@@ -459,8 +459,14 @@ mod links {
         let mut t = term(20, 3);
         let out = frame(&mut t, "AB", &[span(0, 2, "https://x\x07\x1b/y", None)]);
         // The empty-target close that follows an unlinked run is a no-op; no open with a target may remain
-        assert!(!out.replace("\x1b]8;;\x07", "").contains("\x1b]8;"), "a control-bearing url must open no hyperlink: {out:?}");
-        assert!(!out.contains("https://x"), "the url must not be edited into another target: {out:?}");
+        assert!(
+            !out.replace("\x1b]8;;\x07", "").contains("\x1b]8;"),
+            "a control-bearing url must open no hyperlink: {out:?}"
+        );
+        assert!(
+            !out.contains("https://x"),
+            "the url must not be edited into another target: {out:?}"
+        );
         assert!(out.contains("AB"), "the cells still draw: {out:?}");
     }
 

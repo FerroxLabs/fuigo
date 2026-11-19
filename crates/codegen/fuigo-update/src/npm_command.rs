@@ -65,7 +65,10 @@ pub(crate) fn trusted_program(name: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// [`trusted_program`] over an explicit `PATH` value.
-pub(crate) fn trusted_program_in(name: &str, path: Option<&std::ffi::OsStr>) -> anyhow::Result<PathBuf> {
+pub(crate) fn trusted_program_in(
+    name: &str,
+    path: Option<&std::ffi::OsStr>,
+) -> anyhow::Result<PathBuf> {
     path.and_then(|path| find_on_absolute_path(name, path)).ok_or_else(|| {
         anyhow::anyhow!("`{name}` was not found in any absolute directory on PATH; install it and make sure it is on PATH")
     })
@@ -129,7 +132,9 @@ impl Tree {
         #[cfg(not(any(unix, windows)))]
         {
             let _ = child;
-            Err(std::io::Error::other("no process-tree containment on this platform"))
+            Err(std::io::Error::other(
+                "no process-tree containment on this platform",
+            ))
         }
     }
 
@@ -141,7 +146,9 @@ impl Tree {
         }
         #[cfg(windows)]
         {
-            self.job.terminate_and_wait(std::time::Duration::from_secs(5)).await
+            self.job
+                .terminate_and_wait(std::time::Duration::from_secs(5))
+                .await
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -190,7 +197,8 @@ pub(crate) async fn run_tree_bounded(
         use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
         cmd.creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
     }
-    #[allow(clippy::disallowed_methods)] // contained in its own process group / job right below; killed as a tree
+    #[allow(clippy::disallowed_methods)]
+    // contained in its own process group / job right below; killed as a tree
     let mut child = cmd.spawn()?;
     let tree = match Tree::enroll(&child) {
         Ok(tree) => tree,
@@ -239,8 +247,11 @@ pub(crate) async fn run_tree_bounded(
             let killed = guard.tree.kill().await;
             guard.armed = false;
             // The reap is bounded too (Astra P145 r3): Windows may keep a terminated process alive while I/O is pending.
-            let reaped = tokio::time::timeout(std::time::Duration::from_secs(5), child.kill()).await;
-            killed.map_err(|e| std::io::Error::other(format!("npm timed out and could not be stopped: {e}")))?;
+            let reaped =
+                tokio::time::timeout(std::time::Duration::from_secs(5), child.kill()).await;
+            killed.map_err(|e| {
+                std::io::Error::other(format!("npm timed out and could not be stopped: {e}"))
+            })?;
             if reaped.is_err() {
                 return Err(std::io::Error::other(
                     "npm timed out and was killed, but had not exited 5 s later",
@@ -267,13 +278,15 @@ mod win {
         pub(super) fn new() -> io::Result<Self> {
             use std::mem::{size_of, zeroed};
             use windows::Win32::System::JobObjects::{
-                CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JobObjectExtendedLimitInformation, SetInformationJobObject,
+                CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
             };
             use windows::core::PCWSTR;
             // SAFETY: plain Win32 calls on handles this function owns.
             unsafe {
-                let job = CreateJobObjectW(None, PCWSTR::null()).map_err(|e| io::Error::other(format!("CreateJobObjectW: {e}")))?;
+                let job = CreateJobObjectW(None, PCWSTR::null())
+                    .map_err(|e| io::Error::other(format!("CreateJobObjectW: {e}")))?;
                 let job = Self(job);
                 let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -291,16 +304,24 @@ mod win {
         /// Assign the (suspended) child through its own process handle, then resume its threads.
         pub(super) fn assign_and_resume(&self, child: &tokio::process::Child) -> io::Result<()> {
             use windows::Win32::System::Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+                CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                Thread32Next,
             };
             use windows::Win32::System::JobObjects::AssignProcessToJobObject;
-            use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
-            let raw = child.raw_handle().ok_or_else(|| io::Error::other("npm exited before it ran"))?;
-            let pid = child.id().ok_or_else(|| io::Error::other("npm exited before it ran"))?;
+            use windows::Win32::System::Threading::{
+                OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+            };
+            let raw = child
+                .raw_handle()
+                .ok_or_else(|| io::Error::other("npm exited before it ran"))?;
+            let pid = child
+                .id()
+                .ok_or_else(|| io::Error::other("npm exited before it ran"))?;
             // SAFETY: `raw` is the child's live process handle, owned by `child` for the duration of the call; the
             // snapshot and thread handles are closed on every path.
             unsafe {
-                AssignProcessToJobObject(self.0, HANDLE(raw)).map_err(|e| io::Error::other(format!("AssignProcessToJobObject: {e}")))?;
+                AssignProcessToJobObject(self.0, HANDLE(raw))
+                    .map_err(|e| io::Error::other(format!("AssignProcessToJobObject: {e}")))?;
                 let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
                     .map_err(|e| io::Error::other(format!("CreateToolhelp32Snapshot: {e}")))?;
                 let mut entry = THREADENTRY32 {
@@ -311,7 +332,8 @@ mod win {
                 let mut more = Thread32First(snap, &mut entry).is_ok();
                 while more {
                     if entry.th32OwnerProcessID == pid
-                        && let Ok(thread) = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+                        && let Ok(thread) =
+                            OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
                     {
                         if ResumeThread(thread) != u32::MAX {
                             resumed += 1;
@@ -336,7 +358,8 @@ mod win {
 
         fn active_processes(&self) -> io::Result<u32> {
             use windows::Win32::System::JobObjects::{
-                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation, QueryInformationJobObject,
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+                QueryInformationJobObject,
             };
             let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
             // SAFETY: `info` is a correctly sized out-buffer for this information class.
@@ -354,10 +377,14 @@ mod win {
         }
 
         /// Terminate every process in the job and wait until none is left (termination is asynchronous), bounded.
-        pub(super) async fn terminate_and_wait(&self, bound: std::time::Duration) -> io::Result<()> {
+        pub(super) async fn terminate_and_wait(
+            &self,
+            bound: std::time::Duration,
+        ) -> io::Result<()> {
             use windows::Win32::System::JobObjects::TerminateJobObject;
             // SAFETY: valid job handle.
-            unsafe { TerminateJobObject(self.0, 1) }.map_err(|e| io::Error::other(format!("TerminateJobObject: {e}")))?;
+            unsafe { TerminateJobObject(self.0, 1) }
+                .map_err(|e| io::Error::other(format!("TerminateJobObject: {e}")))?;
             let deadline = std::time::Instant::now() + bound;
             loop {
                 let left = self.active_processes()?;
@@ -365,7 +392,10 @@ mod win {
                     return Ok(());
                 }
                 if std::time::Instant::now() >= deadline {
-                    return Err(io::Error::other(format!("{left} npm process(es) still running after {} s", bound.as_secs())));
+                    return Err(io::Error::other(format!(
+                        "{left} npm process(es) still running after {} s",
+                        bound.as_secs()
+                    )));
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
@@ -504,8 +534,12 @@ mod tests {
         let cli = nodejs.join("node_modules/npm/bin/npm-cli.js");
         touch(&cli);
 
-        let got = resolve_windows_npm(std::slice::from_ref(&nodejs), Some(".COM;.EXE;.BAT;.CMD;.VBS;.JS"), is_file)
-            .expect("npm resolves");
+        let got = resolve_windows_npm(
+            std::slice::from_ref(&nodejs),
+            Some(".COM;.EXE;.BAT;.CMD;.VBS;.JS"),
+            is_file,
+        )
+        .expect("npm resolves");
         assert_eq!(got.program, nodejs.join("node.exe"));
         assert_eq!(got.prefix_args, vec![cli.into_os_string()]);
     }
@@ -537,7 +571,13 @@ mod tests {
         touch(&nodejs.join("node_modules/npm/bin/npm-cli.js"));
 
         let got = resolve_windows_npm(&[shim.clone(), nodejs.clone()], None, is_file).unwrap();
-        assert_eq!(got, NpmInvocation { program: shim.join("npm.exe"), prefix_args: vec![] });
+        assert_eq!(
+            got,
+            NpmInvocation {
+                program: shim.join("npm.exe"),
+                prefix_args: vec![]
+            }
+        );
         let got = resolve_windows_npm(&[nodejs.clone(), shim], None, is_file).unwrap();
         assert_eq!(got.program, nodejs.join("node.exe"));
     }
@@ -549,9 +589,15 @@ mod tests {
         let dir = tmp.path().join("d");
         touch(&dir.join("npm.exe"));
         touch(&dir.join("npm.cmd"));
-        let got = resolve_windows_npm(std::slice::from_ref(&dir), Some(".CMD;.EXE"), is_file).unwrap();
-        assert_eq!(got.program, dir.join("npm.cmd"), "no npm-cli.js beside it: the shim itself");
-        let got = resolve_windows_npm(std::slice::from_ref(&dir), Some(".EXE;.CMD"), is_file).unwrap();
+        let got =
+            resolve_windows_npm(std::slice::from_ref(&dir), Some(".CMD;.EXE"), is_file).unwrap();
+        assert_eq!(
+            got.program,
+            dir.join("npm.cmd"),
+            "no npm-cli.js beside it: the shim itself"
+        );
+        let got =
+            resolve_windows_npm(std::slice::from_ref(&dir), Some(".EXE;.CMD"), is_file).unwrap();
         assert_eq!(got.program, dir.join("npm.exe"));
     }
 
@@ -562,13 +608,23 @@ mod tests {
         let dir = tmp.path().join("scoop-shims");
         touch(&dir.join("npm.bat"));
         let got = resolve_windows_npm(std::slice::from_ref(&dir), None, is_file).unwrap();
-        assert_eq!(got, NpmInvocation { program: dir.join("npm.bat"), prefix_args: vec![] });
+        assert_eq!(
+            got,
+            NpmInvocation {
+                program: dir.join("npm.bat"),
+                prefix_args: vec![]
+            }
+        );
 
         let lone = tmp.path().join("lone");
         touch(&lone.join("npm.cmd"));
         touch(&lone.join("node_modules/npm/bin/npm-cli.js"));
         let got = resolve_windows_npm(std::slice::from_ref(&lone), None, is_file).unwrap();
-        assert_eq!(got.program, lone.join("npm.cmd"), "npm-cli.js but no node.exe: fall back to the shim");
+        assert_eq!(
+            got.program,
+            lone.join("npm.cmd"),
+            "npm-cli.js but no node.exe: fall back to the shim"
+        );
     }
 
     /// Relative and empty PATH entries are never searched (they resolve against the current directory), and a
@@ -592,15 +648,28 @@ mod tests {
 
     #[test]
     fn p145_launchable_extensions_parse() {
-        assert_eq!(launchable_extensions(None), vec![".com", ".exe", ".bat", ".cmd"]);
-        assert_eq!(launchable_extensions(Some("  ")), vec![".com", ".exe", ".bat", ".cmd"]);
-        assert_eq!(launchable_extensions(Some(".CMD; .js ;.EXE;.cmd")), vec![".cmd", ".exe"]);
+        assert_eq!(
+            launchable_extensions(None),
+            vec![".com", ".exe", ".bat", ".cmd"]
+        );
+        assert_eq!(
+            launchable_extensions(Some("  ")),
+            vec![".com", ".exe", ".bat", ".cmd"]
+        );
+        assert_eq!(
+            launchable_extensions(Some(".CMD; .js ;.EXE;.cmd")),
+            vec![".cmd", ".exe"]
+        );
     }
 
     #[test]
     fn p145_windows_absolute_shapes() {
-        assert!(looks_like_windows_absolute(Path::new(r"C:\Program Files\nodejs")));
-        assert!(looks_like_windows_absolute(Path::new(r"\\server\share\bin")));
+        assert!(looks_like_windows_absolute(Path::new(
+            r"C:\Program Files\nodejs"
+        )));
+        assert!(looks_like_windows_absolute(Path::new(
+            r"\\server\share\bin"
+        )));
         assert!(!looks_like_windows_absolute(Path::new(r"bin\npm")));
         assert!(!looks_like_windows_absolute(Path::new(r"C:relative")));
     }
@@ -626,7 +695,8 @@ mod tests {
         let abs = std::env::temp_dir().join(format!("r01-abs-{}", std::process::id()));
         let abs_gh = abs.join("gh");
         touch(&abs_gh);
-        std::fs::set_permissions(&abs_gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&abs_gh, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         let both = std::env::join_paths([Path::new(&planted), abs.as_path()]).unwrap();
         let found = trusted_program_in("gh", Some(both.as_os_str()));
         let _ = std::fs::remove_dir_all(&abs);

@@ -31,8 +31,8 @@ use std::sync::{Arc, LazyLock};
 
 use parking_lot::Mutex;
 
-use toml::Value as TomlValue;
 use fuigo_config_types::BoolFlag;
+use toml::Value as TomlValue;
 
 pub use crate::trust::{CONSENT_V, Coverage, KeyError};
 use crate::trust::{TrustStore, trust_key};
@@ -75,7 +75,9 @@ pub fn untrusted_command_refusal(reason: &UntrustedReason) -> String {
                 rule such as --allow 'Bash(cargo test *)'."
             .to_owned();
     }
-    let folder = reason.key().map_or_else(|| "this folder".to_owned(), |key| key.display().to_string());
+    let folder = reason
+        .key()
+        .map_or_else(|| "this folder".to_owned(), |key| key.display().to_string());
     format!(
         "Not run: {folder} is not a trusted folder and this session can't ask. Run \"fuigo --trust\" there once, or \
          add to ~/.fuigo/config.toml: [folder_trust] trusted_folders = [\"{folder}\"] (a project's own config can't \
@@ -187,7 +189,8 @@ fn file_stamp(path: &Path) -> FileStamp {
 /// The worktree registry file the read-write open would use under `home` (per host on network mounts), resolved once
 /// per home (it runs a statfs and a hostname lookup).
 fn worktree_db_path(home: &Path) -> PathBuf {
-    static CACHE: LazyLock<Mutex<HashMap<PathBuf, PathBuf>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    static CACHE: LazyLock<Mutex<HashMap<PathBuf, PathBuf>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
     if let Some(path) = CACHE.lock().get(home) {
         return path.clone();
     }
@@ -283,8 +286,12 @@ fn load_inputs() -> TrustInputs {
             None
         }
     };
-    let user = home.as_ref().and_then(|_| loaded("user", fuigo_config::load_from_disk()));
-    let managed = home.as_ref().and_then(|_| loaded("managed", fuigo_config::load_managed_config()));
+    let user = home
+        .as_ref()
+        .and_then(|_| loaded("user", fuigo_config::load_from_disk()));
+    let managed = home
+        .as_ref()
+        .and_then(|_| loaded("managed", fuigo_config::load_managed_config()));
     let enabled_of = |v: Option<&TomlValue>| folder_trust_table(v)?.get("enabled")?.as_bool();
     let enabled = BoolFlag::env("FUIGO_FOLDER_TRUST")
         .config(enabled_of(user.as_ref()))
@@ -294,7 +301,9 @@ fn load_inputs() -> TrustInputs {
         .value;
     let mut config_keys = Vec::new();
     for layer in [managed.as_ref(), user.as_ref()] {
-        let Some(list) = folder_trust_table(layer).and_then(|t| t.get("trusted_folders")).and_then(TomlValue::as_array)
+        let Some(list) = folder_trust_table(layer)
+            .and_then(|t| t.get("trusted_folders"))
+            .and_then(TomlValue::as_array)
         else {
             continue;
         };
@@ -307,22 +316,36 @@ fn load_inputs() -> TrustInputs {
                 None => PathBuf::from(entry),
             };
             if !path.is_absolute() {
-                tracing::warn!(entry, "[folder_trust] trusted_folders: ignoring a relative path");
+                tracing::warn!(
+                    entry,
+                    "[folder_trust] trusted_folders: ignoring a relative path"
+                );
                 continue;
             }
             match trust_key(&path) {
                 Ok(key) => config_keys.push(key),
                 Err(KeyError::Unrecordable) => {
-                    tracing::warn!(entry, "[folder_trust] trusted_folders: home and root folders can't be trusted; ignored");
+                    tracing::warn!(
+                        entry,
+                        "[folder_trust] trusted_folders: home and root folders can't be trusted; ignored"
+                    );
                 }
                 Err(KeyError::Canonicalize) => {
-                    tracing::debug!(entry, "[folder_trust] trusted_folders: folder not found; ignored");
+                    tracing::debug!(
+                        entry,
+                        "[folder_trust] trusted_folders: folder not found; ignored"
+                    );
                 }
             }
         }
     }
     let store = crate::trust::TrustStore::default_path().map(TrustStore::load_from);
-    TrustInputs { store, disabled: !enabled, config_keys, load_failed }
+    TrustInputs {
+        store,
+        disabled: !enabled,
+        config_keys,
+        load_failed,
+    }
 }
 
 /// The trust inputs last read, with the fingerprint they were read at.
@@ -359,11 +382,13 @@ fn warn_disabled_once() {
 /// Keys the user declined in this process (`n`, `/untrust`). A decline beats the store and the config list for this
 /// process even when it could not be saved (Grok d2 M6). A "yes" that could not be saved leaves the folder untrusted:
 /// it never falls back to [`PROCESS_GRANTS`].
-static PROCESS_DECLINES: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+static PROCESS_DECLINES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 static DECLINE_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Keys a GUI client trusted for this process only (`"duration":"process"`). Held only here, and a "no" from this
 /// process or the store beats it.
-static PROCESS_GRANTS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+static PROCESS_GRANTS: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn set_process_decline(key: &Path, declined: bool) {
     let changed = if declined {
@@ -466,8 +491,12 @@ fn decide_with(path: &Path, key: &Path, interactive: bool, inputs: &TrustInputs)
         Coverage::Trusted { consent } if consent >= CONSENT_V => TrustDecision::Trusted,
         Coverage::Trusted { .. } if interactive => TrustDecision::Prompt(PromptReason::Upgrade),
         Coverage::Trusted { .. } => TrustDecision::Untrusted(UntrustedReason::Legacy(key_buf())),
-        Coverage::None | Coverage::Declined if interactive => TrustDecision::Prompt(PromptReason::New),
-        Coverage::None | Coverage::Declined => TrustDecision::Untrusted(UntrustedReason::Undecided(key_buf())),
+        Coverage::None | Coverage::Declined if interactive => {
+            TrustDecision::Prompt(PromptReason::New)
+        }
+        Coverage::None | Coverage::Declined => {
+            TrustDecision::Untrusted(UntrustedReason::Undecided(key_buf()))
+        }
     }
 }
 
@@ -499,12 +528,15 @@ pub fn dir_trust(dir: &Path) -> CommandTrust {
     let verdict = match decide_in(&canonical, false, &inputs) {
         TrustDecision::Trusted => CommandTrust::Trusted,
         TrustDecision::Untrusted(reason) => CommandTrust::Untrusted(reason),
-        TrustDecision::Prompt(_) => CommandTrust::Untrusted(UntrustedReason::Undecided(canonical.clone())),
+        TrustDecision::Prompt(_) => {
+            CommandTrust::Untrusted(UntrustedReason::Undecided(canonical.clone()))
+        }
     };
     let cacheable = !inputs.load_failed
         && matches!(
             verdict,
-            CommandTrust::Trusted | CommandTrust::Untrusted(UntrustedReason::Declined(_) | UntrustedReason::Inputs)
+            CommandTrust::Trusted
+                | CommandTrust::Untrusted(UntrustedReason::Declined(_) | UntrustedReason::Inputs)
         );
     if cacheable {
         DIR_CACHE.lock().insert(canonical, (fp, verdict.clone()));
@@ -556,7 +588,9 @@ fn test_folder_trust(dir: &Path) -> Option<CommandTrust> {
             // u35 t2 (Astra 7): physical containment only, as the real decision (a symlink inside a trusted folder
             // that points elsewhere is the folder it points to; a folder that does not resolve is not trusted).
             let Ok(canonical) = dunce::canonicalize(dir) else {
-                return Some(CommandTrust::Untrusted(UntrustedReason::Key(KeyError::Canonicalize)));
+                return Some(CommandTrust::Untrusted(UntrustedReason::Key(
+                    KeyError::Canonicalize,
+                )));
             };
             Some(if roots.iter().any(|root| canonical.starts_with(root)) {
                 CommandTrust::Trusted
@@ -579,11 +613,16 @@ impl TestFolderTrust {
         Self(TEST_FOLDER_TRUST.with(|m| m.replace(TestTrustMode::Fixed(trust))))
     }
     pub(crate) fn untrusted() -> Self {
-        Self::set(CommandTrust::Untrusted(UntrustedReason::Undecided(PathBuf::from("/untrusted-test-folder"))))
+        Self::set(CommandTrust::Untrusted(UntrustedReason::Undecided(
+            PathBuf::from("/untrusted-test-folder"),
+        )))
     }
     /// Trusted only physically under `roots` (each by its canonical path).
     pub(crate) fn only(roots: &[&Path]) -> Self {
-        let all = roots.iter().map(|root| dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())).collect();
+        let all = roots
+            .iter()
+            .map(|root| dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()))
+            .collect();
         Self(TEST_FOLDER_TRUST.with(|m| m.replace(TestTrustMode::Only(all))))
     }
     pub(crate) fn real() -> Self {
@@ -662,7 +701,10 @@ pub enum PersistStatus {
 #[derive(Debug)]
 pub enum GrantOutcome {
     /// A record was inserted; see `persist` for whether it reached disk.
-    Granted { key: PathBuf, persist: PersistStatus },
+    Granted {
+        key: PathBuf,
+        persist: PersistStatus,
+    },
     /// The exact key is already durably trusted (current consent); the store was not rewritten.
     AlreadyDurable { key: PathBuf },
     /// Nothing was recorded.
@@ -686,7 +728,9 @@ impl std::fmt::Display for GrantOutcome {
                 ..
             } => write!(f, "folder trust holds for this process only"),
             Self::Refused { reason } => write!(f, "{reason}"),
-            Self::Granted { .. } | Self::AlreadyDurable { .. } => write!(f, "folder trust was saved"),
+            Self::Granted { .. } | Self::AlreadyDurable { .. } => {
+                write!(f, "folder trust was saved")
+            }
         }
     }
 }
@@ -827,9 +871,12 @@ fn precheck_grant(key: &Path) -> Option<GrantOutcome> {
         Err(e)
             if e.kind() == std::io::ErrorKind::NotFound
                 && key.is_absolute()
-                && key
-                    .components()
-                    .all(|c| !matches!(c, std::path::Component::CurDir | std::path::Component::ParentDir)) =>
+                && key.components().all(|c| {
+                    !matches!(
+                        c,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                }) =>
         {
             key.to_path_buf()
         }
@@ -865,7 +912,9 @@ fn apply_grant_to_store(store: &mut TrustStore, key: &Path) -> GrantOutcome {
         };
     }
     // Already durable needs a clean read and an exact record at the current consent (a Legacy record is rewritten).
-    if store.has_decision(&key) && store.coverage(&key, &key) == (Coverage::Trusted { consent: CONSENT_V }) {
+    if store.has_decision(&key)
+        && store.coverage(&key, &key) == (Coverage::Trusted { consent: CONSENT_V })
+    {
         set_process_decline(&key, false);
         return GrantOutcome::AlreadyDurable { key };
     }
@@ -913,7 +962,9 @@ pub fn decline_folder_trust_key(key: &Path) -> Result<(), std::io::Error> {
     }
     let mut store = TrustStore::load();
     if !store.has_store_path() {
-        return Err(std::io::Error::other("no absolute Fuigo home for the trust store"));
+        return Err(std::io::Error::other(
+            "no absolute Fuigo home for the trust store",
+        ));
     }
     let result = store.set_untrusted(key);
     note_trust_changed();
@@ -924,7 +975,11 @@ pub fn decline_folder_trust_key(key: &Path) -> Result<(), std::io::Error> {
 #[derive(Debug)]
 pub enum RevokeOutcome {
     /// The folder is untrusted now. `was_trusted`: it was trusted before; `saved`: the "no" reached the store.
-    Revoked { key: PathBuf, was_trusted: bool, saved: Result<(), std::io::Error> },
+    Revoked {
+        key: PathBuf,
+        was_trusted: bool,
+        saved: Result<(), std::io::Error>,
+    },
     /// Nothing to revoke: an inert build, or a folder with no trust key (never trusted).
     NotApplicable,
 }
@@ -932,7 +987,13 @@ pub enum RevokeOutcome {
 impl RevokeOutcome {
     /// Whether the folder had been trusted.
     pub fn was_trusted(&self) -> bool {
-        matches!(self, Self::Revoked { was_trusted: true, .. })
+        matches!(
+            self,
+            Self::Revoked {
+                was_trusted: true,
+                ..
+            }
+        )
     }
 }
 
@@ -950,7 +1011,11 @@ pub fn revoke_folder_trust_store(cwd: &Path) -> RevokeOutcome {
     if let Err(e) = &saved {
         tracing::warn!(path = %key.display(), error = %e, "folder trust: failed to persist untrust decision");
     }
-    RevokeOutcome::Revoked { key, was_trusted, saved }
+    RevokeOutcome::Revoked {
+        key,
+        was_trusted,
+        saved,
+    }
 }
 
 #[cfg(test)]
@@ -1127,9 +1192,11 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
         hit!("workflows");
     }
     // A project `.fuigo/tool-guidance.toml` rewrites tool descriptions the model sees, so it must gate like instructions
-    if chain.dirs.iter().any(|d| {
-        path_present_or_uncertain(&d.join(".fuigo").join(crate::tool_guidance::FILE_NAME))
-    }) {
+    if chain
+        .dirs
+        .iter()
+        .any(|d| path_present_or_uncertain(&d.join(".fuigo").join(crate::tool_guidance::FILE_NAME)))
+    {
         hit!("tool_guidance");
     }
     // Project instructions (AGENTS.md / CLAUDE.md / rules dirs) reach the model as agent instructions, so an instructions-only clone must gate too
@@ -1196,7 +1263,11 @@ fn write_trust_prompt(err: &mut impl std::io::Write, key: &Path) {
     let _ = writeln!(err, "Do you trust the files in this folder?");
     // A hidden or control character in the name shows as one U+FFFD, so the line cannot be made to read like another prompt
     let folder = key.display().to_string();
-    let _ = writeln!(err, "  {}", fuigo_tty_utils::replace_unsafe_display(&folder, '\u{fffd}'));
+    let _ = writeln!(
+        err,
+        "  {}",
+        fuigo_tty_utils::replace_unsafe_display(&folder, '\u{fffd}')
+    );
     let _ = writeln!(err, "{TRUST_QUESTION_BODY}");
     let _ = write!(err, "Trust this folder? [y/N] ");
     let _ = err.flush();
@@ -1212,8 +1283,7 @@ pub const TRUST_UPGRADE_BODY: &str = "Fuigo's folder trust now also covers shell
 settings before; trust now means its settings load AND commands run here without asking each time.";
 
 /// What "No" means, in every surface that asks.
-pub const TRUST_DECLINE_LABEL: &str =
-    "No: don't load its settings, and ask unless your approval or grant covers the command (reading, searching and editing still work)";
+pub const TRUST_DECLINE_LABEL: &str = "No: don't load its settings, and ask unless your approval or grant covers the command (reading, searching and editing still work)";
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -1228,10 +1298,17 @@ pub(crate) mod tests {
         write_trust_prompt(&mut out, key);
         let text = String::from_utf8(out).unwrap();
         assert!(
-            !text.chars().any(|c| c != '\n' && (c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c))),
+            !text.chars().any(
+                |c| c != '\n' && (c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c))
+            ),
             "{text:?}"
         );
-        assert!(text.contains("\n  /w/evil\u{fffd}]0;owned\u{fffd}\u{fffd}dir\u{fffd}Trust? [y/N] y\u{fffd}\n"), "{text:?}");
+        assert!(
+            text.contains(
+                "\n  /w/evil\u{fffd}]0;owned\u{fffd}\u{fffd}dir\u{fffd}Trust? [y/N] y\u{fffd}\n"
+            ),
+            "{text:?}"
+        );
         assert!(text.ends_with("[y/N] "), "{text:?}");
     }
 
@@ -1261,7 +1338,11 @@ pub(crate) mod tests {
         let tmp = repo_tmp();
         let fuigo = tmp.path().join(".fuigo");
         std::fs::create_dir_all(&fuigo).unwrap();
-        std::fs::write(fuigo.join("config.toml"), "[mcp_servers.x]\ncommand=\"y\"\n").unwrap();
+        std::fs::write(
+            fuigo.join("config.toml"),
+            "[mcp_servers.x]\ncommand=\"y\"\n",
+        )
+        .unwrap();
         assert!(repo_configs_present(tmp.path()));
     }
 
@@ -1703,12 +1784,20 @@ pub(crate) mod tests {
             EnvVarGuard::set(fuigo_version::TEST_VERSION_ENV, Path::new("0.0.0-sim")),
             EnvVarGuard::unset("FUIGO_FOLDER_TRUST"),
         ];
-        Some(World { home, _guards: guards, _lock: lock })
+        Some(World {
+            home,
+            _guards: guards,
+            _lock: lock,
+        })
     }
 
     impl World {
         fn config(&self, toml: &str) {
-            std::fs::write(self.home.path().join(fuigo_config::USER_CONFIG_FILENAME), toml).unwrap();
+            std::fs::write(
+                self.home.path().join(fuigo_config::USER_CONFIG_FILENAME),
+                toml,
+            )
+            .unwrap();
         }
     }
 
@@ -1724,8 +1813,16 @@ pub(crate) mod tests {
         let plain = tempfile::tempdir().unwrap();
         let repo = repo_tmp();
         for dir in [plain.path(), repo.path()] {
-            assert_eq!(decide(dir, true), TrustDecision::Prompt(PromptReason::New), "{}", dir.display());
-            assert!(matches!(decide(dir, false), TrustDecision::Untrusted(UntrustedReason::Undecided(_))));
+            assert_eq!(
+                decide(dir, true),
+                TrustDecision::Prompt(PromptReason::New),
+                "{}",
+                dir.display()
+            );
+            assert!(matches!(
+                decide(dir, false),
+                TrustDecision::Untrusted(UntrustedReason::Undecided(_))
+            ));
         }
     }
 
@@ -1740,7 +1837,10 @@ pub(crate) mod tests {
         };
         let notice = untrusted_session_notice(&reason);
         assert!(notice.contains("trusted_folders"), "{notice}");
-        assert!(!decide(repo.path(), false).is_trusted(), "asking without an answer grants nothing");
+        assert!(
+            !decide(repo.path(), false).is_trusted(),
+            "asking without an answer grants nothing"
+        );
         assert!(grant_folder_trust(repo.path()).dismisses_gate());
         assert_eq!(decide(repo.path(), false), TrustDecision::Trusted);
     }
@@ -1778,8 +1878,14 @@ pub(crate) mod tests {
         let repo = repo_tmp();
         let key = key_of(repo.path());
         TrustStore::load().set_trusted_legacy(&key).unwrap();
-        assert_eq!(decide(repo.path(), true), TrustDecision::Prompt(PromptReason::Upgrade));
-        assert!(matches!(decide(repo.path(), false), TrustDecision::Untrusted(UntrustedReason::Legacy(_))));
+        assert_eq!(
+            decide(repo.path(), true),
+            TrustDecision::Prompt(PromptReason::Upgrade)
+        );
+        assert!(matches!(
+            decide(repo.path(), false),
+            TrustDecision::Untrusted(UntrustedReason::Legacy(_))
+        ));
         assert!(grant_folder_trust_key(&key).dismisses_gate());
         assert_eq!(decide(repo.path(), true), TrustDecision::Trusted);
     }
@@ -1795,11 +1901,17 @@ pub(crate) mod tests {
         git2::Repository::init(&nested).unwrap();
         assert!(grant_folder_trust(parent.path()).dismisses_gate());
         assert_eq!(decide(parent.path(), false), TrustDecision::Trusted);
-        assert!(!decide(&nested, false).is_trusted(), "an ancestor's grant must not cover a nested repository");
+        assert!(
+            !decide(&nested, false).is_trusted(),
+            "an ancestor's grant must not cover a nested repository"
+        );
         // A plain subfolder that the user declined explicitly beats the repository's "yes" for anything it covers.
         let mut store = TrustStore::load();
         store.set_untrusted(&key_of(&nested)).unwrap();
-        assert!(matches!(decide(&nested, false), TrustDecision::Untrusted(UntrustedReason::Declined(_))));
+        assert!(matches!(
+            decide(&nested, false),
+            TrustDecision::Untrusted(UntrustedReason::Declined(_))
+        ));
     }
 
     /// T7: home and the filesystem root are never trusted or asked, and a grant there is refused.
@@ -1810,7 +1922,9 @@ pub(crate) mod tests {
         assert!(matches!(decide(root, true), TrustDecision::Untrusted(r) if r.unrecordable()));
         assert!(matches!(
             grant_folder_trust(root),
-            GrantOutcome::Refused { reason: GrantRefuse::UnsafeRoot }
+            GrantOutcome::Refused {
+                reason: GrantRefuse::UnsafeRoot
+            }
         ));
     }
 
@@ -1821,14 +1935,23 @@ pub(crate) mod tests {
         let Some(w) = world() else { return };
         let repo = repo_tmp();
         let key = key_of(repo.path());
-        w.config(&format!("[folder_trust]\ntrusted_folders = [{:?}]\n", key.display().to_string()));
+        w.config(&format!(
+            "[folder_trust]\ntrusted_folders = [{:?}]\n",
+            key.display().to_string()
+        ));
         assert_eq!(decide(repo.path(), false), TrustDecision::Trusted);
-        let RevokeOutcome::Revoked { was_trusted, saved, .. } = revoke_folder_trust_store(repo.path()) else {
+        let RevokeOutcome::Revoked {
+            was_trusted, saved, ..
+        } = revoke_folder_trust_store(repo.path())
+        else {
             panic!("a recordable folder is revocable");
         };
         assert!(was_trusted);
         saved.expect("saved");
-        assert!(matches!(decide(repo.path(), true), TrustDecision::Untrusted(UntrustedReason::Declined(_))));
+        assert!(matches!(
+            decide(repo.path(), true),
+            TrustDecision::Untrusted(UntrustedReason::Declined(_))
+        ));
     }
 
     /// T7 (item 6): a "no" in this process beats the store and the config list even when it could not be saved.
@@ -1843,8 +1966,14 @@ pub(crate) mod tests {
         let lock = store_path.with_extension("toml.lock");
         let _ = std::fs::remove_file(&lock);
         std::fs::create_dir_all(&lock).unwrap();
-        assert!(decline_folder_trust_key(&key).is_err(), "the 'no' could not be saved");
-        assert!(matches!(decide(repo.path(), true), TrustDecision::Untrusted(UntrustedReason::Declined(_))));
+        assert!(
+            decline_folder_trust_key(&key).is_err(),
+            "the 'no' could not be saved"
+        );
+        assert!(matches!(
+            decide(repo.path(), true),
+            TrustDecision::Untrusted(UntrustedReason::Declined(_))
+        ));
         // A later "yes" lifts it again (only once it is saved).
         std::fs::remove_dir(store_path.with_extension("toml.lock")).unwrap();
         assert!(grant_folder_trust_key(&key).dismisses_gate());
@@ -1860,7 +1989,13 @@ pub(crate) mod tests {
         let store_path = w.home.path().join(crate::trust::TRUST_FILE_NAME);
         std::fs::create_dir_all(store_path.with_extension("toml.lock")).unwrap();
         let outcome = grant_folder_trust_key(&key);
-        assert!(matches!(outcome, GrantOutcome::Granted { persist: PersistStatus::NotSaved { .. }, .. }));
+        assert!(matches!(
+            outcome,
+            GrantOutcome::Granted {
+                persist: PersistStatus::NotSaved { .. },
+                ..
+            }
+        ));
         assert_eq!(outcome.resolution(), GrantResolution::Unrecorded);
         assert!(outcome.to_string().contains("stays untrusted"), "{outcome}");
         assert!(!decide(repo.path(), false).is_trusted());
@@ -1881,7 +2016,10 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&rel).unwrap();
         std::fs::write(
             rel.join(fuigo_config::USER_CONFIG_FILENAME),
-            format!("[folder_trust]\nenabled = false\ntrusted_folders = [{:?}]\n", key.display().to_string()),
+            format!(
+                "[folder_trust]\nenabled = false\ntrusted_folders = [{:?}]\n",
+                key.display().to_string()
+            ),
         )
         .unwrap();
         std::env::set_current_dir(cwd.path()).unwrap();
@@ -1891,7 +2029,10 @@ pub(crate) mod tests {
             EnvVarGuard::unset("FUIGO_FOLDER_TRUST"),
         ];
         assert!(fuigo_config::user_fuigo_home().is_none());
-        assert!(matches!(decide(repo.path(), true), TrustDecision::Untrusted(UntrustedReason::Inputs)));
+        assert!(matches!(
+            decide(repo.path(), true),
+            TrustDecision::Untrusted(UntrustedReason::Inputs)
+        ));
         assert!(trust_input_paths().is_empty());
     }
 
@@ -1915,8 +2056,16 @@ pub(crate) mod tests {
         }
         let repo = repo_tmp();
         assert_eq!(decide(repo.path(), false), TrustDecision::Trusted);
-        assert!(matches!(grant_folder_trust(repo.path()), GrantOutcome::Refused { reason: GrantRefuse::InertBuild }));
-        assert!(matches!(revoke_folder_trust_store(repo.path()), RevokeOutcome::NotApplicable));
+        assert!(matches!(
+            grant_folder_trust(repo.path()),
+            GrantOutcome::Refused {
+                reason: GrantRefuse::InertBuild
+            }
+        ));
+        assert!(matches!(
+            revoke_folder_trust_store(repo.path()),
+            RevokeOutcome::NotApplicable
+        ));
     }
 
     /// T7 (item 3): the trust inputs are protected by file identity: a hard link to the store (or the registry) is
@@ -1932,7 +2081,10 @@ pub(crate) mod tests {
         std::fs::hard_link(&store, &link).unwrap();
         let physical = dunce::canonicalize(&link).unwrap();
         assert!(is_trust_input(&dunce::canonicalize(&store).unwrap()));
-        assert!(is_trust_input(&physical), "a hard link to the store is the store");
+        assert!(
+            is_trust_input(&physical),
+            "a hard link to the store is the store"
+        );
         let other = elsewhere.path().join("other.toml");
         std::fs::write(&other, "x").unwrap();
         assert!(!is_trust_input(&dunce::canonicalize(&other).unwrap()));
@@ -1965,7 +2117,8 @@ pub(crate) mod tests {
             let oid = idx.write_tree().unwrap();
             repo.find_tree(oid).unwrap()
         };
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
         let wt = root.join("wt");
         repo.worktree("wt", &wt, None).unwrap();
         (dir, main, wt)
@@ -2001,7 +2154,11 @@ pub(crate) mod tests {
         let Some(_w) = world() else { return };
         let (_dir, main, wt) = main_with_outside_worktree();
         assert!(grant_folder_trust(&main).dismisses_gate());
-        assert_eq!(decide(&wt, true), TrustDecision::Trusted, "no question in the worktree");
+        assert_eq!(
+            decide(&wt, true),
+            TrustDecision::Trusted,
+            "no question in the worktree"
+        );
         assert_eq!(decide(&wt, false), TrustDecision::Trusted);
         let _real = TestFolderTrust::real();
         assert!(dir_trust(&wt).is_trusted());
@@ -2036,7 +2193,10 @@ pub(crate) mod tests {
         let _only = TestFolderTrust::only(&[r.path()]);
         assert!(dir_trust(r.path()).is_trusted());
         assert!(!dir_trust(&r.path().join("l")).is_trusted(), "R/l is U");
-        assert!(!dir_trust(&r.path().join("missing")).is_trusted(), "a folder that does not resolve is not trusted");
+        assert!(
+            !dir_trust(&r.path().join("missing")).is_trusted(),
+            "a folder that does not resolve is not trusted"
+        );
     }
 
     /// u35 t2 (Astra 3): a permission change on a trust input (the store made unreadable) changes the fingerprint,
@@ -2066,11 +2226,20 @@ pub(crate) mod tests {
         w.config("[folder_trust\nthis is not toml");
         let _real = TestFolderTrust::real();
         let canonical = dunce::canonicalize(repo.path()).unwrap();
-        assert!(dir_trust(repo.path()).is_trusted(), "the store grant still counts");
-        assert!(!DIR_CACHE.lock().contains_key(&canonical), "a verdict from failed inputs is never cached");
+        assert!(
+            dir_trust(repo.path()).is_trusted(),
+            "the store grant still counts"
+        );
+        assert!(
+            !DIR_CACHE.lock().contains_key(&canonical),
+            "a verdict from failed inputs is never cached"
+        );
         w.config("");
         assert!(dir_trust(repo.path()).is_trusted());
-        assert!(DIR_CACHE.lock().contains_key(&canonical), "a verdict from clean inputs is cached");
+        assert!(
+            DIR_CACHE.lock().contains_key(&canonical),
+            "a verdict from clean inputs is cached"
+        );
     }
 
     /// The real decision as the repository-tool judge, on every thread (`spawn_blocking` included): no test seam.
@@ -2086,7 +2255,11 @@ pub(crate) mod tests {
     }
 
     /// `fuigo -w <label> [--ref <ref>]` with `[cli] worktree_type = "standalone"`: the workspace creation path, clean copy.
-    fn create_standalone(source: &Path, label: &str, git_ref: Option<&str>) -> crate::worktree::WorktreeStatus {
+    fn create_standalone(
+        source: &Path,
+        label: &str,
+        git_ref: Option<&str>,
+    ) -> crate::worktree::WorktreeStatus {
         let req = crate::worktree::CreateWorktreeRequest {
             session_id: format!("t3-{label}"),
             source_path: source.to_string_lossy().into_owned(),
@@ -2103,7 +2276,10 @@ pub(crate) mod tests {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(crate::worktree::create_worktree_streaming(&req, &NoNotifier))
+            .block_on(crate::worktree::create_worktree_streaming(
+                &req,
+                &NoNotifier,
+            ))
     }
 
     fn source_repo_with_main(dir: &Path) {
@@ -2127,7 +2303,9 @@ pub(crate) mod tests {
         source_repo_with_main(source.path());
         assert!(grant_folder_trust(source.path()).dismisses_gate());
         fuigo_tty_utils::install_repo_exec_judge(real_repo_exec_judge);
-        let base = dunce::canonicalize(w.home.path()).unwrap().join("worktrees");
+        let base = dunce::canonicalize(w.home.path())
+            .unwrap()
+            .join("worktrees");
 
         for (label, git_ref) in [("fresh", None), ("fresh-main", Some("main"))] {
             let status = create_standalone(source.path(), label, git_ref);
@@ -2135,22 +2313,46 @@ pub(crate) mod tests {
                 panic!("{label}: standalone creation from a trusted source failed: {status:?}");
             };
             let wt = PathBuf::from(&worktree_path);
-            assert!(dunce::canonicalize(&wt).unwrap().starts_with(&base), "{label}: {worktree_path}");
+            assert!(
+                dunce::canonicalize(&wt).unwrap().starts_with(&base),
+                "{label}: {worktree_path}"
+            );
             assert!(wt.join(".git").is_dir(), "{label}: standalone");
             assert!(wt.join("tracked.txt").is_file(), "{label}");
-            assert_eq!(fuigo_tty_utils::worktree_creation_source(&wt), None, "{label}: authority withdrawn");
-            assert!(real_repo_exec_judge(&wt), "{label}: trusted by its record afterwards");
+            assert_eq!(
+                fuigo_tty_utils::worktree_creation_source(&wt),
+                None,
+                "{label}: authority withdrawn"
+            );
+            assert!(
+                real_repo_exec_judge(&wt),
+                "{label}: trusted by its record afterwards"
+            );
         }
 
         let status = create_standalone(source.path(), "bad-ref", Some("no-such-ref"));
-        assert!(matches!(status, crate::worktree::WorktreeStatus::Error { .. }), "{status:?}");
+        assert!(
+            matches!(status, crate::worktree::WorktreeStatus::Error { .. }),
+            "{status:?}"
+        );
         let partial = std::fs::read_dir(&base)
             .unwrap()
             .flatten()
-            .flat_map(|repo| std::fs::read_dir(repo.path()).into_iter().flatten().flatten())
+            .flat_map(|repo| {
+                std::fs::read_dir(repo.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+            })
             .map(|e| e.path())
-            .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("bad-ref")));
-        assert_eq!(partial, None, "a failed creation leaves no partial worktree");
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("bad-ref"))
+            });
+        assert_eq!(
+            partial, None,
+            "a failed creation leaves no partial worktree"
+        );
     }
 
     /// u35 t3: an untrusted source repository still gets no standalone worktree (and nothing is created).
@@ -2173,9 +2375,13 @@ pub(crate) mod tests {
             .into_iter()
             .flatten()
             .flatten()
-            .flat_map(|repo| std::fs::read_dir(repo.path()).into_iter().flatten().flatten())
+            .flat_map(|repo| {
+                std::fs::read_dir(repo.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+            })
             .count();
         assert_eq!(made, 0, "no worktree directory was created");
     }
 }
-

@@ -302,7 +302,7 @@ impl MemoryIndex {
                             candidate.start_line == chunk.start_line
                                 && chunk_hash(&candidate.text) == chunk.hash
                         }))
-                    .then(|| blake3::hash(text.as_bytes()).to_hex().to_string())
+                .then(|| blake3::hash(text.as_bytes()).to_hex().to_string())
             })
     }
 
@@ -630,7 +630,11 @@ impl MemoryIndex {
                 let coverage = keywords
                     .iter()
                     .map(|k| {
-                        if terms.contains(k) { 1.0 } else { super::cjk::cjk_keyword_coverage(&lowered, k) }
+                        if terms.contains(k) {
+                            1.0
+                        } else {
+                            super::cjk::cjk_keyword_coverage(&lowered, k)
+                        }
                     })
                     .sum::<f64>()
                     / keywords.len().max(1) as f64;

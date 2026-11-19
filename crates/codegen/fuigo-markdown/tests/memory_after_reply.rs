@@ -49,7 +49,9 @@ fn long_reply() -> String {
         if i % 7 == 0 {
             reply.push_str("```rust\n");
             for j in 0..25 {
-                reply.push_str(&format!("    let value_{i}_{j} = compute({i}, {j}); // comment {j}\n"));
+                reply.push_str(&format!(
+                    "    let value_{i}_{j} = compute({i}, {j}); // comment {j}\n"
+                ));
             }
             reply.push_str("```\n\n");
         }

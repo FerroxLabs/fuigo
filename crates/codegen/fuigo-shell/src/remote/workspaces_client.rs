@@ -177,12 +177,17 @@ mod tests {
         };
         // Alone in its process: install the issuer no other test happened to install here.
         crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
-        let (base, seen, handle) =
-            crate::remote::identity_tests::spawn_recording_mock("{}").await;
-            let base = front.front_service(&base);
-        let mut client = WorkspacesClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let base = front.front_service(&base);
+        let mut client =
+            WorkspacesClient::new(crate::remote::skills_client::tests::test_auth_manager());
         client.base_url = Some(base);
-        let _ = client.list_workspaces(&WsQuery { page_size: 1, ..WsQuery::default() }).await;
+        let _ = client
+            .list_workspaces(&WsQuery {
+                page_size: 1,
+                ..WsQuery::default()
+            })
+            .await;
         handle.abort();
         crate::remote::identity_tests::assert_no_identity(&seen, "workspaces");
     }
@@ -270,13 +275,28 @@ mod tests {
     #[serial_test::serial]
     fn workspaces_client_env_chain_precedence_is_unchanged() {
         let am = crate::remote::skills_client::tests::test_auth_manager;
-        let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
-        assert_eq!(WorkspacesClient::new(am()).base_url.as_deref(), Some("https://web.example.test"));
-        let _conv =
-            fuigo_test_support::EnvGuard::set("FUIGO_CONVERSATIONS_BASE_URL", "https://conv.example.test");
-        assert_eq!(WorkspacesClient::new(am()).base_url.as_deref(), Some("https://conv.example.test"));
-        let _ws = fuigo_test_support::EnvGuard::set("FUIGO_WORKSPACES_BASE_URL", "https://ws.example.test");
-        assert_eq!(WorkspacesClient::new(am()).base_url.as_deref(), Some("https://ws.example.test"));
+        let _web =
+            fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
+        assert_eq!(
+            WorkspacesClient::new(am()).base_url.as_deref(),
+            Some("https://web.example.test")
+        );
+        let _conv = fuigo_test_support::EnvGuard::set(
+            "FUIGO_CONVERSATIONS_BASE_URL",
+            "https://conv.example.test",
+        );
+        assert_eq!(
+            WorkspacesClient::new(am()).base_url.as_deref(),
+            Some("https://conv.example.test")
+        );
+        let _ws = fuigo_test_support::EnvGuard::set(
+            "FUIGO_WORKSPACES_BASE_URL",
+            "https://ws.example.test",
+        );
+        assert_eq!(
+            WorkspacesClient::new(am()).base_url.as_deref(),
+            Some("https://ws.example.test")
+        );
     }
 }
 

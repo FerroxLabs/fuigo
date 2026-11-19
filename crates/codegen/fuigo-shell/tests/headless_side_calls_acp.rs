@@ -93,7 +93,11 @@ fn non_interactive_sessions_skip_dashboard_side_calls() {
         loop {
             let requests = mock.requests();
             let interactive_requests = inference_for(&requests, &interactive);
-            let seen = |prefix: &str| interactive_requests.iter().any(|r| req_id(r).starts_with(prefix));
+            let seen = |prefix: &str| {
+                interactive_requests
+                    .iter()
+                    .any(|r| req_id(r).starts_with(prefix))
+            };
             if seen("fuigo-turn-summary-")
                 && seen("fuigo-title-refresh-")
                 && interactive_requests.iter().any(|r| is_model_title(r))

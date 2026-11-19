@@ -1,6 +1,6 @@
+use fuigo_tool_runtime::{ToolError, ToolErrorKind};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use fuigo_tool_runtime::{ToolError, ToolErrorKind};
 
 #[cfg(bundle_rg)]
 const RG_BYTES: &[u8] = include_bytes!(concat!(

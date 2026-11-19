@@ -118,7 +118,12 @@ pub(crate) fn managed_policy_rows(
             .unwrap_or_else(|| "<unknown>".to_string())
     };
     let mut rows = Vec::new();
-    for source in ms.mcp_allowlist.sources.iter().filter(|s| s.is_restricted()) {
+    for source in ms
+        .mcp_allowlist
+        .sources
+        .iter()
+        .filter(|s| s.is_restricted())
+    {
         let detail = if source.is_lockdown() {
             "lockdown: every MCP server blocked".to_string()
         } else {
@@ -401,7 +406,11 @@ pub(crate) struct ConfigLayer {
 
 pub async fn inspect(cwd: &Path, json: bool) -> anyhow::Result<()> {
     let report = build_report(cwd).await;
-    write_inspect(&report, json, &mut fuigo_tty_utils::best_effort_stdout::display_stdout())
+    write_inspect(
+        &report,
+        json,
+        &mut fuigo_tty_utils::best_effort_stdout::display_stdout(),
+    )
 }
 
 /// A closed stdout (`fuigo inspect | head`) is a clean stop.
@@ -1186,7 +1195,10 @@ fn feature_flag_type_warnings(
                 ConfigWarning::config_key(
                     format!("features.{key}"),
                     ConfigWarningKind::InvalidValue,
-                    format!("must be true or false, but is {} ({value}); the setting is ignored", value.type_str()),
+                    format!(
+                        "must be true or false, but is {} ({value}); the setting is ignored",
+                        value.type_str()
+                    ),
                 )
             })
         })
@@ -1201,7 +1213,11 @@ fn list_lsp_servers(
     let trusted: Vec<_> = discovered_plugins.iter().filter(|p| p.trusted).collect();
     let plugin_lsp_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = trusted
         .iter()
-        .filter_map(|p| p.lsp_config_path.clone().map(|path| (path, p.canonical_root.clone())))
+        .filter_map(|p| {
+            p.lsp_config_path
+                .clone()
+                .map(|path| (path, p.canonical_root.clone()))
+        })
         .collect();
     let plugin_names: Vec<&str> = trusted
         .iter()
@@ -1416,9 +1432,10 @@ fn describe_project_config_file(path: &Path) -> Option<(String, Option<String>)>
             let empty = v.as_table().is_none_or(|t| t.is_empty());
             Some((path_s, empty.then(|| "empty".to_string())))
         }
-        Err(e) if e.kind() == fuigo_dirs::contained::OUTSIDE_ROOT => {
-            Some((path_s, Some("not loaded: links outside its project folder".to_string())))
-        }
+        Err(e) if e.kind() == fuigo_dirs::contained::OUTSIDE_ROOT => Some((
+            path_s,
+            Some("not loaded: links outside its project folder".to_string()),
+        )),
         Err(_) => Some((path_s, Some("parse error".to_string()))),
     }
 }
@@ -1545,11 +1562,23 @@ fn print_columns<T>(
         writeln!(out, "  {TREE} (none)")?;
         return Ok(());
     }
-    let names: Vec<String> = items.iter().map(|i| cell_within(&name(i), NAME_MAX_COLUMNS)).collect();
-    let pad = names.iter().map(|n| fuigo_tty_utils::display_width(n)).max().unwrap_or(0).min(NAME_MAX_COLUMNS);
+    let names: Vec<String> = items
+        .iter()
+        .map(|i| cell_within(&name(i), NAME_MAX_COLUMNS))
+        .collect();
+    let pad = names
+        .iter()
+        .map(|n| fuigo_tty_utils::display_width(n))
+        .max()
+        .unwrap_or(0)
+        .min(NAME_MAX_COLUMNS);
     for (item, n) in items.iter().zip(&names) {
         let fill = " ".repeat(pad.saturating_sub(fuigo_tty_utils::display_width(n)));
-        writeln!(out, "  {TREE} {n}{fill}  {}", cell_within(&label(item), LABEL_MAX_COLUMNS))?;
+        writeln!(
+            out,
+            "  {TREE} {n}{fill}  {}",
+            cell_within(&label(item), LABEL_MAX_COLUMNS)
+        )?;
     }
     Ok(())
 }
@@ -1609,7 +1638,10 @@ fn render_config_warnings(
     let mut out = String::from("\n  Config Warnings\n");
     let _ = writeln!(out, "  {TREE} {} warning(s)", warnings.len());
     for w in warnings {
-        let field = w.field().map(|f| format!(" {}", untrusted(f))).unwrap_or_default();
+        let field = w
+            .field()
+            .map(|f| format!(" {}", untrusted(f)))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
             "    {TREE} [{}]{field} — {}",
@@ -1653,18 +1685,24 @@ fn render_harness_compatibility(report: &ExternalCompatReport) -> String {
         let _ = writeln!(
             out,
             "    {TREE} {:<10} {:<3}  ({})",
-            untrusted(&cell.surface).to_string(), status, untrusted(cell.source)
+            untrusted(&cell.surface).to_string(),
+            status,
+            untrusted(cell.source)
         );
     }
     out.push('\n');
     out
 }
 
-
 fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
     writeln!(out)?;
     writeln!(out, "  Environment")?;
-    writeln!(out, "  {TREE} Version: {} {}", untrusted(&r.fuigo_version), fuigo_tty_utils::bracketed(&r.channel, FIELD_MAX_COLUMNS))?;
+    writeln!(
+        out,
+        "  {TREE} Version: {} {}",
+        untrusted(&r.fuigo_version),
+        fuigo_tty_utils::bracketed(&r.channel, FIELD_MAX_COLUMNS)
+    )?;
     writeln!(out, "  {TREE} CWD: {}", q(&r.cwd))?;
     if let Some(ref root) = r.project_root {
         writeln!(out, "  {TREE} Git root: {}", q(root))?;
@@ -1727,7 +1765,11 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
     if !r.permissions.policy_rows.is_empty() {
         writeln!(out, "  {TREE} Managed policy")?;
         for row in &r.permissions.policy_rows {
-            writeln!(out, "    {TREE} {}: {} ({})", row.kind, row.detail, row.source)?;
+            writeln!(
+                out,
+                "    {TREE} {}: {} ({})",
+                row.kind, row.detail, row.source
+            )?;
         }
     }
     if !r.permissions.mcp_server_allowlist.is_empty() {
@@ -1764,7 +1806,9 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
     writeln!(
         out,
         "  {TREE} force_login_team_uuid: {}",
-        untrusted(format_force_login_team(&r.login_policy.force_login_team_uuid))
+        untrusted(format_force_login_team(
+            &r.login_policy.force_login_team_uuid
+        ))
     )?;
     writeln!(
         out,
@@ -1938,7 +1982,13 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
             "project" => "Project",
             other => other,
         };
-        writeln!(out, "  {TREE} {}: {}{}", untrusted(label), q(&layer.path), tag)?;
+        writeln!(
+            out,
+            "  {TREE} {}: {}{}",
+            untrusted(label),
+            q(&layer.path),
+            tag
+        )?;
     }
     if !r.config_sources.layers.iter().any(|l| l.role == "project") {
         writeln!(out, "  {TREE} Project: (none)")?;
@@ -1955,7 +2005,10 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
     Ok(())
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2174,12 +2227,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("proj");
         std::fs::create_dir_all(project.join(".fuigo")).unwrap();
-        std::fs::write(dir.path().join("outside.toml"), "[mcp_servers.x]\ncommand = \"y\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("outside.toml"),
+            "[mcp_servers.x]\ncommand = \"y\"\n",
+        )
+        .unwrap();
         let cfg = project.join(".fuigo").join("config.toml");
         std::os::unix::fs::symlink(dir.path().join("outside.toml"), &cfg).unwrap();
         let (_, note) = describe_project_config_file(&cfg).unwrap();
-        assert_eq!(note.as_deref(), Some("not loaded: links outside its project folder"));
-        assert!(!crate::util::config::project_mcp_server_defined_at(&cfg, "x"));
+        assert_eq!(
+            note.as_deref(),
+            Some("not loaded: links outside its project folder")
+        );
+        assert!(!crate::util::config::project_mcp_server_defined_at(
+            &cfg, "x"
+        ));
         // The user-layer helper still follows links.
         assert!(crate::util::config::mcp_server_defined_at(&cfg, "x"));
     }
@@ -2492,10 +2554,16 @@ mod tests {
         let warnings = feature_flag_type_warnings(&effective);
         let human = render_config_warnings(&warnings);
         for key in ["web_fetch", "lsp_tools", "mcp_auto_restart"] {
-            assert!(human.contains(&format!("features.{key}")), "{key} must be reported: {human}");
+            assert!(
+                human.contains(&format!("features.{key}")),
+                "{key} must be reported: {human}"
+            );
         }
         for key in ["voice_mode", "session_search", "made_up_flag"] {
-            assert!(!human.contains(&format!("features.{key}")), "{key} must not be reported: {human}");
+            assert!(
+                !human.contains(&format!("features.{key}")),
+                "{key} must not be reported: {human}"
+            );
         }
         assert!(human.contains("true or false"), "{human}");
         assert!(feature_flag_type_warnings(&toml::Value::Table(Default::default())).is_empty());
@@ -2819,8 +2887,14 @@ mod tests {
         .unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let report = build_report(cwd.path()).await;
-        assert!(!plugin_state(&report, "w3e-off"), "disabled plugin shown as enabled");
-        assert!(plugin_state(&report, "w3e-on"), "enabled plugin shown as disabled");
+        assert!(
+            !plugin_state(&report, "w3e-off"),
+            "disabled plugin shown as enabled"
+        );
+        assert!(
+            plugin_state(&report, "w3e-on"),
+            "enabled plugin shown as disabled"
+        );
         let mut out = Vec::new();
         write_inspect(&report, false, &mut out).unwrap();
         let text = String::from_utf8_lossy(&out);
@@ -2868,7 +2942,10 @@ mod tests {
         )
         .unwrap();
         let report = build_report(repo.path()).await;
-        assert!(!plugin_state(&report, "fu2-off"), "project-disabled plugin shown as enabled");
+        assert!(
+            !plugin_state(&report, "fu2-off"),
+            "project-disabled plugin shown as enabled"
+        );
         assert!(plugin_state(&report, "fu2-on"));
         let mut out = Vec::new();
         write_inspect(&report, false, &mut out).unwrap();
@@ -2907,7 +2984,10 @@ mod tests {
                 matches!(&l.source, ConfigSource::Plugin { plugin_name, .. } if plugin_name == n)
             })
         };
-        assert!(hook_of("fu2on") && lsp_of("fu2on"), "enabled plugin lost its rows");
+        assert!(
+            hook_of("fu2on") && lsp_of("fu2on"),
+            "enabled plugin lost its rows"
+        );
         assert!(!hook_of("fu2off"), "disabled plugin shows a hook row");
         assert!(!lsp_of("fu2off"), "disabled plugin shows an LSP row");
     }
@@ -3051,16 +3131,42 @@ mod tests {
         for bytes in [raw, shown] {
             let text = String::from_utf8(bytes).expect("utf8");
             assert!(!text.contains('\r') && !text.contains('\x1b'), "{text:?}");
-            let verdicts: Vec<_> = text.lines().filter(|l| l.trim_start().starts_with("\u{2514} Project trusted:")).collect();
-            assert_eq!(verdicts, ["  \u{2514} Project trusted: no"], "hostile text never forms a verdict line: {text:?}");
-            assert!(text.contains("  \u{2514} Project trusted: no\n"), "{text:?}");
-            for field_line in ["Git root: \"/repo/x", "CWD: \"/cwd/x", "Source: \"src x", "mcp x", "mkt x"] {
-                let line = text.lines().find(|l| l.contains(field_line)).unwrap_or_else(|| panic!("{field_line}: {text:?}"));
+            let verdicts: Vec<_> = text
+                .lines()
+                .filter(|l| l.trim_start().starts_with("\u{2514} Project trusted:"))
+                .collect();
+            assert_eq!(
+                verdicts,
+                ["  \u{2514} Project trusted: no"],
+                "hostile text never forms a verdict line: {text:?}"
+            );
+            assert!(
+                text.contains("  \u{2514} Project trusted: no\n"),
+                "{text:?}"
+            );
+            for field_line in [
+                "Git root: \"/repo/x",
+                "CWD: \"/cwd/x",
+                "Source: \"src x",
+                "mcp x",
+                "mkt x",
+            ] {
+                let line = text
+                    .lines()
+                    .find(|l| l.contains(field_line))
+                    .unwrap_or_else(|| panic!("{field_line}: {text:?}"));
                 if field_line.starts_with("mcp") || field_line.starts_with("mkt") {
-                    assert!(line.contains("[31;41m") || line.contains("[K"), "inert bytes visible: {line:?}");
+                    assert!(
+                        line.contains("[31;41m") || line.contains("[K"),
+                        "inert bytes visible: {line:?}"
+                    );
                 } else {
                     // quoted and capped: the long hostile tail is elided in the middle, never wrapped
-                    assert!(line.ends_with('"') && fuigo_tty_utils::display_width(line) <= FIELD_MAX_COLUMNS + 30, "{line:?}");
+                    assert!(
+                        line.ends_with('"')
+                            && fuigo_tty_utils::display_width(line) <= FIELD_MAX_COLUMNS + 30,
+                        "{line:?}"
+                    );
                 }
             }
         }
@@ -3077,10 +3183,16 @@ mod tests {
         let mut out = Vec::new();
         print_human(&r, &mut out).expect("write");
         let text = String::from_utf8(out).unwrap();
-        let line = text.lines().find(|l| l.contains("Git root:")).expect("git root line");
+        let line = text
+            .lines()
+            .find(|l| l.contains("Git root:"))
+            .expect("git root line");
         assert!(line.contains("Git root: \"x"), "{line:?}");
         assert!(line.ends_with('"') && line.contains('\u{2026}'), "{line:?}");
-        assert!(fuigo_tty_utils::display_width(line) <= 2 + 2 + 10 + FIELD_MAX_COLUMNS + 2 + 1, "{line:?}"); // +1: the tree glyph U+2514 is 2 columns
+        assert!(
+            fuigo_tty_utils::display_width(line) <= 2 + 2 + 10 + FIELD_MAX_COLUMNS + 2 + 1,
+            "{line:?}"
+        ); // +1: the tree glyph U+2514 is 2 columns
         assert_eq!(text.matches("Project trusted: no").count(), 1, "{text:?}");
     }
 
@@ -3095,7 +3207,10 @@ mod tests {
         let mut out = Vec::new();
         print_human(&r, &mut out).expect("write");
         let text = String::from_utf8(out).unwrap();
-        let line = text.lines().find(|l| l.contains("Git root:")).expect("git root line");
+        let line = text
+            .lines()
+            .find(|l| l.contains("Git root:"))
+            .expect("git root line");
         // U+2514 is 2 columns (box drawing counts wide since round S6), so the tail keeps one `x` fewer
         let kept = tail.strip_prefix('x').unwrap();
         let want = format!("Git root: \"{}\u{2026}{kept}\"", "\\\"".repeat(15));
@@ -3106,8 +3221,18 @@ mod tests {
         let mut out = Vec::new();
         print_human(&r, &mut out).expect("write");
         let text = String::from_utf8(out).unwrap();
-        let line = text.lines().find(|l| l.contains("Git root:")).expect("git root line");
-        assert!(line.ends_with(&format!("\"{}\u{2026}{}\"", "\u{1F680}".repeat(15), "\u{1F680}".repeat(14))), "{line:?}");
+        let line = text
+            .lines()
+            .find(|l| l.contains("Git root:"))
+            .expect("git root line");
+        assert!(
+            line.ends_with(&format!(
+                "\"{}\u{2026}{}\"",
+                "\u{1F680}".repeat(15),
+                "\u{1F680}".repeat(14)
+            )),
+            "{line:?}"
+        );
     }
 
     /// P181 (S5, M2): every untrusted field has a stated cap (60 columns; rows 72; column name 30, label 40).
@@ -3117,23 +3242,52 @@ mod tests {
         assert!(fuigo_tty_utils::display_width(&untrusted(&wide)) <= FIELD_MAX_COLUMNS);
         assert!(fuigo_tty_utils::display_width(&cell(&wide)) <= ROW_MAX_COLUMNS);
         let mut out = Vec::new();
-        print_columns(&mut out, "T", std::slice::from_ref(&wide), |n| n.clone(), |n| n.clone()).unwrap();
+        print_columns(
+            &mut out,
+            "T",
+            std::slice::from_ref(&wide),
+            |n| n.clone(),
+            |n| n.clone(),
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
-        for line in text.lines().filter(|l| l.contains(TREE) && !l.contains("(none)")) {
-            assert!(fuigo_tty_utils::display_width(line) <= 4 + NAME_MAX_COLUMNS + 2 + LABEL_MAX_COLUMNS + 2, "{line:?}");
+        for line in text
+            .lines()
+            .filter(|l| l.contains(TREE) && !l.contains("(none)"))
+        {
+            assert!(
+                fuigo_tty_utils::display_width(line)
+                    <= 4 + NAME_MAX_COLUMNS + 2 + LABEL_MAX_COLUMNS + 2,
+                "{line:?}"
+            );
         }
-        assert_eq!(text.matches("Project trusted: yes").count(), 0, "the planted tail is in the capped middle: {text:?}");
+        assert_eq!(
+            text.matches("Project trusted: yes").count(),
+            0,
+            "the planted tail is in the capped middle: {text:?}"
+        );
     }
 
     /// P181 (Grok r3, L2): `print_columns` pads by display columns, not bytes.
     #[test]
     fn print_columns_pads_by_display_width() {
         let mut out = Vec::new();
-        print_columns(&mut out, "T", &["\u{4e2d}\u{6587}", "ab"], |n| n.to_string(), |_| "L".to_string()).unwrap();
+        print_columns(
+            &mut out,
+            "T",
+            &["\u{4e2d}\u{6587}", "ab"],
+            |n| n.to_string(),
+            |_| "L".to_string(),
+        )
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         let rows: Vec<&str> = text.lines().filter(|l| l.ends_with('L')).collect();
         assert_eq!(rows.len(), 2, "{text:?}");
-        assert_eq!(fuigo_tty_utils::display_width(rows[0]), fuigo_tty_utils::display_width(rows[1]), "{rows:?}");
+        assert_eq!(
+            fuigo_tty_utils::display_width(rows[0]),
+            fuigo_tty_utils::display_width(rows[1]),
+            "{rows:?}"
+        );
     }
 
     /// P181 (sweep): `inspect` prints project paths, server names and hook text that came from repo files, so its human
@@ -3149,7 +3303,14 @@ mod tests {
             .filter(|(_, l)| l.contains("io::stdout()") || l.contains("stdout().lock()"))
             .map(|(n, l)| format!("{}: {}", n + 1, l.trim()))
             .collect();
-        assert!(offenders.is_empty(), "unfiltered stdout handle:\n{}", offenders.join("\n"));
-        assert!(code.contains("display_stdout()"), "inspect no longer writes through display_stdout()");
+        assert!(
+            offenders.is_empty(),
+            "unfiltered stdout handle:\n{}",
+            offenders.join("\n")
+        );
+        assert!(
+            code.contains("display_stdout()"),
+            "inspect no longer writes through display_stdout()"
+        );
     }
 }

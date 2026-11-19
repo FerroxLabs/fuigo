@@ -12,9 +12,9 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::{Arc, LazyLock};
 
+use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{Mutex, mpsc};
-use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
 use fuigo_workspace::file_system::TargetClientId;
 
@@ -269,7 +269,10 @@ fn pty_spawn_failure(
     if let Some(io) = chain().find_map(|e| e.downcast_ref::<std::io::Error>()) {
         return fuigo_tools::util::spawn::ShellSpawnFailure::new("pty", program, io, path_set);
     }
-    let text = chain().map(ToString::to_string).collect::<Vec<_>>().join(": ");
+    let text = chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ");
     fuigo_tools::util::spawn::ShellSpawnFailure::from_error_text("pty", program, &text, path_set)
 }
 
@@ -881,7 +884,12 @@ mod tests {
             "/nonexistent-u35-winenv/fuigo-missing-shell"
         };
         let pair = native_pty_system()
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .expect("openpty");
         #[allow(clippy::disallowed_methods)]
         let Err(err) = pair.slave.spawn_command(CommandBuilder::new(missing)) else {
@@ -893,7 +901,10 @@ mod tests {
         assert!(failure.path_set);
         if cfg!(windows) {
             // ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND.
-            assert!(matches!(failure.os_error, Some(2 | 3)), "{failure:?} from {err:#}");
+            assert!(
+                matches!(failure.os_error, Some(2 | 3)),
+                "{failure:?} from {err:#}"
+            );
             assert_eq!(failure.kind, std::io::ErrorKind::NotFound, "{failure:?}");
         }
         // The exact message portable-pty 0.9 builds on Windows, on every host.
@@ -1012,13 +1023,22 @@ mod unix_tests {
     #[test]
     fn p113_pty_removes_a_secret_only_the_builder_holds() {
         let name = "FUIGO_EXTRA_AUTH_KEY";
-        assert!(std::env::var_os(name).is_none(), "precondition: this process does not hold {name}");
+        assert!(
+            std::env::var_os(name).is_none(),
+            "precondition: this process does not hold {name}"
+        );
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.env(name, "fake-p113-registry");
         cmd.env("P113_BENIGN", "kept");
         remove_fuigo_secrets(&mut cmd);
-        assert!(cmd.get_env(name).is_none(), "the builder-only secret is still set");
-        assert_eq!(cmd.get_env("P113_BENIGN"), Some(std::ffi::OsStr::new("kept")));
+        assert!(
+            cmd.get_env(name).is_none(),
+            "the builder-only secret is still set"
+        );
+        assert_eq!(
+            cmd.get_env("P113_BENIGN"),
+            Some(std::ffi::OsStr::new("kept"))
+        );
     }
 
     /// P113 r3: a client PTY shell keeps the user's environment but none of Fuigo's own secrets; an explicit variable

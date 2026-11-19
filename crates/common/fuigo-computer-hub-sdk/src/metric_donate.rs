@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use base64::Engine as _;
+use fuigo_tool_protocol::{MAX_DONATION_BYTES, MAX_METRICS_PER_DONATION};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::KeyValue;
 use opentelemetry_proto::tonic::metrics::v1::{
@@ -26,7 +27,6 @@ use prometheus::proto::{MetricFamily, MetricType};
 use prost::Message as _;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use fuigo_tool_protocol::{MAX_DONATION_BYTES, MAX_METRICS_PER_DONATION};
 
 use crate::donate_pump::{
     PENDING_FLUSHES, PumpMsg, make_resource, now_unix_nanos, run_pump, string_kv,
@@ -570,7 +570,8 @@ other_family_total 9\n";
 
         // Histogram -> Histogram with cumulative buckets differenced and
         // a +Inf bucket appended.
-        let metric::Data::Histogram(h) = by_name["fuigo_test_seconds"].data.as_ref().unwrap() else {
+        let metric::Data::Histogram(h) = by_name["fuigo_test_seconds"].data.as_ref().unwrap()
+        else {
             panic!("histogram must convert to Histogram");
         };
         assert_eq!(

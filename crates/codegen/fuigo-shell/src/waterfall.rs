@@ -27,7 +27,10 @@ pub fn mark(id: &str, stage: &str) {
     mark_with_clock(id, stage, now_us);
 }
 
-#[allow(clippy::disallowed_methods, reason = "trace sink file named by an env var; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "trace sink file named by an env var; not inside a session folder"
+)]
 fn mark_with_clock(id: &str, stage: &str, clock: impl FnOnce() -> u128) {
     enum Sink {
         Off,
@@ -52,7 +55,11 @@ fn mark_with_clock(id: &str, stage: &str, clock: impl FnOnce() -> u128) {
     };
     let t_us = clock();
     match file {
-        None => fuigo_tty_utils::cli_eprintln!("{LINE_PREFIX} id={} stage={} t_us={t_us}", fuigo_tty_utils::untrusted(&id), fuigo_tty_utils::untrusted(&stage)),
+        None => fuigo_tty_utils::cli_eprintln!(
+            "{LINE_PREFIX} id={} stage={} t_us={t_us}",
+            fuigo_tty_utils::untrusted(&id),
+            fuigo_tty_utils::untrusted(&stage)
+        ),
         Some(f) => {
             use std::io::Write as _;
             if let Ok(mut f) = f.lock() {

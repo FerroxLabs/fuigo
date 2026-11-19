@@ -4,9 +4,9 @@ use super::paste::paste_key_tests;
 #[cfg(test)]
 use super::test_fixtures;
 use super::{
-    AgentPane, AgentView, BlockingCard, CtaPhase, InputMode, KeyOwner,
-    MULTI_CLICK_TIMEOUT_MS, PromptInputMode, active_contexts_for_pane, format_key_for_log,
-    is_link_modifier_for_key, is_mouse_reporting_toggle_chord, resolve_action,
+    AgentPane, AgentView, BlockingCard, CtaPhase, InputMode, KeyOwner, MULTI_CLICK_TIMEOUT_MS,
+    PromptInputMode, active_contexts_for_pane, format_key_for_log, is_link_modifier_for_key,
+    is_mouse_reporting_toggle_chord, resolve_action,
 };
 use crate::actions::{ActionId, ActionRegistry, When};
 use crate::app::actions::Action;

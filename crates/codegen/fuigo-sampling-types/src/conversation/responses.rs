@@ -169,7 +169,9 @@ pub fn response_to_conversation_items_with_custom(
 
 /// The freeform text of a downgraded custom call: arguments that are a JSON object with exactly one field, `input`, a string.
 fn downgraded_custom_input(arguments: &str) -> Option<String> {
-    let serde_json::Value::Object(obj) = serde_json::from_str::<serde_json::Value>(arguments).ok()? else {
+    let serde_json::Value::Object(obj) =
+        serde_json::from_str::<serde_json::Value>(arguments).ok()?
+    else {
         return None;
     };
     match (obj.len(), obj.get("input")) {

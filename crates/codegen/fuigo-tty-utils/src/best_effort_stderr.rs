@@ -252,15 +252,26 @@ mod tests {
     fn diagnostics_are_scrubbed_before_they_are_written() {
         let mut buf = Vec::new();
         assert_eq!(
-            write_fmt_scrubbed(&mut buf, format_args!("warn: {}\u{2028}end\n", "a\x1b]0;t\x07b")),
+            write_fmt_scrubbed(
+                &mut buf,
+                format_args!("warn: {}\u{2028}end\n", "a\x1b]0;t\x07b")
+            ),
             Outcome::Written
         );
         assert_eq!(String::from_utf8(buf).unwrap(), "warn: a ]0;t b end\n");
         let mut buf = Vec::new();
-        assert!(write_line_scrubbed(&mut buf, "x\u{e0041}\x1b[31my\x1b[2J", false));
+        assert!(write_line_scrubbed(
+            &mut buf,
+            "x\u{e0041}\x1b[31my\x1b[2J",
+            false
+        ));
         assert_eq!(String::from_utf8(buf).unwrap(), "x [31my [2J\n");
         let mut buf = Vec::new();
-        assert!(write_line_scrubbed(&mut buf, "\r\x1b[Kfuigo: forged\x1b[8m", false));
+        assert!(write_line_scrubbed(
+            &mut buf,
+            "\r\x1b[Kfuigo: forged\x1b[8m",
+            false
+        ));
         assert_eq!(String::from_utf8(buf).unwrap(), "  [Kfuigo: forged [8m\n");
     }
 
@@ -269,12 +280,23 @@ mod tests {
     #[test]
     fn the_device_code_grey_renders_its_exact_bytes() {
         let mut w = Scripted::new([]);
-        assert_eq!(STDERR.write(&mut w, "\x1b[90m".as_bytes()), Outcome::Written);
         assert_eq!(
-            write_fmt_scrubbed(&mut w, format_args!("Only continue with a code you requested. Don't share it with anyone.")),
+            STDERR.write(&mut w, "\x1b[90m".as_bytes()),
             Outcome::Written
         );
-        assert_eq!(STDERR.write(&mut w, "\x1b[0m\n".as_bytes()), Outcome::Written);
+        assert_eq!(
+            write_fmt_scrubbed(
+                &mut w,
+                format_args!(
+                    "Only continue with a code you requested. Don't share it with anyone."
+                )
+            ),
+            Outcome::Written
+        );
+        assert_eq!(
+            STDERR.write(&mut w, "\x1b[0m\n".as_bytes()),
+            Outcome::Written
+        );
         assert_eq!(
             w.seen,
             b"\x1b[90mOnly continue with a code you requested. Don't share it with anyone.\x1b[0m\n".to_vec()
@@ -287,26 +309,50 @@ mod tests {
     #[test]
     fn trusted_control_text_is_exact_and_the_filtered_path_refuses_the_erase() {
         let mut w = Scripted::new([]);
-        assert_eq!(STDERR.write(&mut w, CLEAR_LINE.as_bytes()), Outcome::Written);
+        assert_eq!(
+            STDERR.write(&mut w, CLEAR_LINE.as_bytes()),
+            Outcome::Written
+        );
         assert_eq!(w.seen, b"\r\x1b[K");
         let mut buf = Vec::new();
         assert_eq!(
-            write_fmt_scrubbed(&mut buf, format_args!("{CLEAR_LINE}\x1b[1;32m\u{2713} Signed in\x1b[0m\n")),
+            write_fmt_scrubbed(
+                &mut buf,
+                format_args!("{CLEAR_LINE}\x1b[1;32m\u{2713} Signed in\x1b[0m\n")
+            ),
             Outcome::Written
         );
-        assert_eq!(String::from_utf8(buf).unwrap(), "  [K [1;32m\u{2713} Signed in [0m\n");
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "  [K [1;32m\u{2713} Signed in [0m\n"
+        );
     }
 
     /// P181 (S5, M4): a foreground colour that hides text (`ESC[30m`, `ESC[90m`, truecolor) never survives the filter.
     #[test]
     fn the_line_filter_passes_no_colour_sequence() {
-        for hide in ["\x1b[30m", "\x1b[37m", "\x1b[90m", "\x1b[97m", "\x1b[38;5;0m", "\x1b[38;2;0;0;0m", "\x1b[1;32m"] {
+        for hide in [
+            "\x1b[30m",
+            "\x1b[37m",
+            "\x1b[90m",
+            "\x1b[97m",
+            "\x1b[38;5;0m",
+            "\x1b[38;2;0;0;0m",
+            "\x1b[1;32m",
+        ] {
             let mut buf = Vec::new();
-            assert_eq!(write_fmt_scrubbed(&mut buf, format_args!("a{hide}hidden")), Outcome::Written);
+            assert_eq!(
+                write_fmt_scrubbed(&mut buf, format_args!("a{hide}hidden")),
+                Outcome::Written
+            );
             let out = String::from_utf8(buf).unwrap();
             assert!(!out.contains('\x1b'), "{out:?}");
             let mut buf = Vec::new();
-            assert!(write_line_scrubbed(&mut buf, &format!("a{hide}hidden"), false));
+            assert!(write_line_scrubbed(
+                &mut buf,
+                &format!("a{hide}hidden"),
+                false
+            ));
             assert!(!String::from_utf8(buf).unwrap().contains('\x1b'));
         }
         assert_eq!(crate::scrub_terminal_text("x\x1b[30mY").as_ref(), "x [30mY");
@@ -335,7 +381,11 @@ mod tests {
     #[test]
     fn fuigo_lines_start_with_a_reset_on_a_terminal_only() {
         let mut buf = Vec::new();
-        assert!(write_line_scrubbed(&mut buf, "fuigo: blocked \x1b[30;40m", true));
+        assert!(write_line_scrubbed(
+            &mut buf,
+            "fuigo: blocked \x1b[30;40m",
+            true
+        ));
         assert_eq!(buf, b"\x1b[0mfuigo: blocked  [30;40m\n");
         let mut buf = Vec::new();
         assert!(write_line_scrubbed(&mut buf, "fuigo: blocked", false));
@@ -352,16 +402,22 @@ mod tests {
         let mut stack = vec![root];
         let mut callers = Vec::new();
         while let Some(dir) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for e in rd.flatten() {
                 let path = e.path();
                 if path.is_dir() {
-                    if path.file_name().is_some_and(|n| n == "target" || n == "node_modules") {
+                    if path
+                        .file_name()
+                        .is_some_and(|n| n == "target" || n == "node_modules")
+                    {
                         continue;
                     }
                     stack.push(path);
                 } else if path.extension().is_some_and(|x| x == "rs")
-                    && std::fs::read_to_string(&path).is_ok_and(|t| t.contains(concat!("__eprint_trusted", "_literal(")))
+                    && std::fs::read_to_string(&path)
+                        .is_ok_and(|t| t.contains(concat!("__eprint_trusted", "_literal(")))
                 {
                     callers.push(path);
                 }

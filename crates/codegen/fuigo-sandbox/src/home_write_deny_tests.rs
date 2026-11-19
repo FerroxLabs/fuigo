@@ -158,13 +158,11 @@ fn p177_every_home_entry_is_protected_with_its_missing_kind() {
     // The caches cargo writes on every build are never denied (on Linux `~/.cargo` is pinned,
     // its caches kept writable)
     for rel in [".cargo", ".cargo/registry", ".cargo/git", ".npm", ".cache"] {
-        let denied = got
-            .iter()
-            .any(|entry| {
-                entry.path == home.join(rel)
-                    && entry.kind.is_denied_by_name()
-                    && entry.kind != GitPathKind::MissingAncestor
-            });
+        let denied = got.iter().any(|entry| {
+            entry.path == home.join(rel)
+                && entry.kind.is_denied_by_name()
+                && entry.kind != GitPathKind::MissingAncestor
+        });
         assert!(!denied, "{rel} must stay writable: {got:?}");
     }
     let _ = std::fs::remove_dir_all(&root);
@@ -756,7 +754,11 @@ fn p177_linux_a_grant_that_is_also_a_temp_root_refuses() {
         temp: vec![cargo.clone()],
     };
     let got = scan(&ws, &home, &roots, &HomeEnv::default());
-    assert!(refusals(&got).contains(".cargo/config"), "{}", refusals(&got));
+    assert!(
+        refusals(&got).contains(".cargo/config"),
+        "{}",
+        refusals(&got)
+    );
     assert!(!has(&got.protected, &cargo, GitPathKind::PinnedDir));
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -781,7 +783,11 @@ fn p177_linux_a_grant_not_yet_made_is_pinned_and_made() {
     };
     add_git_leaves_to_plan(&mut plan, &got, &roots.write).unwrap();
     assert!(m2.is_dir());
-    assert!(plan.pinned.iter().any(|pin| pin.path == m2), "{:?}", plan.pinned);
+    assert!(
+        plan.pinned.iter().any(|pin| pin.path == m2),
+        "{:?}",
+        plan.pinned
+    );
     // The scan after the plan sees the same pin
     let again = entries(&ws, &home, &roots);
     assert!(has(&again, &m2, GitPathKind::PinnedDir), "{again:?}");
@@ -831,7 +837,11 @@ fn p177_linux_pin_rebinds_skip_link_parents_and_survive_nesting() {
     let mut plan = empty();
     add_git_leaves_to_plan(&mut plan, &got, &roots.write).unwrap();
     assert!(rebound(&plan, inner.join("registry")), "{:?}", plan.rebinds);
-    assert!(rebound(&plan, inner.join(".package-cache")), "{:?}", plan.rebinds);
+    assert!(
+        rebound(&plan, inner.join(".package-cache")),
+        "{:?}",
+        plan.rebinds
+    );
     assert!(!rebound(&plan, inner.clone()), "{:?}", plan.rebinds);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -858,7 +868,11 @@ fn p177_an_unlistable_but_searchable_dir_in_a_root_refuses_the_alias_search() {
         scan(&ws, &home, &configured(&[&ws]), &HomeEnv::default())
     });
     std::fs::set_permissions(&drop_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(refusals(&got).contains("cannot be searched"), "{}", refusals(&got));
+    assert!(
+        refusals(&got).contains("cannot be searched"),
+        "{}",
+        refusals(&got)
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -884,7 +898,11 @@ fn p177_a_grant_inside_a_protected_tree_refuses() {
     let lua = home.join(".config/nvim/lua");
     std::fs::create_dir_all(&lua).unwrap();
     let got = scan(&ws, &home, &configured(&[&ws, &lua]), &HomeEnv::default());
-    assert!(refusals(&got).contains("holds the writable root"), "{}", refusals(&got));
+    assert!(
+        refusals(&got).contains("holds the writable root"),
+        "{}",
+        refusals(&got)
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -903,7 +921,11 @@ fn p177_linux_a_fuigo_home_holding_a_missing_name_refuses() {
         temp: Vec::new(),
     };
     let got = scan(&ws, &home, &roots, &HomeEnv::default());
-    assert!(refusals(&got).contains(".cargo/config"), "{}", refusals(&got));
+    assert!(
+        refusals(&got).contains(".cargo/config"),
+        "{}",
+        refusals(&got)
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -922,7 +944,11 @@ fn p177_an_unlistable_secret_store_refuses() {
         scan(&ws, &home, &configured(&[&ws]), &HomeEnv::default())
     });
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(refusals(&got).contains("cannot list it"), "{}", refusals(&got));
+    assert!(
+        refusals(&got).contains("cannot list it"),
+        "{}",
+        refusals(&got)
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -933,12 +959,19 @@ fn p177_missing_ancestors_are_node_entries() {
     let (root, home, ws) = layout("ancestors");
     let got = entries(&ws, &home, &configured(&[&ws]));
     for dir in [".cargo", ".config/fish", ".config", ".gradle"] {
-        assert!(has(&got, home.join(dir), GitPathKind::MissingAncestor), "{dir}: {got:?}");
+        assert!(
+            has(&got, home.join(dir), GitPathKind::MissingAncestor),
+            "{dir}: {got:?}"
+        );
     }
     assert!(!has(&got, &home, GitPathKind::MissingAncestor));
     std::fs::create_dir_all(home.join(".cargo")).unwrap();
     let got = entries(&ws, &home, &configured(&[&ws]));
-    assert!(!has(&got, home.join(".cargo"), GitPathKind::MissingAncestor));
+    assert!(!has(
+        &got,
+        home.join(".cargo"),
+        GitPathKind::MissingAncestor
+    ));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -956,7 +989,11 @@ fn p177_linux_a_nested_pin_made_by_the_plan_revalidates() {
     let roots = configured(&[&ws, &cargo, &zsh]);
     let got = scan(&ws, &home, &roots, &vars);
     assert!(got.unread.is_empty(), "{}", refusals(&got));
-    assert!(has(&got.protected, &zsh, GitPathKind::PinnedDir), "{:?}", got.protected);
+    assert!(
+        has(&got.protected, &zsh, GitPathKind::PinnedDir),
+        "{:?}",
+        got.protected
+    );
     let mut plan = HookWriteDenyBwrapPlan {
         ancestor_rw_binds: Vec::new(),
         leaves: Vec::new(),

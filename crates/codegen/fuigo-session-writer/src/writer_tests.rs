@@ -18,17 +18,29 @@ const SEAM: Duration = Duration::from_secs(10);
 fn unique_id(tag: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    format!("{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "{tag}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime")
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime")
 }
 
 /// Another holder, as the lock tests make it: a second open of the lock file excludes this process's own open exactly as
 /// another process's would (the OS lock belongs to the open file).
 fn foreign_could_take(dir: &Path) -> bool {
-    let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(dir.join(SESSION_WRITER_LOCK_FILE)) else {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join(SESSION_WRITER_LOCK_FILE))
+    else {
         return true;
     };
     match file.try_lock() {
@@ -84,14 +96,20 @@ const HOLDER_DIR: &str = "FUIGO_P30_DIRECT_HOLDER_DIR";
 #[test]
 #[ignore = "helper process for ct_w4"]
 fn probe_process() {
-    let Some(dir) = std::env::var_os(PROBE_DIR) else { return };
+    let Some(dir) = std::env::var_os(PROBE_DIR) else {
+        return;
+    };
     let path = Path::new(&dir).join(SESSION_WRITER_LOCK_FILE);
     println!("PROBE_READY");
     for line in std::io::stdin().lock().lines() {
         if line.expect("line") != "probe" {
             break;
         }
-        let answer = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+        let answer = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
             Err(_) => "nofile",
             Ok(file) => match file.try_lock() {
                 Ok(()) => {
@@ -110,7 +128,13 @@ fn spawn_test_child(name: &str, env: (&str, &Path), stdin: bool) -> Child {
     // Not enrolled in a process scope: the test kills and reaps it itself.
     #[allow(clippy::disallowed_methods)]
     std::process::Command::new(std::env::current_exe().expect("test exe"))
-        .args(["--exact", name, "--ignored", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            name,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(env.0, env.1)
         .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -123,7 +147,10 @@ fn wait_line(out: &mut BufReader<ChildStdout>, want: &str) {
     let mut line = String::new();
     loop {
         line.clear();
-        assert!(out.read_line(&mut line).expect("read") > 0, "child exited before {want}");
+        assert!(
+            out.read_line(&mut line).expect("read") > 0,
+            "child exited before {want}"
+        );
         // libtest prints `test <name> ... ` without a newline before the child's own output.
         if line.contains(want) {
             return;
@@ -151,7 +178,10 @@ impl Probe {
         self.stdin.flush().expect("flush");
         loop {
             let mut line = String::new();
-            assert!(self.out.read_line(&mut line).expect("read") > 0, "probe exited");
+            assert!(
+                self.out.read_line(&mut line).expect("read") > 0,
+                "probe exited"
+            );
             let last = line.split_whitespace().last().unwrap_or("").to_owned();
             if matches!(last.as_str(), "nofile" | "held" | "free" | "error") {
                 return last;
@@ -184,15 +214,28 @@ fn ct_w1_second_claim_is_busy_until_the_last_clone_drops() {
     let id = unique_id("w1");
     let first = SessionWriter::try_claim(&id, dir.path().join("s")).expect("first");
     let clone = first.clone();
-    let busy = SessionWriter::try_claim(&id, dir.path().join("s")).expect_err("second must be busy");
+    let busy =
+        SessionWriter::try_claim(&id, dir.path().join("s")).expect_err("second must be busy");
     let rt = rt();
-    let waiter = rt.spawn(async move { busy.freed_by(Instant::now() + Duration::from_secs(10)).await });
+    let waiter = rt.spawn(async move {
+        busy.freed_by(Instant::now() + Duration::from_secs(10))
+            .await
+    });
     drop(first);
     std::thread::sleep(Duration::from_millis(50));
-    assert!(!waiter.is_finished(), "woke while a clone still holds the slot");
-    assert!(SessionWriter::try_claim(&id, dir.path().join("s")).is_err(), "slot freed while a clone lives");
+    assert!(
+        !waiter.is_finished(),
+        "woke while a clone still holds the slot"
+    );
+    assert!(
+        SessionWriter::try_claim(&id, dir.path().join("s")).is_err(),
+        "slot freed while a clone lives"
+    );
     drop(clone);
-    assert!(rt.block_on(waiter).expect("join"), "waiter not woken by the last drop");
+    assert!(
+        rt.block_on(waiter).expect("join"),
+        "waiter not woken by the last drop"
+    );
     let again = SessionWriter::try_claim(&id, dir.path().join("s")).expect("claims after free");
     assert!(again.generation() > 0);
     assert_eq!(crate::debug_live_writers(&id), 1);
@@ -208,18 +251,32 @@ fn claim_waits_for_the_holder_then_reports_still_closing() {
     let id = unique_id("claim");
     let rt = rt();
     let held = SessionWriter::try_claim(&id, dir.path().join("s")).expect("held");
-    let short = rt.block_on(SessionWriter::claim(&id, dir.path().join("s"), Instant::now() + Duration::from_millis(80)));
+    let short = rt.block_on(SessionWriter::claim(
+        &id,
+        dir.path().join("s"),
+        Instant::now() + Duration::from_millis(80),
+    ));
     assert_eq!(short.expect_err("must time out"), ClaimError::StillClosing);
-    assert!(!rt.block_on(SessionWriter::wait_free(&id, Instant::now() + Duration::from_millis(50))));
+    assert!(!rt.block_on(SessionWriter::wait_free(
+        &id,
+        Instant::now() + Duration::from_millis(50)
+    )));
     let release = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(100));
         drop(held);
     });
-    let got = rt.block_on(SessionWriter::claim(&id, dir.path().join("s"), Instant::now() + Duration::from_secs(10)));
+    let got = rt.block_on(SessionWriter::claim(
+        &id,
+        dir.path().join("s"),
+        Instant::now() + Duration::from_secs(10),
+    ));
     release.join().expect("join");
     let got = got.expect("claims once the holder drops");
     drop(got);
-    assert!(rt.block_on(SessionWriter::wait_free(&id, Instant::now() + Duration::from_secs(1))));
+    assert!(rt.block_on(SessionWriter::wait_free(
+        &id,
+        Instant::now() + Duration::from_secs(1)
+    )));
 }
 
 // ---- CT-W2: the drop window ----------------------------------------------------------------------------------------
@@ -237,7 +294,10 @@ fn ct_w2_drop_window_is_busy_and_a_stale_drop_is_harmless() {
     assert!(gate.wait_reached(SEAM), "drop never reached the seam");
     // The OS hold is already released, the slot is not.
     assert!(eventually(|| foreign_could_take(&dir.path().join("s"))));
-    assert!(SessionWriter::try_claim(&id, dir.path().join("s")).is_err(), "slot free inside the drop window");
+    assert!(
+        SessionWriter::try_claim(&id, dir.path().join("s")).is_err(),
+        "slot free inside the drop window"
+    );
     // Simulate a newer generation owning the id while the old drop is still in flight.
     let newer_gen = 1 << 60;
     {
@@ -246,7 +306,10 @@ fn ct_w2_drop_window_is_busy_and_a_stale_drop_is_harmless() {
     }
     gate.open();
     dropper.join().expect("join");
-    assert!(!SessionWriter::is_free(&id), "a stale drop removed the newer generation's slot");
+    assert!(
+        !SessionWriter::is_free(&id),
+        "a stale drop removed the newer generation's slot"
+    );
     crate::writer::test_remove_slot(&id);
 }
 
@@ -261,7 +324,9 @@ fn ct_w3_wait_free_waits_for_an_abandoned_replace_atomic() {
     let session = dir.path().join("s");
     let rt = rt();
     let writer = SessionWriter::try_claim(&id, &session).expect("claim");
-    writer.replace_atomic_sync("state.json", b"old").expect("first write");
+    writer
+        .replace_atomic_sync("state.json", b"old")
+        .expect("first write");
     let gate = seams::arm(&format!("rename:{id}"));
     // Open the gate even if an assertion below fails, so the runtime's drop does not wait on the parked write.
     struct OpenOnDrop(Arc<seams::Gate>);
@@ -278,11 +343,24 @@ fn ct_w3_wait_free_waits_for_an_abandoned_replace_atomic() {
     assert!(gate.wait_reached(SEAM), "never reached the rename");
     task.abort();
     drop(writer);
-    assert!(!rt.block_on(SessionWriter::wait_free(&id, Instant::now() + Duration::from_millis(150))));
-    assert_eq!(std::fs::read(session.join("state.json")).expect("read"), b"old");
+    assert!(!rt.block_on(SessionWriter::wait_free(
+        &id,
+        Instant::now() + Duration::from_millis(150)
+    )));
+    assert_eq!(
+        std::fs::read(session.join("state.json")).expect("read"),
+        b"old"
+    );
     gate.open();
-    assert!(rt.block_on(SessionWriter::wait_free(&id, Instant::now() + Duration::from_secs(10))));
-    assert_eq!(std::fs::read(session.join("state.json")).expect("read"), b"new", "the write landed before free");
+    assert!(rt.block_on(SessionWriter::wait_free(
+        &id,
+        Instant::now() + Duration::from_secs(10)
+    )));
+    assert_eq!(
+        std::fs::read(session.join("state.json")).expect("read"),
+        b"new",
+        "the write landed before free"
+    );
 }
 
 /// CT-W3c (`SessionAppend` half): a recorder task that owns a `SessionAppend` keeps the writer until it drops.
@@ -296,15 +374,26 @@ fn ct_w3c_a_held_append_handle_keeps_the_writer() {
     drop(writer);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let recorder = rt.spawn(async move {
-        log.write_all_async(b"line 1\n".to_vec()).await.expect("write");
+        log.write_all_async(b"line 1\n".to_vec())
+            .await
+            .expect("write");
         let _ = stop_rx.await;
         log.write_all(b"line 2\n").expect("write");
     });
-    assert!(!rt.block_on(SessionWriter::wait_free(&id, Instant::now() + Duration::from_millis(150))));
+    assert!(!rt.block_on(SessionWriter::wait_free(
+        &id,
+        Instant::now() + Duration::from_millis(150)
+    )));
     let _ = stop_tx.send(());
     rt.block_on(recorder).expect("join");
-    assert!(rt.block_on(SessionWriter::wait_free(&id, Instant::now() + Duration::from_secs(10))));
-    assert_eq!(std::fs::read(dir.path().join("s/terminal/t1.log")).expect("read"), b"line 1\nline 2\n");
+    assert!(rt.block_on(SessionWriter::wait_free(
+        &id,
+        Instant::now() + Duration::from_secs(10)
+    )));
+    assert_eq!(
+        std::fs::read(dir.path().join("s/terminal/t1.log")).expect("read"),
+        b"line 1\nline 2\n"
+    );
 }
 
 // ---- CT-W4: the OS hold from the first byte -------------------------------------------------------------------------
@@ -318,7 +407,11 @@ fn ct_w4_a_new_session_holds_the_os_lock_from_its_first_byte() {
     let session = dir.path().join("cwd-bucket").join(&id);
     let rt = rt();
     let writer = rt
-        .block_on(SessionWriter::claim(&id, &session, Instant::now() + Duration::from_secs(5)))
+        .block_on(SessionWriter::claim(
+            &id,
+            &session,
+            Instant::now() + Duration::from_secs(5),
+        ))
         .expect("claim");
     assert!(!session.exists(), "claim must not create the folder");
     let mut probe = Probe::start(&session);
@@ -328,21 +421,44 @@ fn ct_w4_a_new_session_holds_the_os_lock_from_its_first_byte() {
         let writer = writer.clone();
         move || writer.append_sync("updates.jsonl", b"{}\n")
     });
-    assert!(gate.wait_reached(SEAM), "first write never reached its syscall");
-    assert!(!session.join("updates.jsonl").exists(), "paused before the first byte");
-    assert_eq!(probe.ask(), "held", "OS lock not held before the first byte");
+    assert!(
+        gate.wait_reached(SEAM),
+        "first write never reached its syscall"
+    );
+    assert!(
+        !session.join("updates.jsonl").exists(),
+        "paused before the first byte"
+    );
+    assert_eq!(
+        probe.ask(),
+        "held",
+        "OS lock not held before the first byte"
+    );
     gate.open();
     first.join().expect("join").expect("first write");
     let clone = writer.clone();
     drop(writer);
     assert_eq!(probe.ask(), "held", "released while a clone lives");
     drop(clone);
-    assert!(eventually(|| probe.ask() == "free"), "not released after the last clone");
+    assert!(
+        eventually(|| probe.ask() == "free"),
+        "not released after the last clone"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        assert_eq!(std::fs::metadata(&session).expect("meta").permissions().mode() & 0o777, 0o700);
-        let mode = std::fs::metadata(session.join("updates.jsonl")).expect("meta").permissions().mode();
+        assert_eq!(
+            std::fs::metadata(&session)
+                .expect("meta")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let mode = std::fs::metadata(session.join("updates.jsonl"))
+            .expect("meta")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 }
@@ -361,32 +477,58 @@ fn ct_w4b_a_folder_held_by_another_process_is_never_written() {
     let mut holder = foreign_process_hold(&session);
     let before = snapshot(&session);
     let writer = SessionWriter::try_claim(&id, &session).expect("in-process slot is free");
-    let error = writer.copy_in_sync(&src, "chat_history.jsonl").expect_err("copy_in must be refused");
+    let error = writer
+        .copy_in_sync(&src, "chat_history.jsonl")
+        .expect_err("copy_in must be refused");
     assert_eq!(refusal(&error), Some(Refusal::HeldElsewhere), "{error}");
-    let error = writer.create_new_sync("mcp/dump.txt", b"x").expect_err("create_new must be refused");
+    let error = writer
+        .create_new_sync("mcp/dump.txt", b"x")
+        .expect_err("create_new must be refused");
     assert_eq!(refusal(&error), Some(Refusal::HeldElsewhere), "{error}");
-    let error = writer.append_sync("updates.jsonl", b"more").expect_err("append must be refused");
+    let error = writer
+        .append_sync("updates.jsonl", b"more")
+        .expect_err("append must be refused");
     assert_eq!(refusal(&error), Some(Refusal::HeldElsewhere));
     // F5-C8: the methods that never create the folder attach the hold too (a rename or a remove by a writer that
     // skipped the hold would change a folder another process owns).
-    let error = writer.rename_sync("updates.jsonl", "moved/updates.jsonl").expect_err("rename must be refused");
+    let error = writer
+        .rename_sync("updates.jsonl", "moved/updates.jsonl")
+        .expect_err("rename must be refused");
     assert_eq!(refusal(&error), Some(Refusal::HeldElsewhere), "{error}");
-    let error = writer.remove_sync("updates.jsonl").expect_err("remove must be refused");
+    let error = writer
+        .remove_sync("updates.jsonl")
+        .expect_err("remove must be refused");
     assert_eq!(refusal(&error), Some(Refusal::HeldElsewhere), "{error}");
     assert_eq!(snapshot(&session), before, "the folder changed");
     assert!(!session.join("moved").exists());
     assert!(!session.join("mcp").exists());
     drop(writer);
     let rt = rt();
-    let refused = rt.block_on(SessionWriter::claim(&id, &session, Instant::now() + Duration::from_secs(5)));
-    assert_eq!(refused.expect_err("eager attach refuses"), ClaimError::HeldElsewhere);
-    assert!(SessionWriter::is_free(&id), "a refused claim keeps the slot");
+    let refused = rt.block_on(SessionWriter::claim(
+        &id,
+        &session,
+        Instant::now() + Duration::from_secs(5),
+    ));
+    assert_eq!(
+        refused.expect_err("eager attach refuses"),
+        ClaimError::HeldElsewhere
+    );
+    assert!(
+        SessionWriter::is_free(&id),
+        "a refused claim keeps the slot"
+    );
     holder.kill().expect("kill");
     holder.wait().expect("reap");
     let writer = rt
-        .block_on(SessionWriter::claim(&id, &session, Instant::now() + Duration::from_secs(5)))
+        .block_on(SessionWriter::claim(
+            &id,
+            &session,
+            Instant::now() + Duration::from_secs(5),
+        ))
         .expect("free after the holder dies");
-    writer.copy_in_sync(&src, "chat_history.jsonl").expect("now writes");
+    writer
+        .copy_in_sync(&src, "chat_history.jsonl")
+        .expect("now writes");
 }
 
 /// Audit S12-F1: a transient error opening the lock file (here EMFILE) must not turn the session's lock off for the
@@ -400,11 +542,24 @@ fn a_transient_lock_file_error_does_not_disable_the_lock_for_good() {
     std::fs::create_dir_all(&session).expect("mkdir");
     let writer = SessionWriter::try_claim(&id, &session).expect("slot");
     crate::lock::FAIL_LOCK_OPENS.with(|n| n.set(1));
-    writer.append_sync("updates.jsonl", b"one\n").expect("the write goes through");
-    assert!(foreign_could_take(&session), "the failed attach held nothing");
-    writer.append_sync("updates.jsonl", b"two\n").expect("second write");
-    assert!(!foreign_could_take(&session), "the next mutating call must take the hold");
-    assert_eq!(std::fs::read(session.join("updates.jsonl")).expect("read"), b"one\ntwo\n");
+    writer
+        .append_sync("updates.jsonl", b"one\n")
+        .expect("the write goes through");
+    assert!(
+        foreign_could_take(&session),
+        "the failed attach held nothing"
+    );
+    writer
+        .append_sync("updates.jsonl", b"two\n")
+        .expect("second write");
+    assert!(
+        !foreign_could_take(&session),
+        "the next mutating call must take the hold"
+    );
+    assert_eq!(
+        std::fs::read(session.join("updates.jsonl")).expect("read"),
+        b"one\ntwo\n"
+    );
 }
 
 /// Review L18: a lock error that never clears (here EMFILE on every open) is retried a bounded number of times, not on
@@ -419,11 +574,21 @@ fn a_lasting_lock_file_error_stops_being_retried() {
     let writer = SessionWriter::try_claim(&id, &session).expect("slot");
     crate::lock::FAIL_LOCK_OPENS.with(|n| n.set(1000));
     for _ in 0..30 {
-        writer.append_sync("updates.jsonl", b"x\n").expect("the write goes through unlocked");
+        writer
+            .append_sync("updates.jsonl", b"x\n")
+            .expect("the write goes through unlocked");
     }
     let tried = 1000 - crate::lock::FAIL_LOCK_OPENS.with(|n| n.replace(0));
-    assert!(tried <= 8, "the lock open was retried {tried} times over 30 writes");
-    assert_eq!(std::fs::read(session.join("updates.jsonl")).expect("read").len(), 60);
+    assert!(
+        tried <= 8,
+        "the lock open was retried {tried} times over 30 writes"
+    );
+    assert_eq!(
+        std::fs::read(session.join("updates.jsonl"))
+            .expect("read")
+            .len(),
+        60
+    );
 }
 
 /// Audit S12-F7: a symlink planted at a session file name is refused: the append fails and the link's target keeps its
@@ -441,9 +606,15 @@ fn an_append_through_a_planted_symlink_is_refused_and_the_target_is_untouched() 
     std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).expect("mode");
     std::os::unix::fs::symlink(&outside, session.join("updates.jsonl")).expect("symlink");
     let writer = SessionWriter::try_claim(&id, &session).expect("slot");
-    writer.append_sync("updates.jsonl", b"injected\n").expect_err("the append must fail");
+    writer
+        .append_sync("updates.jsonl", b"injected\n")
+        .expect_err("the append must fail");
     assert_eq!(std::fs::read(&outside).expect("read"), b"precious");
-    assert_eq!(mode_of(&outside) & 0o777, 0o644, "the link target's mode must not change");
+    assert_eq!(
+        mode_of(&outside) & 0o777,
+        0o644,
+        "the link target's mode must not change"
+    );
 }
 
 /// F5-C8: `ensure_folder_owner_only_sync` makes a folder that already existed with a wider mode (an earlier, failed
@@ -459,7 +630,15 @@ fn c8_ensure_folder_owner_only_retightens_an_existing_folder() {
     std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let writer = SessionWriter::try_claim(&id, &session).expect("claim");
     writer.ensure_folder_owner_only_sync().expect("ensure");
-    assert_eq!(std::fs::metadata(&session).expect("meta").permissions().mode() & 0o777, 0o700, "not re-tightened");
+    assert_eq!(
+        std::fs::metadata(&session)
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "not re-tightened"
+    );
 }
 
 /// A reader's writer does not retry a contended lock: it is refused at once, not after 300 ms (Fable round-2 L6).
@@ -479,13 +658,22 @@ fn a_reader_writer_never_waits_for_a_contended_lock() {
     other.try_lock().expect("foreign hold");
     let reader = SessionWriter::try_claim_reader(&id, &session).expect("slot");
     let started = std::time::Instant::now();
-    let error = reader.replace_atomic_sync("chat_history.jsonl", b"x").expect_err("refused");
+    let error = reader
+        .replace_atomic_sync("chat_history.jsonl", b"x")
+        .expect_err("refused");
     assert_eq!(refusal(&error), Some(Refusal::HeldElsewhere));
-    assert!(started.elapsed() < Duration::from_millis(200), "a reader waited {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "a reader waited {:?}",
+        started.elapsed()
+    );
     let owner = SessionWriter::try_claim(format!("{id}-owner"), &session).expect("slot");
     let started = std::time::Instant::now();
     assert!(owner.append_sync("x", b"x").is_err());
-    assert!(started.elapsed() >= Duration::from_millis(290), "an owner rides out a momentary hold");
+    assert!(
+        started.elapsed() >= Duration::from_millis(290),
+        "an owner rides out a momentary hold"
+    );
 }
 
 // ---- CT-W6 (crate half): unwind frees the writer --------------------------------------------------------------------
@@ -497,13 +685,18 @@ fn ct_w6_unwind_frees_the_writer() {
     let id = unique_id("w6");
     let writer = SessionWriter::try_claim(&id, dir.path().join("s")).expect("claim");
     let thread = std::thread::spawn(move || {
-        writer.append_sync("updates.jsonl", b"tail\n").expect("tail");
+        writer
+            .append_sync("updates.jsonl", b"tail\n")
+            .expect("tail");
         panic!("session thread dies");
     });
     assert!(thread.join().is_err());
     assert!(SessionWriter::is_free(&id));
     assert!(eventually(|| foreign_could_take(&dir.path().join("s"))));
-    assert_eq!(std::fs::read(dir.path().join("s/updates.jsonl")).expect("read"), b"tail\n");
+    assert_eq!(
+        std::fs::read(dir.path().join("s/updates.jsonl")).expect("read"),
+        b"tail\n"
+    );
 }
 
 // ---- CT-W7: delete --------------------------------------------------------------------------------------------------
@@ -518,12 +711,21 @@ fn ct_w7_delete_tree_order_and_gone_after() {
     let rt = rt();
     std::fs::create_dir_all(&session).expect("mkdir");
     std::fs::write(session.join("updates.jsonl"), b"{}\n").expect("seed");
-    let writer =
-        rt.block_on(SessionWriter::claim(&id, &session, Instant::now() + Duration::from_secs(5))).expect("claim");
+    let writer = rt
+        .block_on(SessionWriter::claim(
+            &id,
+            &session,
+            Instant::now() + Duration::from_secs(5),
+        ))
+        .expect("claim");
     assert!(!foreign_could_take(&session), "eager attach holds the lock");
     let survivor = writer.clone();
     let log: Arc<Mutex<Vec<String>>> = Arc::default();
-    let tombstone = dir.path().join(format!("{}{id}-{}", crate::DELETING_PREFIX, std::process::id()));
+    let tombstone = dir.path().join(format!(
+        "{}{id}-{}",
+        crate::DELETING_PREFIX,
+        std::process::id()
+    ));
     let (log2, session2, tomb2) = (log.clone(), session.clone(), tombstone.clone());
     crate::delete_observer::set(Some(Box::new(move |step, dir| {
         // Only this test's steps: the observer is process-wide.
@@ -531,7 +733,12 @@ fn ct_w7_delete_tree_order_and_gone_after() {
             return;
         }
         let state = match step {
-            "local_rename" => format!("{step}:orig={}:tomb={}:held={}", session2.exists(), tomb2.exists(), !foreign_could_take(&tomb2)),
+            "local_rename" => format!(
+                "{step}:orig={}:tomb={}:held={}",
+                session2.exists(),
+                tomb2.exists(),
+                !foreign_could_take(&tomb2)
+            ),
             _ => step.to_owned(),
         };
         log2.lock().expect("log").push(state);
@@ -540,14 +747,26 @@ fn ct_w7_delete_tree_order_and_gone_after() {
     crate::delete_observer::set(None);
     assert_eq!(
         *log.lock().expect("log"),
-        vec!["local_rename:orig=false:tomb=true:held=true".to_owned(), "hold_released".into(), "local_wipe".into()]
+        vec![
+            "local_rename:orig=false:tomb=true:held=true".to_owned(),
+            "hold_released".into(),
+            "local_wipe".into()
+        ]
     );
     assert!(!session.exists() && !tombstone.exists());
-    let error = survivor.append_sync("updates.jsonl", b"late").expect_err("Gone");
+    let error = survivor
+        .append_sync("updates.jsonl", b"late")
+        .expect_err("Gone");
     assert_eq!(refusal(&error), Some(Refusal::Gone));
-    assert_eq!(refusal(&survivor.delete_tree_sync().expect_err("Gone")), Some(Refusal::Gone));
+    assert_eq!(
+        refusal(&survivor.delete_tree_sync().expect_err("Gone")),
+        Some(Refusal::Gone)
+    );
     assert!(!session.exists(), "a late write recreated the folder");
-    assert!(!SessionWriter::is_free(&id), "the slot is held until the last clone drops");
+    assert!(
+        !SessionWriter::is_free(&id),
+        "the slot is held until the last clone drops"
+    );
     drop((writer, survivor));
     assert!(SessionWriter::is_free(&id));
 }
@@ -568,20 +787,32 @@ fn ct_w8_relative_paths_only_and_nothing_above_the_folder() {
     }
     assert!(!session.exists(), "a refused path created the folder");
     assert!(!dir.path().join("escape").exists());
-    writer.create_new_sync("subagents/c1/meta.json", b"{}").expect("nested");
+    writer
+        .create_new_sync("subagents/c1/meta.json", b"{}")
+        .expect("nested");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         for sub in ["subagents", "subagents/c1"] {
-            let mode = std::fs::metadata(session.join(sub)).expect("meta").permissions().mode();
+            let mode = std::fs::metadata(session.join(sub))
+                .expect("meta")
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o700, "{sub}");
         }
     }
     std::fs::remove_dir_all(&session).expect("removed underneath");
-    let error = writer.create_new_sync("images/1.png", b"png").expect_err("must not recreate the folder");
+    let error = writer
+        .create_new_sync("images/1.png", b"png")
+        .expect_err("must not recreate the folder");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     assert!(!session.exists());
-    assert_eq!(std::fs::read_dir(dir.path().join("bucket")).expect("bucket").count(), 0);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("bucket"))
+            .expect("bucket")
+            .count(),
+        0
+    );
 }
 
 // ---- the rest of the write API ----------------------------------------------------------------------------------------
@@ -593,29 +824,56 @@ fn write_api_round_trip() {
     let session = dir.path().join(&id);
     let rt = rt();
     let w = SessionWriter::try_claim(&id, &session).expect("claim");
-    rt.block_on(w.append("updates.jsonl", b"a\n".to_vec())).expect("append");
+    rt.block_on(w.append("updates.jsonl", b"a\n".to_vec()))
+        .expect("append");
     w.append_sync("updates.jsonl", b"b").expect("append torn");
-    w.append_line_checked_sync("updates.jsonl", b"c\n").expect("checked");
-    assert_eq!(std::fs::read(session.join("updates.jsonl")).expect("read"), b"a\nb\nc\n");
-    rt.block_on(w.replace_atomic("summary.json", b"{}".to_vec())).expect("replace");
+    w.append_line_checked_sync("updates.jsonl", b"c\n")
+        .expect("checked");
+    assert_eq!(
+        std::fs::read(session.join("updates.jsonl")).expect("read"),
+        b"a\nb\nc\n"
+    );
+    rt.block_on(w.replace_atomic("summary.json", b"{}".to_vec()))
+        .expect("replace");
     assert!(
-        std::fs::read_dir(&session).expect("ls").all(|e| !e.expect("e").file_name().to_string_lossy().ends_with(".tmp")),
+        std::fs::read_dir(&session).expect("ls").all(|e| !e
+            .expect("e")
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")),
         "temporary sibling left behind"
     );
     let error = w.create_new_sync("summary.json", b"x").expect_err("exists");
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-    rt.block_on(w.create_new("mcp/c1.txt", b"dump".to_vec())).expect("create_new");
-    rt.block_on(w.rename("mcp/c1.txt", "mcp/c1.corrupt")).expect("rename");
-    rt.block_on(w.copy_in(session.join("summary.json"), "fork/summary.json")).expect("copy_in");
+    rt.block_on(w.create_new("mcp/c1.txt", b"dump".to_vec()))
+        .expect("create_new");
+    rt.block_on(w.rename("mcp/c1.txt", "mcp/c1.corrupt"))
+        .expect("rename");
+    rt.block_on(w.copy_in(session.join("summary.json"), "fork/summary.json"))
+        .expect("copy_in");
     rt.block_on(w.remove("mcp/c1.corrupt")).expect("remove");
     let lock = w.open_lock("turn_owner.lock").expect("lock sidecar");
     lock.try_lock().expect("lock it");
-    let seen = w.summary(|summary, lock| Ok((summary.to_path_buf(), lock.to_path_buf()))).expect("summary");
-    assert_eq!(seen, (session.join("summary.json"), session.join("summary.json.lock")));
-    let other = SessionWriter::try_claim(unique_id("api-missing"), dir.path().join("missing")).expect("claim");
-    let error = other.summary(|_, _| Ok(())).expect_err("summary never creates the folder");
+    let seen = w
+        .summary(|summary, lock| Ok((summary.to_path_buf(), lock.to_path_buf())))
+        .expect("summary");
+    assert_eq!(
+        seen,
+        (
+            session.join("summary.json"),
+            session.join("summary.json.lock")
+        )
+    );
+    let other = SessionWriter::try_claim(unique_id("api-missing"), dir.path().join("missing"))
+        .expect("claim");
+    let error = other
+        .summary(|_, _| Ok(()))
+        .expect_err("summary never creates the folder");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-    assert_eq!(other.remove_sync("x").expect_err("nor does remove").kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        other.remove_sync("x").expect_err("nor does remove").kind(),
+        std::io::ErrorKind::NotFound
+    );
     assert!(!dir.path().join("missing").exists());
 }
 
@@ -638,7 +896,8 @@ fn trace_marks_bracket_every_mutation_and_wait_for_directory_acks() {
                         let name = entry.file_name().to_string_lossy().into_owned();
                         if let Some(rest) = name.strip_prefix("d.") {
                             let ack: Vec<&str> = rest.splitn(3, '.').take(2).collect();
-                            let _ = std::fs::File::create(acks.join(format!("d.{}", ack.join("."))));
+                            let _ =
+                                std::fs::File::create(acks.join(format!("d.{}", ack.join("."))));
                         }
                     }
                 }
@@ -652,24 +911,45 @@ fn trace_marks_bracket_every_mutation_and_wait_for_directory_acks() {
     let w = SessionWriter::try_claim(&id, &session).expect("claim");
     let generation = w.generation();
     w.append_sync("terminal/t.log", b"x").expect("append");
-    w.replace_atomic_sync("summary.json", b"{}").expect("replace");
+    w.replace_atomic_sync("summary.json", b"{}")
+        .expect("replace");
     drop(w);
     crate::trace::set_test_trace_dir(None);
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     acker.join().expect("acker");
-    let names: Vec<String> =
-        std::fs::read_dir(&marks).expect("marks").map(|e| e.expect("e").file_name().to_string_lossy().into_owned()).collect();
+    let names: Vec<String> = std::fs::read_dir(&marks)
+        .expect("marks")
+        .map(|e| e.expect("e").file_name().to_string_lossy().into_owned())
+        .collect();
     let has = |prefix: &str| names.iter().any(|n| n.starts_with(prefix));
-    assert!(has(&format!("claim.{id}.{generation}")) && has(&format!("free.{id}.{generation}")), "{names:?}");
+    assert!(
+        has(&format!("claim.{id}.{generation}")) && has(&format!("free.{id}.{generation}")),
+        "{names:?}"
+    );
     let log_hash = crate::trace::path_hash(&session.join("terminal/t.log"));
     let summary_hash = crate::trace::path_hash(&session.join("summary.json"));
     for hash in [&log_hash, &summary_hash] {
-        assert!(names.iter().any(|n| n.starts_with(&format!("b.{generation}.")) && n.ends_with(hash.as_str())), "{names:?}");
-        assert!(names.iter().any(|n| n.starts_with(&format!("e.{generation}.")) && n.ends_with(hash.as_str())), "{names:?}");
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with(&format!("b.{generation}.")) && n.ends_with(hash.as_str())),
+            "{names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with(&format!("e.{generation}.")) && n.ends_with(hash.as_str())),
+            "{names:?}"
+        );
     }
     for created in [session.clone(), session.join("terminal")] {
         let hash = crate::trace::path_hash(&created);
-        assert!(names.iter().any(|n| n.starts_with(&format!("d.{generation}.")) && n.ends_with(&hash)), "{names:?}");
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with(&format!("d.{generation}.")) && n.ends_with(&hash)),
+            "{names:?}"
+        );
     }
     assert!(!has("dto.") && !has("x."), "{names:?}");
 }
@@ -697,12 +977,24 @@ fn trace_detects_a_same_path_write_inside_the_window() {
         }
     });
     assert!(gate.wait_reached(SEAM));
-    std::fs::OpenOptions::new().append(true).open(session.join("updates.jsonl")).expect("bypass").write_all(b"bypass\n").expect("w");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(session.join("updates.jsonl"))
+        .expect("bypass")
+        .write_all(b"bypass\n")
+        .expect("w");
     gate.open();
     thread.join().expect("join");
-    let names: Vec<String> =
-        std::fs::read_dir(&marks).expect("marks").map(|e| e.expect("e").file_name().to_string_lossy().into_owned()).collect();
-    assert!(names.iter().any(|n| n.starts_with(&format!("x.{generation}."))), "{names:?}");
+    let names: Vec<String> = std::fs::read_dir(&marks)
+        .expect("marks")
+        .map(|e| e.expect("e").file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names
+            .iter()
+            .any(|n| n.starts_with(&format!("x.{generation}."))),
+        "{names:?}"
+    );
 }
 
 // ---- F5-C3: move_in, hard_link_in_no_replace ------------------------------------------------------------------------
@@ -714,7 +1006,12 @@ fn mode_of(path: &Path) -> u32 {
 }
 
 fn no_tmp_left(dir: &Path) -> bool {
-    std::fs::read_dir(dir).expect("ls").all(|e| !e.expect("e").file_name().to_string_lossy().ends_with(".tmp"))
+    std::fs::read_dir(dir).expect("ls").all(|e| {
+        !e.expect("e")
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    })
 }
 
 #[test]
@@ -726,14 +1023,21 @@ fn c3_move_in_renames_a_staged_file_into_the_folder_replacing_the_target() {
     std::fs::create_dir_all(staged.parent().expect("p")).expect("staging");
     std::fs::write(&staged, b"staged\n").expect("stage");
     let w = SessionWriter::try_claim(&id, &session).expect("claim");
-    w.append_sync("updates.jsonl", b"old\n").expect("seed through the writer");
+    w.append_sync("updates.jsonl", b"old\n")
+        .expect("seed through the writer");
     w.move_in_sync(&staged, "updates.jsonl").expect("move_in");
-    assert_eq!(std::fs::read(session.join("updates.jsonl")).expect("read"), b"staged\n");
+    assert_eq!(
+        std::fs::read(session.join("updates.jsonl")).expect("read"),
+        b"staged\n"
+    );
     assert!(!staged.exists(), "a rename leaves nothing staged");
-    rt().block_on(w.move_in(dir.path().join("missing"), "x")).expect_err("a missing source is an error");
+    rt().block_on(w.move_in(dir.path().join("missing"), "x"))
+        .expect_err("a missing source is an error");
     assert!(!session.join("x").exists());
     assert!(no_tmp_left(&session));
-    let error = w.move_in_sync(&staged, "../escape").expect_err("relative inside only");
+    let error = w
+        .move_in_sync(&staged, "../escape")
+        .expect_err("relative inside only");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
@@ -754,11 +1058,21 @@ fn c3_move_in_across_filesystems_copies_owner_only_then_removes_the_source() {
     let moved = w.move_in_sync(&staged, "sub/updates.jsonl");
     crate::writer::FORCE_EXDEV.with(|f| f.set(false));
     moved.expect("the EXDEV fallback");
-    assert_eq!(std::fs::read(session.join("sub/updates.jsonl")).expect("read"), b"cross\n");
-    assert!(!staged.exists(), "the fallback removes the staged original once the copy landed");
+    assert_eq!(
+        std::fs::read(session.join("sub/updates.jsonl")).expect("read"),
+        b"cross\n"
+    );
+    assert!(
+        !staged.exists(),
+        "the fallback removes the staged original once the copy landed"
+    );
     assert!(no_tmp_left(&session.join("sub")));
     #[cfg(unix)]
-    assert_eq!(mode_of(&session.join("sub/updates.jsonl")), 0o600, "owner-only whatever the source's mode");
+    assert_eq!(
+        mode_of(&session.join("sub/updates.jsonl")),
+        0o600,
+        "owner-only whatever the source's mode"
+    );
 }
 
 #[test]
@@ -769,17 +1083,32 @@ fn c3_hard_link_in_no_replace_publishes_once_and_never_replaces() {
     let w = SessionWriter::try_claim(&id, &session).expect("claim");
     w.create_new_sync("chat.a.tmp", b"first").expect("stage a");
     w.create_new_sync("chat.b.tmp", b"second").expect("stage b");
-    w.hard_link_in_no_replace_sync("chat.a.tmp", "chat.pre-repair").expect("first publisher wins");
-    let error = w.hard_link_in_no_replace_sync("chat.b.tmp", "chat.pre-repair").expect_err("never replaces");
+    w.hard_link_in_no_replace_sync("chat.a.tmp", "chat.pre-repair")
+        .expect("first publisher wins");
+    let error = w
+        .hard_link_in_no_replace_sync("chat.b.tmp", "chat.pre-repair")
+        .expect_err("never replaces");
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-    assert_eq!(std::fs::read(session.join("chat.pre-repair")).expect("read"), b"first");
+    assert_eq!(
+        std::fs::read(session.join("chat.pre-repair")).expect("read"),
+        b"first"
+    );
     w.remove_sync("chat.a.tmp").expect("unstage");
-    assert_eq!(std::fs::read(session.join("chat.pre-repair")).expect("read"), b"first", "a link, not a name");
-    let other = SessionWriter::try_claim(unique_id("ln-missing"), dir.path().join("missing")).expect("claim");
-    let error = other.hard_link_in_no_replace_sync("a", "b").expect_err("never creates the folder");
+    assert_eq!(
+        std::fs::read(session.join("chat.pre-repair")).expect("read"),
+        b"first",
+        "a link, not a name"
+    );
+    let other = SessionWriter::try_claim(unique_id("ln-missing"), dir.path().join("missing"))
+        .expect("claim");
+    let error = other
+        .hard_link_in_no_replace_sync("a", "b")
+        .expect_err("never creates the folder");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     assert!(!dir.path().join("missing").exists());
-    let error = w.hard_link_in_no_replace_sync("chat.b.tmp", "/abs").expect_err("relative only");
+    let error = w
+        .hard_link_in_no_replace_sync("chat.b.tmp", "/abs")
+        .expect_err("relative only");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
 
@@ -795,9 +1124,13 @@ fn c3_move_in_and_hard_link_refuse_a_folder_held_by_another_process() {
     let mut holder = foreign_process_hold(&session);
     let before = snapshot(&session);
     let writer = SessionWriter::try_claim(&id, &session).expect("in-process slot is free");
-    let error = writer.move_in_sync(&staged, "updates.jsonl").expect_err("move_in must be refused");
+    let error = writer
+        .move_in_sync(&staged, "updates.jsonl")
+        .expect_err("move_in must be refused");
     assert_eq!(refusal(&error), Some(Refusal::HeldElsewhere), "{error}");
-    let error = writer.hard_link_in_no_replace_sync("chat.tmp", "chat.pre-repair").expect_err("link must be refused");
+    let error = writer
+        .hard_link_in_no_replace_sync("chat.tmp", "chat.pre-repair")
+        .expect_err("link must be refused");
     assert_eq!(refusal(&error), Some(Refusal::HeldElsewhere), "{error}");
     assert_eq!(snapshot(&session), before, "the folder changed");
     assert!(staged.exists(), "a refused move keeps the staged file");
@@ -821,21 +1154,32 @@ fn c3_trace_marks_bracket_move_in_and_hard_link() {
     let w = SessionWriter::try_claim(&id, &session).expect("claim");
     let generation = w.generation();
     w.move_in_sync(&staged, "updates.jsonl").expect("move_in");
-    w.hard_link_in_no_replace_sync("updates.jsonl", "updates.link").expect("link");
+    w.hard_link_in_no_replace_sync("updates.jsonl", "updates.link")
+        .expect("link");
     drop(w);
     crate::trace::set_test_trace_dir(None);
-    let names: Vec<String> =
-        std::fs::read_dir(&marks).expect("marks").map(|e| e.expect("e").file_name().to_string_lossy().into_owned()).collect();
+    let names: Vec<String> = std::fs::read_dir(&marks)
+        .expect("marks")
+        .map(|e| e.expect("e").file_name().to_string_lossy().into_owned())
+        .collect();
     for rel in ["updates.jsonl", "updates.link"] {
         let hash = crate::trace::path_hash(&session.join(rel));
         for kind in ["b", "e"] {
             assert!(
-                names.iter().any(|n| n.starts_with(&format!("{kind}.{generation}.")) && n.ends_with(hash.as_str())),
+                names
+                    .iter()
+                    .any(|n| n.starts_with(&format!("{kind}.{generation}."))
+                        && n.ends_with(hash.as_str())),
                 "{kind} mark for {rel}: {names:?}"
             );
         }
     }
-    assert!(!names.iter().any(|n| n.starts_with("x.") || n.starts_with("dto.")), "{names:?}");
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.starts_with("x.") || n.starts_with("dto.")),
+        "{names:?}"
+    );
 }
 
 // ---- F5-B5 (box B4): a freed writer leaves no handle open ----------------------------------------------------------
@@ -843,10 +1187,17 @@ fn c3_trace_marks_bracket_move_in_and_hard_link() {
 /// The open descriptors of this process that point at one of `paths`.
 #[cfg(target_os = "linux")]
 fn open_fds_to(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let wanted: Vec<PathBuf> = paths.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
+    let wanted: Vec<PathBuf> = paths
+        .iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
     std::fs::read_dir("/proc/self/fd")
         .map(|entries| {
-            entries.flatten().filter_map(|entry| std::fs::read_link(entry.path()).ok()).filter(|t| wanted.contains(t)).collect()
+            entries
+                .flatten()
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .filter(|t| wanted.contains(t))
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -864,14 +1215,21 @@ fn f5b5_an_append_handle_closes_its_file_before_the_writer_is_free() {
     append.write_all(b"{}\n").expect("append");
     drop(writer);
     let events = dir.path().join("s").join("events.jsonl");
-    assert_eq!(open_fds_to(std::slice::from_ref(&events)).len(), 1, "fixture: the handle holds events.jsonl open");
+    assert_eq!(
+        open_fds_to(std::slice::from_ref(&events)).len(),
+        1,
+        "fixture: the handle holds events.jsonl open"
+    );
     let gate = seams::arm(&format!("drop:{id}"));
     let dropper = std::thread::spawn(move || drop(append));
     assert!(gate.wait_reached(SEAM), "the writer was never freed");
     let open = open_fds_to(std::slice::from_ref(&events));
     gate.open();
     dropper.join().expect("join");
-    assert!(open.is_empty(), "events.jsonl was still open when its writer was freed: {open:?}");
+    assert!(
+        open.is_empty(),
+        "events.jsonl was still open when its writer was freed: {open:?}"
+    );
     assert!(SessionWriter::is_free(&id));
 }
 
@@ -879,15 +1237,24 @@ fn f5b5_an_append_handle_closes_its_file_before_the_writer_is_free() {
 /// they must exist as soon as the session is held: at the first write of a cold folder, and at a claim of an existing one.
 #[tokio::test]
 async fn r1h2_the_lock_sidecars_exist_once_the_hold_attaches() {
-    const SIDECARS: [&str; 3] = ["snapshot.lock", "chat_history.jsonl.lock", "updates.jsonl.lock"];
+    const SIDECARS: [&str; 3] = [
+        "snapshot.lock",
+        "chat_history.jsonl.lock",
+        "updates.jsonl.lock",
+    ];
     let root = tempfile::tempdir().unwrap();
     let cold = root.path().join("r1h2-cold");
     let first = SessionWriter::try_claim("r1h2-cold", &cold).unwrap();
     first.append_sync("events.jsonl", b"x\n").unwrap();
     let warm = root.path().join("r1h2-warm");
     std::fs::create_dir_all(&warm).unwrap();
-    let claimed = SessionWriter::claim("r1h2-warm", &warm, Instant::now() + Duration::from_secs(5)).await.unwrap();
-    for (dir, what) in [(&cold, "first write of a cold folder"), (&warm, "claim of an existing folder")] {
+    let claimed = SessionWriter::claim("r1h2-warm", &warm, Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    for (dir, what) in [
+        (&cold, "first write of a cold folder"),
+        (&warm, "claim of an existing folder"),
+    ] {
         for name in SIDECARS {
             assert!(dir.join(name).is_file(), "{name} missing after the {what}");
         }

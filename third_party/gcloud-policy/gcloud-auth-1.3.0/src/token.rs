@@ -8,7 +8,8 @@ use token_source::{TokenSource, TokenSourceProvider};
 use crate::credentials::CredentialsFile;
 use crate::error::Error;
 use crate::project::{
-    create_token_source_from_credentials, create_token_source_from_project, project, Config, Project,
+    create_token_source_from_credentials, create_token_source_from_project, project, Config,
+    Project,
 };
 use crate::token_source::TokenSource as InternalTokenSource;
 
@@ -61,9 +62,13 @@ impl DefaultTokenSourceProvider {
 
         let (project_id, source_credentials) = match project {
             Project::FromMetadataServer(info) => (info.project_id, None),
-            Project::FromFile(cred) => {
-                (cred.project_id.as_ref().or(cred.quota_project_id.as_ref()).cloned(), Some(cred))
-            }
+            Project::FromFile(cred) => (
+                cred.project_id
+                    .as_ref()
+                    .or(cred.quota_project_id.as_ref())
+                    .cloned(),
+                Some(cred),
+            ),
         };
         Ok(Self {
             ts: Arc::new(DefaultTokenSource {
@@ -75,7 +80,10 @@ impl DefaultTokenSourceProvider {
     }
 
     ///Creates source using existing credentials file
-    pub async fn new_with_credentials(config: Config<'_>, credentials: Box<CredentialsFile>) -> Result<Self, Error> {
+    pub async fn new_with_credentials(
+        config: Config<'_>,
+        credentials: Box<CredentialsFile>,
+    ) -> Result<Self, Error> {
         let inner = create_token_source_from_credentials(&credentials, &config)
             .await?
             .into();

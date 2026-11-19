@@ -41,7 +41,10 @@ fn synthetic_rules_for_default_mode(
 
     if effects.bypass_permissions {
         if let Some(reason) = policy_block {
-            warn!(reason, "defaultMode=bypassPermissions ignored: always-approve is locked off");
+            warn!(
+                reason,
+                "defaultMode=bypassPermissions ignored: always-approve is locked off"
+            );
             bypass_blocked = true;
             skipped.push(SkippedPermission {
                 rule: "defaultMode=bypassPermissions".to_string(),
@@ -95,7 +98,9 @@ fn parse_default_mode_claiming_scope(
 /// Parse `[permission]` from TOML.
 /// Tries compact (`deny = ["Read(...)"]`) first, falls back to verbose (`[[permission.rules]]`).
 #[cfg(test)]
-pub(crate) fn parse_toml_permission_section_for_test(permission_value: &toml::Value) -> Vec<PermissionRule> {
+pub(crate) fn parse_toml_permission_section_for_test(
+    permission_value: &toml::Value,
+) -> Vec<PermissionRule> {
     parse_toml_permission_section(permission_value).expect("valid [permission]")
 }
 
@@ -258,7 +263,9 @@ fn load_config_toml_permissions(cwd: &Path, project_trusted: bool) -> Vec<Source
                     if value.get("folder_trust").is_some() {
                         warn!(path = %path.display(), "[folder_trust] in a project config is ignored; set it in your own ~/.fuigo/config.toml");
                     }
-                    rules.extend(extract_toml_permissions(&value, || RequirementSource::Config { path: path.clone() }))
+                    rules.extend(extract_toml_permissions(&value, || {
+                        RequirementSource::Config { path: path.clone() }
+                    }))
                 }
                 Err(e) => {
                     warn!(path = %path.display(), error = %e, "Failed to load project config.toml")
@@ -337,7 +344,10 @@ pub struct SessionPolicyInputs {
 
 /// The session permission config: the layered resolution for `inputs.cwd` (its project tier only when
 /// `project_trusted`), the CLI rules first, then the mode hint.
-pub async fn resolve_session_policy(inputs: &SessionPolicyInputs, project_trusted: bool) -> Option<PermissionConfig> {
+pub async fn resolve_session_policy(
+    inputs: &SessionPolicyInputs,
+    project_trusted: bool,
+) -> Option<PermissionConfig> {
     let mut config = resolve_permission_config_with_fallback_launch(
         &inputs.cwd,
         project_trusted,
@@ -536,9 +546,7 @@ impl ResolveInputs<'static> {
         Self {
             policy_block,
             managed: managed_settings(),
-            managed_config_rules: managed_config_permissions(
-                &fuigo_config::managed_config_layers(),
-            ),
+            managed_config_rules: managed_config_permissions(&fuigo_config::managed_config_layers()),
             project_trusted,
             launch_rules: launch_policy_rules(session_policy),
         }
@@ -556,12 +564,20 @@ fn launch_policy_rules(
     }
     let mut rules = Vec::new();
     if let Some(policy) = process {
-        tag_with_source(&mut rules, policy.rules.clone(), policy.source(LaunchScope::Process));
+        tag_with_source(
+            &mut rules,
+            policy.rules.clone(),
+            policy.source(LaunchScope::Process),
+        );
     }
     if let Some(policy) = session_policy
         && process.is_none_or(|p| p.sha256 != policy.sha256 || p.path != policy.path)
     {
-        tag_with_source(&mut rules, policy.rules.clone(), policy.source(LaunchScope::Session));
+        tag_with_source(
+            &mut rules,
+            policy.rules.clone(),
+            policy.source(LaunchScope::Session),
+        );
     }
     rules
 }
@@ -654,7 +670,8 @@ async fn resolve_permissions_with_provenance_inner(
             .clone()
             .unwrap_or_else(|| PathBuf::from("managed-settings.json"));
         let source = RequirementSource::ManagedSettings { path: managed_path };
-        let (syn_rules, syn_skipped, blocked) = synthetic_rules_for_default_mode(mode, policy_block);
+        let (syn_rules, syn_skipped, blocked) =
+            synthetic_rules_for_default_mode(mode, policy_block);
         if !blocked {
             resolved_base = mode.resolved_base();
         }
@@ -866,7 +883,10 @@ fn resolve_claude_settings_inner(
             resolved_base: if bypass_blocked {
                 ResolvedBaseMode::Default
             } else {
-                applied_mode.map_or(ResolvedBaseMode::Default, DefaultPermissionMode::resolved_base)
+                applied_mode.map_or(
+                    ResolvedBaseMode::Default,
+                    DefaultPermissionMode::resolved_base,
+                )
             },
             launch_rules: Vec::new(),
         },
@@ -878,7 +898,6 @@ fn resolve_claude_settings_inner(
 // ═════════════════════════════════════════════════════════════════════════════
 // managed-settings.json
 // ═════════════════════════════════════════════════════════════════════════════
-
 
 pub use fuigo_config::policy_sources::{PolicyLayerOwnership, PolicyPin};
 
@@ -921,7 +940,9 @@ pub fn managed_settings() -> &'static ManagedSettings {
         "{}|env_hooks_only={env_hooks_only}",
         managed_settings_cache_key(&sources, fuigo_config::admin_requirements_copy_id)
     );
-    let mut guard = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((k, ms)) = guard.as_ref()
         && *k == key
     {
@@ -1272,7 +1293,8 @@ pub fn yolo_policy_lock() -> Option<YoloPolicyLock> {
         .iter()
         .map(|l| (PathBuf::from(l.source.label().as_ref()), &l.value))
         .collect();
-    resolve_yolo_policy_block(labeled.iter().map(|(p, v)| (p.as_path(), *v))).or_else(user_config_lock)
+    resolve_yolo_policy_block(labeled.iter().map(|(p, v)| (p.as_path(), *v)))
+        .or_else(user_config_lock)
 }
 
 /// Read `[ui] <key>` as a bool; a non-bool value warns (naming key and layer) rather than silently failing to lock.
@@ -1304,8 +1326,9 @@ pub fn user_config_lock() -> Option<YoloPolicyLock> {
     match read {
         Ok(value) => resolve_yolo_policy_block_with_user(std::iter::empty(), Some((&path, &value))),
         Err(e) => {
-            static WARNED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
-                std::sync::LazyLock::new(Default::default);
+            static WARNED: std::sync::LazyLock<
+                std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+            > = std::sync::LazyLock::new(Default::default);
             let first = WARNED
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -1619,7 +1642,10 @@ impl McpServerAllowlist {
             }) => {
                 let lossy = command.to_string_lossy();
                 self.commands.iter().any(|c| *c == lossy)
-                    || self.argvs.iter().any(|argv| argv_matches(argv, command, args))
+                    || self
+                        .argvs
+                        .iter()
+                        .any(|argv| argv_matches(argv, command, args))
             }
             _ => false,
         }
@@ -1627,7 +1653,9 @@ impl McpServerAllowlist {
 
     /// A server known only by its name (an in-process ACP SDK server, P169 Grok 4.7 #4) matches a `serverName` deny.
     pub(crate) fn is_name_denied(&self, name: &str) -> bool {
-        self.deny_names.iter().any(|pat| mcp_name_matches(pat, name))
+        self.deny_names
+            .iter()
+            .any(|pat| mcp_name_matches(pat, name))
     }
 
     /// A name-only server is positively granted only by a `serverName` allow entry.

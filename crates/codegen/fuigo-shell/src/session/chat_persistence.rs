@@ -131,7 +131,9 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut persistence = ChannelChatPersistence::new(tx);
         let items = [ConversationItem::system("compacted")];
-        persistence.try_replace_history(&items).expect("actor alive: queued");
+        persistence
+            .try_replace_history(&items)
+            .expect("actor alive: queued");
         drop(rx);
         let error = persistence
             .try_replace_history(&items)

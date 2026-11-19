@@ -184,7 +184,11 @@ mod tests {
         assert_eq!(r.take_goal_stop(), None);
         r.note_goal_stop("user_paused");
         r.note_goal_stop("cleared");
-        assert_eq!(r.take_goal_stop().as_deref(), Some("user_paused"), "clearing is not a stop");
+        assert_eq!(
+            r.take_goal_stop().as_deref(),
+            Some("user_paused"),
+            "clearing is not a stop"
+        );
     }
 
     #[test]

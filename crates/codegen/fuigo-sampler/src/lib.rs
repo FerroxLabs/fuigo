@@ -9,6 +9,11 @@
 //! - **Layer 2**: [`stream`] transforms raw streams into [`SamplingEvent`]s.
 //! - **Layer 3**: [`SamplerHandle`] manages concurrent requests with retry, cancellation, and event-based coordination via the actor.
 
+#![allow(
+    clippy::result_large_err,
+    reason = "SamplingError inlines the upstream classification; boxing it touches every construction site and is a separate refactor"
+)]
+
 pub mod actor;
 pub mod attribution;
 pub mod client;
@@ -18,10 +23,10 @@ pub mod doom_loop;
 mod doom_loop_recovery;
 pub mod events;
 pub mod execution_budget;
-pub(crate) mod request_accounting;
 pub mod handle;
 pub mod metrics;
 mod prewarm;
+pub(crate) mod request_accounting;
 pub mod retry;
 pub mod sampling_log;
 pub(crate) mod sent_credentials;

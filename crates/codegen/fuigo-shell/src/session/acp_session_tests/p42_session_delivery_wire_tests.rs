@@ -50,8 +50,14 @@ fn preconditions() {
     use crate::auth::session_delivery::session_may_reach;
     assert!(session_may_reach(CONFIGURED), "fixture: configured origin");
     assert!(!session_may_reach(CLEARTEXT), "fixture: cleartext refused");
-    assert!(!session_may_reach(OTHER_PORT), "fixture: other port refused");
-    assert!(!session_may_reach("http://127.0.0.1:9/v1"), "fixture: loopback refused");
+    assert!(
+        !session_may_reach(OTHER_PORT),
+        "fixture: other port refused"
+    );
+    assert!(
+        !session_may_reach("http://127.0.0.1:9/v1"),
+        "fixture: loopback refused"
+    );
     assert!(
         crate::util::is_fuigo_api_url(CLEARTEXT)
             && crate::util::is_fuigo_api_url(OTHER_PORT)
@@ -144,7 +150,10 @@ async fn send_config(cfg: fuigo_sampler::SamplerConfig) {
 }
 
 fn assert_withheld(seen: &[Observed], what: &str) {
-    assert!(!seen.is_empty(), "{what}: the request must reach the destination (else the test is vacuous)");
+    assert!(
+        !seen.is_empty(),
+        "{what}: the request must reach the destination (else the test is vacuous)"
+    );
     assert!(
         !token_arrived(seen, TOKEN) && !token_arrived(seen, EXPIRED),
         "{what}: the session token reached a destination that may not receive it: {seen:?}"
@@ -153,8 +162,10 @@ fn assert_withheld(seen: &[Observed], what: &str) {
 
 fn assert_delivered(seen: &[Observed], what: &str) {
     assert!(
-        seen.iter().any(|o| o.target.starts_with(&format!("https://{CONFIGURED_HOST}"))
-            && o.authorization.as_deref() == Some(&format!("Bearer {TOKEN}"))),
+        seen.iter().any(
+            |o| o.target.starts_with(&format!("https://{CONFIGURED_HOST}"))
+                && o.authorization.as_deref() == Some(&format!("Bearer {TOKEN}"))
+        ),
         "{what}: the configured origin must receive the session token: {seen:?}"
     );
 }
@@ -176,7 +187,10 @@ fn p42_wire_session_token_reaches_the_configured_origin() {
     run(async {
         let mut wire = SessionWire::start().await;
         preconditions();
-        assert_eq!(byok(UNLISTED_MODEL), crate::agent::auth_method::ModelByok::NotByok);
+        assert_eq!(
+            byok(UNLISTED_MODEL),
+            crate::agent::auth_method::ModelByok::NotByok
+        );
         let (_d, am) = manager(TOKEN, true);
         let actor = session_actor(am, CONFIGURED, UNLISTED_MODEL, None).await;
         send_turn(&actor).await;
@@ -193,7 +207,10 @@ fn p42_wire_cleartext_url_never_receives_the_session_token() {
     run(async {
         let mut wire = SessionWire::start().await;
         preconditions();
-        assert_eq!(byok(UNKNOWN_MODEL), crate::agent::auth_method::ModelByok::Unknown);
+        assert_eq!(
+            byok(UNKNOWN_MODEL),
+            crate::agent::auth_method::ModelByok::Unknown
+        );
         let (_d, am) = manager(TOKEN, true);
         let actor = session_actor(am, CLEARTEXT, UNKNOWN_MODEL, None).await;
         send_turn(&actor).await;
@@ -244,7 +261,10 @@ fn p42_wire_notbyok_model_absent_from_the_catalogue_never_receives_the_session_t
     run(async {
         let mut wire = SessionWire::start().await;
         preconditions();
-        assert_eq!(byok(UNLISTED_MODEL), crate::agent::auth_method::ModelByok::NotByok);
+        assert_eq!(
+            byok(UNLISTED_MODEL),
+            crate::agent::auth_method::ModelByok::NotByok
+        );
         let (_d, am) = manager(TOKEN, true);
         let actor = session_actor(am, &wire.loopback_url(), UNLISTED_MODEL, None).await;
         send_turn(&actor).await;
@@ -267,7 +287,12 @@ fn p42_wire_buffered_token_is_rechecked_after_the_destination_changes() {
         send_turn(&actor).await;
         assert_delivered(&wire.observed().await, "turn 1");
         assert_eq!(
-            actor.chat_state_handle.get_credentials().await.api_key.as_deref(),
+            actor
+                .chat_state_handle
+                .get_credentials()
+                .await
+                .api_key
+                .as_deref(),
             Some(TOKEN),
             "turn 1 must have buffered the session token in chat-state credentials"
         );
@@ -275,7 +300,10 @@ fn p42_wire_buffered_token_is_rechecked_after_the_destination_changes() {
             .chat_state_handle
             .update_sampling_config(sampling(&wire.loopback_url(), UNKNOWN_MODEL));
         send_turn(&actor).await;
-        assert_withheld(&wire.observed().await, "turn 2 after the destination changed");
+        assert_withheld(
+            &wire.observed().await,
+            "turn 2 after the destination changed",
+        );
     });
 }
 
@@ -291,7 +319,10 @@ fn p42_wire_buffered_hard_expired_token_is_withheld_from_a_refused_destination()
         let (_d, am) = manager(EXPIRED, false);
         let actor = session_actor(am, &wire.loopback_url(), UNKNOWN_MODEL, Some(EXPIRED)).await;
         send_turn(&actor).await;
-        assert_withheld(&wire.observed().await, "buffered hard-expired token, refused destination");
+        assert_withheld(
+            &wire.observed().await,
+            "buffered hard-expired token, refused destination",
+        );
     });
 }
 
@@ -307,7 +338,10 @@ fn p42_wire_hard_expired_token_is_still_stripped_at_the_configured_origin() {
         let (_d, am) = manager(EXPIRED, false);
         let actor = session_actor(am, CONFIGURED, UNLISTED_MODEL, Some(EXPIRED)).await;
         send_turn(&actor).await;
-        assert_withheld(&wire.observed().await, "hard-expired token at the configured origin");
+        assert_withheld(
+            &wire.observed().await,
+            "hard-expired token at the configured origin",
+        );
     });
 }
 
@@ -321,7 +355,12 @@ fn p42_wire_kill_switch_substitutes_the_session_only_where_it_may_go() {
         let mut wire = SessionWire::start().await;
         preconditions();
         let (_d, _am) = manager(TOKEN, true);
-        for base in [wire.loopback_url(), CLEARTEXT.to_string(), OTHER_PORT.to_string(), CONFIGURED.to_string()] {
+        for base in [
+            wire.loopback_url(),
+            CLEARTEXT.to_string(),
+            OTHER_PORT.to_string(),
+            CONFIGURED.to_string(),
+        ] {
             let mut creds = crate::agent::config::ResolvedCredentials {
                 api_key: Some("p42-own-first-party-key".into()),
                 base_url: base.clone(),
@@ -337,7 +376,10 @@ fn p42_wire_kill_switch_substitutes_the_session_only_where_it_may_go() {
             })
             .await;
             let seen = wire.observed().await;
-            assert!(!token_arrived(&seen, "p42-own-first-party-key"), "{base}: key must be refused");
+            assert!(
+                !token_arrived(&seen, "p42-own-first-party-key"),
+                "{base}: key must be refused"
+            );
             if base == CONFIGURED {
                 assert_delivered(&seen, "kill switch at the configured origin");
             } else {
@@ -364,17 +406,30 @@ fn p42_wire_aux_fallback_bearer_respects_the_destination() {
                 ..Default::default()
             };
             let resolved = crate::agent::config::resolve_aux_model_sampling_config(
-                "p42-aux-model", &models, &endpoints, Some(TOKEN), false, None, None, &crate::agent::models::EffectiveAllowlist::Unrestricted,
+                "p42-aux-model",
+                &models,
+                &endpoints,
+                Some(TOKEN),
+                false,
+                None,
+                None,
+                &crate::agent::models::EffectiveAllowlist::Unrestricted,
             );
             match resolved {
                 Some(cfg) => send_config(cfg).await,
-                None => assert!(!expect, "{base}: the configured origin must resolve a sampler"),
+                None => assert!(
+                    !expect,
+                    "{base}: the configured origin must resolve a sampler"
+                ),
             }
             let seen = wire.observed().await;
             if expect {
                 assert_delivered(&seen, "aux fallback at the configured origin");
             } else {
-                assert!(!token_arrived(&seen, TOKEN), "aux fallback at {base}: {seen:?}");
+                assert!(
+                    !token_arrived(&seen, TOKEN),
+                    "aux fallback at {base}: {seen:?}"
+                );
             }
         }
     });
@@ -397,7 +452,10 @@ fn p42_wire_models_refresh_does_not_send_the_session_to_loopback() {
         );
         actor.maybe_refresh_model_metadata_on_resume().await;
         let seen = wire.observed().await;
-        assert!(!token_arrived(&seen, TOKEN), "/models at loopback: {seen:?}");
+        assert!(
+            !token_arrived(&seen, TOKEN),
+            "/models at loopback: {seen:?}"
+        );
     });
 }
 
@@ -468,7 +526,9 @@ fn p42_auxiliary_credential_arm_refuses_the_session_at_configured_https_loopback
                 format!("[endpoints]\nfuigo_api_base_url = \"{base}\"\n"),
             )
             .unwrap();
-            let key = am.voice_api_key_for(&format!("{base}/audio/transcriptions")).await;
+            let key = am
+                .voice_api_key_for(&format!("{base}/audio/transcriptions"))
+                .await;
             assert_eq!(key.as_deref(), expect, "{base}");
         }
     });
@@ -486,7 +546,10 @@ fn p42_tokenize_key_follows_the_one_predicate() {
         let (_d, am) = manager(TOKEN, true);
         let actor = session_actor(am, CONFIGURED, UNLISTED_MODEL, Some(TOKEN)).await;
         assert_eq!(
-            actor.p42_tokenize_api_key("https://api.fluxrouter.ai/v1/tokenize-text").await.as_deref(),
+            actor
+                .p42_tokenize_api_key("https://api.fluxrouter.ai/v1/tokenize-text")
+                .await
+                .as_deref(),
             Some(TOKEN)
         );
         for url in [
@@ -510,7 +573,11 @@ fn p42_memory_embed_key_is_rechecked_against_the_destination() {
         ..Default::default()
     };
     for refused in [CLEARTEXT, OTHER_PORT, "http://127.0.0.1:9/v1"] {
-        assert_eq!(super::spawn::memory_embed_api_key(&cfg(refused, TOKEN), Some(&am)), None, "{refused}");
+        assert_eq!(
+            super::spawn::memory_embed_api_key(&cfg(refused, TOKEN), Some(&am)),
+            None,
+            "{refused}"
+        );
         assert_eq!(
             super::spawn::memory_embed_api_key(&cfg(refused, "p42-byok"), Some(&am)).as_deref(),
             Some("p42-byok"),
@@ -547,7 +614,9 @@ fn p42_static_manager_api_key_is_not_treated_as_a_session_token() {
         )
         .unwrap();
         assert_eq!(
-            am.voice_api_key_for("https://localhost:8443/v1/audio/transcriptions").await.as_deref(),
+            am.voice_api_key_for("https://localhost:8443/v1/audio/transcriptions")
+                .await
+                .as_deref(),
             Some("p42-static-manager-key")
         );
         let endpoints = crate::agent::config::EndpointsConfig {
@@ -576,16 +645,32 @@ fn p42_static_manager_api_key_is_not_treated_as_a_session_token() {
             ..Default::default()
         };
         let aux = crate::agent::config::resolve_aux_model_sampling_config_for_held(
-            "p42-aux-model", &indexmap::IndexMap::new(), &endpoints, held.as_ref(), false, None, None,
-            crate::agent::config::HelperModelChoice::Default, &crate::agent::models::EffectiveAllowlist::Unrestricted,
+            "p42-aux-model",
+            &indexmap::IndexMap::new(),
+            &endpoints,
+            held.as_ref(),
+            false,
+            None,
+            None,
+            crate::agent::config::HelperModelChoice::Default,
+            &crate::agent::models::EffectiveAllowlist::Unrestricted,
         )
         .expect("the held static key routes the aux fallback");
         assert_eq!(aux.api_key.as_deref(), Some("p42-static-manager-key"));
 
         // `/tokenize-text` (audit round 3, L3): the held static key wins over a different buffered key.
-        let actor = session_actor(am.clone(), CONFIGURED, UNLISTED_MODEL, Some("p42-other-byok")).await;
+        let actor = session_actor(
+            am.clone(),
+            CONFIGURED,
+            UNLISTED_MODEL,
+            Some("p42-other-byok"),
+        )
+        .await;
         assert_eq!(
-            actor.p42_tokenize_api_key("https://localhost:8443/v1/tokenize-text").await.as_deref(),
+            actor
+                .p42_tokenize_api_key("https://localhost:8443/v1/tokenize-text")
+                .await
+                .as_deref(),
             Some("p42-static-manager-key")
         );
     });

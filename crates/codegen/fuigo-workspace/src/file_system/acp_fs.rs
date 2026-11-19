@@ -1,7 +1,7 @@
 use crate::file_system::{AsyncFileSystem, FsError};
 use agent_client_protocol as acp;
-use std::path::{Path, PathBuf};
 use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
+use std::path::{Path, PathBuf};
 
 pub struct AcpSessionFs {
     root: PathBuf,

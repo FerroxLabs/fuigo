@@ -92,7 +92,9 @@ impl StaticShellSnapshot {
         // Aliases first, then functions: the replay defines them in this order (see `prepare_command`). Zsh `TRAP*`
         // and hook functions act as soon as they are defined, before the restore guard, so they are not captured.
         let capture = match shell {
-            UnixShellKind::Bash => "builtin alias -p 2>/dev/null; builtin declare -f 2>/dev/null".to_owned(),
+            UnixShellKind::Bash => {
+                "builtin alias -p 2>/dev/null; builtin declare -f 2>/dev/null".to_owned()
+            }
             UnixShellKind::Zsh => format!(
                 "{{ builtin alias -L; builtin alias -gL; builtin alias -sL }} 2>/dev/null; \
                  for __fuigo_fn in ${{(ok)functions}}; do case $__fuigo_fn in ({unreplayed}) ;; \
@@ -109,7 +111,8 @@ impl StaticShellSnapshot {
         let result = tokio::time::timeout(INIT_TIMEOUT, async {
             // P189-unplaced: static-shell snapshot capture; stays UNPLACED on purpose: it runs the user's login shell start-up files with a Fuigo-chosen fixed script (never a model-chosen command), and a stop must not kill an ssh-agent or similar started by the profile. Stated limit: a process detached by the user's shell start-up files is outside the session cgroup and survives a stop.
             let mut cmd = tokio::process::Command::new(shell_binary(shell));
-            cmd.args(["-lc", &script]).current_dir(capture_start_dir(cwd));
+            cmd.args(["-lc", &script])
+                .current_dir(capture_start_dir(cwd));
             crate::util::apply_shell_environment_policy(&mut cmd, policy);
             cmd.envs(crate::util::pager_env());
             let call = crate::sandbox_launch::CallId::shell_init("static-shell");
@@ -297,11 +300,14 @@ fn set_cloexec(fd: &OwnedFd) -> std::io::Result<()> {
 #[path = "static_shell_cli_facing_unchanged_tests.rs"]
 mod cli_facing_unchanged_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
-    use std::process::Stdio;
     use super::*;
+    use std::process::Stdio;
 
     #[test]
     fn start_up_capture_runs_outside_the_session_folder() {
@@ -311,7 +317,8 @@ mod tests {
         let init = &source[source.find("pub async fn init_with_policy").unwrap()..];
         let init = &init[..init.find("\n    }\n").unwrap()];
         assert!(
-            !init.contains(".current_dir(cwd)") && init.contains(".current_dir(capture_start_dir(cwd))"),
+            !init.contains(".current_dir(cwd)")
+                && init.contains(".current_dir(capture_start_dir(cwd))"),
             "the static shell capture must start in the session folder only through the trust check"
         );
         let terminal = include_str!("terminal.rs");
@@ -329,11 +336,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(start_dir_for(dir.path(), true), dir.path());
         assert_eq!(start_dir_for(dir.path(), false), neutral_start_dir());
-        assert_eq!(start_dir_for(&dir.path().join("missing"), true), neutral_start_dir());
-        assert_eq!(start_dir_for(std::path::Path::new(""), true), neutral_start_dir());
+        assert_eq!(
+            start_dir_for(&dir.path().join("missing"), true),
+            neutral_start_dir()
+        );
+        assert_eq!(
+            start_dir_for(std::path::Path::new(""), true),
+            neutral_start_dir()
+        );
         let terminal = include_str!("terminal.rs");
+        // Whitespace-insensitive, so a rustfmt reflow of the calls cannot break the pin.
+        let squash = |text: &str| text.split_whitespace().collect::<String>();
+        let terminal = squash(terminal);
         assert!(
-            terminal.contains("capture_login_env_in(cwd,") && terminal.contains("capture_login_env_in(&cwd,"),
+            terminal.contains(&squash("capture_login_env_in(cwd,"))
+                && terminal.contains(&squash("capture_login_env_in(&cwd,")),
             "the session paths must hand the folder to the login-env probe"
         );
     }
@@ -471,9 +488,15 @@ mod tests {
         .await;
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{output:?}");
-        assert!(!stdout.contains("SHADOW"), "a replayed shadow ran: {stdout:?}");
+        assert!(
+            !stdout.contains("SHADOW"),
+            "a replayed shadow ran: {stdout:?}"
+        );
         assert!(stdout.lines().any(|l| l.trim() == "/"), "{stdout:?}");
-        assert!(stdout.contains("0 /dev/null") && stdout.contains("FOO=bar"), "{stdout:?}");
+        assert!(
+            stdout.contains("0 /dev/null") && stdout.contains("FOO=bar"),
+            "{stdout:?}"
+        );
     }
 
     /// g5a (Fable r4): the static zsh replay applies the zsh guard: shadows, `TRAP*` and hook functions are disabled,
@@ -493,25 +516,43 @@ mod tests {
         .await;
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{output:?}");
-        assert!(!stdout.contains("SHADOW"), "a replayed shadow ran: {stdout:?}");
+        assert!(
+            !stdout.contains("SHADOW"),
+            "a replayed shadow ran: {stdout:?}"
+        );
         assert!(stdout.lines().any(|l| l.trim() == "/"), "{stdout:?}");
-        assert!(stdout.contains("0 /dev/null") && stdout.contains("=ls"), "{stdout:?}");
+        assert!(
+            stdout.contains("0 /dev/null") && stdout.contains("=ls"),
+            "{stdout:?}"
+        );
     }
 
     /// g5a: the static replay guard on every bash this machine has (on macOS `/bin/bash` is 3.2; more through
     /// `FUIGO_TEST_EXTRA_BASH`, colon-separated).
     #[tokio::test]
     async fn u35_static_guard_runs_on_every_available_bash() {
-        let mut found: Vec<String> = vec![shell_binary(UnixShellKind::Bash).to_owned(), "/bin/bash".to_owned()];
+        let mut found: Vec<String> = vec![
+            shell_binary(UnixShellKind::Bash).to_owned(),
+            "/bin/bash".to_owned(),
+        ];
         if let Ok(extra) = std::env::var("FUIGO_TEST_EXTRA_BASH") {
-            found.extend(extra.split(':').filter(|p| !p.is_empty()).map(str::to_owned));
+            found.extend(
+                extra
+                    .split(':')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_owned),
+            );
         }
         found.retain(|p| std::path::Path::new(p).exists());
         found.dedup();
         for bash in found {
             let output = run_static_in(UnixShellKind::Bash, Some(&bash), "", "echo plain-ok").await;
             assert!(output.status.success(), "{bash}: {output:?}");
-            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "plain-ok", "{bash}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                "plain-ok",
+                "{bash}"
+            );
             let output = run_static_in(
                 UnixShellKind::Bash,
                 Some(&bash),
@@ -521,7 +562,10 @@ mod tests {
             .await;
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(output.status.success(), "{bash}: {output:?}");
-            assert!(!stdout.contains("SHADOW") && stdout.contains("DIR"), "{bash}: {stdout:?}");
+            assert!(
+                !stdout.contains("SHADOW") && stdout.contains("DIR"),
+                "{bash}: {stdout:?}"
+            );
             assert!(stdout.contains("0 /dev/null"), "{bash}: {stdout:?}");
         }
     }

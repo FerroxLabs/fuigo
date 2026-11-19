@@ -6,8 +6,8 @@ use std::time::Duration;
 use fuigo_peer::limits::MAX_FRAME_BYTES;
 use fuigo_peer::wire::MAX_LIST_PAGES;
 use fuigo_peer::{
-    Address, BoundedId, DeliveryOutcome, Envelope, Hello, HostId, NoticeKind, OperatorKind, Op, PeerBase, PeerMode,
-    Reply, SessionRow,
+    Address, BoundedId, DeliveryOutcome, Envelope, Hello, HostId, NoticeKind, Op, OperatorKind,
+    PeerBase, PeerMode, Reply, SessionRow,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
 
@@ -52,18 +52,33 @@ impl FakeHost {
 impl InboxHost for FakeHost {
     async fn list(&self, page: u32) -> (Vec<SessionRow>, bool) {
         self.calls.lock().unwrap().push(format!("list {page}"));
-        (vec![SessionRow { address: addr(), name: "n".into(), session_ref: "r".into() }], true)
+        (
+            vec![SessionRow {
+                address: addr(),
+                name: "n".into(),
+                session_ref: "r".into(),
+            }],
+            true,
+        )
     }
     async fn send_watched(&self, to: Address, e: Envelope, _watch: bool) -> DeliveryOutcome {
         self.send(to, e).await
     }
     async fn send(&self, _to: Address, envelope: Envelope) -> DeliveryOutcome {
-        envelope.validate().expect("host must only see valid envelopes");
-        self.calls.lock().unwrap().push(format!("send {}", envelope.message_id));
+        envelope
+            .validate()
+            .expect("host must only see valid envelopes");
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("send {}", envelope.message_id));
         DeliveryOutcome::Delivered {}
     }
     async fn notice(&self, message_id: BoundedId, kind: NoticeKind) {
-        self.calls.lock().unwrap().push(format!("notice {} {kind:?}", message_id.as_str()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("notice {} {kind:?}", message_id.as_str()));
     }
 }
 
@@ -108,19 +123,37 @@ fn script(ops: &[&Op]) -> Vec<u8> {
 async fn happy_path_list_send_notice() {
     for (op, check) in [
         (Op::List { page: 2 }, "list 2"),
-        (Op::Send { to: addr(), envelope: envelope(), watch: false }, "send m-1"),
-        (Op::Notice { message_id: BoundedId::new("m-9").unwrap(), kind: NoticeKind::Idle }, "notice m-9 Idle"),
+        (
+            Op::Send {
+                to: addr(),
+                envelope: envelope(),
+                watch: false,
+            },
+            "send m-1",
+        ),
+        (
+            Op::Notice {
+                message_id: BoundedId::new("m-9").unwrap(),
+                kind: NoticeKind::Idle,
+            },
+            "notice m-9 Idle",
+        ),
     ] {
         let host = FakeHost::default();
         let (client, server) = duplex(1 << 16);
         let expect = hid(HOST);
-        let (r, reply) = tokio::join!(serve_one(server, our(), &host), exchange(client, Hello::new(hid(OTHER)), &expect, op.clone()));
+        let (r, reply) = tokio::join!(
+            serve_one(server, our(), &host),
+            exchange(client, Hello::new(hid(OTHER)), &expect, op.clone())
+        );
         r.unwrap();
         let reply = reply.unwrap();
         assert_eq!(host.calls(), vec![check.to_string()]);
         match (&op, reply) {
             (Op::List { .. }, Reply::List { rows, more }) => assert!(more && rows.len() == 1),
-            (Op::Send { .. }, Reply::Send { outcome }) => assert_eq!(outcome, DeliveryOutcome::Delivered {}),
+            (Op::Send { .. }, Reply::Send { outcome }) => {
+                assert_eq!(outcome, DeliveryOutcome::Delivered {})
+            }
             (Op::Notice { .. }, Reply::Notice {}) => {}
             other => panic!("wrong reply {other:?}"),
         }
@@ -175,7 +208,13 @@ async fn client_one_byte_per_second_server_is_dropped_too() {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
-    let r = exchange(client, Hello::new(hid(OTHER)), &hid(HOST), Op::List { page: 0 }).await;
+    let r = exchange(
+        client,
+        Hello::new(hid(OTHER)),
+        &hid(HOST),
+        Op::List { page: 0 },
+    )
+    .await;
     assert_eq!(r, Err(ConnError::ExchangeTimeout));
     feeder.abort();
 }
@@ -227,14 +266,25 @@ async fn client_sees_host_mismatch_and_sends_no_op() {
     let (mut peer, client) = duplex(1 << 16);
     let t = tokio::spawn(async move {
         let _ = read_one(&mut peer).await;
-        peer.write_all(&json_frame(&Hello::new(hid(OTHER)))).await.unwrap();
+        peer.write_all(&json_frame(&Hello::new(hid(OTHER))))
+            .await
+            .unwrap();
         let mut rest = Vec::new();
         peer.read_to_end(&mut rest).await.unwrap();
         rest
     });
-    let r = exchange(client, Hello::new(hid(OTHER)), &hid(HOST), Op::List { page: 0 }).await;
+    let r = exchange(
+        client,
+        Hello::new(hid(OTHER)),
+        &hid(HOST),
+        Op::List { page: 0 },
+    )
+    .await;
     assert_eq!(r, Err(ConnError::HostMismatch));
-    assert!(t.await.unwrap().is_empty(), "no op is sent to the wrong host");
+    assert!(
+        t.await.unwrap().is_empty(),
+        "no op is sent to the wrong host"
+    );
 }
 
 #[tokio::test]
@@ -247,14 +297,24 @@ async fn client_sees_version_mismatch_as_its_own_error() {
         peer.write_all(&json_frame(&h)).await.unwrap();
         let _ = peer.read_to_end(&mut Vec::new()).await;
     });
-    let r = exchange(client, Hello::new(hid(OTHER)), &hid(HOST), Op::List { page: 0 }).await;
+    let r = exchange(
+        client,
+        Hello::new(hid(OTHER)),
+        &hid(HOST),
+        Op::List { page: 0 },
+    )
+    .await;
     assert_eq!(r, Err(ConnError::VersionMismatch));
 }
 
 #[tokio::test]
 async fn two_pipelined_ops_give_one_reply_and_one_host_call() {
     let host = FakeHost::default();
-    let (r, out) = serve_script(script(&[&Op::List { page: 0 }, &Op::List { page: 1 }]), &host).await;
+    let (r, out) = serve_script(
+        script(&[&Op::List { page: 0 }, &Op::List { page: 1 }]),
+        &host,
+    )
+    .await;
     r.unwrap();
     assert_eq!(host.calls(), vec!["list 0".to_string()]);
     let mut cur = &out[..];
@@ -271,10 +331,21 @@ async fn two_pipelined_ops_give_one_reply_and_one_host_call() {
 async fn invalid_ops_never_reach_the_host() {
     let host = FakeHost::default();
     // Page out of range: decodes, fails Op::validate.
-    let (r, _) = serve_script(script(&[&Op::List { page: MAX_LIST_PAGES }]), &host).await;
+    let (r, _) = serve_script(
+        script(&[&Op::List {
+            page: MAX_LIST_PAGES,
+        }]),
+        &host,
+    )
+    .await;
     assert_eq!(r, Err(ConnError::Invalid));
     // Oversized body: the envelope refuses to decode.
-    let mut v = serde_json::to_value(Op::Send { to: addr(), envelope: envelope(), watch: false }).unwrap();
+    let mut v = serde_json::to_value(Op::Send {
+        to: addr(),
+        envelope: envelope(),
+        watch: false,
+    })
+    .unwrap();
     v["envelope"]["body"] = serde_json::json!("x".repeat(40 * 1024));
     let mut s = json_frame(&Hello::new(hid(OTHER)));
     s.extend(json_frame(&v));
@@ -306,8 +377,17 @@ async fn mutation_fuzz_never_panics_and_host_sees_only_valid_input() {
     let host = FakeHost::default();
     let seeds: Vec<Vec<u8>> = vec![
         serde_json::to_vec(&Op::List { page: 0 }).unwrap(),
-        serde_json::to_vec(&Op::Send { to: addr(), envelope: envelope(), watch: false }).unwrap(),
-        serde_json::to_vec(&Op::Notice { message_id: BoundedId::new("m-1").unwrap(), kind: NoticeKind::Idle }).unwrap(),
+        serde_json::to_vec(&Op::Send {
+            to: addr(),
+            envelope: envelope(),
+            watch: false,
+        })
+        .unwrap(),
+        serde_json::to_vec(&Op::Notice {
+            message_id: BoundedId::new("m-1").unwrap(),
+            kind: NoticeKind::Idle,
+        })
+        .unwrap(),
     ];
     let hello = serde_json::to_vec(&Hello::new(hid(OTHER))).unwrap();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
@@ -336,7 +416,10 @@ async fn mutation_fuzz_never_panics_and_host_sees_only_valid_input() {
             served += 1;
         }
     }
-    assert!(served > 0, "some mutations survive, so the loop reaches the host");
+    assert!(
+        served > 0,
+        "some mutations survive, so the loop reaches the host"
+    );
     for c in host.calls() {
         assert!(c.starts_with("list ") || c.starts_with("send ") || c.starts_with("notice "));
     }
@@ -347,19 +430,30 @@ async fn no_error_text_contains_peer_bytes() {
     let host = FakeHost::default();
     let mut cases: Vec<Vec<u8>> = Vec::new();
     // Marker as a host id, as an unknown field, as an op tag, as a body, as raw non-JSON bytes.
-    cases.push(json_frame(&serde_json::json!({"version": 1, "host_id": MARKER})));
-    cases.push(json_frame(&serde_json::json!({"version": 1, "host_id": OTHER, MARKER: 1})));
+    cases.push(json_frame(
+        &serde_json::json!({"version": 1, "host_id": MARKER}),
+    ));
+    cases.push(json_frame(
+        &serde_json::json!({"version": 1, "host_id": OTHER, MARKER: 1}),
+    ));
     let mut s = json_frame(&Hello::new(hid(OTHER)));
     s.extend(json_frame(&serde_json::json!({"op": MARKER})));
     cases.push(s);
     let mut s = json_frame(&Hello::new(hid(OTHER)));
-    s.extend(json_frame(&serde_json::json!({"op": "list", "page": MARKER})));
+    s.extend(json_frame(
+        &serde_json::json!({"op": "list", "page": MARKER}),
+    ));
     cases.push(s);
     let mut s = json_frame(&Hello::new(hid(OTHER)));
     s.extend(frame(MARKER.as_bytes()));
     cases.push(s);
     cases.push(frame(MARKER.as_bytes()));
-    let mut v = serde_json::to_value(Op::Send { to: addr(), envelope: envelope(), watch: false }).unwrap();
+    let mut v = serde_json::to_value(Op::Send {
+        to: addr(),
+        envelope: envelope(),
+        watch: false,
+    })
+    .unwrap();
     v["envelope"]["body"] = serde_json::json!(MARKER.repeat(5000));
     let mut s = json_frame(&Hello::new(hid(OTHER)));
     s.extend(json_frame(&v));
@@ -374,15 +468,27 @@ async fn no_error_text_contains_peer_bytes() {
         assert!(!format!("{e} {e:?}").contains(MARKER));
     }
     // Client side: a server that answers with marker garbage.
-    for reply in [frame(MARKER.as_bytes()), json_frame(&serde_json::json!({"reply": MARKER}))] {
+    for reply in [
+        frame(MARKER.as_bytes()),
+        json_frame(&serde_json::json!({"reply": MARKER})),
+    ] {
         let (mut peer, client) = duplex(1 << 16);
         let t = tokio::spawn(async move {
             let _ = read_one(&mut peer).await;
-            peer.write_all(&json_frame(&Hello::new(hid(HOST)))).await.unwrap();
+            peer.write_all(&json_frame(&Hello::new(hid(HOST))))
+                .await
+                .unwrap();
             let _ = read_one(&mut peer).await;
             peer.write_all(&reply).await.unwrap();
         });
-        let e = exchange(client, Hello::new(hid(OTHER)), &hid(HOST), Op::List { page: 0 }).await.unwrap_err();
+        let e = exchange(
+            client,
+            Hello::new(hid(OTHER)),
+            &hid(HOST),
+            Op::List { page: 0 },
+        )
+        .await
+        .unwrap_err();
         assert!(!format!("{e} {e:?}").contains(MARKER));
         t.await.unwrap();
     }
@@ -394,17 +500,34 @@ async fn client_refuses_a_reply_of_the_wrong_kind_and_an_op_that_fails_validate(
     let (mut peer, client) = duplex(1 << 16);
     tokio::spawn(async move {
         let _ = read_one(&mut peer).await;
-        peer.write_all(&json_frame(&Hello::new(hid(HOST)))).await.unwrap();
+        peer.write_all(&json_frame(&Hello::new(hid(HOST))))
+            .await
+            .unwrap();
         let _ = read_one(&mut peer).await;
-        peer.write_all(&json_frame(&Reply::Notice {})).await.unwrap();
+        peer.write_all(&json_frame(&Reply::Notice {}))
+            .await
+            .unwrap();
     });
-    let r = exchange(client, Hello::new(hid(OTHER)), &hid(HOST), Op::List { page: 0 }).await;
+    let r = exchange(
+        client,
+        Hello::new(hid(OTHER)),
+        &hid(HOST),
+        Op::List { page: 0 },
+    )
+    .await;
     assert_eq!(r, Err(ConnError::UnexpectedReply));
     let (_p, client) = duplex(64);
-    let r = exchange(client, Hello::new(hid(OTHER)), &hid(HOST), Op::List { page: MAX_LIST_PAGES }).await;
+    let r = exchange(
+        client,
+        Hello::new(hid(OTHER)),
+        &hid(HOST),
+        Op::List {
+            page: MAX_LIST_PAGES,
+        },
+    )
+    .await;
     assert_eq!(r, Err(ConnError::Invalid));
 }
-
 
 // ---------------------------------------------------------------------------------------------------------------
 // Round 2
@@ -436,10 +559,15 @@ async fn r2_peer_hello_runs_only_after_the_version_matched() {
     bad["version"] = serde_json::json!(2);
     let (mut peer, server) = duplex(1 << 20);
     peer.write_all(&json_frame(&bad)).await.unwrap();
-    assert_eq!(serve_one(server, our(), &host).await, Err(ConnError::VersionMismatch));
+    assert_eq!(
+        serve_one(server, our(), &host).await,
+        Err(ConnError::VersionMismatch)
+    );
     assert!(host.hellos.lock().unwrap().is_empty());
     let (mut peer, server) = duplex(1 << 20);
-    peer.write_all(&script(&[&Op::List { page: 0 }])).await.unwrap();
+    peer.write_all(&script(&[&Op::List { page: 0 }]))
+        .await
+        .unwrap();
     assert_eq!(serve_one(server, our(), &host).await, Ok(()));
     assert_eq!(host.hellos.lock().unwrap().len(), 1);
 }
@@ -469,7 +597,10 @@ impl tokio::io::AsyncWrite for StallShutdown {
     ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.0).poll_flush(cx)
     }
-    fn poll_shutdown(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         std::task::Poll::Pending
     }
 }
@@ -478,8 +609,14 @@ impl tokio::io::AsyncWrite for StallShutdown {
 async fn r2_a_finished_exchange_does_not_hold_its_permit_for_the_write_deadline() {
     let host = FakeHost::default();
     let (mut peer, server) = duplex(1 << 20);
-    peer.write_all(&script(&[&Op::List { page: 0 }])).await.unwrap();
+    peer.write_all(&script(&[&Op::List { page: 0 }]))
+        .await
+        .unwrap();
     let t0 = tokio::time::Instant::now();
     assert_eq!(serve_one(StallShutdown(server), our(), &host).await, Ok(()));
-    assert!(t0.elapsed() < std::time::Duration::from_secs(1), "{:?}", t0.elapsed());
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        t0.elapsed()
+    );
 }

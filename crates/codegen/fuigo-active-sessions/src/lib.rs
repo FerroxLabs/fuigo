@@ -226,7 +226,8 @@ fn recover_corrupt(path: &Path, bytes: &[u8], error: &serde_json::Error) -> Vec<
 /// Entries of a damaged list that still decode: every readable element of an intact array, or the complete
 /// objects found in a truncated or otherwise broken one.
 fn salvage_entries(bytes: &[u8]) -> Vec<ActiveSession> {
-    if let Ok(serde_json::Value::Array(items)) = serde_json::from_slice::<serde_json::Value>(bytes) {
+    if let Ok(serde_json::Value::Array(items)) = serde_json::from_slice::<serde_json::Value>(bytes)
+    {
         return items
             .into_iter()
             .filter_map(|item| serde_json::from_value(item).ok())
@@ -274,8 +275,8 @@ fn salvage_entries(bytes: &[u8]) -> Vec<ActiveSession> {
 /// Copy the corrupt file to `active_sessions.json.corrupt-<hash of its bytes>` (owner-only), once per distinct content,
 /// and drop the oldest copies beyond [`MAX_CORRUPT_BACKUPS`].
 fn backup_corrupt_file(path: &Path, bytes: &[u8]) -> io::Result<std::path::PathBuf> {
-    use std::hash::{Hash, Hasher};
     use io::Write as _;
+    use std::hash::{Hash, Hasher};
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
@@ -293,7 +294,9 @@ fn backup_corrupt_file(path: &Path, bytes: &[u8]) -> io::Result<std::path::PathB
 
 fn prune_corrupt_backups(dir: &Path) {
     let prefix = format!("{DATA_FILENAME}.corrupt-");
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     let mut backups: Vec<_> = entries
         .filter_map(Result::ok)
         .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
@@ -324,10 +327,9 @@ fn write_data_file_atomic(
     }
     {
         use io::Write as _;
-        let mut tmp = fuigo_config::owner_only_file_options(
-            OpenOptions::new().write(true).create_new(true),
-        )
-        .open(tmp_path)?;
+        let mut tmp =
+            fuigo_config::owner_only_file_options(OpenOptions::new().write(true).create_new(true))
+                .open(tmp_path)?;
         tmp.write_all(json.as_bytes())?;
         // Synced before the rename, so power loss cannot leave an empty registry (read as "no sessions").
         tmp.sync_all()?;
@@ -376,11 +378,18 @@ fn process_start_time(pid: u32) -> Option<u64> {
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::{CloseHandle, FILETIME};
-        use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-        let (mut created, mut exited, mut kernel, mut user) =
-            (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
-        let times = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+        let (mut created, mut exited, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        let times =
+            unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
         let _ = unsafe { CloseHandle(handle) };
         times.ok()?;
         Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
@@ -436,7 +445,10 @@ mod tests {
         let holder = open_lock_file(&dir.path().join(LOCK_FILENAME)).unwrap();
         holder.lock_exclusive().unwrap();
         let out = try_with_locked_state(dir.path(), |_| ());
-        assert!(matches!(out, Ok(None)), "expected Ok(None) while another handle holds the lock, got {out:?}");
+        assert!(
+            matches!(out, Ok(None)),
+            "expected Ok(None) while another handle holds the lock, got {out:?}"
+        );
     }
 
     /// Audit S12-F6: the startup sweep must not wait forever on a lock another process holds (stopped, or stuck on a
@@ -455,9 +467,16 @@ mod tests {
         let out = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("collect_crashed_in must not block on a held lock");
-        assert!(out.is_ok_and(|crashed| crashed.is_empty()), "a skipped sweep reports nothing");
+        assert!(
+            out.is_ok_and(|crashed| crashed.is_empty()),
+            "a skipped sweep reports nothing"
+        );
         holder.unlock().unwrap();
-        assert_eq!(list_in(dir.path()).unwrap().len(), 1, "the skipped sweep left the registry alone");
+        assert_eq!(
+            list_in(dir.path()).unwrap().len(),
+            1,
+            "the skipped sweep left the registry alone"
+        );
     }
 
     /// Audit R05: registration must not wait forever on a lock another process holds; it gives up
@@ -475,9 +494,15 @@ mod tests {
         let out = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("register_in must not block on a held lock");
-        assert!(out.is_err(), "a skipped registration reports the busy registry, got {out:?}");
+        assert!(
+            out.is_err(),
+            "a skipped registration reports the busy registry, got {out:?}"
+        );
         holder.unlock().unwrap();
-        assert!(list_in(dir.path()).unwrap().is_empty(), "the skipped registration wrote nothing");
+        assert!(
+            list_in(dir.path()).unwrap().is_empty(),
+            "the skipped registration wrote nothing"
+        );
     }
 
     /// Audit S12-F6 (pid reuse): an entry whose pid now belongs to a process with a different start time is stale; one with
@@ -488,7 +513,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let pid = std::process::id();
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-        let start: u64 = stat[stat.rfind(')').unwrap() + 2..].split(' ').nth(19).unwrap().parse().unwrap();
+        let start: u64 = stat[stat.rfind(')').unwrap() + 2..]
+            .split(' ')
+            .nth(19)
+            .unwrap()
+            .parse()
+            .unwrap();
         let entry = |id: &str, start: Option<u64>| {
             let mut v = serde_json::json!({
                 "session_id": id, "pid": pid, "cwd": "/tmp/x", "opened_at": "2026-01-01T00:00:00Z"
@@ -498,7 +528,11 @@ mod tests {
             }
             v
         };
-        let data = serde_json::json!([entry("recycled", Some(start + 1)), entry("same", Some(start)), entry("legacy", None)]);
+        let data = serde_json::json!([
+            entry("recycled", Some(start + 1)),
+            entry("same", Some(start)),
+            entry("legacy", None)
+        ]);
         std::fs::write(dir.path().join(DATA_FILENAME), data.to_string()).unwrap();
         let crashed = collect_crashed_in(dir.path()).unwrap();
         let ids: Vec<&str> = crashed.iter().map(|s| &*s.session_id.0).collect();
@@ -587,7 +621,7 @@ mod tests {
     #[cfg(unix)]
     mod modes {
         use super::*;
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::os::unix::fs::{PermissionsExt, symlink};
 
         fn mode(p: &Path) -> u32 {
             fs::metadata(p).unwrap().permissions().mode() & 0o777
@@ -624,12 +658,22 @@ mod tests {
             let tmp = dir.path().join(TMP_FILENAME);
             fs::write(&tmp, b"stale").unwrap();
             set(&tmp, 0o644);
-            register_in(dir.path(), make_session("fu2-new-session", std::process::id())).unwrap();
+            register_in(
+                dir.path(),
+                make_session("fu2-new-session", std::process::id()),
+            )
+            .unwrap();
             let data = dir.path().join(DATA_FILENAME);
             assert_eq!(mode(&data), 0o600);
             let body = fs::read_to_string(&data).unwrap();
-            assert!(body.contains("fu2-new-session"), "new session id missing: {body}");
-            assert!(!body.contains("stale"), "stale temp content survived: {body}");
+            assert!(
+                body.contains("fu2-new-session"),
+                "new session id missing: {body}"
+            );
+            assert!(
+                !body.contains("stale"),
+                "stale temp content survived: {body}"
+            );
         }
 
         #[test]
@@ -699,15 +743,27 @@ mod recovery_tests {
         fs::write(dir.path().join(DATA_FILENAME), &text).unwrap();
         assert_eq!(ids(dir.path()), ["keep-1", "keep-2"]);
         let saved = backups(dir.path());
-        assert_eq!(saved.len(), 1, "exactly one backup of the corrupt file: {saved:?}");
-        assert_eq!(fs::read_to_string(&saved[0]).unwrap(), text, "the backup is the original bytes");
+        assert_eq!(
+            saved.len(),
+            1,
+            "exactly one backup of the corrupt file: {saved:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&saved[0]).unwrap(),
+            text,
+            "the backup is the original bytes"
+        );
     }
 
     #[test]
     fn a_truncated_file_recovers_the_complete_entries() {
         let dir = TempDir::new().unwrap();
         let second = json(&session("cut"));
-        let text = format!("[{}, {}", json(&session("whole")), &second[..second.len() / 2]);
+        let text = format!(
+            "[{}, {}",
+            json(&session("whole")),
+            &second[..second.len() / 2]
+        );
         fs::write(dir.path().join(DATA_FILENAME), &text).unwrap();
         assert_eq!(ids(dir.path()), ["whole"]);
         assert_eq!(backups(dir.path()).len(), 1);

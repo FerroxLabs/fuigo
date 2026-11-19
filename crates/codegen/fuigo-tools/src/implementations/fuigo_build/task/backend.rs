@@ -16,10 +16,11 @@ use super::types::{
     ActiveAgentMessageOutcome, ActiveAgentMessageRequest, HandedOffForegroundSubagent,
     SpawnedSubagentRef, SubagentActiveMessageRequest, SubagentCancelOutcome, SubagentCancelRequest,
     SubagentCancelTarget, SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent,
-    SubagentEventSender, SubagentHandOffForegroundRequest, SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest,
-    SubagentQueryRequest, SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest,
-    SubagentResult, SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
-    SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
+    SubagentEventSender, SubagentHandOffForegroundRequest, SubagentInspectRequest,
+    SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest, SubagentRegistryCounts,
+    SubagentRegistryCountsRequest, SubagentRequest, SubagentResult, SubagentSnapshot,
+    SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentValidateTypeOutcome,
+    SubagentValidateTypeRequest,
 };
 use crate::register_resource;
 use fuigo_tool_runtime::ToolError;
@@ -302,7 +303,10 @@ impl ChannelBackend {
 
     /// Attach the parent session's writer to this backend's spawns (built in `agent_rebuild` from the actor's writer).
     #[must_use]
-    pub fn with_parent_writer(mut self, writer: Option<fuigo_session_writer::SessionWriter>) -> Self {
+    pub fn with_parent_writer(
+        mut self,
+        writer: Option<fuigo_session_writer::SessionWriter>,
+    ) -> Self {
         self.parent_writer = writer;
         self
     }

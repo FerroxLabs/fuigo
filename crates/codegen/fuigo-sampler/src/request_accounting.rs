@@ -188,7 +188,11 @@ pub(crate) fn current_policy() -> (RequestPurpose, Option<String>) {
 /// An admitted, not yet dispatched attempt. Dropping it without `disarm` (the request was cancelled between
 /// admission and the send) gives the call slot back; the refund runs on a spawned task.
 pub(crate) struct Admitted {
-    armed: Option<(Arc<dyn fuigo_sampling_types::ExecutionAdmission>, RequestPurpose, String)>,
+    armed: Option<(
+        Arc<dyn fuigo_sampling_types::ExecutionAdmission>,
+        RequestPurpose,
+        String,
+    )>,
 }
 
 impl Admitted {
@@ -222,7 +226,9 @@ pub(crate) async fn admit_current() -> Result<Admitted, String> {
         .flatten();
     if let Some((admission, purpose, id)) = admission {
         admission.admit(purpose, id.clone()).await?;
-        return Ok(Admitted { armed: Some((admission, purpose, id)) });
+        return Ok(Admitted {
+            armed: Some((admission, purpose, id)),
+        });
     }
     Ok(Admitted { armed: None })
 }

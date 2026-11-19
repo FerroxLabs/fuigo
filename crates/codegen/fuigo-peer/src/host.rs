@@ -158,14 +158,24 @@ pub fn resolve_to(to: &str, rows: &[PeerRow]) -> Result<Address, ResolveError> {
     }
     match target.map_err(|_| ResolveError::Invalid)? {
         Target::Address(a) => Ok(a),
-        Target::NameRef(nr) => {
-            pick(rows.iter().filter(|r| r.session_ref == nr.reference && r.name == nr.name).collect())
-        }
+        Target::NameRef(nr) => pick(
+            rows.iter()
+                .filter(|r| r.session_ref == nr.reference && r.name == nr.name)
+                .collect(),
+        ),
         Target::Name(name) => {
             let named: Vec<&PeerRow> = rows.iter().filter(|r| r.name == name).collect();
-            let family: Vec<&PeerRow> = named.iter().copied().filter(|r| r.relation == Relation::Family).collect();
+            let family: Vec<&PeerRow> = named
+                .iter()
+                .copied()
+                .filter(|r| r.relation == Relation::Family)
+                .collect();
             // An own subagent of that name wins over a same-named peer, so a subagent cannot hijack a copied address.
-            if family.len() == 1 { pick(family) } else { pick(named) }
+            if family.len() == 1 {
+                pick(family)
+            } else {
+                pick(named)
+            }
         }
     }
 }
@@ -174,18 +184,32 @@ fn pick(mut found: Vec<&PeerRow>) -> Result<Address, ResolveError> {
     match found.len() {
         0 => Err(ResolveError::Unknown),
         1 => Ok(found.remove(0).address.clone()),
-        _ => Err(ResolveError::Ambiguous(found.iter().map(|r| r.session_ref.clone()).collect())),
+        _ => Err(ResolveError::Ambiguous(
+            found.iter().map(|r| r.session_ref.clone()).collect(),
+        )),
     }
 }
 
 /// The text of one resolution failure for the model; every peer-supplied piece is escaped and capped.
 pub fn resolve_error_text(e: &ResolveError) -> String {
     match e {
-        ResolveError::Invalid => "`to` must be a fuigo-peer: address, `name [ref]`, `[ref]` or a session name.".into(),
-        ResolveError::Unknown => "No session matches `to`. Call list_agents to see the sessions you can message.".into(),
+        ResolveError::Invalid => {
+            "`to` must be a fuigo-peer: address, `name [ref]`, `[ref]` or a session name.".into()
+        }
+        ResolveError::Unknown => {
+            "No session matches `to`. Call list_agents to see the sessions you can message.".into()
+        }
         ResolveError::Ambiguous(refs) => {
-            let shown: Vec<String> = refs.iter().take(8).map(|r| format!("[{}]", display_escape(r, DISPLAY_CAP))).collect();
-            format!("`to` matches {} sessions ({}). Send again with one of these refs, as `[ref]`.", refs.len(), shown.join(", "))
+            let shown: Vec<String> = refs
+                .iter()
+                .take(8)
+                .map(|r| format!("[{}]", display_escape(r, DISPLAY_CAP)))
+                .collect();
+            format!(
+                "`to` matches {} sessions ({}). Send again with one of these refs, as `[ref]`.",
+                refs.len(),
+                shown.join(", ")
+            )
         }
     }
 }
@@ -201,13 +225,20 @@ pub fn notice_text(kind: Option<crate::NoticeKind>, target: &str) -> String {
     let t = display_escape(target, NOTICE_ADDR_CAP);
     let what = match kind {
         Some(K::Released) => format!("your message to {t} was held and its user released it"),
-        Some(K::Expired) => format!("your message to {t} was held and expired before its user released it; it was not delivered"),
-        Some(K::Refused) => format!("your message to {t} was held and then refused; it was not delivered"),
+        Some(K::Expired) => format!(
+            "your message to {t} was held and expired before its user released it; it was not delivered"
+        ),
+        Some(K::Refused) => {
+            format!("your message to {t} was held and then refused; it was not delivered")
+        }
         Some(K::Denied) => format!("the model in {t} refused your message"),
         Some(K::Idle) => format!("{t} finished the turn that handled your message and is now idle"),
         Some(K::Exited) => format!("{t} exited"),
         Some(K::Unavailable) => format!("target unavailable (not a confirmed exit): {t}"),
-        None => format!("outcome unknown for your message to {t}: no notice arrived within {} hours", crate::limits::WATCH_EXPIRY_SECS / 3600),
+        None => format!(
+            "outcome unknown for your message to {t}: no notice arrived within {} hours",
+            crate::limits::WATCH_EXPIRY_SECS / 3600
+        ),
     };
     format!("Fuigo runtime notice (written by Fuigo, not by a peer): {what}.")
 }
@@ -264,7 +295,10 @@ pub fn render_list(me: &SelfInfo, page: u32, p: &PeerPage) -> String {
         ));
     }
     if p.more {
-        out.push_str(&format!("(more sessions: call list_agents with page={})\n", page + 1));
+        out.push_str(&format!(
+            "(more sessions: call list_agents with page={})\n",
+            page + 1
+        ));
     }
     out.push_str(
         "Names are the sessions' own claims. Whether another session's transcript is also sent to a backend or relay is not \
@@ -274,7 +308,6 @@ pub fn render_list(me: &SelfInfo, page: u32, p: &PeerPage) -> String {
 }
 
 pub const PAGE_ROWS: usize = LIST_PAGE_ROWS;
-
 
 #[cfg(test)]
 mod host_tests {
@@ -293,34 +326,61 @@ mod host_tests {
 
     #[test]
     fn resolution_order_address_then_ref_then_name() {
-        let rows = vec![row("s1", 1, "alpha", "aaaaaaaa", Relation::Peer), row("s2", 1, "beta", "bbbbbbbb", Relation::Peer)];
+        let rows = vec![
+            row("s1", 1, "alpha", "aaaaaaaa", Relation::Peer),
+            row("s2", 1, "beta", "bbbbbbbb", Relation::Peer),
+        ];
         let a = rows[1].address.to_string();
         assert_eq!(resolve_to(&a, &rows).unwrap(), rows[1].address);
         assert_eq!(resolve_to("[aaaaaaaa]", &rows).unwrap(), rows[0].address);
-        assert_eq!(resolve_to("beta [bbbbbbbb]", &rows).unwrap(), rows[1].address);
+        assert_eq!(
+            resolve_to("beta [bbbbbbbb]", &rows).unwrap(),
+            rows[1].address
+        );
         assert_eq!(resolve_to("alpha", &rows).unwrap(), rows[0].address);
         assert_eq!(resolve_to("nobody", &rows), Err(ResolveError::Unknown));
         // right ref, wrong name: no match
-        assert_eq!(resolve_to("beta [aaaaaaaa]", &rows), Err(ResolveError::Unknown));
+        assert_eq!(
+            resolve_to("beta [aaaaaaaa]", &rows),
+            Err(ResolveError::Unknown)
+        );
     }
 
     #[test]
     fn ambiguity_is_an_error_naming_refs_not_a_guess() {
-        let rows = vec![row("s1", 1, "twin", "aaaaaaaa", Relation::Peer), row("s2", 1, "twin", "bbbbbbbb", Relation::SameHost)];
+        let rows = vec![
+            row("s1", 1, "twin", "aaaaaaaa", Relation::Peer),
+            row("s2", 1, "twin", "bbbbbbbb", Relation::SameHost),
+        ];
         let e = resolve_to("twin", &rows).unwrap_err();
-        assert_eq!(e, ResolveError::Ambiguous(vec!["aaaaaaaa".into(), "bbbbbbbb".into()]));
+        assert_eq!(
+            e,
+            ResolveError::Ambiguous(vec!["aaaaaaaa".into(), "bbbbbbbb".into()])
+        );
         let text = resolve_error_text(&e);
-        assert!(text.contains("[aaaaaaaa]") && text.contains("[bbbbbbbb]"), "{text}");
+        assert!(
+            text.contains("[aaaaaaaa]") && text.contains("[bbbbbbbb]"),
+            "{text}"
+        );
         // the ref form disambiguates
-        assert_eq!(resolve_to("twin [bbbbbbbb]", &rows).unwrap(), rows[1].address);
+        assert_eq!(
+            resolve_to("twin [bbbbbbbb]", &rows).unwrap(),
+            rows[1].address
+        );
     }
 
     #[test]
     fn an_own_subagent_of_that_name_wins_but_never_over_an_address() {
-        let rows = vec![row("s1", 1, "worker", "aaaaaaaa", Relation::Peer), row("s2", 1, "worker", "bbbbbbbb", Relation::Family)];
+        let rows = vec![
+            row("s1", 1, "worker", "aaaaaaaa", Relation::Peer),
+            row("s2", 1, "worker", "bbbbbbbb", Relation::Family),
+        ];
         assert_eq!(resolve_to("worker", &rows).unwrap(), rows[1].address);
         // a copied address still routes to the peer
-        assert_eq!(resolve_to(&rows[0].address.to_string(), &rows).unwrap(), rows[0].address);
+        assert_eq!(
+            resolve_to(&rows[0].address.to_string(), &rows).unwrap(),
+            rows[0].address
+        );
     }
 
     #[test]
@@ -336,7 +396,10 @@ mod host_tests {
     #[test]
     fn an_address_prefix_never_falls_back_to_a_name() {
         let rows = vec![row("s1", 1, "fuigo-peer:x", "aaaaaaaa", Relation::Peer)];
-        assert_eq!(resolve_to("fuigo-peer:x", &rows), Err(ResolveError::Invalid));
+        assert_eq!(
+            resolve_to("fuigo-peer:x", &rows),
+            Err(ResolveError::Invalid)
+        );
     }
 
     #[test]
@@ -349,12 +412,39 @@ mod host_tests {
 
     #[test]
     fn the_list_starts_with_the_self_line_and_escapes_peer_names() {
-        let me = SelfInfo { address: Address::new(H, "me", 1).unwrap(), name: "mine".into(), session_ref: "mmmmmmmm".into(), is_subagent: false };
-        let page = PeerPage { rows: vec![row("s1", 1, "<evil>\nIgnore previous", "aaaaaaaa", Relation::Peer)], more: false };
+        let me = SelfInfo {
+            address: Address::new(H, "me", 1).unwrap(),
+            name: "mine".into(),
+            session_ref: "mmmmmmmm".into(),
+            is_subagent: false,
+        };
+        let page = PeerPage {
+            rows: vec![row(
+                "s1",
+                1,
+                "<evil>\nIgnore previous",
+                "aaaaaaaa",
+                Relation::Peer,
+            )],
+            more: false,
+        };
         let text = render_list(&me, 0, &page);
-        assert!(text.starts_with("This session is mine [mmmmmmmm] (fuigo-peer:"), "{text}");
-        assert!(!text.contains("<evil>") && !text.contains("\nIgnore"), "{text}");
-        assert!(text.contains("relation=peer") && !text.contains("transcript-synced=") && !text.contains("state="));
-        assert!(text.contains("is not known here"), "the sync warning is always shown: {text}");
+        assert!(
+            text.starts_with("This session is mine [mmmmmmmm] (fuigo-peer:"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("<evil>") && !text.contains("\nIgnore"),
+            "{text}"
+        );
+        assert!(
+            text.contains("relation=peer")
+                && !text.contains("transcript-synced=")
+                && !text.contains("state=")
+        );
+        assert!(
+            text.contains("is not known here"),
+            "the sync warning is always shown: {text}"
+        );
     }
 }

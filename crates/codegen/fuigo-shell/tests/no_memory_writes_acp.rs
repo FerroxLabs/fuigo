@@ -143,24 +143,41 @@ fn inspect<T>(what: &Path, result: std::io::Result<T>) -> Option<T> {
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Kind>) {
-    let Some(entries) = inspect(dir, std::fs::read_dir(dir)) else { return };
+    let Some(entries) = inspect(dir, std::fs::read_dir(dir)) else {
+        return;
+    };
     for entry in entries {
-        let Some(entry) = inspect(dir, entry) else { continue };
+        let Some(entry) = inspect(dir, entry) else {
+            continue;
+        };
         let path = entry.path();
         let rel = path
             .strip_prefix(root)
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
-        let Some(meta) = inspect(&path, std::fs::symlink_metadata(&path)) else { continue };
+        let Some(meta) = inspect(&path, std::fs::symlink_metadata(&path)) else {
+            continue;
+        };
         if meta.is_dir() {
-            out.insert(rel, Kind::Dir { mtime_ns: mtime_ns(&meta) });
-            walk(root, &path, out);
-        } else if meta.is_file() {
-            let Some(bytes) = inspect(&path, std::fs::read(&path)) else { continue };
             out.insert(
                 rel,
-                Kind::File { len: meta.len(), mtime_ns: mtime_ns(&meta), hash: hash_bytes(&bytes) },
+                Kind::Dir {
+                    mtime_ns: mtime_ns(&meta),
+                },
+            );
+            walk(root, &path, out);
+        } else if meta.is_file() {
+            let Some(bytes) = inspect(&path, std::fs::read(&path)) else {
+                continue;
+            };
+            out.insert(
+                rel,
+                Kind::File {
+                    len: meta.len(),
+                    mtime_ns: mtime_ns(&meta),
+                    hash: hash_bytes(&bytes),
+                },
             );
         } else {
             out.insert(rel, Kind::Other);
@@ -209,9 +226,16 @@ fn is_memory_path(entry: &str) -> bool {
     if path.contains("/docs/user-guide/") || path.starts_with("home/.fuigo/sessions/") {
         return false;
     }
-    ["memory", "memtrace", "dream", "consolidat", "index.sqlite", "embedding"]
-        .iter()
-        .any(|needle| path.contains(needle))
+    [
+        "memory",
+        "memtrace",
+        "dream",
+        "consolidat",
+        "index.sqlite",
+        "embedding",
+    ]
+    .iter()
+    .any(|needle| path.contains(needle))
 }
 
 struct Outcome {
@@ -238,7 +262,10 @@ struct Outcome {
 }
 
 /// A project directory outside the system temp dir, so memory is not treated as ephemeral.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn project_dir() -> tempfile::TempDir {
     let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(&base).expect("target tmpdir");
@@ -291,16 +318,22 @@ async fn ext(
     method: &str,
     params: serde_json::Value,
 ) -> agent_client_protocol::Result<agent_client_protocol::ExtResponse> {
-    tokio::time::timeout(scaled(Duration::from_secs(60)), client.ext_method(method, params))
-        .await
-        .unwrap_or_else(|_| panic!("{method} timed out\nstderr:\n{}", client.stderr()))
+    tokio::time::timeout(
+        scaled(Duration::from_secs(60)),
+        client.ext_method(method, params),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{method} timed out\nstderr:\n{}", client.stderr()))
 }
 
 fn config_with_idle(idle_secs: u64) -> String {
     HOSTILE_CONFIG.replace("{IDLE}", &idle_secs.to_string())
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn scenario(no_memory: bool) -> Outcome {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(REPLY);
@@ -310,8 +343,11 @@ async fn scenario(no_memory: bool) -> Outcome {
     std::fs::write(cwd.join("README.md"), "# p53 project\n").expect("project file");
     let fuigo_home = sandbox.fuigo_home().to_path_buf();
     let memory_root = fuigo_home.join("memory");
-    std::fs::write(fuigo_home.join("config.toml"), config_with_idle(IDLE_PHASE1_SECS))
-        .expect("write config");
+    std::fs::write(
+        fuigo_home.join("config.toml"),
+        config_with_idle(IDLE_PHASE1_SECS),
+    )
+    .expect("write config");
     std::fs::create_dir_all(&memory_root).expect("memory root");
     std::fs::write(memory_root.join("MEMORY.md"), CANARY_BODY).expect("plant canary");
     let orphan = memory_root.join("tmp-p53-orphan");
@@ -325,16 +361,24 @@ async fn scenario(no_memory: bool) -> Outcome {
     }
 
     // ---- phase 1: every explicit trigger, one at a time -------------------------------------------
-    let mut client =
-        FuigoStdioClient::spawn_with_sandbox_env_and_args(&server, &cwd, sandbox, AGENT_ENV, &leading)
-            .await;
+    let mut client = FuigoStdioClient::spawn_with_sandbox_env_and_args(
+        &server, &cwd, sandbox, AGENT_ENV, &leading,
+    )
+    .await;
     client.initialize_with_timeout().await;
     let session = client.create_session_with_timeout(&cwd).await;
     let sid = session.to_string();
     for turn in 0..3 {
-        let text = format!("{SENTINEL} turn {turn}: {}", "context padding words ".repeat(200));
+        let text = format!(
+            "{SENTINEL} turn {turn}: {}",
+            "context padding words ".repeat(200)
+        );
         let reply = client.prompt_with_timeout(&session, &text).await;
-        assert!(reply.is_ok(), "turn {turn} failed: {reply:?}\n{}", client.stderr());
+        assert!(
+            reply.is_ok(),
+            "turn {turn} failed: {reply:?}\n{}",
+            client.stderr()
+        );
     }
     // The explicit memory entry points. Under `--no-memory` these may be refused or ignored; they
     // must never write. Their results are not asserted, only their effects.
@@ -364,17 +408,29 @@ async fn scenario(no_memory: bool) -> Outcome {
         json!({ "session_id": sid, "user_context": "keep the sentinel" }),
     )
     .await
-    .unwrap_or_else(|e| panic!("compaction failed (no_memory={no_memory}): {e:?}\n{}", client.stderr()));
+    .unwrap_or_else(|e| {
+        panic!(
+            "compaction failed (no_memory={no_memory}): {e:?}\n{}",
+            client.stderr()
+        )
+    });
     let reply = client
         .prompt_with_timeout(&session, &format!("{SENTINEL} after compaction"))
         .await;
-    assert!(reply.is_ok(), "turn after compaction failed (no_memory={no_memory}): {reply:?}");
+    assert!(
+        reply.is_ok(),
+        "turn after compaction failed (no_memory={no_memory}): {reply:?}"
+    );
     tokio::time::sleep(scaled(SETTLE)).await;
     // Close both sessions: that is what runs the session-end memory save (a SIGTERM does not).
     for closing in [&second, &session] {
-        ext(&client, "fuigo/session/close", json!({ "sessionId": closing.to_string() }))
-            .await
-            .unwrap_or_else(|e| panic!("session close failed (no_memory={no_memory}): {e:?}"));
+        ext(
+            &client,
+            "fuigo/session/close",
+            json!({ "sessionId": closing.to_string() }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("session close failed (no_memory={no_memory}): {e:?}"));
     }
     tokio::time::sleep(scaled(SETTLE)).await;
     let _ = client.close().await;
@@ -382,21 +438,30 @@ async fn scenario(no_memory: bool) -> Outcome {
     let sandbox = client.take_sandbox();
 
     // ---- phase 2: restart in the same sandbox, resume, go quiet --------------------------------------
-    std::fs::write(fuigo_home.join("config.toml"), config_with_idle(IDLE_PHASE2_SECS))
-        .expect("rewrite config");
-    let mut client =
-        FuigoStdioClient::spawn_with_sandbox_env_and_args(&server, &cwd, sandbox, AGENT_ENV, &leading)
-            .await;
+    std::fs::write(
+        fuigo_home.join("config.toml"),
+        config_with_idle(IDLE_PHASE2_SECS),
+    )
+    .expect("rewrite config");
+    let mut client = FuigoStdioClient::spawn_with_sandbox_env_and_args(
+        &server, &cwd, sandbox, AGENT_ENV, &leading,
+    )
+    .await;
     client.initialize_with_timeout().await;
     client.load_session_with_timeout(&session, &cwd).await;
     let reply = client
         .prompt_with_timeout(&session, &format!("{SENTINEL} after resume"))
         .await;
-    assert!(reply.is_ok(), "turn after resume failed (no_memory={no_memory}): {reply:?}");
+    assert!(
+        reply.is_ok(),
+        "turn after resume failed (no_memory={no_memory}): {reply:?}"
+    );
     tokio::time::sleep(scaled(IDLE_WINDOW)).await;
     ext(&client, "fuigo/session/close", json!({ "sessionId": sid }))
         .await
-        .unwrap_or_else(|e| panic!("session close after resume failed (no_memory={no_memory}): {e:?}"));
+        .unwrap_or_else(|e| {
+            panic!("session close after resume failed (no_memory={no_memory}): {e:?}")
+        });
     tokio::time::sleep(scaled(SETTLE)).await;
     let _ = client.close().await;
     stderr.push_str(&client.stderr());
@@ -405,7 +470,11 @@ async fn scenario(no_memory: bool) -> Outcome {
 
     let after = snapshot_all(&root, &cwd);
     let changed = diff(&before, &after);
-    let memory_changed: Vec<String> = changed.iter().filter(|c| is_memory_path(c)).cloned().collect();
+    let memory_changed: Vec<String> = changed
+        .iter()
+        .filter(|c| is_memory_path(c))
+        .cloned()
+        .collect();
     let requests = server.requests();
     let memory_requests: Vec<String> = requests
         .iter()
@@ -415,12 +484,19 @@ async fn scenario(no_memory: bool) -> Outcome {
         .collect();
     let rewrite_requests = requests
         .iter()
-        .filter(|r| r.body.as_ref().is_some_and(|b| b.to_string().contains("memory note formatter")))
+        .filter(|r| {
+            r.body
+                .as_ref()
+                .is_some_and(|b| b.to_string().contains("memory note formatter"))
+        })
         .count();
     let rewrite = rewrite.map(|_| ()).map_err(|e| {
         let v = serde_json::to_value(&e).unwrap_or_default();
         // The typed detail (kind + reason) rides in `data`; the top-level message is the generic JSON-RPC text.
-        (v["code"].as_i64().unwrap_or_default(), format!("{} {}", v["message"], v["data"]))
+        (
+            v["code"].as_i64().unwrap_or_default(),
+            format!("{} {}", v["message"], v["data"]),
+        )
     });
     let memory_tools_offered = requests
         .iter()
@@ -501,10 +577,18 @@ async fn no_memory_writes_nothing_and_the_control_proves_the_detector_sees_memor
         control.stderr
     );
     let wrote = |needle: &str| control.memory_changed.iter().any(|c| c.contains(needle));
-    assert!(wrote("/index.sqlite"), "CONTROL created no memory index: {:#?}", control.memory_changed);
+    assert!(
+        wrote("/index.sqlite"),
+        "CONTROL created no memory index: {:#?}",
+        control.memory_changed
+    );
     // Dream committed: the consolidation marker exists and the workspace MEMORY.md carries the
     // consolidated conversation (the empty template `ensure_initialized` writes would not).
-    assert!(wrote("/.dream-consolidated"), "CONTROL committed no dream marker: {:#?}", control.memory_changed);
+    assert!(
+        wrote("/.dream-consolidated"),
+        "CONTROL committed no dream marker: {:#?}",
+        control.memory_changed
+    );
     assert!(
         control.consolidated_memory_has_sentinel,
         "CONTROL's dream wrote no consolidated MEMORY.md: {:#?}",
@@ -512,7 +596,12 @@ async fn no_memory_writes_nothing_and_the_control_proves_the_detector_sees_memor
     );
     // Every flush trigger wrote a log under its own name: idle (`interval`, phase 2 only), compaction,
     // `/flush` and the `fuigo/memory/flush` extension (`user_requested`).
-    for trigger in ["interval", "pre_compaction", "slash_command", "user_requested"] {
+    for trigger in [
+        "interval",
+        "pre_compaction",
+        "slash_command",
+        "user_requested",
+    ] {
         assert!(
             control
                 .memory_changed
@@ -524,16 +613,27 @@ async fn no_memory_writes_nothing_and_the_control_proves_the_detector_sees_memor
     }
     // The session-end save names its log after the first user query, not after a flush trigger.
     assert!(
-        control.memory_changed.iter().any(|c| c.contains("/sessions/")
-            && c.contains("p53-nomem")
-            && !["interval", "pre_compaction", "slash_command", "user_requested"]
+        control
+            .memory_changed
+            .iter()
+            .any(|c| c.contains("/sessions/")
+                && c.contains("p53-nomem")
+                && ![
+                    "interval",
+                    "pre_compaction",
+                    "slash_command",
+                    "user_requested"
+                ]
                 .iter()
                 .any(|t| c.contains(&format!("-{t}-")))),
         "CONTROL wrote no session-end log: {:#?}",
         control.memory_changed
     );
     assert!(
-        control.memory_requests.iter().any(|id| id.starts_with("fuigo-dream-")),
+        control
+            .memory_requests
+            .iter()
+            .any(|id| id.starts_with("fuigo-dream-")),
         "CONTROL never reached the dream model call: {:?}",
         control.memory_requests
     );
@@ -545,10 +645,24 @@ async fn no_memory_writes_nothing_and_the_control_proves_the_detector_sees_memor
         !control.orphan_dir_survived,
         "CONTROL did not garbage-collect the planted orphan: the gc write path was not exercised"
     );
-    assert!(wrote("memtrace"), "CONTROL wrote no memtrace file: {:#?}", control.memory_changed);
-    assert!(control.memory_tools_offered, "CONTROL was not offered memory_* tools");
-    assert_eq!(control.rewrite, Ok(()), "CONTROL's fuigo/memory/rewrite failed");
-    assert!(control.rewrite_requests > 0, "CONTROL's rewrite never reached the model");
+    assert!(
+        wrote("memtrace"),
+        "CONTROL wrote no memtrace file: {:#?}",
+        control.memory_changed
+    );
+    assert!(
+        control.memory_tools_offered,
+        "CONTROL was not offered memory_* tools"
+    );
+    assert_eq!(
+        control.rewrite,
+        Ok(()),
+        "CONTROL's fuigo/memory/rewrite failed"
+    );
+    assert!(
+        control.rewrite_requests > 0,
+        "CONTROL's rewrite never reached the model"
+    );
 
     // The claim. Subject: nothing memory-like changed, the canaries are untouched, and no flush
     // or dream model call was even made.
@@ -559,19 +673,40 @@ async fn no_memory_writes_nothing_and_the_control_proves_the_detector_sees_memor
         subject.changed,
         subject.stderr
     );
-    assert!(subject.canary_intact, "--no-memory modified the planted MEMORY.md");
-    assert!(subject.orphan_dir_survived, "--no-memory garbage-collected memory directories");
+    assert!(
+        subject.canary_intact,
+        "--no-memory modified the planted MEMORY.md"
+    );
+    assert!(
+        subject.orphan_dir_survived,
+        "--no-memory garbage-collected memory directories"
+    );
     assert!(
         subject.memory_requests.is_empty(),
         "--no-memory still made memory model requests: {:?}",
         subject.memory_requests
     );
-    assert!(!subject.memory_tools_offered, "--no-memory still offered memory_* tools");
+    assert!(
+        !subject.memory_tools_offered,
+        "--no-memory still offered memory_* tools"
+    );
     // `fuigo/memory/rewrite` is refused with a typed invalid-request error and never calls the model.
-    let (code, message) = subject.rewrite.clone().expect_err("--no-memory must refuse fuigo/memory/rewrite");
-    assert_eq!(code, -32600, "refusal is an invalid-request error: {message}");
-    assert!(message.contains("memory is not enabled"), "refusal names the reason: {message}");
-    assert_eq!(subject.rewrite_requests, 0, "--no-memory still sent the note to the model");
+    let (code, message) = subject
+        .rewrite
+        .clone()
+        .expect_err("--no-memory must refuse fuigo/memory/rewrite");
+    assert_eq!(
+        code, -32600,
+        "refusal is an invalid-request error: {message}"
+    );
+    assert!(
+        message.contains("memory is not enabled"),
+        "refusal names the reason: {message}"
+    );
+    assert_eq!(
+        subject.rewrite_requests, 0,
+        "--no-memory still sent the note to the model"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -600,7 +735,10 @@ idle_timeout_secs = 3600
 /// delay 2 s) opens a NEW session and goes quiet: the only thing that can start a dream is the startup timer, because
 /// no `/dream` is ever sent and the periodic check is an hour out. Returns the number of dream model requests seen
 /// in run 2 and the paths of memory files changed.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn startup_dream_scenario(no_memory: bool) -> (usize, Vec<String>) {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(REPLY);
@@ -608,19 +746,33 @@ async fn startup_dream_scenario(no_memory: bool) -> (usize, Vec<String>) {
     let project = project_dir();
     let cwd = project.path().to_path_buf();
     std::fs::write(cwd.join("README.md"), "# p53 project\n").expect("project file");
-    std::fs::write(sandbox.fuigo_home().join("config.toml"), STARTUP_DREAM_CONFIG).expect("config");
+    std::fs::write(
+        sandbox.fuigo_home().join("config.toml"),
+        STARTUP_DREAM_CONFIG,
+    )
+    .expect("config");
     let mut leading: Vec<&str> = MURAGE_LEADING.to_vec();
     if no_memory {
         leading.push("--no-memory");
     }
-    let env_run1: Vec<(&str, &str)> = vec![("FUIGO_MEMORY", "1"), ("FUIGO_MEMORY_DREAM_STARTUP_SECS", "3600")];
-    let env_run2: Vec<(&str, &str)> = vec![("FUIGO_MEMORY", "1"), ("FUIGO_MEMORY_DREAM_STARTUP_SECS", "2")];
+    let env_run1: Vec<(&str, &str)> = vec![
+        ("FUIGO_MEMORY", "1"),
+        ("FUIGO_MEMORY_DREAM_STARTUP_SECS", "3600"),
+    ];
+    let env_run2: Vec<(&str, &str)> = vec![
+        ("FUIGO_MEMORY", "1"),
+        ("FUIGO_MEMORY_DREAM_STARTUP_SECS", "2"),
+    ];
 
-    let mut client =
-        FuigoStdioClient::spawn_with_sandbox_env_and_args(&server, &cwd, sandbox, &env_run1, &leading).await;
+    let mut client = FuigoStdioClient::spawn_with_sandbox_env_and_args(
+        &server, &cwd, sandbox, &env_run1, &leading,
+    )
+    .await;
     client.initialize_with_timeout().await;
     let first = client.create_session_with_timeout(&cwd).await;
-    let reply = client.prompt_with_timeout(&first, &format!("{SENTINEL} run one")).await;
+    let reply = client
+        .prompt_with_timeout(&first, &format!("{SENTINEL} run one"))
+        .await;
     assert!(reply.is_ok(), "run-one turn failed: {reply:?}");
     let _ = client.prompt_with_timeout(&first, "/flush").await;
     tokio::time::sleep(scaled(SETTLE)).await;
@@ -628,21 +780,30 @@ async fn startup_dream_scenario(no_memory: bool) -> (usize, Vec<String>) {
     let sandbox = client.take_sandbox();
     let root = sandbox.root().to_path_buf();
     let dreams_before = dream_requests(&server);
-    assert_eq!(dreams_before, 0, "no dream may run in run one (no_memory={no_memory})");
+    assert_eq!(
+        dreams_before, 0,
+        "no dream may run in run one (no_memory={no_memory})"
+    );
     let before = snapshot_all(&root, &cwd);
 
-    let mut client =
-        FuigoStdioClient::spawn_with_sandbox_env_and_args(&server, &cwd, sandbox, &env_run2, &leading).await;
+    let mut client = FuigoStdioClient::spawn_with_sandbox_env_and_args(
+        &server, &cwd, sandbox, &env_run2, &leading,
+    )
+    .await;
     client.initialize_with_timeout().await;
     let second = client.create_session_with_timeout(&cwd).await;
-    let reply = client.prompt_with_timeout(&second, &format!("{SENTINEL} run two")).await;
+    let reply = client
+        .prompt_with_timeout(&second, &format!("{SENTINEL} run two"))
+        .await;
     assert!(reply.is_ok(), "run-two turn failed: {reply:?}");
     tokio::time::sleep(scaled(IDLE_WINDOW)).await;
     let _ = client.close().await;
     let sandbox = client.take_sandbox();
     let after = snapshot_all(sandbox.root(), &cwd);
-    let memory_changed: Vec<String> =
-        diff(&before, &after).into_iter().filter(|c| is_memory_path(c)).collect();
+    let memory_changed: Vec<String> = diff(&before, &after)
+        .into_iter()
+        .filter(|c| is_memory_path(c))
+        .collect();
     (dream_requests(&server), memory_changed)
 }
 
@@ -661,15 +822,23 @@ async fn no_memory_stops_the_startup_dream_timer() {
     log_binary_identity();
     let local = LocalSet::new();
     let ((subject_dreams, subject_changed), (control_dreams, control_changed)) = local
-        .run_until(async { tokio::join!(startup_dream_scenario(true), startup_dream_scenario(false)) })
+        .run_until(async {
+            tokio::join!(startup_dream_scenario(true), startup_dream_scenario(false))
+        })
         .await;
     // Positive control: with the flag absent the startup timer alone starts a dream.
     assert!(
         control_dreams > 0,
         "CONTROL's startup dream timer never started a dream: the test cannot see the timer. changed: {control_changed:#?}"
     );
-    assert_eq!(subject_dreams, 0, "--no-memory still ran the startup dream timer");
-    assert!(subject_changed.is_empty(), "--no-memory wrote memory in run two: {subject_changed:#?}");
+    assert_eq!(
+        subject_dreams, 0,
+        "--no-memory still ran the startup dream timer"
+    );
+    assert!(
+        subject_changed.is_empty(),
+        "--no-memory wrote memory in run two: {subject_changed:#?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -692,7 +861,10 @@ struct AgentMemoryOutcome {
     stderr: String,
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn agent_memory_scenario(no_memory: bool) -> AgentMemoryOutcome {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(REPLY);
@@ -739,9 +911,10 @@ async fn agent_memory_scenario(no_memory: bool) -> AgentMemoryOutcome {
     if no_memory {
         leading.push("--no-memory");
     }
-    let mut client =
-        FuigoStdioClient::spawn_with_sandbox_env_and_args(&server, &cwd, sandbox, AGENT_ENV, &leading)
-            .await;
+    let mut client = FuigoStdioClient::spawn_with_sandbox_env_and_args(
+        &server, &cwd, sandbox, AGENT_ENV, &leading,
+    )
+    .await;
     client.initialize_with_timeout().await;
     let session = client.create_session_with_timeout(&cwd).await;
     let reply = tokio::time::timeout(
@@ -752,34 +925,64 @@ async fn agent_memory_scenario(no_memory: bool) -> AgentMemoryOutcome {
     .unwrap_or_else(|_| {
         panic!(
             "the spawning turn timed out (no_memory={no_memory}); mock saw {:?}\n{}",
-            server.requests().iter().map(|r| r.path.clone()).collect::<Vec<_>>(),
+            server
+                .requests()
+                .iter()
+                .map(|r| r.path.clone())
+                .collect::<Vec<_>>(),
             client.stderr()
         )
     });
-    assert!(reply.is_ok(), "the spawning turn failed: {reply:?}\n{}", client.stderr());
+    assert!(
+        reply.is_ok(),
+        "the spawning turn failed: {reply:?}\n{}",
+        client.stderr()
+    );
     tokio::time::sleep(scaled(SETTLE)).await;
     let _ = client.close().await;
     let stderr = client.stderr();
     let sandbox = client.take_sandbox();
     assert_eq!(root, sandbox.root());
-    assert!(spawn.is_satisfied(), "the scripted spawn_subagent reply was never claimed\n{stderr}");
+    assert!(
+        spawn.is_satisfied(),
+        "the scripted spawn_subagent reply was never claimed\n{stderr}"
+    );
 
     let after = snapshot_all(&root, &cwd);
     let changed = diff(&before, &after);
-    let memory_changed: Vec<String> = changed.iter().filter(|c| is_memory_path(c)).cloned().collect();
+    let memory_changed: Vec<String> = changed
+        .iter()
+        .filter(|c| is_memory_path(c))
+        .cloned()
+        .collect();
     let requests = server.requests();
-    let chat: Vec<_> = requests.iter().filter(|r| r.path == "/v1/chat/completions").collect();
+    let chat: Vec<_> = requests
+        .iter()
+        .filter(|r| r.path == "/v1/chat/completions")
+        .collect();
     let requests_with_canary = chat
         .iter()
-        .filter(|r| r.body.as_ref().is_some_and(|b| b.to_string().contains(AGENT_MEMORY_CANARY)))
+        .filter(|r| {
+            r.body
+                .as_ref()
+                .is_some_and(|b| b.to_string().contains(AGENT_MEMORY_CANARY))
+        })
         .count();
     let child_requests = chat
         .iter()
-        .filter(|r| r.body.as_ref().is_some_and(|b| b.to_string().contains(CHILD_PROMPT_MARKER)))
+        .filter(|r| {
+            r.body
+                .as_ref()
+                .is_some_and(|b| b.to_string().contains(CHILD_PROMPT_MARKER))
+        })
         .count();
     let child_tools: Vec<String> = chat
         .iter()
-        .filter(|r| r.body.as_ref().is_some_and(|b| b.to_string().contains(CHILD_PROMPT_MARKER)))
+        .filter(|r| {
+            r.body
+                .as_ref()
+                .is_some_and(|b| b.to_string().contains(CHILD_PROMPT_MARKER))
+        })
         .filter_map(|r| r.body.as_ref().and_then(|b| b["tools"].as_array()).cloned())
         .flatten()
         .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
@@ -808,9 +1011,15 @@ async fn no_memory_withholds_agent_memory_from_subagents() {
     log_binary_identity();
     let local = LocalSet::new();
     let (subject, control) = local
-        .run_until(async { tokio::join!(agent_memory_scenario(true), agent_memory_scenario(false)) })
+        .run_until(async {
+            tokio::join!(agent_memory_scenario(true), agent_memory_scenario(false))
+        })
         .await;
-    assert!(control.child_requests > 0, "CONTROL never ran the child: {}", control.stderr);
+    assert!(
+        control.child_requests > 0,
+        "CONTROL never ran the child: {}",
+        control.stderr
+    );
     assert!(
         control.requests_with_canary > 0,
         "CONTROL's child never saw its agent memory, so the memory agent was not wired:\n{}",
@@ -825,7 +1034,10 @@ async fn no_memory_withholds_agent_memory_from_subagents() {
         subject.requests_with_canary, 0,
         "--no-memory still injected the agent's MEMORY.md into a subagent prompt"
     );
-    assert!(subject.canary_intact, "--no-memory modified the agent's MEMORY.md");
+    assert!(
+        subject.canary_intact,
+        "--no-memory modified the agent's MEMORY.md"
+    );
     assert!(
         subject.memory_changed.is_empty(),
         "--no-memory still wrote agent memory: {:#?}",
@@ -845,7 +1057,11 @@ const NOTE_REFUSED: &str = "P53 note refused: memory is off";
 fn workspace_memory_file(root: &Path) -> Option<String> {
     let snap = snapshot_all(root, root.join("nonexistent-project").as_path());
     snap.keys()
-        .find(|k| k.starts_with("home/.fuigo/memory/") && k.ends_with("/MEMORY.md") && k.matches('/').count() == 4)
+        .find(|k| {
+            k.starts_with("home/.fuigo/memory/")
+                && k.ends_with("/MEMORY.md")
+                && k.matches('/').count() == 4
+        })
         .and_then(|k| std::fs::read_to_string(root.join(k)).ok())
 }
 
@@ -854,37 +1070,61 @@ async fn save_note(
     session: &agent_client_protocol::SessionId,
     text: &str,
 ) -> Result<(), (i64, String)> {
-    ext(client, "fuigo/memory/save_note", json!({ "sessionId": session.to_string(), "text": text }))
-        .await
-        .map(|_| ())
-        .map_err(|e| {
-            let v = serde_json::to_value(&e).unwrap_or_default();
-            (v["code"].as_i64().unwrap_or_default(), format!("{} {}", v["message"], v["data"]))
-        })
+    ext(
+        client,
+        "fuigo/memory/save_note",
+        json!({ "sessionId": session.to_string(), "text": text }),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| {
+        let v = serde_json::to_value(&e).unwrap_or_default();
+        (
+            v["code"].as_i64().unwrap_or_default(),
+            format!("{} {}", v["message"], v["data"]),
+        )
+    })
 }
 
 /// One agent, one session. The client holds NO memory state of its own: it never reads an available-commands update,
 /// which is exactly a pager whose first update was dropped, or whose cache went stale after another client acted.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-async fn note_scenario(no_memory: bool) -> (Vec<Result<(), (i64, String)>>, Vec<Option<String>>, Vec<String>) {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+async fn note_scenario(
+    no_memory: bool,
+) -> (
+    Vec<Result<(), (i64, String)>>,
+    Vec<Option<String>>,
+    Vec<String>,
+) {
     let server = MockInferenceServer::start().await.expect("start mock");
     server.set_response(REPLY);
     let sandbox = TestSandbox::new();
     let project = project_dir();
     let cwd = project.path().to_path_buf();
     std::fs::write(cwd.join("README.md"), "# p53 project\n").expect("project file");
-    std::fs::write(sandbox.fuigo_home().join("config.toml"), config_with_idle(IDLE_PHASE1_SECS)).expect("config");
+    std::fs::write(
+        sandbox.fuigo_home().join("config.toml"),
+        config_with_idle(IDLE_PHASE1_SECS),
+    )
+    .expect("config");
     let root = sandbox.root().to_path_buf();
     let before = snapshot_all(&root, &cwd);
     let mut leading: Vec<&str> = MURAGE_LEADING.to_vec();
     if no_memory {
         leading.push("--no-memory");
     }
-    let mut client =
-        FuigoStdioClient::spawn_with_sandbox_env_and_args(&server, &cwd, sandbox, AGENT_ENV, &leading).await;
+    let mut client = FuigoStdioClient::spawn_with_sandbox_env_and_args(
+        &server, &cwd, sandbox, AGENT_ENV, &leading,
+    )
+    .await;
     client.initialize_with_timeout().await;
     let session = client.create_session_with_timeout(&cwd).await;
-    let reply = client.prompt_with_timeout(&session, &format!("{SENTINEL} note scenario")).await;
+    let reply = client
+        .prompt_with_timeout(&session, &format!("{SENTINEL} note scenario"))
+        .await;
     assert!(reply.is_ok(), "turn failed: {reply:?}");
 
     let mut results = Vec::new();
@@ -904,7 +1144,10 @@ async fn note_scenario(no_memory: bool) -> (Vec<Result<(), (i64, String)>>, Vec<
     let _ = client.close().await;
     let sandbox = client.take_sandbox();
     let after = snapshot_all(sandbox.root(), &cwd);
-    let memory_changed: Vec<String> = diff(&before, &after).into_iter().filter(|c| is_memory_path(c)).collect();
+    let memory_changed: Vec<String> = diff(&before, &after)
+        .into_iter()
+        .filter(|c| is_memory_path(c))
+        .collect();
     (results, files, memory_changed)
 }
 
@@ -918,34 +1161,66 @@ async fn a_memory_note_is_decided_by_the_shell_at_write_time() {
 
     // CONTROL (memory on): the note is saved with no client-side state at all (the unreported case); after
     // `/memory off` the same call is refused and the file is unchanged; after `/memory on` it saves again.
-    assert_eq!(control[0], Ok(()), "a note with memory on and nothing reported must save");
-    assert!(control_files[0].as_deref().is_some_and(|f| f.contains(NOTE_ONE)), "note one is in MEMORY.md");
-    let (code, message) = control[1].clone().expect_err("a note after /memory off must be refused");
-    assert_eq!(code, -32600, "typed invalid-request refusal: {message}");
-    assert!(message.contains("memory is not enabled"), "refusal names the reason: {message}");
-    assert_eq!(control_files[1], control_files[0], "the refused note wrote nothing");
+    assert_eq!(
+        control[0],
+        Ok(()),
+        "a note with memory on and nothing reported must save"
+    );
     assert!(
-        !control_files[1].as_deref().unwrap_or_default().contains(NOTE_REFUSED),
+        control_files[0]
+            .as_deref()
+            .is_some_and(|f| f.contains(NOTE_ONE)),
+        "note one is in MEMORY.md"
+    );
+    let (code, message) = control[1]
+        .clone()
+        .expect_err("a note after /memory off must be refused");
+    assert_eq!(code, -32600, "typed invalid-request refusal: {message}");
+    assert!(
+        message.contains("memory is not enabled"),
+        "refusal names the reason: {message}"
+    );
+    assert_eq!(
+        control_files[1], control_files[0],
+        "the refused note wrote nothing"
+    );
+    assert!(
+        !control_files[1]
+            .as_deref()
+            .unwrap_or_default()
+            .contains(NOTE_REFUSED),
         "the refused note is not in MEMORY.md"
     );
     assert_eq!(control[2], Ok(()), "after /memory on the note saves again");
     let last = control_files[2].as_deref().unwrap_or_default();
-    assert!(last.contains(NOTE_ONE) && last.contains(NOTE_TWO) && !last.contains(NOTE_REFUSED), "{last}");
+    assert!(
+        last.contains(NOTE_ONE) && last.contains(NOTE_TWO) && !last.contains(NOTE_REFUSED),
+        "{last}"
+    );
 
     // SUBJECT (--no-memory): every note is refused and nothing memory-shaped is created.
     for (i, r) in subject.iter().enumerate() {
         let (code, message) = r.clone().expect_err("--no-memory refuses every note");
         assert_eq!(code, -32600, "note {i}: {message}");
     }
-    assert!(subject_files.iter().all(Option::is_none), "no MEMORY.md under --no-memory: {subject_files:?}");
-    assert!(subject_changed.is_empty(), "--no-memory wrote memory for a note: {subject_changed:#?}");
+    assert!(
+        subject_files.iter().all(Option::is_none),
+        "no MEMORY.md under --no-memory: {subject_files:?}"
+    );
+    assert!(
+        subject_changed.is_empty(),
+        "--no-memory wrote memory for a note: {subject_changed:#?}"
+    );
 }
 
 /// A note racing `/memory off` is either written entirely (the save returned `Ok` and the note is in `MEMORY.md`) or
 /// refused entirely (the save returned an error and the note is not): never written after a refusal, never `Ok` without a
 /// write. The check and the append run with no `.await` between them on the session's single thread, so a toggle cannot
 /// land in the middle; this test would catch a regression that moved the append off that thread.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn a_memory_note_racing_memory_off_is_all_or_nothing() {
     log_binary_identity();
@@ -958,15 +1233,25 @@ async fn a_memory_note_racing_memory_off_is_all_or_nothing() {
             let project = project_dir();
             let cwd = project.path().to_path_buf();
             std::fs::write(cwd.join("README.md"), "# p53 project\n").expect("project file");
-            std::fs::write(sandbox.fuigo_home().join("config.toml"), config_with_idle(IDLE_PHASE1_SECS))
-                .expect("config");
+            std::fs::write(
+                sandbox.fuigo_home().join("config.toml"),
+                config_with_idle(IDLE_PHASE1_SECS),
+            )
+            .expect("config");
             let root = sandbox.root().to_path_buf();
-            let mut client =
-                FuigoStdioClient::spawn_with_sandbox_env_and_args(&server, &cwd, sandbox, AGENT_ENV, MURAGE_LEADING)
-                    .await;
+            let mut client = FuigoStdioClient::spawn_with_sandbox_env_and_args(
+                &server,
+                &cwd,
+                sandbox,
+                AGENT_ENV,
+                MURAGE_LEADING,
+            )
+            .await;
             client.initialize_with_timeout().await;
             let session = client.create_session_with_timeout(&cwd).await;
-            let reply = client.prompt_with_timeout(&session, &format!("{SENTINEL} race")).await;
+            let reply = client
+                .prompt_with_timeout(&session, &format!("{SENTINEL} race"))
+                .await;
             assert!(reply.is_ok(), "turn failed: {reply:?}");
             let (mut written, mut refused) = (0, 0);
             for i in 0..8 {
@@ -979,12 +1264,18 @@ async fn a_memory_note_racing_memory_off_is_all_or_nothing() {
                 match saved {
                     Ok(()) => {
                         written += 1;
-                        assert!(file.contains(&note), "save said Ok but the note is not in MEMORY.md (round {i})");
+                        assert!(
+                            file.contains(&note),
+                            "save said Ok but the note is not in MEMORY.md (round {i})"
+                        );
                     }
                     Err((code, message)) => {
                         refused += 1;
                         assert_eq!(code, -32600, "{message}");
-                        assert!(!file.contains(&note), "save was refused but the note was written (round {i})");
+                        assert!(
+                            !file.contains(&note),
+                            "save was refused but the note was written (round {i})"
+                        );
                     }
                 }
                 let _ = client.prompt_with_timeout(&session, "/memory on").await;

@@ -146,7 +146,11 @@ impl WorkflowRunStore {
             if let Some(effort) = effort {
                 atomic_write_new(writer, &run_dir.join("effort"), effort.as_str().as_bytes())?;
             }
-            atomic_write_new(writer, &script_revision_path(&run_dir, 0), script.as_bytes())?;
+            atomic_write_new(
+                writer,
+                &script_revision_path(&run_dir, 0),
+                script.as_bytes(),
+            )?;
             writer.replace_atomic_sync(run_dir.join("script.rhai"), script.as_bytes())?;
         }
 
@@ -285,7 +289,9 @@ impl WorkflowRunStore {
     }
 
     fn run_dir(&self, run_id: &str) -> Option<PathBuf> {
-        self.writer.as_ref().map(|writer| writer.dir().join(run_rel(run_id)))
+        self.writer
+            .as_ref()
+            .map(|writer| writer.dir().join(run_rel(run_id)))
     }
 
     /// The session writer run files are written through (`None`: a session-less run).
@@ -302,7 +308,10 @@ fn run_rel(run_id: &str) -> PathBuf {
 /// Tests: a writer claimed for `dir` (`None` stays `None`).
 #[cfg(test)]
 pub(crate) fn test_writer_for(dir: Option<PathBuf>) -> Option<fuigo_session_writer::SessionWriter> {
-    dir.map(|dir| fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).unwrap())
+    dir.map(|dir| {
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .unwrap()
+    })
 }
 
 pub(crate) fn validate_run_id(run_id: &str) -> io::Result<()> {
@@ -373,7 +382,11 @@ pub(crate) fn read_bounded_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u
 }
 
 /// Write an immutable run file `rel` atomically and durably as `writer`; `AlreadyExists` when it is there.
-fn atomic_write_new(writer: &fuigo_session_writer::SessionWriter, rel: &Path, bytes: &[u8]) -> io::Result<()> {
+fn atomic_write_new(
+    writer: &fuigo_session_writer::SessionWriter,
+    rel: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
     if writer.dir().join(rel).exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -383,7 +396,10 @@ fn atomic_write_new(writer: &fuigo_session_writer::SessionWriter, rel: &Path, by
     writer.replace_atomic_sync(rel, bytes)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3171,7 +3171,10 @@ async fn a_background_start_keeps_its_childs_call_answers_until_the_child_is_gon
 /// reported, a missing one is no gap and is not created. In a child process, as the switch is one-way.
 #[cfg(unix)]
 #[test]
-#[allow(clippy::disallowed_methods, reason = "test code: a fixture FUIGO_HOME in a temp dir, seeded by path")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: a fixture FUIGO_HOME in a temp dir, seeded by path"
+)]
 fn r2m_session_dir_gap_with_persistence_off_checks_but_never_creates() {
     use std::os::unix::fs::PermissionsExt;
     if let Some(home) = std::env::var_os("R2M_HOME") {
@@ -3179,7 +3182,11 @@ fn r2m_session_dir_gap_with_persistence_off_checks_but_never_creates() {
         let home = PathBuf::from(home);
         let root = |name: &str| PathBuf::from(std::env::var(name).unwrap());
         let gap = |name: &str| super::session_dir_gap(&home, &root(name));
-        assert_eq!(gap("R2M_GOOD"), None, "an existing 0700 bucket is not a gap");
+        assert_eq!(
+            gap("R2M_GOOD"),
+            None,
+            "an existing 0700 bucket is not a gap"
+        );
         let loose = gap("R2M_LOOSE").expect("a loose-mode bucket is still reported");
         assert!(loose.contains("open to other users"), "{loose}");
         assert_eq!(gap("R2M_MISSING"), None, "a missing bucket is not a gap");
@@ -3197,7 +3204,11 @@ fn r2m_session_dir_gap_with_persistence_off_checks_but_never_creates() {
         }
         root
     };
-    let (good, loose, missing) = (mk("good", Some(0o700)), mk("loose", Some(0o755)), mk("missing", None));
+    let (good, loose, missing) = (
+        mk("good", Some(0o700)),
+        mk("loose", Some(0o755)),
+        mk("missing", None),
+    );
     let listing = |dir: &Path| {
         let mut out = Vec::new();
         let mut stack = vec![dir.to_path_buf()];
@@ -3215,7 +3226,11 @@ fn r2m_session_dir_gap_with_persistence_off_checks_but_never_creates() {
     };
     let before = listing(&home);
     let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "sandbox::tests::r2m_session_dir_gap_with_persistence_off_checks_but_never_creates", "--nocapture"])
+        .args([
+            "--exact",
+            "sandbox::tests::r2m_session_dir_gap_with_persistence_off_checks_but_never_creates",
+            "--nocapture",
+        ])
         .env("R2M_HOME", &home)
         .env("R2M_GOOD", &good)
         .env("R2M_LOOSE", &loose)
@@ -3223,5 +3238,9 @@ fn r2m_session_dir_gap_with_persistence_off_checks_but_never_creates() {
         .status()
         .unwrap();
     assert!(status.success(), "the child run failed");
-    assert_eq!(listing(&home), before, "the check created or changed something under sessions/");
+    assert_eq!(
+        listing(&home),
+        before,
+        "the check created or changed something under sessions/"
+    );
 }

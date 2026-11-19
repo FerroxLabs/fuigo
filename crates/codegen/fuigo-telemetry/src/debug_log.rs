@@ -704,7 +704,9 @@ mod tests {
         let layer = RoutingLayer::new(dir.path().to_path_buf(), "agent".to_owned(), 4242);
         let subscriber = tracing_subscriber::registry().with(layer);
 
+        let _second = crate::hold_second_dispatcher();
         tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             // `%` mirrors production's `info_span!("session", session_id = %...)`.
             tracing::info_span!("session", session_id = %"sess-xyz").in_scope(|| {
                 tracing::info!(target: "fuigo_shell", "inside session");
@@ -741,7 +743,9 @@ mod tests {
         let layer = RoutingLayer::new(dir.path().to_path_buf(), "agent".to_owned(), 4343);
         let subscriber = tracing_subscriber::registry().with(layer);
         let upstream = format!("API error (status 400): key {cred} is not valid");
+        let _second = crate::hold_second_dispatcher();
         tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             tracing::info_span!("session", session_id = %"sess-p70b").in_scope(|| {
                 tracing::error!(target: "fuigo_shell", error = %upstream, debug = ?upstream, "failed: {upstream}");
             });
@@ -771,7 +775,9 @@ mod tests {
             .with_filter(firehose_filter());
         let subscriber = tracing_subscriber::registry().with(layer);
 
+        let _second = crate::hold_second_dispatcher();
         tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             tracing::info_span!(
                 target: "fuigo_telemetry::session_ctx",
                 "session",
@@ -803,7 +809,9 @@ mod tests {
         let layer = RoutingLayer::new(dir.path().to_path_buf(), "agent".to_owned(), 1);
         let subscriber = tracing_subscriber::registry().with(layer);
 
+        let _second = crate::hold_second_dispatcher();
         tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             tracing::info_span!("session", session_id = %"sid-one").in_scope(|| {
                 // Two events in one session also prove within-session accumulation.
                 tracing::info!(target: "fuigo_shell", "one first");
@@ -999,8 +1007,15 @@ mod acp_raw_wire_filter_tests {
     /// Records the target of every event that reaches it.
     struct Recorder(Arc<Mutex<Vec<String>>>);
     impl<S: Subscriber> Layer<S> for Recorder {
-        fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-            self.0.lock().unwrap().push(event.metadata().target().to_owned());
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(event.metadata().target().to_owned());
         }
     }
 
@@ -1012,13 +1027,18 @@ mod acp_raw_wire_filter_tests {
         let subscriber = tracing_subscriber::registry()
             .with(acp_raw_wire_filter())
             .with(Recorder(seen.clone()));
+        let _second = crate::hold_second_dispatcher();
         tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             tracing::error!(target: "agent_client_protocol::rpc", "unhandled line: p08-FAKE");
             tracing::trace!(target: "agent_client_protocol::rpc", "recv: p08-FAKE");
             tracing::trace!(target: "agent_client_protocol::other", "kept");
             tracing::trace!(target: "fuigo_shell::auth", "kept");
         });
         let seen = seen.lock().unwrap().clone();
-        assert_eq!(seen, vec!["agent_client_protocol::other", "fuigo_shell::auth"]);
+        assert_eq!(
+            seen,
+            vec!["agent_client_protocol::other", "fuigo_shell::auth"]
+        );
     }
 }

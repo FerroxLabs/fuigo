@@ -57,8 +57,14 @@ fn preconditions(am: &AuthManager, base_url: &str) {
         !crate::auth::session_delivery::session_may_reach(base_url),
         "fixture: the loopback embeddings destination must be refused"
     );
-    assert!(am.is_session_bearer(TOKEN), "fixture: TOKEN is the manager's session bearer");
-    assert!(!am.is_session_bearer(BYOK), "fixture: BYOK is not a session bearer");
+    assert!(
+        am.is_session_bearer(TOKEN),
+        "fixture: TOKEN is the manager's session bearer"
+    );
+    assert!(
+        !am.is_session_bearer(BYOK),
+        "fixture: BYOK is not a session bearer"
+    );
 }
 
 /// Memory on, API embeddings on, a flat root holding a `MEMORY.md` the startup reindex chunks and embeds.
@@ -113,7 +119,9 @@ async fn spawn_session(
     let persistence = PersistenceHandle::from_sender_for_test(persistence_tx);
 
     let cwd_abs = fuigo_paths::AbsPathBuf::new(cwd.to_path_buf()).expect("absolute cwd");
-    let fs = Arc::new(fuigo_workspace::file_system::LocalFs::new(cwd.to_path_buf()));
+    let fs = Arc::new(fuigo_workspace::file_system::LocalFs::new(
+        cwd.to_path_buf(),
+    ));
     let terminal = Arc::new(crate::terminal::TerminalRunner::new(
         Arc::new(gateway.clone()),
         session_info.id.clone(),
@@ -283,7 +291,9 @@ async fn spawn_session(
 }
 
 fn embeddings(seen: &[Observed]) -> Vec<&Observed> {
-    seen.iter().filter(|o| o.target.ends_with("/embeddings")).collect()
+    seen.iter()
+        .filter(|o| o.target.ends_with("/embeddings"))
+        .collect()
 }
 
 /// Wait until the startup reindex has written chunks for `root` (the step right before it embeds).
@@ -400,9 +410,10 @@ fn p42_spawn_memory_reindex_withholds_session_token_from_refused_embeddings() {
         .await;
         let embeds = embeddings(&seen);
         assert!(
-            !embeds
-                .iter()
-                .any(|o| o.authorization.as_deref().is_some_and(|a| a.contains(TOKEN))),
+            !embeds.iter().any(|o| o
+                .authorization
+                .as_deref()
+                .is_some_and(|a| a.contains(TOKEN))),
             "the session token reached a refused /embeddings destination via the spawn-time memory reindex: {embeds:?}"
         );
     });
@@ -411,11 +422,17 @@ fn p42_spawn_memory_reindex_withholds_session_token_from_refused_embeddings() {
 /// The open descriptors of this process that point at one of `paths`.
 #[cfg(target_os = "linux")]
 fn open_fds_to(paths: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
-    let wanted: Vec<std::path::PathBuf> =
-        paths.iter().map(|p| dunce::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
+    let wanted: Vec<std::path::PathBuf> = paths
+        .iter()
+        .map(|p| dunce::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
     std::fs::read_dir("/proc/self/fd")
         .map(|entries| {
-            entries.flatten().filter_map(|entry| std::fs::read_link(entry.path()).ok()).filter(|t| wanted.contains(t)).collect()
+            entries
+                .flatten()
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .filter(|t| wanted.contains(t))
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -450,11 +467,23 @@ fn f5b5_a_freed_session_writer_leaves_no_session_handle_open() {
             cwd: cwd.path().to_string_lossy().into_owned(),
         });
         let files: Vec<std::path::PathBuf> =
-            ["events.jsonl", "turn_owner.lock", "session_writer.lock"].iter().map(|name| dir.join(name)).collect();
+            ["events.jsonl", "turn_owner.lock", "session_writer.lock"]
+                .iter()
+                .map(|name| dir.join(name))
+                .collect();
         let live = open_fds_to(&files);
-        assert!(live.len() >= 2, "fixture: the live session holds its lock handles open: {live:?}");
-        let Spawned { _handle: handle, _thread: thread, .. } = session;
-        let _ = handle.cmd_tx.send(crate::session::SessionCommand::Shutdown(crate::session::ShutdownKind::Graceful));
+        assert!(
+            live.len() >= 2,
+            "fixture: the live session holds its lock handles open: {live:?}"
+        );
+        let Spawned {
+            _handle: handle,
+            _thread: thread,
+            ..
+        } = session;
+        let _ = handle.cmd_tx.send(crate::session::SessionCommand::Shutdown(
+            crate::session::ShutdownKind::Graceful,
+        ));
         drop(handle);
         let (reached, open) = tokio::task::spawn_blocking(move || {
             let reached = gate.wait_reached(std::time::Duration::from_secs(60));
@@ -464,8 +493,14 @@ fn f5b5_a_freed_session_writer_leaves_no_session_handle_open() {
         })
         .await
         .unwrap();
-        assert!(reached, "the session's writer was never freed after its shutdown");
-        assert!(open.is_empty(), "a handle of the session was still open when its writer was freed: {open:?}");
+        assert!(
+            reached,
+            "the session's writer was never freed after its shutdown"
+        );
+        assert!(
+            open.is_empty(),
+            "a handle of the session was still open when its writer was freed: {open:?}"
+        );
         drop(thread);
     });
 }

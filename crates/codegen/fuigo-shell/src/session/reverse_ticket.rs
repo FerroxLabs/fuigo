@@ -21,7 +21,8 @@ use crate::session::quiesce;
 pub(crate) const TICKET_META_KEY: &str = "fuigo/internal/ticket";
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-static TABLE: LazyLock<Mutex<HashMap<u64, Arc<Ticket>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static TABLE: LazyLock<Mutex<HashMap<u64, Arc<Ticket>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The ticket was cancelled (its invoker gave up) or the park it waited under was cancelled by a new prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +45,9 @@ pub(crate) struct Ticket {
 }
 
 fn table() -> std::sync::MutexGuard<'static, HashMap<u64, Arc<Ticket>>> {
-    TABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    TABLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Owns a ticket for the life of one reverse call; dropping it removes the ticket and cancels the held request.
@@ -106,7 +109,10 @@ impl Ticket {
                 return Err(Cancelled);
             }
             {
-                let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let parked = quiesce::is_parked(&self.session);
                 if parked && state.generation.is_none() {
                     let root = quiesce::root_of(&self.session);
@@ -121,7 +127,9 @@ impl Ticket {
                 if !parked || state.in_load_window {
                     // Grok r4 #6: a call created while its tree was parked (outside a load window) belongs to
                     // the park even if an unpark won before the first check here: it goes out marked released.
-                    return Ok(state.released || (state.generation.is_some() && !state.in_load_window));
+                    return Ok(
+                        state.released || (state.generation.is_some() && !state.in_load_window)
+                    );
                 }
                 state.released = true;
             }

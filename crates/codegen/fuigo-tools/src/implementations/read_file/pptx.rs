@@ -47,6 +47,7 @@ fn extract_pptx_text_with_budget(bytes: &[u8], mut budget: u64) -> Result<String
     let mut slide_numbers: Vec<u32> = archive
         .file_names()
         .filter_map(|name| {
+            let name = name.ok()?;
             name.strip_prefix("ppt/slides/slide")?
                 .strip_suffix(".xml")?
                 .parse()
@@ -69,7 +70,7 @@ fn extract_pptx_text_with_budget(bytes: &[u8], mut budget: u64) -> Result<String
             &format!("ppt/slides/slide{number}.xml"),
             &mut budget,
         )?
-            .ok_or_else(|| format!("Failed to read slide {number}"))?;
+        .ok_or_else(|| format!("Failed to read slide {number}"))?;
         let slide_text = extract_drawingml_text(&slide_xml)
             .map_err(|e| format!("Error parsing slide {number}: {e}"))?;
 
@@ -142,7 +143,9 @@ fn extract_drawingml_text(xml: &str) -> Result<String, String> {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"t" => in_text_run = true,
             Ok(Event::Text(e)) if in_text_run => {
-                let content = e.xml_content().map_err(|e| e.to_string())?;
+                let content = e
+                    .xml_content(quick_xml::XmlVersion::Implicit1_0)
+                    .map_err(|e| e.to_string())?;
                 text.push_str(&content);
             }
             // quick-xml ≥0.37 emits `&amp;` / `&#233;` as separate events
@@ -272,7 +275,9 @@ mod tests {
         let err = extract_pptx_text_with_budget(&bytes, 4096).unwrap_err();
         assert!(err.contains("total decompressed size limit"), "{err}");
 
-        let names: Vec<String> = (1..=MAX_SLIDES + 1).map(|n| format!("ppt/slides/slide{n}.xml")).collect();
+        let names: Vec<String> = (1..=MAX_SLIDES + 1)
+            .map(|n| format!("ppt/slides/slide{n}.xml"))
+            .collect();
         let entries: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "<p:sld/>")).collect();
         let err = extract_pptx_text_from_bytes(&build_zip(&entries)).unwrap_err();
         assert!(err.contains("more than"), "{err}");

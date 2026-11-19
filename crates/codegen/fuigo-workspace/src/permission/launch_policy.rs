@@ -18,8 +18,12 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use serde::Deserialize;
 use sha2::Digest as _;
 
-use crate::permission::rules::{find_first_unescaped, find_last_unescaped, parse_permission_rule, tool_name_to_filter};
-use crate::permission::types::{PatternMode, PermissionRule, RequirementSource, RuleAction, ToolFilter};
+use crate::permission::rules::{
+    find_first_unescaped, find_last_unescaped, parse_permission_rule, tool_name_to_filter,
+};
+use crate::permission::types::{
+    PatternMode, PermissionRule, RequirementSource, RuleAction, ToolFilter,
+};
 
 /// The process policy file (absolute path).
 pub const ENV_PATH: &str = "FUIGO_POLICY_PATH";
@@ -47,7 +51,12 @@ pub struct PolicyError {
 
 impl PolicyError {
     pub fn new(code: &'static str, path: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { code, path: path.into(), line: None, message: message.into() }
+        Self {
+            code,
+            path: path.into(),
+            line: None,
+            message: message.into(),
+        }
     }
 
     fn at(mut self, line: Option<usize>) -> Self {
@@ -114,7 +123,11 @@ impl LaunchPolicy {
     /// `(deny, ask, allow)` rule counts.
     pub fn counts(&self) -> (usize, usize, usize) {
         let count = |action| self.rules.iter().filter(|r| r.action == action).count();
-        (count(RuleAction::Deny), count(RuleAction::Ask), count(RuleAction::Allow))
+        (
+            count(RuleAction::Deny),
+            count(RuleAction::Ask),
+            count(RuleAction::Allow),
+        )
     }
 
     pub fn source(&self, scope: LaunchScope) -> RequirementSource {
@@ -130,20 +143,30 @@ impl LaunchPolicy {
         if path == self.path {
             return true;
         }
-        let Some(identity) = &self.identity else { return false };
+        let Some(identity) = &self.identity else {
+            return false;
+        };
         let physical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         same_file::Handle::from_path(&physical).ok().as_ref() == Some(identity)
     }
 
     /// The binding key a session governed by this policy carries.
     pub fn binding(&self) -> PolicyBinding {
-        PolicyBinding { path: self.path.to_string_lossy().into_owned(), sha256: self.sha256.clone() }
+        PolicyBinding {
+            path: self.path.to_string_lossy().into_owned(),
+            sha256: self.sha256.clone(),
+        }
     }
 
     /// Build a policy without a file (tests).
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(path: &str, rules: Vec<PermissionRule>) -> Arc<Self> {
-        Arc::new(Self { path: PathBuf::from(path), sha256: "0".repeat(64), identity: None, rules })
+        Arc::new(Self {
+            path: PathBuf::from(path),
+            sha256: "0".repeat(64),
+            identity: None,
+            rules,
+        })
     }
 }
 
@@ -163,7 +186,8 @@ static PINS: Mutex<Vec<Arc<LaunchPolicy>>> = Mutex::new(Vec::new());
 /// Set on the first pin / binding, so the unset path never takes a lock.
 static ANY_PINS: AtomicBool = AtomicBool::new(false);
 static ANY_BINDINGS: AtomicBool = AtomicBool::new(false);
-static BINDINGS: LazyLock<Mutex<HashMap<String, PolicyBinding>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static BINDINGS: LazyLock<Mutex<HashMap<String, PolicyBinding>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The process policy, when the launcher set one.
 pub fn process() -> Option<&'static Arc<LaunchPolicy>> {
@@ -207,11 +231,14 @@ pub fn install_process(policy: Arc<LaunchPolicy>) {
 }
 
 fn pins() -> std::sync::MutexGuard<'static, Vec<Arc<LaunchPolicy>>> {
-    PINS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    PINS.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn bindings() -> std::sync::MutexGuard<'static, HashMap<String, PolicyBinding>> {
-    BINDINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    BINDINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Whether any policy file is pinned (one atomic load; `false` on the unset path).
@@ -244,7 +271,9 @@ pub fn is_pinned_policy_file(path: &Path) -> bool {
 static REGISTER: Mutex<()> = Mutex::new(());
 
 fn register_lock() -> std::sync::MutexGuard<'static, ()> {
-    REGISTER.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    REGISTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The binding check for `session_id`: its existing binding (if any) must equal `wanted`; `None` against an existing
@@ -262,7 +291,10 @@ fn check_and_bind(session_id: &str, wanted: Option<&PolicyBinding>) -> Result<()
         (Some(existing), Some(wanted)) => Err(PolicyError::new(
             "session_policy_conflict",
             wanted.path.clone(),
-            format!("this session is governed by {} with a different policy", existing.path),
+            format!(
+                "this session is governed by {} with a different policy",
+                existing.path
+            ),
         )),
         (None, Some(wanted)) => {
             map.insert(session_id.to_owned(), wanted.clone());
@@ -287,7 +319,10 @@ pub struct Registration {
 
 /// Begin registering an actor for `session_id` that runs under `binding` (`None`: no session policy). The id's binding
 /// must be absent or equal; a governed actor binds an unbound id. Hold the result until the actor is resident.
-pub fn begin_registration(session_id: &str, binding: Option<&PolicyBinding>) -> Result<Registration, PolicyError> {
+pub fn begin_registration(
+    session_id: &str,
+    binding: Option<&PolicyBinding>,
+) -> Result<Registration, PolicyError> {
     let guard = register_lock();
     check_and_bind(session_id, binding)?;
     Ok(Registration { _guard: guard })
@@ -316,7 +351,10 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Verify `path` against `expected_sha` and pin it. A file already pinned (by path or identity) answers from the pin:
 /// equal hash → the pinned snapshot (bytes not parsed again); different → `hash_mismatch`.
-pub fn verify_and_pin(path: &str, expected_sha: Option<&str>) -> Result<Arc<LaunchPolicy>, PolicyError> {
+pub fn verify_and_pin(
+    path: &str,
+    expected_sha: Option<&str>,
+) -> Result<Arc<LaunchPolicy>, PolicyError> {
     check_absolute(path)?;
     let Some(expected) = expected_sha.map(str::trim) else {
         return Err(PolicyError::new(
@@ -326,7 +364,11 @@ pub fn verify_and_pin(path: &str, expected_sha: Option<&str>) -> Result<Arc<Laun
         ));
     };
     if !valid_sha256(expected) {
-        return Err(PolicyError::new("hash_missing", path, "the policy sha256 must be 64 hex digits"));
+        return Err(PolicyError::new(
+            "hash_missing",
+            path,
+            "the policy sha256 must be 64 hex digits",
+        ));
     }
     let expected = expected.to_ascii_lowercase();
     let pin_answer = |pin: &Arc<LaunchPolicy>| {
@@ -344,9 +386,12 @@ pub fn verify_and_pin(path: &str, expected_sha: Option<&str>) -> Result<Arc<Laun
         return pin_answer(pin);
     }
     let (bytes, identity) = read_policy_bytes(path)?;
-    let by_identity = identity
-        .as_ref()
-        .and_then(|identity| pins().iter().find(|pin| pin.identity.as_ref() == Some(identity)).cloned());
+    let by_identity = identity.as_ref().and_then(|identity| {
+        pins()
+            .iter()
+            .find(|pin| pin.identity.as_ref() == Some(identity))
+            .cloned()
+    });
     if let Some(pin) = by_identity {
         // Another name for a pinned file: the pinned snapshot (never re-parsed), bound by the name and hash this caller
         // asserted, and kept so the same name and hash answer from it again.
@@ -375,7 +420,12 @@ pub fn verify_and_pin(path: &str, expected_sha: Option<&str>) -> Result<Arc<Laun
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| PolicyError::new("not_utf8", path, "the policy file is not UTF-8"))?;
     let rules = decode(text, path)?;
-    let policy = Arc::new(LaunchPolicy { path: PathBuf::from(path), sha256: actual, identity, rules });
+    let policy = Arc::new(LaunchPolicy {
+        path: PathBuf::from(path),
+        sha256: actual,
+        identity,
+        rules,
+    });
     let mut pins = pins();
     // A concurrent pin of the same file wins; answer from it.
     if let Some(pin) = pins.iter().find(|pin| pin.path == policy.path) {
@@ -398,7 +448,11 @@ pub fn check_file(path: &str) -> Result<(Vec<PermissionRule>, String), PolicyErr
 
 fn check_absolute(path: &str) -> Result<(), PolicyError> {
     if path.is_empty() || !Path::new(path).is_absolute() {
-        return Err(PolicyError::new("not_absolute", path, "the policy path must be absolute"));
+        return Err(PolicyError::new(
+            "not_absolute",
+            path,
+            "the policy path must be absolute",
+        ));
     }
     Ok(())
 }
@@ -413,8 +467,14 @@ fn open_error(path: &str, err: &std::io::Error) -> PolicyError {
         return PolicyError::new("symlink", path, "the policy path is a symlink");
     }
     match err.kind() {
-        std::io::ErrorKind::NotFound => PolicyError::new("not_found", path, "the policy file does not exist"),
-        _ => PolicyError::new("unreadable", path, format!("the policy file cannot be opened: {err}")),
+        std::io::ErrorKind::NotFound => {
+            PolicyError::new("not_found", path, "the policy file does not exist")
+        }
+        _ => PolicyError::new(
+            "unreadable",
+            path,
+            format!("the policy file cannot be opened: {err}"),
+        ),
     }
 }
 
@@ -439,11 +499,19 @@ fn open_no_follow(path: &str) -> Result<std::fs::File, PolicyError> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .map_err(|err| open_error(path, &err))?;
-    let metadata = file
-        .metadata()
-        .map_err(|err| PolicyError::new("unreadable", path, format!("the policy file cannot be inspected: {err}")))?;
+    let metadata = file.metadata().map_err(|err| {
+        PolicyError::new(
+            "unreadable",
+            path,
+            format!("the policy file cannot be inspected: {err}"),
+        )
+    })?;
     if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(PolicyError::new("symlink", path, "the policy path is a reparse point"));
+        return Err(PolicyError::new(
+            "symlink",
+            path,
+            "the policy path is a reparse point",
+        ));
     }
     Ok(file)
 }
@@ -456,17 +524,31 @@ fn open_no_follow(path: &str) -> Result<std::fs::File, PolicyError> {
 /// Open without following the final component, check it is a regular file, read at most [`MAX_BYTES`].
 fn read_policy_bytes(path: &str) -> Result<(Vec<u8>, Option<same_file::Handle>), PolicyError> {
     let file = open_no_follow(path)?;
-    let metadata = file
-        .metadata()
-        .map_err(|err| PolicyError::new("unreadable", path, format!("the policy file cannot be inspected: {err}")))?;
+    let metadata = file.metadata().map_err(|err| {
+        PolicyError::new(
+            "unreadable",
+            path,
+            format!("the policy file cannot be inspected: {err}"),
+        )
+    })?;
     if !metadata.is_file() {
-        return Err(PolicyError::new("not_regular_file", path, "the policy path is not a regular file"));
+        return Err(PolicyError::new(
+            "not_regular_file",
+            path,
+            "the policy path is not a regular file",
+        ));
     }
     let mut bytes = Vec::new();
     (&file)
         .take(MAX_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|err| PolicyError::new("unreadable", path, format!("the policy file cannot be read: {err}")))?;
+        .map_err(|err| {
+            PolicyError::new(
+                "unreadable",
+                path,
+                format!("the policy file cannot be read: {err}"),
+            )
+        })?;
     if bytes.len() as u64 > MAX_BYTES {
         return Err(PolicyError::new(
             "too_large",
@@ -515,7 +597,11 @@ struct StrictRule {
 }
 
 fn line_of(text: &str, offset: usize) -> usize {
-    text.as_bytes()[..offset.min(text.len())].iter().filter(|b| **b == b'\n').count() + 1
+    text.as_bytes()[..offset.min(text.len())]
+        .iter()
+        .filter(|b| **b == b'\n')
+        .count()
+        + 1
 }
 
 /// Decode a launch policy strictly: only `[permission]` with `allow`/`deny`/`ask`/`rules`, every rule fully consumed,
@@ -529,7 +615,11 @@ pub fn decode(text: &str, path: &str) -> Result<Vec<PermissionRule>, PolicyError
     let file: StrictFile = toml::from_str(text).map_err(|err| {
         let line = err.span().map(|span| line_of(text, span.start));
         let message = err.message().to_owned();
-        let code = if message.contains("unknown field") { "unknown_key" } else { "bad_rule" };
+        let code = if message.contains("unknown field") {
+            "unknown_key"
+        } else {
+            "bad_rule"
+        };
         PolicyError::new(code, path, message).at(line)
     })?;
     let section = file.permission.unwrap_or_default();
@@ -541,23 +631,29 @@ pub fn decode(text: &str, path: &str) -> Result<Vec<PermissionRule>, PolicyError
     ] {
         for entry in entries {
             let line = Some(line_of(text, entry.span().start));
-            let rule = decode_compact(entry.get_ref(), action).map_err(|(code, message)| {
-                PolicyError::new(code, path, message).at(line)
-            })?;
+            let rule = decode_compact(entry.get_ref(), action)
+                .map_err(|(code, message)| PolicyError::new(code, path, message).at(line))?;
             rules.push(rule);
         }
     }
     for entry in &section.rules {
         let line = Some(line_of(text, entry.span().start));
-        let StrictRule { action, tool, pattern, pattern_mode } = entry.get_ref();
+        let StrictRule {
+            action,
+            tool,
+            pattern,
+            pattern_mode,
+        } = entry.get_ref();
         let rule = PermissionRule {
             action: *action,
             tool: tool.clone().unwrap_or_default(),
             pattern: pattern.clone(),
             pattern_mode: pattern_mode.unwrap_or_default(),
         };
-        check_domain_has_pattern(&rule).map_err(|message| PolicyError::new("bad_rule", path, message).at(line))?;
-        check_pattern(&rule).map_err(|message| PolicyError::new("bad_pattern", path, message).at(line))?;
+        check_domain_has_pattern(&rule)
+            .map_err(|message| PolicyError::new("bad_rule", path, message).at(line))?;
+        check_pattern(&rule)
+            .map_err(|message| PolicyError::new("bad_pattern", path, message).at(line))?;
         rules.push(rule);
     }
     if rules.is_empty() {
@@ -608,7 +704,9 @@ fn mcp_rest_ok(rest: &str) -> bool {
         return true;
     }
     let ok_name = |s: &str| {
-        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
     };
     match rest.split_once("__") {
         None => ok_name(rest),
@@ -618,7 +716,8 @@ fn mcp_rest_ok(rest: &str) -> bool {
 
 /// A domain rule names a host: an empty one (`WebFetch(domain:)`) would otherwise cover every domain.
 fn check_domain_has_pattern(rule: &PermissionRule) -> Result<(), String> {
-    if rule.pattern_mode == PatternMode::Domain && rule.pattern.as_deref().is_none_or(str::is_empty) {
+    if rule.pattern_mode == PatternMode::Domain && rule.pattern.as_deref().is_none_or(str::is_empty)
+    {
         return Err("a domain rule needs a host, such as `domain:example.com`".to_owned());
     }
     Ok(())
@@ -626,7 +725,9 @@ fn check_domain_has_pattern(rule: &PermissionRule) -> Result<(), String> {
 
 /// Every glob must build; a domain pattern must be a bare host.
 fn check_pattern(rule: &PermissionRule) -> Result<(), String> {
-    let Some(pattern) = rule.pattern.as_deref() else { return Ok(()) };
+    let Some(pattern) = rule.pattern.as_deref() else {
+        return Ok(());
+    };
     match rule.pattern_mode {
         PatternMode::Glob => glob::Pattern::new(pattern)
             .map(|_| ())
@@ -639,11 +740,15 @@ fn check_domain(raw: &str) -> Result<(), String> {
     use fuigo_tools::implementations::fuigo_build::web_fetch::domain::normalize_domain;
     let domain = normalize_domain(raw);
     if let Some(rest) = domain.strip_prefix("*.") {
-        return Err(format!("invalid domain `{raw}`: subdomains are already covered, write `{rest}`"));
+        return Err(format!(
+            "invalid domain `{raw}`: subdomains are already covered, write `{rest}`"
+        ));
     }
     let forbidden = |c: char| matches!(c, '/' | '@' | ':' | '*') || c.is_whitespace();
     if domain.is_empty() || domain.contains(forbidden) || url::Host::parse(&domain).is_err() {
-        return Err(format!("invalid domain `{raw}`: expected a bare host such as `example.com`"));
+        return Err(format!(
+            "invalid domain `{raw}`: expected a bare host such as `example.com`"
+        ));
     }
     Ok(())
 }
@@ -662,17 +767,25 @@ pub struct SessionPolicyClaim {
 impl SessionPolicyClaim {
     /// Decode the claim. An absent key is unset; a key present with any value but a string (`null`, a number, an
     /// object) is `bad_claim`, never silently unset.
-    pub fn from_meta(meta: Option<&serde_json::Map<String, serde_json::Value>>) -> Result<Self, PolicyError> {
+    pub fn from_meta(
+        meta: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Self, PolicyError> {
         let get = |key: &str| match meta.and_then(|m| m.get(key)) {
             None => Ok(None),
             Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
             Some(other) => Err(PolicyError::new(
                 "bad_claim",
                 "",
-                format!("_meta[\"{key}\"] must be a string, not {}", json_kind(other)),
+                format!(
+                    "_meta[\"{key}\"] must be a string, not {}",
+                    json_kind(other)
+                ),
             )),
         };
-        Ok(Self { path: get(META_PATH)?, sha256: get(META_SHA256)? })
+        Ok(Self {
+            path: get(META_PATH)?,
+            sha256: get(META_SHA256)?,
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -682,7 +795,12 @@ impl SessionPolicyClaim {
     /// Whether this claim names the binding exactly.
     fn matches(&self, binding: &PolicyBinding) -> bool {
         self.path.as_deref() == Some(binding.path.as_str())
-            && self.sha256.as_deref().map(str::to_ascii_lowercase).as_deref() == Some(binding.sha256.as_str())
+            && self
+                .sha256
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+                == Some(binding.sha256.as_str())
     }
 }
 
@@ -734,7 +852,10 @@ pub fn resolve_session_claim(
             return Err(PolicyError::new(
                 "session_policy_conflict",
                 path,
-                format!("this session is governed by {} with a different policy", required.path),
+                format!(
+                    "this session is governed by {} with a different policy",
+                    required.path
+                ),
             ));
         }
     }
@@ -752,7 +873,11 @@ pub fn check_resident_claim(
         Some(binding) if claim.matches(binding) => Ok(()),
         _ => Err(PolicyError::new(
             "session_policy_conflict",
-            claim.path.clone().or_else(|| installed.map(|b| b.path.clone())).unwrap_or_default(),
+            claim
+                .path
+                .clone()
+                .or_else(|| installed.map(|b| b.path.clone()))
+                .unwrap_or_default(),
             "the loaded session runs under a different launch policy",
         )),
     }

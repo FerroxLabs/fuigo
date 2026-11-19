@@ -15,7 +15,9 @@ impl std::fmt::Display for ManagedPolicyRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // Fixed sentence per category: no path, signature or claim value.
-            Self::Compromised(reason) => write!(f, "{MANAGED_POLICY_MISSING_MSG}\nReason: {reason}."),
+            Self::Compromised(reason) => {
+                write!(f, "{MANAGED_POLICY_MISSING_MSG}\nReason: {reason}.")
+            }
             Self::Busy => f.write_str(
                 "Managed policy is being updated by another fuigo process or a \
                  background policy sync in this one, and could not be verified in \

@@ -13,13 +13,20 @@ pub(crate) struct AdminSeam {
 /// An admin directory whose `requirements.toml` does not parse, and no MDM payload: a broken file with no validated copy.
 pub(crate) fn broken_file() -> AdminSeam {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("requirements.toml"), "[[ this is not toml\n").unwrap();
+    std::fs::write(
+        dir.path().join("requirements.toml"),
+        "[[ this is not toml\n",
+    )
+    .unwrap();
     seam(dir, Ok(None))
 }
 
 /// An empty admin directory and a forced MDM payload that does not decode.
 pub(crate) fn undecodable_mdm() -> AdminSeam {
-    seam(tempfile::tempdir().unwrap(), Err("the forced MDM requirements value is not valid base64".to_owned()))
+    seam(
+        tempfile::tempdir().unwrap(),
+        Err("the forced MDM requirements value is not valid base64".to_owned()),
+    )
 }
 
 /// An empty admin directory and a decoded MDM payload whose `[[version_overrides]]` are invalid.
@@ -39,5 +46,9 @@ pub(crate) fn healthy() -> AdminSeam {
 fn seam(dir: tempfile::TempDir, mdm: Result<Option<toml::Value>, String>) -> AdminSeam {
     let root = admin_root_override::set(dir.path().to_path_buf());
     let mdm = mdm_override::set(mdm);
-    AdminSeam { _dir: dir, _root: root, _mdm: mdm }
+    AdminSeam {
+        _dir: dir,
+        _root: root,
+        _mdm: mdm,
+    }
 }

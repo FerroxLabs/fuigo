@@ -678,16 +678,24 @@ mod tests {
             () = tokio::time::sleep(Duration::from_millis(10)) => {}
         }
         client.write_all(tail).await.unwrap();
-        write_message(&mut client, &ClientMessage::Ping).await.unwrap();
+        write_message(&mut client, &ClientMessage::Ping)
+            .await
+            .unwrap();
 
-        let got = tokio::time::timeout(Duration::from_secs(5), reader.read_message::<ClientMessage>())
-            .await;
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            reader.read_message::<ClientMessage>(),
+        )
+        .await;
         assert!(
             matches!(&got, Ok(Ok(ClientMessage::Acp { payload })) if payload.contains(r#""method":"a""#)),
             "got {got:?}"
         );
-        let got = tokio::time::timeout(Duration::from_secs(5), reader.read_message::<ClientMessage>())
-            .await;
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            reader.read_message::<ClientMessage>(),
+        )
+        .await;
         assert!(matches!(got, Ok(Ok(ClientMessage::Ping))), "got {got:?}");
     }
 
@@ -785,7 +793,9 @@ mod tests {
         let (mut client, mut server) = duplex(64 * 1024);
         let expected = payload.clone();
         let writer = tokio::spawn(async move { write_frame(&mut client, &payload).await });
-        let got = read_frame(&mut server).await.expect("a 5 MiB frame is within the cap");
+        let got = read_frame(&mut server)
+            .await
+            .expect("a 5 MiB frame is within the cap");
         writer.await.unwrap().expect("the write is accepted");
         assert_eq!(got.len(), expected.len());
         assert!(got == expected);

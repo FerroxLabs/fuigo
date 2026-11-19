@@ -300,5 +300,8 @@ fn p145_a_loose_turn_owner_lock_is_tightened_on_open() {
     std::fs::write(&path, b"").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     let _guard = try_recovery_lock(dir.path());
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }

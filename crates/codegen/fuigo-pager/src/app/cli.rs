@@ -1329,7 +1329,10 @@ mod tests {
         assert_eq!(args(Some(GIVEN)).get_secret(), GIVEN);
         assert!(recorded(GIVEN), "a --secret value was not recorded");
         let generated = args(None).get_secret();
-        assert!(recorded(&generated), "the generated secret was not recorded");
+        assert!(
+            recorded(&generated),
+            "the generated secret was not recorded"
+        );
     }
 
     /// Audit S10-F2: the auto-generated serve secret carries at least 128 bits (32 hex characters), not 48.
@@ -1472,6 +1475,7 @@ mod tests {
             bare.command,
             Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
                 json: false,
+                report: false,
                 command: None,
             }))
         ));
@@ -1481,9 +1485,24 @@ mod tests {
             json.command,
             Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
                 json: true,
+                report: false,
                 command: None,
             }))
         ));
+        let report = PagerArgs::try_parse_from(["fuigo", "doctor", "--report"])
+            .expect("doctor --report parses");
+        assert!(matches!(
+            report.command,
+            Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
+                json: false,
+                report: true,
+                command: None,
+            }))
+        ));
+        assert!(
+            PagerArgs::try_parse_from(["fuigo", "doctor", "--report", "--json"]).is_err(),
+            "--report and --json are different outputs"
+        );
         for id in [
             "terminal.ssh-wrap",
             "tmux-clipboard",
@@ -1493,14 +1512,15 @@ mod tests {
             let fix = PagerArgs::try_parse_from(["fuigo", "doctor", "fix", id, "--yes"])
                 .expect("doctor fix parses");
             assert!(matches!(
-                fix.command,
-                Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
-                    json: false,
-                    command: Some(crate::doctor_cmd::DoctorCommand::Fix(
-                        crate::doctor_cmd::FixArgs { id: Some(ref parsed), yes: true }
-                    )),
-                })) if parsed == id
-            ));
+                            fix.command,
+                            Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
+                                json: false,
+            report: false,
+                                                    command: Some(crate::doctor_cmd::DoctorCommand::Fix(
+                                    crate::doctor_cmd::FixArgs { id: Some(ref parsed), yes: true }
+                                )),
+                            })) if parsed == id
+                        ));
         }
         let list = PagerArgs::try_parse_from(["fuigo", "doctor", "fix"])
             .expect("doctor fix without an ID lists applicable fixes");
@@ -1508,6 +1528,7 @@ mod tests {
             list.command,
             Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
                 json: false,
+                report: false,
                 command: Some(crate::doctor_cmd::DoctorCommand::Fix(
                     crate::doctor_cmd::FixArgs {
                         id: None,
@@ -1881,7 +1902,15 @@ mod tests {
         }
         assert!(PagerArgs::try_parse_from(["fuigo", "login"]).is_ok());
         assert!(PagerArgs::try_parse_from(["fuigo", "login", "--status"]).is_ok());
-        for target in ["flux", "chatgpt", "xai", "grok", "openai", "anthropic", "sso"] {
+        for target in [
+            "flux",
+            "chatgpt",
+            "xai",
+            "grok",
+            "openai",
+            "anthropic",
+            "sso",
+        ] {
             assert!(
                 PagerArgs::try_parse_from(["fuigo", "login", "--provider", target]).is_ok(),
                 "{target}"

@@ -192,7 +192,11 @@ fn config_has_include(repo: &git2::Repository, entries: &[(String, String)]) -> 
     });
     let in_files = ["config", "config.worktree"].iter().any(|file| {
         std::fs::read(repo.path().join(file))
-            .map(|bytes| String::from_utf8_lossy(&bytes).to_ascii_lowercase().contains("include"))
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .to_ascii_lowercase()
+                    .contains("include")
+            })
             .unwrap_or(false)
     });
     named || in_files
@@ -339,7 +343,14 @@ fn git_cli_local_config_entries(
         cmd.env_remove(name);
     }
     let output = cmd
-        .args(["config", "--list", "--show-scope", "--show-origin", "--includes", "-z"])
+        .args([
+            "config",
+            "--list",
+            "--show-scope",
+            "--show-origin",
+            "--includes",
+            "-z",
+        ])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
@@ -376,10 +387,13 @@ fn origin_is_in_repository(origin: &str, repo: &git2::Repository) -> bool {
         return true;
     }
     let resolved = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    [Some(repo.path()), repo.workdir()].into_iter().flatten().any(|root| {
-        let root_resolved = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        path.starts_with(root) || resolved.starts_with(&root_resolved)
-    })
+    [Some(repo.path()), repo.workdir()]
+        .into_iter()
+        .flatten()
+        .any(|root| {
+            let root_resolved = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            path.starts_with(root) || resolved.starts_with(&root_resolved)
+        })
 }
 
 /// One repository's local/worktree config entries as libgit2 reads them. `None` on read errors.
@@ -412,14 +426,14 @@ fn libgit2_local_config_entries(repo: &git2::Repository) -> Option<Vec<(String, 
             _ => continue,
         }
         // git2 yields None for non-UTF-8. Dropping that entry would hide a filter Git can still run.
-        let name = entry.name()?;
+        let name = entry.name().ok()?;
         // libgit2 does not evaluate `includeIf.hasconfig:remote.*.url`.
         if local_includeif_unsupported(name) {
             return None;
         }
         // A bare key is boolean true. `value()` panics when no value is defined.
         let value = if entry.has_value() {
-            let Some(value) = entry.value() else {
+            let Some(value) = entry.value().ok() else {
                 if filter_command_driver(name).is_some() {
                     return None;
                 }
@@ -658,7 +672,11 @@ mod tests {
     /// `sample` is one.
     #[test]
     fn u35_g12_sample_hooks_are_skipped_in_any_case() {
-        for name in ["pre-commit.sample", "pre-commit.SAMPLE", "Post-Index-Change.Sample"] {
+        for name in [
+            "pre-commit.sample",
+            "pre-commit.SAMPLE",
+            "Post-Index-Change.Sample",
+        ] {
             assert!(is_sample_hook(name), "{name}");
         }
         for name in ["pre-commit", "sample-hook", "pre-commit.samples"] {
@@ -677,7 +695,11 @@ mod tests {
                 std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        assert_eq!(hooks_entry(&repo), Some(Vec::new()), "samples in any case are no hooks");
+        assert_eq!(
+            hooks_entry(&repo),
+            Some(Vec::new()),
+            "samples in any case are no hooks"
+        );
     }
 
     /// u35 g12 (Fable r11 Low): on Windows, Git for Windows runs `post-index-change.exe` for `git status`, so the
@@ -693,6 +715,9 @@ mod tests {
         assert_eq!(hooks_entry(&repo), Some(Vec::new()));
         std::fs::write(hooks.join("Post-Index-Change.EXE"), "MZ").unwrap();
         let entries = hooks_entry(&repo).expect("readable");
-        assert!(entries.iter().any(|(name, _)| name == "core.hookspath"), "{entries:?}");
+        assert!(
+            entries.iter().any(|(name, _)| name == "core.hookspath"),
+            "{entries:?}"
+        );
     }
 }

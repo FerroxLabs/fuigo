@@ -107,7 +107,10 @@ impl WrapImageGate {
 
     fn admit(&mut self) -> Option<WrapImageTicket> {
         use std::sync::atomic::Ordering;
-        if self.last_served.is_some_and(|t| t.elapsed() < self.min_interval) {
+        if self
+            .last_served
+            .is_some_and(|t| t.elapsed() < self.min_interval)
+        {
             return None;
         }
         if self.in_flight.swap(true, Ordering::AcqRel) {
@@ -731,12 +734,22 @@ mod tests {
         });
         let one = crate::wrap_clipboard_image::request_osc_bytes();
         let flood: Vec<u8> = one.iter().copied().cycle().take(one.len() * 50).collect();
-        assert!(filter.feed(&flood).is_empty(), "every request is still consumed");
-        assert_eq!(tickets.borrow().len(), 1, "one read in flight, the rest dropped");
+        assert!(
+            filter.feed(&flood).is_empty(),
+            "every request is still consumed"
+        );
+        assert_eq!(
+            tickets.borrow().len(),
+            1,
+            "one read in flight, the rest dropped"
+        );
         // Finished, but inside the minimum interval: still dropped.
         tickets.borrow_mut().clear();
         filter.feed(&flood);
-        assert!(tickets.borrow().is_empty(), "a request inside the interval is dropped");
+        assert!(
+            tickets.borrow().is_empty(),
+            "a request inside the interval is dropped"
+        );
         // Past the interval a new request is served again.
         filter.wrap_image_gate.min_interval = std::time::Duration::ZERO;
         filter.feed(&flood);
@@ -757,7 +770,11 @@ mod tests {
         for seq in [&missing, &wrong] {
             assert!(filter.feed(seq).is_empty(), "consumed, never shown");
         }
-        assert_eq!(*calls.borrow(), 0, "no nonce or a wrong one is not answered");
+        assert_eq!(
+            *calls.borrow(),
+            0,
+            "no nonce or a wrong one is not answered"
+        );
         let right = crate::wrap_clipboard_image::request_osc_bytes_with_nonce(Some("s3cret"));
         assert!(filter.feed(&right).is_empty());
         assert_eq!(*calls.borrow(), 1);

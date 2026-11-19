@@ -2276,8 +2276,14 @@ mod tests {
         let state = SlashState::default();
         agent.refresh(&state, "/cd", 3, &models);
         let snap = state.snapshot();
-        assert!(!snap.matches.is_empty(), "the menu offers near matches for /cd");
-        assert!(snap.matches.iter().all(|r| r.display != "/cd"), "/cd is not in the menu off the dashboard");
+        assert!(
+            !snap.matches.is_empty(),
+            "the menu offers near matches for /cd"
+        );
+        assert!(
+            snap.matches.iter().all(|r| r.display != "/cd"),
+            "/cd is not in the menu off the dashboard"
+        );
         assert!(
             is_typed_slash_selected(&snap, "/cd", agent.registry()),
             "Enter must send /cd as typed, not accept {:?}",

@@ -15,8 +15,14 @@ const CASES: &[(&str, &str)] = &[
     ("sed_i", "sed -i s/a/b/ CLAUDE.md"),
     ("git_config", "git config user.name x"),
     ("unparseable", "if then fi (( ;; <<<"),
-    ("transcript", "echo x >> .fuigo/sessions/enc/id/transcript.jsonl"),
-    ("session_state", "echo '{}' > .fuigo/sessions/enc/id/peer_influence.json"),
+    (
+        "transcript",
+        "echo x >> .fuigo/sessions/enc/id/transcript.jsonl",
+    ),
+    (
+        "session_state",
+        "echo '{}' > .fuigo/sessions/enc/id/peer_influence.json",
+    ),
 ];
 
 fn prepare(root: &std::path::Path) {
@@ -54,7 +60,10 @@ const OPAQUE_CASES: &[(&str, &str)] = &[
 
 /// Round 2, item 2: a directory landing on a protected container.
 const LANDING_CASES: &[(&str, &str)] = &[
-    ("tree_copy_into_claude", "mkdir -p s/rules && echo evil > s/rules/a.md && cp -r s/. .claude/"),
+    (
+        "tree_copy_into_claude",
+        "mkdir -p s/rules && echo evil > s/rules/a.md && cp -r s/. .claude/",
+    ),
     ("tree_copy_existing_s", "cp -r s/. .claude/"),
     ("mv_dir_to_claude", "mv s .claude"),
     ("mv_dir_to_cursor", "mv s .cursor"),
@@ -69,8 +78,14 @@ const LANDING_CASES: &[(&str, &str)] = &[
 /// Round 2, item 3: links, both ends, hard and symbolic.
 const LINK_CASES: &[(&str, &str)] = &[
     ("ln_hard", "ln CLAUDE.md n.txt"),
-    ("ln_hard_then_write", "ln CLAUDE.md n.txt && echo evil >> n.txt"),
-    ("ln_symlink_then_write", "ln -s .claude/rules r && echo x > r/a.md"),
+    (
+        "ln_hard_then_write",
+        "ln CLAUDE.md n.txt && echo evil >> n.txt",
+    ),
+    (
+        "ln_symlink_then_write",
+        "ln -s .claude/rules r && echo x > r/a.md",
+    ),
     ("ln_symlink_to_container", "ln -s .claude c"),
     ("ln_into_protected_dest", "ln a.txt CLAUDE.md"),
     ("cp_l", "cp -l CLAUDE.md n.txt"),
@@ -91,10 +106,23 @@ async fn assert_table_denied(cases: &[(&str, &str)]) {
                 let control = make(&cwd);
                 influenced.set_peer_influenced(true);
                 for (label, cmd) in cases {
-                    let d = decide(&influenced, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
-                    assert!(is_guard_denial(&d), "{name}/{label}: must be denied, got {d}");
-                    let c = decide(&control, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
-                    assert!(!is_guard_denial(&c), "{name}/{label}: control must not see the guard: {c}");
+                    let d = decide(
+                        &influenced,
+                        &root,
+                        AccessKind::Bash((*cmd).to_owned()),
+                        None,
+                    )
+                    .await;
+                    assert!(
+                        is_guard_denial(&d),
+                        "{name}/{label}: must be denied, got {d}"
+                    );
+                    let c =
+                        decide(&control, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
+                    assert!(
+                        !is_guard_denial(&c),
+                        "{name}/{label}: control must not see the guard: {c}"
+                    );
                 }
             }
         })
@@ -137,8 +165,17 @@ async fn s6_4_r2_refusal_text_tells_unanalysable_from_resolved() {
                     assert!(is_guard_denial(&d), "{name}/{cmd}: {d}");
                     assert!(d.contains("could not be analysed"), "{name}/{cmd}: {d}");
                 }
-                let d = decide(&h, &root, AccessKind::Bash("echo x > CLAUDE.md".into()), None).await;
-                assert!(is_guard_denial(&d) && !d.contains("could not be analysed"), "{name}: {d}");
+                let d = decide(
+                    &h,
+                    &root,
+                    AccessKind::Bash("echo x > CLAUDE.md".into()),
+                    None,
+                )
+                .await;
+                assert!(
+                    is_guard_denial(&d) && !d.contains("could not be analysed"),
+                    "{name}: {d}"
+                );
             }
         })
         .await;
@@ -168,7 +205,8 @@ async fn s6_4_r2_ordinary_commands_pass_when_influenced() {
                     "ln -s a.txt b.txt",
                     "ln a.txt h.txt",
                 ] {
-                    let a = decide(&influenced, &root, AccessKind::Bash(cmd.to_owned()), None).await;
+                    let a =
+                        decide(&influenced, &root, AccessKind::Bash(cmd.to_owned()), None).await;
                     let b = decide(&control, &root, AccessKind::Bash(cmd.to_owned()), None).await;
                     assert_eq!(a, b, "{name}/{cmd}");
                     assert!(!is_guard_denial(&a), "{name}/{cmd}: {a}");
@@ -190,7 +228,13 @@ async fn s6_4_r2_git_config_get_is_not_a_guard_denial() {
                 prepare(&root);
                 let h = make(&AbsPathBuf::new(root.clone()).unwrap());
                 h.set_peer_influenced(true);
-                let d = decide(&h, &root, AccessKind::Bash("git config --get user.name".into()), None).await;
+                let d = decide(
+                    &h,
+                    &root,
+                    AccessKind::Bash("git config --get user.name".into()),
+                    None,
+                )
+                .await;
                 assert!(!is_guard_denial(&d), "{name}: {d}");
             }
         })
@@ -211,10 +255,23 @@ async fn s6_4_shell_table_every_mode_denies_when_influenced_and_is_untouched_oth
                 let control = make(&cwd);
                 influenced.set_peer_influenced(true);
                 for (label, cmd) in CASES {
-                    let d = decide(&influenced, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
-                    assert!(is_guard_denial(&d), "{name}/{label}: must be denied, got {d}");
-                    let c = decide(&control, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
-                    assert!(!is_guard_denial(&c), "{name}/{label}: control must not see the guard: {c}");
+                    let d = decide(
+                        &influenced,
+                        &root,
+                        AccessKind::Bash((*cmd).to_owned()),
+                        None,
+                    )
+                    .await;
+                    assert!(
+                        is_guard_denial(&d),
+                        "{name}/{label}: must be denied, got {d}"
+                    );
+                    let c =
+                        decide(&control, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
+                    assert!(
+                        !is_guard_denial(&c),
+                        "{name}/{label}: control must not see the guard: {c}"
+                    );
                 }
             }
         })
@@ -234,8 +291,15 @@ async fn s6_4_ordinary_shell_commands_match_the_control_when_influenced() {
                 let influenced = make(&cwd);
                 let control = make(&cwd);
                 influenced.set_peer_influenced(true);
-                for cmd in ["ls -la", "echo x > out.txt", "cp src.txt copy.txt", "git status", "cat CLAUDE.md"] {
-                    let a = decide(&influenced, &root, AccessKind::Bash(cmd.to_owned()), None).await;
+                for cmd in [
+                    "ls -la",
+                    "echo x > out.txt",
+                    "cp src.txt copy.txt",
+                    "git status",
+                    "cat CLAUDE.md",
+                ] {
+                    let a =
+                        decide(&influenced, &root, AccessKind::Bash(cmd.to_owned()), None).await;
                     let b = decide(&control, &root, AccessKind::Bash(cmd.to_owned()), None).await;
                     assert_eq!(a, b, "{name}/{cmd}");
                     assert!(!is_guard_denial(&a), "{name}/{cmd}");
@@ -258,7 +322,13 @@ async fn s6_4_subagent_clone_of_an_influenced_handle_is_denied_a_shell_write() {
                 let parent = make(&AbsPathBuf::new(root.clone()).unwrap());
                 let child = parent.clone();
                 parent.set_peer_influenced(true);
-                let d = decide(&child, &root, AccessKind::Bash("echo x > CLAUDE.md".into()), None).await;
+                let d = decide(
+                    &child,
+                    &root,
+                    AccessKind::Bash("echo x > CLAUDE.md".into()),
+                    None,
+                )
+                .await;
                 assert!(is_guard_denial(&d), "{name}: {d}");
             }
         })
@@ -273,17 +343,31 @@ fn s6_2_session_store_is_in_the_protected_set() {
     let t = tempfile::tempdir().unwrap();
     let home = dunce::canonicalize(t.path()).unwrap();
     let _env = crate::LockedTestEnv::lock().set("FUIGO_HOME", &home);
-    for f in ["sessions/enc/id/transcript.jsonl", "sessions/enc/id/peer_influence.json"] {
-        assert!(crate::permission::peer_guard::is_peer_protected_path(&home.join(f)), "{f}");
+    for f in [
+        "sessions/enc/id/transcript.jsonl",
+        "sessions/enc/id/peer_influence.json",
+    ] {
+        assert!(
+            crate::permission::peer_guard::is_peer_protected_path(&home.join(f)),
+            "{f}"
+        );
     }
-    assert!(!crate::permission::peer_guard::is_peer_protected_path(&home.join("elsewhere/x.txt")));
+    assert!(!crate::permission::peer_guard::is_peer_protected_path(
+        &home.join("elsewhere/x.txt")
+    ));
     // Through `request()` as well, in every mode.
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(tokio::task::LocalSet::new().run_until(async {
         for (name, make) in modes() {
             let h = make(&AbsPathBuf::new(home.clone()).unwrap());
             h.set_peer_influenced(true);
-            let p = home.join("sessions/enc/id/transcript.jsonl").to_string_lossy().into_owned();
+            let p = home
+                .join("sessions/enc/id/transcript.jsonl")
+                .to_string_lossy()
+                .into_owned();
             let d = decide(&h, &home, AccessKind::Edit(p), None).await;
             assert!(is_guard_denial(&d), "{name}: {d}");
         }
@@ -297,7 +381,9 @@ fn s6_4_extended_set_does_not_leak_into_the_ordinary_floor() {
     let root = dunce::canonicalize(tmp.path()).unwrap();
     let p = root.join("CLAUDE.md");
     assert!(crate::permission::shell_access::edit_target_protection(&p).is_none());
-    assert!(crate::permission::shell_access::with_peer_extended_set(|| crate::permission::shell_access::edit_target_protection(&p).is_some()));
+    assert!(crate::permission::shell_access::with_peer_extended_set(
+        || crate::permission::shell_access::edit_target_protection(&p).is_some()
+    ));
     assert!(crate::permission::shell_access::edit_target_protection(&p).is_none());
 }
 
@@ -313,9 +399,21 @@ async fn s6_4_extended_set_does_not_leak_through_request() {
                 prepare(&root);
                 let h = make(&AbsPathBuf::new(root.clone()).unwrap());
                 h.set_peer_influenced(true);
-                let _ = decide(&h, &root, AccessKind::Bash("echo x > CLAUDE.md".into()), None).await;
+                let _ = decide(
+                    &h,
+                    &root,
+                    AccessKind::Bash("echo x > CLAUDE.md".into()),
+                    None,
+                )
+                .await;
                 h.set_peer_influenced(false);
-                let d = decide(&h, &root, AccessKind::Bash("echo x > CLAUDE.md".into()), None).await;
+                let d = decide(
+                    &h,
+                    &root,
+                    AccessKind::Bash("echo x > CLAUDE.md".into()),
+                    None,
+                )
+                .await;
                 assert!(!is_guard_denial(&d), "{name}: {d}");
             }
         })
@@ -353,13 +451,25 @@ const R3_CASES: &[(&str, &str)] = &[
     ("chown_protected", "chown me CLAUDE.md"),
     ("chattr_protected", "chattr +i CLAUDE.md"),
     ("touch_protected", "touch CLAUDE.md"),
-    ("git_remote_add", "git remote add origin https://example.com/r.git"),
-    ("git_remote_set_url", "git remote set-url origin https://example.com/r.git"),
+    (
+        "git_remote_add",
+        "git remote add origin https://example.com/r.git",
+    ),
+    (
+        "git_remote_set_url",
+        "git remote set-url origin https://example.com/r.git",
+    ),
     ("git_remote_rm", "git remote rm origin"),
-    ("git_submodule_add", "git submodule add https://example.com/r.git sub"),
+    (
+        "git_submodule_add",
+        "git submodule add https://example.com/r.git sub",
+    ),
     ("git_submodule_update", "git submodule update --init"),
     ("git_branch_upstream", "git branch -u origin/main"),
-    ("git_branch_set_upstream", "git branch --set-upstream-to=origin/main"),
+    (
+        "git_branch_set_upstream",
+        "git branch --set-upstream-to=origin/main",
+    ),
     ("git_init", "git init"),
     ("git_clone", "git clone https://example.com/r.git"),
     ("git_worktree_add", "git worktree add ../wt"),
@@ -369,14 +479,29 @@ const R3_CASES: &[(&str, &str)] = &[
     ("git_c_editor", "git -c core.editor=evil commit"),
     ("git_c_hookspath", "git -c core.hooksPath=/x status"),
     ("git_exec_path", "git --exec-path=/x status"),
-    ("git_c_attached_sshcommand", "git -ccore.sshCommand=evil fetch"),
-    ("git_c_attached_fsmonitor", "git -ccore.fsmonitor=evil status"),
+    (
+        "git_c_attached_sshcommand",
+        "git -ccore.sshCommand=evil fetch",
+    ),
+    (
+        "git_c_attached_fsmonitor",
+        "git -ccore.fsmonitor=evil status",
+    ),
     ("git_c_attached_editor", "git -ccore.editor=evil commit"),
-    ("git_config_env_attached", "git --config-env=core.sshCommand=EVIL fetch"),
-    ("git_config_env_split", "git --config-env core.sshCommand=EVIL fetch"),
+    (
+        "git_config_env_attached",
+        "git --config-env=core.sshCommand=EVIL fetch",
+    ),
+    (
+        "git_config_env_split",
+        "git --config-env core.sshCommand=EVIL fetch",
+    ),
     ("git_exec_path_abbrev", "git --exec-p=/x status"),
     ("git_branch_upstream_attached", "git branch -uorigin/main"),
-    ("git_branch_set_upstream_abbrev", "git branch --set-up=origin/main"),
+    (
+        "git_branch_set_upstream_abbrev",
+        "git branch --set-up=origin/main",
+    ),
     ("git_branch_unset_abbrev_short", "git branch --u"),
     ("git_branch_unset_abbrev", "git branch --unset"),
     ("git_branch_edit_abbrev_short", "git branch --e"),
@@ -384,7 +509,12 @@ const R3_CASES: &[(&str, &str)] = &[
 ];
 
 /// Round 3, item 8: glob and brace words use the "could not be analysed" text.
-const R3_UNANALYSED: &[&str] = &["echo x >> CLAUDE.m?", "rm CLAUDE.[m]d", "echo x > CLAUDE.{md,x}", "echo x > CLAUDE.{m..m}d"];
+const R3_UNANALYSED: &[&str] = &[
+    "echo x >> CLAUDE.m?",
+    "rm CLAUDE.[m]d",
+    "echo x > CLAUDE.{md,x}",
+    "echo x > CLAUDE.{m..m}d",
+];
 
 /// Round 3 controls (items 1-7): these PASS the guard when influenced, same as the control.
 const R3_PASS: &[&str] = &[
@@ -438,7 +568,10 @@ async fn s6_4_r3_glob_and_brace_words_use_the_unanalysable_text() {
                 h.set_peer_influenced(true);
                 for cmd in R3_UNANALYSED {
                     let d = decide(&h, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
-                    assert!(is_guard_denial(&d) && d.contains("could not be analysed"), "{name}/{cmd}: {d}");
+                    assert!(
+                        is_guard_denial(&d) && d.contains("could not be analysed"),
+                        "{name}/{cmd}: {d}"
+                    );
                 }
             }
         })
@@ -459,8 +592,15 @@ async fn s6_4_r3_controls_pass_when_influenced() {
                 let control = make(&cwd);
                 influenced.set_peer_influenced(true);
                 for cmd in R3_PASS {
-                    let a = decide(&influenced, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
-                    let b = decide(&control, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
+                    let a = decide(
+                        &influenced,
+                        &root,
+                        AccessKind::Bash((*cmd).to_owned()),
+                        None,
+                    )
+                    .await;
+                    let b =
+                        decide(&control, &root, AccessKind::Bash((*cmd).to_owned()), None).await;
                     assert_eq!(a, b, "{name}/{cmd}");
                     assert!(!is_guard_denial(&a), "{name}/{cmd}: {a}");
                 }

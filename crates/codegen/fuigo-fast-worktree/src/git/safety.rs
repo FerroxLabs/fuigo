@@ -153,7 +153,12 @@ fn answer_within(
         tracing::warn!(path = %worktree.display(), "safety gate could not start; keeping worktree");
         return Safety::Keep(KeepReason::CheckFailed);
     }
-    await_answer(worktree, timeout, std::time::Instant::now().checked_add(timeout), &answered)
+    await_answer(
+        worktree,
+        timeout,
+        std::time::Instant::now().checked_add(timeout),
+        &answered,
+    )
 }
 
 /// Accept the gate's answer only if it was produced by `deadline`. An answer

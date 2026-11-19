@@ -73,7 +73,10 @@ async fn tool_names_by_kind_returns_when_the_toolset_is_free() {
             let (actor, _events) =
                 create_test_actor_ex(0, 500_000, 95, gateway_tx, persistence_tx).await;
             let (first, second) = actor
-                .tool_names_by_kind("${{ tools.by_kind.execute }}", "${{ tools.by_kind.monitor }}")
+                .tool_names_by_kind(
+                    "${{ tools.by_kind.execute }}",
+                    "${{ tools.by_kind.monitor }}",
+                )
                 .await;
             // An unresolved template never leaks the raw `by_kind` placeholder.
             for name in [first, second].into_iter().flatten() {

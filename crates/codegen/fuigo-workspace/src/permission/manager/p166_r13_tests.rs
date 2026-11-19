@@ -31,10 +31,15 @@ pub(super) fn check_floor(cwd: &std::path::Path, rows: &[String], blocked: bool)
         .iter()
         .filter_map(|cmd| {
             let got = floor(cwd, cmd);
-            (got.is_some() != blocked).then(|| format!("{cmd}: expected blocked={blocked}, got {got:?}"))
+            (got.is_some() != blocked)
+                .then(|| format!("{cmd}: expected blocked={blocked}, got {got:?}"))
         })
         .collect();
-    assert!(wrong.is_empty(), "protected floor mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "protected floor mismatches:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// Item 1 (HIGH 1): a host destination writes no local file; its path is still judged by the protected floor.
@@ -49,15 +54,25 @@ fn p166_r13_item1_remote_destination_is_not_a_local_write() {
         "scp build.tar host:/srv/",
     ] {
         let e = evaluate_bash(cmd, &state, true);
-        assert!(!e.assessment.contains(ClassifierSecurityFinding::FileWrite), "{cmd}: writes no local file");
+        assert!(
+            !e.assessment.contains(ClassifierSecurityFinding::FileWrite),
+            "{cmd}: writes no local file"
+        );
     }
     let (_root, deep) = deep_project();
-    let rows = ["scp id.pub host:.ssh/authorized_keys", "scp x host:.bashrc", "rsync -a x/ host:.git/hooks/"]
-        .map(String::from);
+    let rows = [
+        "scp id.pub host:.ssh/authorized_keys",
+        "scp x host:.bashrc",
+        "rsync -a x/ host:.git/hooks/",
+    ]
+    .map(String::from);
     check_floor(&deep, &rows, true);
     // A local destination is still a FileWrite.
     let e = evaluate_bash("scp host:a.txt b.txt", &state, true);
-    assert!(e.assessment.contains(ClassifierSecurityFinding::FileWrite), "a local destination stays a FileWrite");
+    assert!(
+        e.assessment.contains(ClassifierSecurityFinding::FileWrite),
+        "a local destination stays a FileWrite"
+    );
 }
 
 /// Item 2 (HIGH 2): options that run a command are exec risk whatever the value and form.
@@ -132,13 +147,7 @@ fn p166_r13_items5_6_ipv6_and_file_scheme() {
         ],
         false,
     );
-    check_exec(
-        &[
-            "git fetch 'ext::sh -c id'",
-            "git fetch 'a::b'",
-        ],
-        true,
-    );
+    check_exec(&["git fetch 'ext::sh -c id'", "git fetch 'a::b'"], true);
     // Config SET rows are judged by the protected floor.
     let (_root, deep) = deep_project();
     let sets = [
@@ -162,7 +171,8 @@ fn p166_r13_item3_current_user_tilde_resolves_to_home() {
     let (_root, deep) = deep_project();
     // `~name` must resolve against the home: exactly as many `..` as the home has components reach `/etc`, while a
     // base one component deeper (the unresolved `~name` word) stops at the first component.
-    let home_depth = std::env::var("HOME").map_or(2, |home| home.split('/').filter(|c| !c.is_empty()).count());
+    let home_depth =
+        std::env::var("HOME").map_or(2, |home| home.split('/').filter(|c| !c.is_empty()).count());
     let up = "../".repeat(home_depth);
     let blocked = [
         format!("cd ~{user} && touch {up}etc/passwd"),
@@ -218,20 +228,41 @@ fn p166_r13_item4_reader_output_options_scan_undecodable_values() {
 }
 
 const FP13: &[&str] = &[
-    "scp a.txt host:b.txt", "scp -r dist/ user@host:/srv/app/", "rsync -a ./ host:proj/",
-    "rsync -az --delete build/ deploy@web:/var/www/", "scp id.pub host:.ssh/authorized_keys", "git fetch origin",
-    "git fetch --all --prune", "git fetch --depth 1 origin main", "git clone --depth 1 https://github.com/a/b",
-    "git clone -b main https://github.com/a/b dir", "git clone --recurse-submodules git@github.com:a/b.git",
-    "git push -u origin main", "git push --force-with-lease origin main", "git pull --rebase origin main",
-    "git ls-remote --heads origin", "git archive --format=tar HEAD", "git fetch 'ssh://[2001:db8::1]/repo.git'",
-    "git fetch ssh://git@github.com:22/a/b.git", "ls ~", "ls ~{U}", "touch ~{U}/notes.txt", "touch ~/notes.txt",
-    "cd ~{U}/src && make", "less README.md", "less -N README.md", "sort -u names.txt", "sort -o sorted.txt names.txt",
-    "diff a b", "uniq a b",
+    "scp a.txt host:b.txt",
+    "scp -r dist/ user@host:/srv/app/",
+    "rsync -a ./ host:proj/",
+    "rsync -az --delete build/ deploy@web:/var/www/",
+    "scp id.pub host:.ssh/authorized_keys",
+    "git fetch origin",
+    "git fetch --all --prune",
+    "git fetch --depth 1 origin main",
+    "git clone --depth 1 https://github.com/a/b",
+    "git clone -b main https://github.com/a/b dir",
+    "git clone --recurse-submodules git@github.com:a/b.git",
+    "git push -u origin main",
+    "git push --force-with-lease origin main",
+    "git pull --rebase origin main",
+    "git ls-remote --heads origin",
+    "git archive --format=tar HEAD",
+    "git fetch 'ssh://[2001:db8::1]/repo.git'",
+    "git fetch ssh://git@github.com:22/a/b.git",
+    "ls ~",
+    "ls ~{U}",
+    "touch ~{U}/notes.txt",
+    "touch ~/notes.txt",
+    "cd ~{U}/src && make",
+    "less README.md",
+    "less -N README.md",
+    "sort -u names.txt",
+    "sort -o sorted.txt names.txt",
+    "diff a b",
+    "uniq a b",
 ];
 
 /// `clone` writes an unknown tree, so it takes the `Sensitive` floor at `39c6d45d` too: only exec risk is asserted.
 const FP13_FLOOR_UNCHANGED: &[&str] = &[
-    "git clone --depth 1 https://github.com/a/b", "git clone -b main https://github.com/a/b dir",
+    "git clone --depth 1 https://github.com/a/b",
+    "git clone -b main https://github.com/a/b dir",
     "git clone --recurse-submodules git@github.com:a/b.git",
 ];
 
@@ -253,5 +284,9 @@ fn p166_r13_false_positive_suite_rows() {
             wrong.push(format!("{template}: floor={got:?} exec={risky}"));
         }
     }
-    assert!(wrong.is_empty(), "false-positive suite differs:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "false-positive suite differs:\n{}",
+        wrong.join("\n")
+    );
 }

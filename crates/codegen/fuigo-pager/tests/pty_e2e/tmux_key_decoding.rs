@@ -80,7 +80,11 @@ fn check_shortcuts(extended_keys: bool) {
 
     // Alt+S (ESC s): stash the draft. Also what the later probes use to clean up.
     press(&mut h, "stashme", b"\x1bs");
-    assert!(!h.contains_text("stashme"), "{ctx}: Alt+S must stash the draft\n{}", h.screen_contents());
+    assert!(
+        !h.contains_text("stashme"),
+        "{ctx}: Alt+S must stash the draft\n{}",
+        h.screen_contents()
+    );
 
     // Alt+Enter (ESC CR): newline, not submit.
     press(&mut h, "line1", b"\x1b\r");
@@ -97,14 +101,22 @@ fn check_shortcuts(extended_keys: bool) {
     press(&mut h, "abc", b"\x1b[1;2D");
     h.inject_keys(b"Z").expect("type over");
     h.update(Duration::from_millis(800));
-    assert!(h.contains_text("abZ"), "{ctx}: Shift+Left must select the last char\n{}", h.screen_contents());
+    assert!(
+        h.contains_text("abZ"),
+        "{ctx}: Shift+Left must select the last char\n{}",
+        h.screen_contents()
+    );
     clear_composer(&mut h);
 
     // Alt+Left (CSI 1;3 D) moves a word left.
     press(&mut h, "abc", b"\x1b[1;3D");
     h.inject_keys(b"Y").expect("type");
     h.update(Duration::from_millis(800));
-    assert!(h.contains_text("Yabc"), "{ctx}: Alt+Left must move to the word start\n{}", h.screen_contents());
+    assert!(
+        h.contains_text("Yabc"),
+        "{ctx}: Alt+Left must move to the word start\n{}",
+        h.screen_contents()
+    );
     clear_composer(&mut h);
 
     // Shift+Tab (CSI Z) cycles the mode.
@@ -120,7 +132,10 @@ fn check_shortcuts(extended_keys: bool) {
     let (name, bytes): (&str, &[u8]) = if screen.contains("Ctrl+.:shortcuts") {
         ("Ctrl+.", b"\x1b[46;5u")
     } else {
-        assert!(screen.contains("Ctrl+x:shortcuts"), "{ctx}: no cheatsheet key in the footer\n{screen}");
+        assert!(
+            screen.contains("Ctrl+x:shortcuts"),
+            "{ctx}: no cheatsheet key in the footer\n{screen}"
+        );
         ("Ctrl+x", b"\x18")
     };
     press(&mut h, "", bytes);

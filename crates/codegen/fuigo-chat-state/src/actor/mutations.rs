@@ -386,7 +386,9 @@ impl ChatStateActor {
             .conversation
             .iter()
             .rposition(|i| matches!(i, ConversationItem::Assistant(a) if !a.tool_calls.is_empty()))
-            .filter(|&at| fuigo_sampling_types::has_dangling_tool_calls(&self.state.conversation[at..]));
+            .filter(|&at| {
+                fuigo_sampling_types::has_dangling_tool_calls(&self.state.conversation[at..])
+            });
         match open_at {
             Some(at) => {
                 self.rewrite_history(HistoryRewrite::IntegrityRepair, |conversation| {

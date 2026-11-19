@@ -231,7 +231,10 @@ impl SessionRegistryClient {
         &self,
         builder: RequestBuilder,
         op: &'static str,
-    ) -> Result<(reqwest::Response, Option<fuigo_auth::StampedBearerFingerprint>)> {
+    ) -> Result<(
+        reqwest::Response,
+        Option<fuigo_auth::StampedBearerFingerprint>,
+    )> {
         let builder = fuigo_file_utils::trace_context::inject_trace_context_into_request(builder);
         let request = builder.build().context(op)?;
         fuigo_auth::execute_with_stamp(&self.client, request)
@@ -264,7 +267,11 @@ impl SessionRegistryClient {
     /// Emit a single `auth 401 attribution` log entry tagged with `consumer = "SessionRegistryClient.<op>"`.
     /// The op string is the operation name passed to `check_response`, e.g. `"session register"`.
     /// `stamp` is what the middleware put on the wire; [`fuigo_auth::StampedBearerFingerprint`] explains why it is never re-resolved.
-    fn record_401_attribution(&self, op: &str, stamp: Option<&fuigo_auth::StampedBearerFingerprint>) {
+    fn record_401_attribution(
+        &self,
+        op: &str,
+        stamp: Option<&fuigo_auth::StampedBearerFingerprint>,
+    ) {
         if let Some(manager) = self.credentials.auth_manager() {
             crate::auth::attribution::record_consumer_401(
                 manager.as_ref(),
@@ -369,7 +376,10 @@ impl SessionRegistryClient {
     }
 
     /// GET /v1/sessions/{id}/download; returns a signed URL, then streams to the dest file.
-    #[allow(clippy::disallowed_methods, reason = "download_file dest is caller-chosen; download_file has no callers in the workspace; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "download_file dest is caller-chosen; download_file has no callers in the workspace; not inside a session folder"
+    )]
     pub async fn download_file(
         &self,
         session_id: &str,
@@ -752,11 +762,17 @@ mod tests {
         );
         assert_eq!(flux.device_id.as_deref(), Some(MACHINE_ID));
         assert_eq!(flux.hostname.as_deref(), Some("host-a"));
-        let none = register_body_for("http://127.0.0.1:9/sessions/register", &RegisterRequest {
-            device_id: None,
-            ..register_request_with_device(MACHINE_ID)
-        });
-        assert_eq!(none.device_id, None, "a suppressed (ZDR) device id stays absent");
+        let none = register_body_for(
+            "http://127.0.0.1:9/sessions/register",
+            &RegisterRequest {
+                device_id: None,
+                ..register_request_with_device(MACHINE_ID)
+            },
+        );
+        assert_eq!(
+            none.device_id, None,
+            "a suppressed (ZDR) device id stays absent"
+        );
     }
 
     // last_turn_number can run ahead of restorable_turn_number: a turn can be done while the session-state upload is still in flight

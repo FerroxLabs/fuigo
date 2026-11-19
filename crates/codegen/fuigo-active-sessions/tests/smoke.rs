@@ -2,8 +2,8 @@
 //! Proves a clean exit removes its entry and crash detection returns only the session with a dead PID.
 
 use chrono::Utc;
-use tempfile::TempDir;
 use fuigo_active_sessions::*;
+use tempfile::TempDir;
 
 fn session(id: &str, pid: u32) -> ActiveSession {
     ActiveSession {

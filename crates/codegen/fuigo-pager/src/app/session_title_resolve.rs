@@ -130,7 +130,10 @@ pub(crate) fn resume_candidates<'a>(arg: &str, summaries: &'a [Summary]) -> Vec<
         let manual: Vec<&Summary> = exact
             .iter()
             .copied()
-            .filter(|s| s.manual_title_opt().is_some_and(|t| title_key(&t) == needle))
+            .filter(|s| {
+                s.manual_title_opt()
+                    .is_some_and(|t| title_key(&t) == needle)
+            })
             .collect();
         if let [only] = manual.as_slice() {
             return vec![*only];
@@ -143,7 +146,9 @@ pub(crate) fn resume_candidates<'a>(arg: &str, summaries: &'a [Summary]) -> Vec<
         .iter()
         .filter(|s| {
             let have = title_words(s.display_title());
-            wanted.iter().all(|w| have.iter().any(|h| h.contains(w.as_str())))
+            wanted
+                .iter()
+                .all(|w| have.iter().any(|h| h.contains(w.as_str())))
         })
         .collect();
     newest_first(&mut hits);
@@ -194,7 +199,11 @@ pub(crate) fn title_miss_hint_with(arg: &str, similar: &[&Summary]) -> String {
 }
 
 /// [`title_miss_hint_with`] for the local sessions of `cwd`.
-pub(crate) fn title_miss_hint_for(arg: &str, cwd: &str, selection: RecentSessionSelection) -> String {
+pub(crate) fn title_miss_hint_for(
+    arg: &str,
+    cwd: &str,
+    selection: RecentSessionSelection,
+) -> String {
     match fuigo_shell::session::persistence::local_summaries_for_cwd_sync(cwd, selection) {
         Ok(all) => title_miss_hint_with(arg, &similar_titles(arg, &all, 3)),
         Err(_) => title_miss_hint(arg),

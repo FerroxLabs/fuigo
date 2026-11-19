@@ -192,5 +192,8 @@ fn unchanged_static_overlay_skips_payload() {
 fn clear_kitty_image_frees_image_data() {
     let esc = clear_kitty_image(7);
     assert!(esc.contains("a=d,d=I,i=7"), "must free data (d=I): {esc:?}");
-    assert!(!esc.contains("d=i,"), "lower-case d=i keeps the data: {esc:?}");
+    assert!(
+        !esc.contains("d=i,"),
+        "lower-case d=i keeps the data: {esc:?}"
+    );
 }

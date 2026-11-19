@@ -142,7 +142,9 @@ pub fn load_from(
     user_file: Option<&Path>,
     known: &HashSet<String>,
 ) -> HashMap<String, ToolGuidance> {
-    let mut merged = user_file.map(|p| read_file(p, None, known)).unwrap_or_default();
+    let mut merged = user_file
+        .map(|p| read_file(p, None, known))
+        .unwrap_or_default();
     for p in project_files {
         // `<dir>/.fuigo/tool-guidance.toml` is held to `<dir>`, pinned when this load starts.
         let Some(root) = p

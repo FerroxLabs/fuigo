@@ -91,7 +91,8 @@ impl ChatStateActor {
         let context_window = self.state.sampling_config.context_window;
         let cw = context_window.get();
 
-        if fuigo_token_estimation::exceeds_threshold(self.state.total_tokens, cw, threshold_percent) {
+        if fuigo_token_estimation::exceeds_threshold(self.state.total_tokens, cw, threshold_percent)
+        {
             let utilization_percent =
                 fuigo_token_estimation::usage_percentage_truncated_u8(self.state.total_tokens, cw);
             Some(AutoCompactTrigger {

@@ -33,7 +33,10 @@ pub(crate) fn prompt_history_path(cwd: &str) -> PathBuf {
 /// for the append (P72), the lock [`truncate_if_needed`] rewrites the file
 /// under: an append that landed between the truncation's read and its rename
 /// went into the replaced file and was lost.
-#[allow(clippy::disallowed_methods, reason = "prompt_history.jsonl lives in sessions/<cwd>/, the cwd dir that parents session folders; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "prompt_history.jsonl lives in sessions/<cwd>/, the cwd dir that parents session folders; not inside a session folder"
+)]
 pub(crate) fn append_prompt(cwd: &str, entry: &PromptEntry) -> io::Result<()> {
     // F12: `--no-session-persistence` records no prompt.
     if fuigo_session_writer::persistence_disabled() {
@@ -143,7 +146,10 @@ fn truncate_file_if_needed(path: &std::path::Path, max: usize) -> io::Result<()>
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 contents.push(b'\n');
             }
-            Ok(Edit::Replace { contents, value: () })
+            Ok(Edit::Replace {
+                contents,
+                value: (),
+            })
         },
     )
     .map_err(io::Error::from)
@@ -263,7 +269,10 @@ pub(crate) async fn truncate_if_needed_async(cwd: String) {
     .await;
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,7 +331,11 @@ mod tests {
         append_prompt(&cwd, &entry).unwrap();
         let path = prompt_history_path(&cwd);
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&path), 0o600, "a new prompt history must be owner-only");
+        assert_eq!(
+            mode(&path),
+            0o600,
+            "a new prompt history must be owner-only"
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         append_prompt(&cwd, &entry).unwrap();
         assert_eq!(mode(&path), 0o600, "a looser prompt history is tightened");

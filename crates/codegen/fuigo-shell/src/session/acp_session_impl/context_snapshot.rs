@@ -26,13 +26,7 @@ impl SessionActor {
         tracing::info!(model, "session_context_snapshot: tokenizing");
         let texts = self.snapshot_texts().await;
         let counts = texts.item_counts();
-        let tokens = tokenize_texts_parallel(
-            &tokenize_url,
-            &api_key,
-            model,
-            texts.jobs(),
-        )
-        .await;
+        let tokens = tokenize_texts_parallel(&tokenize_url, &api_key, model, texts.jobs()).await;
         tracing::info!(
             model,
             skills_tokens = tokens.skills,

@@ -20,7 +20,10 @@ use serde_json::json;
 
 const AUTH_KEY: &str = "p148-authenticate-key-FAKE";
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn an_authenticated_key_resolves_trusted_key_references_in_the_same_process() {
     run_agent_test(|cwd, _mock| async move {
@@ -35,7 +38,10 @@ fn an_authenticated_key_resolves_trusted_key_references_in_the_same_process() {
         let script = fuigo_home.join("p148-cap.sh");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\nprintf '%s' \"$TOKEN\" > '{}'\nexec cat > /dev/null\n", out.display()),
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$TOKEN\" > '{}'\nexec cat > /dev/null\n",
+                out.display()
+            ),
         )
         .expect("capture script");
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
@@ -48,7 +54,10 @@ fn an_authenticated_key_resolves_trusted_key_references_in_the_same_process() {
             ),
         )
         .expect("config.toml");
-        assert!(!fuigo_home.join("auth.json").exists(), "precondition: no saved key");
+        assert!(
+            !fuigo_home.join("auth.json").exists(),
+            "precondition: no saved key"
+        );
 
         let mut config = fuigo_shell::agent::config::Config::default();
         config.session.title_policy = Some(fuigo_shell::agent::config::TitlePolicy::Local);
@@ -68,7 +77,10 @@ fn an_authenticated_key_resolves_trusted_key_references_in_the_same_process() {
             if let Ok(token) = std::fs::read_to_string(&out) {
                 break token;
             }
-            assert!(Instant::now() < deadline, "the user's MCP server was never spawned");
+            assert!(
+                Instant::now() < deadline,
+                "the user's MCP server was never spawned"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
         assert_eq!(
@@ -76,6 +88,9 @@ fn an_authenticated_key_resolves_trusted_key_references_in_the_same_process() {
             "a trusted ${{FUIGO_API_KEY}} reference must resolve to the key this process authenticated with"
         );
         let saved = std::fs::read_to_string(fuigo_home.join("auth.json")).unwrap_or_default();
-        assert!(!saved.contains(AUTH_KEY), "B18: an authenticated key is not saved by default");
+        assert!(
+            !saved.contains(AUTH_KEY),
+            "B18: an authenticated key is not saved by default"
+        );
     });
 }

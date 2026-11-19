@@ -6285,7 +6285,10 @@ mod dispatch_model_routes {
 
     fn model(id: &str, name: &str, meta: serde_json::Value) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(std::sync::Arc::from(id));
-        (id.clone(), acp::ModelInfo::new(id, name.to_string()).meta(meta.as_object().cloned()))
+        (
+            id.clone(),
+            acp::ModelInfo::new(id, name.to_string()).meta(meta.as_object().cloned()),
+        )
     }
 
     fn route(key: &str, word: &str, reason: &str) -> serde_json::Value {
@@ -6295,11 +6298,19 @@ mod dispatch_model_routes {
     fn dashboard_with_models(text: &str) -> DashboardState {
         let mut state = DashboardState::new();
         for (id, info) in [
-            model("grok-4.7", "Grok 4.7", serde_json::json!({ "routes": [
-                route("grok-4.7", "flux", "via Flux Router: $2.5 in / $10 out per 1M tokens"),
-                route("xai/grok-4.7", "grok", "included in your Grok subscription: no per-token charge"),
-            ]})),
-            model("xai/grok-4.7", "grok-4.7 (Grok subscription)", serde_json::json!({ "altRouteOf": "grok-4.7" })),
+            model(
+                "grok-4.7",
+                "Grok 4.7",
+                serde_json::json!({ "routes": [
+                    route("grok-4.7", "flux", "via Flux Router: $2.5 in / $10 out per 1M tokens"),
+                    route("xai/grok-4.7", "grok", "included in your Grok subscription: no per-token charge"),
+                ]}),
+            ),
+            model(
+                "xai/grok-4.7",
+                "grok-4.7 (Grok subscription)",
+                serde_json::json!({ "altRouteOf": "grok-4.7" }),
+            ),
             model("solo", "Solo", serde_json::json!({})),
         ] {
             state.models.available.insert(id, info);
@@ -6317,7 +6328,10 @@ mod dispatch_model_routes {
             let mut state = dashboard_with_models("/model ");
             assert!(state.dispatch.slash_open());
             let registry = crate::actions::ActionRegistry::defaults();
-            let _ = state.handle_input(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)), &registry);
+            let _ = state.handle_input(
+                &Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+                &registry,
+            );
             assert_eq!(state.dispatch.text(), "/model Grok 4.7 via ", "{code:?}");
             let rows: Vec<String> = state
                 .dispatch
@@ -6336,8 +6350,15 @@ mod dispatch_model_routes {
     fn a_single_route_model_keeps_tab_as_completion() {
         let mut state = dashboard_with_models("/model Sol");
         let registry = crate::actions::ActionRegistry::defaults();
-        let _ = state.handle_input(&Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)), &registry);
-        assert!(!state.dispatch.text().contains(" via "), "{}", state.dispatch.text());
+        let _ = state.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            &registry,
+        );
+        assert!(
+            !state.dispatch.text().contains(" via "),
+            "{}",
+            state.dispatch.text()
+        );
     }
 }
 
@@ -6352,9 +6373,15 @@ fn stashed_peek_reply_is_cancelled_at_once_when_the_panel_closes() {
         attach: false,
     });
     state.set_peek(None);
-    assert!(state.deferred_peek_send.is_none(), "the stash is dropped when the panel closes");
     assert!(
-        state.error_toast.as_deref().is_some_and(|t| t.contains("Reply canceled")),
+        state.deferred_peek_send.is_none(),
+        "the stash is dropped when the panel closes"
+    );
+    assert!(
+        state
+            .error_toast
+            .as_deref()
+            .is_some_and(|t| t.contains("Reply canceled")),
         "the cancel is announced: {:?}",
         state.error_toast
     );
@@ -6372,7 +6399,10 @@ fn stashed_peek_reply_is_cancelled_at_once_when_the_cursor_moves_rows() {
     moved.row = DashboardRowId::TopLevel(AgentId(7));
     state.set_peek(Some(moved));
     assert!(state.deferred_peek_send.is_none());
-    assert!(state.error_toast.is_some(), "moving rows announces the cancel");
+    assert!(
+        state.error_toast.is_some(),
+        "moving rows announces the cancel"
+    );
 }
 
 #[test]
@@ -6388,7 +6418,10 @@ fn stashed_peek_reply_survives_a_refresh_of_the_same_row() {
         peek_fields_for_test("Idle"),
     );
     state.set_peek(Some(same));
-    assert!(state.deferred_peek_send.is_some(), "a same-row refresh keeps the stash");
+    assert!(
+        state.deferred_peek_send.is_some(),
+        "a same-row refresh keeps the stash"
+    );
     assert!(state.error_toast.is_none());
 }
 
@@ -6397,7 +6430,12 @@ fn stashed_peek_reply_survives_a_refresh_of_the_same_row() {
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 
-fn tail_mouse(state: &mut DashboardState, kind: MouseEventKind, column: u16, row: u16) -> InputOutcome {
+fn tail_mouse(
+    state: &mut DashboardState,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+) -> InputOutcome {
     state.handle_mouse(&MouseEvent {
         kind,
         column,
@@ -6426,12 +6464,21 @@ fn dragging_over_the_peek_tail_copies_the_selected_text_on_release() {
         tail_mouse(&mut state, MouseEventKind::Down(MouseButton::Left), 2, 5),
         InputOutcome::Changed
     ));
-    assert!(state.peek_tail_selection.is_some(), "the press starts a selection");
-    assert!(state.peek_tail_last_copy.is_none(), "nothing is copied before the release");
+    assert!(
+        state.peek_tail_selection.is_some(),
+        "the press starts a selection"
+    );
+    assert!(
+        state.peek_tail_last_copy.is_none(),
+        "nothing is copied before the release"
+    );
     let _ = tail_mouse(&mut state, MouseEventKind::Drag(MouseButton::Left), 6, 5);
     let _ = tail_mouse(&mut state, MouseEventKind::Up(MouseButton::Left), 6, 5);
     assert_eq!(state.peek_tail_last_copy.as_deref(), Some("first"));
-    assert!(state.peek_tail_selection.is_some(), "the highlight stays after the copy");
+    assert!(
+        state.peek_tail_selection.is_some(),
+        "the highlight stays after the copy"
+    );
 }
 
 /// A drag across several rows copies them in reading order, and may run past the box edge.

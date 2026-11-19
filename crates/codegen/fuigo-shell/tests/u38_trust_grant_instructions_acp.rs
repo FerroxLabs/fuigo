@@ -14,8 +14,8 @@ use std::time::Duration;
 use fuigo_test_support::acp_client::{AgentSpawnSpec, RawReply, RawStdioClient};
 use fuigo_test_support::sse::chat_completions_reasoning_then_tool_call_events;
 use fuigo_test_support::{
-    InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, MockModelEntry, ScriptedResponse, SseEvent,
-    TestSandbox,
+    InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, MockModelEntry,
+    ScriptedResponse, SseEvent, TestSandbox,
 };
 use serde_json::{Value, json};
 
@@ -31,7 +31,10 @@ const DEFAULT_MODEL: &str = "test-model";
 /// A model's `agent_type` chooses only a strict harness, and with no profile every session is the plan agent. So the
 /// reminder agent under test is asked for by name, as a client does; the tests read the history tag to prove which ran.
 const REMINDER_TAG: &str = r#""synthetic_reason":"project_instructions""#;
-const TRUST: &[(&str, &str)] = &[("FUIGO_TEST_VERSION", "1.0.38-u38"), ("FUIGO_FOLDER_TRUST", "1")];
+const TRUST: &[(&str, &str)] = &[
+    ("FUIGO_TEST_VERSION", "1.0.38-u38"),
+    ("FUIGO_FOLDER_TRUST", "1"),
+];
 
 fn profile(model: &str) -> &'static str {
     match model {
@@ -63,7 +66,10 @@ async fn server() -> MockInferenceServer {
     server
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn sandbox(server: &MockInferenceServer) -> TestSandbox {
     let sandbox = TestSandbox::builder().mock_url(server.url()).git().build();
     std::fs::write(
@@ -74,7 +80,10 @@ fn sandbox(server: &MockInferenceServer) -> TestSandbox {
     sandbox
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn plant_user_file(sandbox: &TestSandbox) {
     std::fs::write(
         sandbox.fuigo_home().join("AGENTS.md"),
@@ -112,10 +121,17 @@ fn answer(reply: Reply, held: Rc<RefCell<Option<Value>>>) -> impl FnMut(&Value) 
         if msg.get("method").and_then(Value::as_str) == Some("session/request_permission") {
             let option = msg["params"]["options"]
                 .as_array()
-                .and_then(|options| options.iter().find(|o| o["kind"] == "allow_once").or(options.first()))
+                .and_then(|options| {
+                    options
+                        .iter()
+                        .find(|o| o["kind"] == "allow_once")
+                        .or(options.first())
+                })
                 .map(|o| o["optionId"].clone())
                 .unwrap_or(Value::Null);
-            return RawReply::Result(json!({ "outcome": { "outcome": "selected", "optionId": option } }));
+            return RawReply::Result(
+                json!({ "outcome": { "outcome": "selected", "optionId": option } }),
+            );
         }
         RawReply::Refuse
     }
@@ -147,7 +163,14 @@ impl Peer {
 
     /// Initialize and authenticate an agent spawned by the caller.
     async fn adopt(client: RawStdioClient, cwd: PathBuf) -> Self {
-        let mut peer = Self { client, next: 0, reply: Reply::Hold, held: Rc::default(), cwd, display_cwd: None };
+        let mut peer = Self {
+            client,
+            next: 0,
+            reply: Reply::Hold,
+            held: Rc::default(),
+            cwd,
+            display_cwd: None,
+        };
         let init = peer
             .call(
                 "initialize",
@@ -164,7 +187,10 @@ impl Peer {
             .await;
         assert!(init.get("result").is_some(), "initialize: {init}");
         let auth = peer
-            .call("authenticate", json!({ "methodId": "fuigo.api_key", "_meta": { "headless": true } }))
+            .call(
+                "authenticate",
+                json!({ "methodId": "fuigo.api_key", "_meta": { "headless": true } }),
+            )
             .await;
         assert!(auth.get("result").is_some(), "authenticate: {auth}");
         peer
@@ -188,7 +214,10 @@ impl Peer {
                 }),
             )
             .await;
-        new["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("session/new: {new}")).to_owned()
+        new["result"]["sessionId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("session/new: {new}"))
+            .to_owned()
     }
 
     async fn load(&mut self, model: &str, session: &str) {
@@ -202,7 +231,11 @@ impl Peer {
                 }),
             )
             .await;
-        assert!(load.get("result").is_some(), "session/load: {load}\nstderr: {}", self.client.stderr());
+        assert!(
+            load.get("result").is_some(),
+            "session/load: {load}\nstderr: {}",
+            self.client.stderr()
+        );
     }
 
     async fn prompt(&mut self, session: &str, text: &str) {
@@ -212,14 +245,23 @@ impl Peer {
                 json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }),
             )
             .await;
-        assert!(done.get("result").is_some(), "session/prompt: {done}\nstderr: {}", self.client.stderr());
+        assert!(
+            done.get("result").is_some(),
+            "session/prompt: {done}\nstderr: {}",
+            self.client.stderr()
+        );
     }
 
     /// Let the detached grant task finish. Reads the agent's stdout meanwhile, so it never blocks on a full pipe.
     async fn settle(&mut self, secs: u64) {
         let _ = self
             .client
-            .wait_for_message("settle", Duration::from_secs(secs), |_| false, answer(self.reply, self.held.clone()))
+            .wait_for_message(
+                "settle",
+                Duration::from_secs(secs),
+                |_| false,
+                answer(self.reply, self.held.clone()),
+            )
             .await;
     }
 
@@ -228,7 +270,11 @@ impl Peer {
         if self.held.borrow().is_none() {
             self.settle(2).await;
         }
-        let id = self.held.borrow_mut().take().expect("premise: a trust request is held");
+        let id = self
+            .held
+            .borrow_mut()
+            .take()
+            .expect("premise: a trust request is held");
         self.client.respond(&id, GRANT(), RPC).await;
         self.reply = Reply::Trust;
         self.settle(1).await;
@@ -245,19 +291,33 @@ impl Peer {
         });
         self.client.send_line(&line.to_string()).await;
         let reply = answer(self.reply, self.held.clone());
-        let _ = self.client.wait_for_message("hold", after, |_| false, reply).await;
-        let held = self.held.borrow_mut().take().expect("premise: a trust request is held");
+        let _ = self
+            .client
+            .wait_for_message("hold", after, |_| false, reply)
+            .await;
+        let held = self
+            .held
+            .borrow_mut()
+            .take()
+            .expect("premise: a trust request is held");
         self.client.respond(&held, GRANT(), RPC).await;
         self.reply = Reply::Trust;
         let reply = answer(self.reply, self.held.clone());
-        let done = self.client.response_for_id_answering(&id, "session/prompt", RPC, reply).await;
+        let done = self
+            .client
+            .response_for_id_answering(&id, "session/prompt", RPC, reply)
+            .await;
         assert!(done.get("result").is_some(), "session/prompt: {done}");
     }
 
     /// Send a prompt, answer the held trust request with `reply` shortly after, and return how long the turn then took.
     async fn prompt_answering_held(&mut self, session: &str, text: &str, reply: Value) -> Duration {
         self.settle(1).await;
-        let held = self.held.borrow_mut().take().expect("premise: a trust request is held");
+        let held = self
+            .held
+            .borrow_mut()
+            .take()
+            .expect("premise: a trust request is held");
         self.next += 1;
         let id = format!("u38-{}", self.next);
         let line = json!({
@@ -266,33 +326,51 @@ impl Peer {
         });
         self.client.send_line(&line.to_string()).await;
         let answer_fn = answer(self.reply, self.held.clone());
-        let _ = self.client.wait_for_message("hold", Duration::from_millis(300), |_| false, answer_fn).await;
+        let _ = self
+            .client
+            .wait_for_message("hold", Duration::from_millis(300), |_| false, answer_fn)
+            .await;
         let mut line = reply;
         line["jsonrpc"] = json!("2.0");
         line["id"] = held;
         self.client.send_line(&line.to_string()).await;
         let answered = std::time::Instant::now();
         let answer_fn = answer(self.reply, self.held.clone());
-        let done = self.client.response_for_id_answering(&id, "session/prompt", RPC, answer_fn).await;
+        let done = self
+            .client
+            .response_for_id_answering(&id, "session/prompt", RPC, answer_fn)
+            .await;
         assert!(done.get("result").is_some(), "session/prompt: {done}");
         answered.elapsed()
     }
 
     async fn set_model(&mut self, session: &str, model: &str) {
-        let set = self.call("session/set_model", json!({ "sessionId": session, "modelId": model })).await;
+        let set = self
+            .call(
+                "session/set_model",
+                json!({ "sessionId": session, "modelId": model }),
+            )
+            .await;
         assert!(set.get("result").is_some(), "set_model {model}: {set}");
     }
 
     async fn compact(&mut self, session: &str) {
         let done = self
-            .call("_fuigo/compact_conversation", json!({ "session_id": session, "user_context": "keep it" }))
+            .call(
+                "_fuigo/compact_conversation",
+                json!({ "session_id": session, "user_context": "keep it" }),
+            )
             .await;
         assert!(done.get("result").is_some(), "compact: {done}");
     }
 
     /// The grant reached the durable store.
     fn granted(&self) -> bool {
-        let store = self.client.sandbox().fuigo_home().join("trusted_folders.toml");
+        let store = self
+            .client
+            .sandbox()
+            .fuigo_home()
+            .join("trusted_folders.toml");
         std::fs::read_to_string(store).is_ok_and(|text| text.contains(&*self.cwd.to_string_lossy()))
     }
 
@@ -311,12 +389,16 @@ fn history(sandbox: &TestSandbox, session: &str) -> String {
     let mut out = String::new();
     let mut stack = vec![sandbox.fuigo_home().to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("chat_history"))
+            } else if path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("chat_history"))
                 && path.to_string_lossy().contains(session)
             {
                 out.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
@@ -331,10 +413,16 @@ fn history(sandbox: &TestSandbox, session: &str) -> String {
 fn session_dir(sandbox: &TestSandbox, session: &str) -> PathBuf {
     let mut stack = vec![sandbox.fuigo_home().to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if dir.file_name().is_some_and(|n| n.to_string_lossy() == session) && dir.join("chat_history.jsonl").exists() {
+        if dir
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy() == session)
+            && dir.join("chat_history.jsonl").exists()
+        {
             return dir;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         stack.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
     }
     panic!("no session directory for {session}");
@@ -345,7 +433,9 @@ fn forks(sandbox: &TestSandbox) -> Vec<String> {
     let mut found = Vec::new();
     let mut stack = vec![sandbox.fuigo_home().to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for path in entries.flatten().map(|e| e.path()) {
             if path.is_dir() {
                 stack.push(path);
@@ -365,7 +455,9 @@ fn user_history_holding(sandbox: &TestSandbox, parent: &str, marker: &str) -> St
     let mut found = Vec::new();
     let mut stack = vec![sandbox.fuigo_home().to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for path in entries.flatten().map(|e| e.path()) {
             if path.is_dir() {
                 stack.push(path);
@@ -404,9 +496,15 @@ fn child_body(server: &MockInferenceServer, task: &str) -> String {
         .request_bodies()
         .iter()
         .find(|body| {
-            let Some(messages) = body["messages"].as_array() else { return false };
-            messages.first().is_some_and(|m| m.to_string().contains("subagent"))
-                && messages.last().is_some_and(|m| m.to_string().contains(task))
+            let Some(messages) = body["messages"].as_array() else {
+                return false;
+            };
+            messages
+                .first()
+                .is_some_and(|m| m.to_string().contains("subagent"))
+                && messages
+                    .last()
+                    .is_some_and(|m| m.to_string().contains(task))
         })
         .map(Value::to_string)
         .unwrap_or_else(|| panic!("no child request for {task}"))
@@ -414,12 +512,19 @@ fn child_body(server: &MockInferenceServer, task: &str) -> String {
 
 /// Every request carrying `marker` holds the project file `copies` times.
 fn every_request(server: &MockInferenceServer, marker: &str, copies: usize, what: &str) {
-    let bodies: Vec<String> =
-        server.request_bodies().iter().map(Value::to_string).filter(|body| body.contains(marker)).collect();
+    let bodies: Vec<String> = server
+        .request_bodies()
+        .iter()
+        .map(Value::to_string)
+        .filter(|body| body.contains(marker))
+        .collect();
     assert!(!bodies.is_empty(), "{what}: no request carried {marker}");
     for body in bodies {
         assert_eq!(hits(&body, CANARY), copies, "{what}");
-        assert!(!body.contains("project_files_withheld"), "{what}: the bit reached the wire");
+        assert!(
+            !body.contains("project_files_withheld"),
+            "{what}: the bit reached the wire"
+        );
     }
 }
 
@@ -433,18 +538,33 @@ async fn grant_reaches_next_turn_and_load(model: &str) {
     assert!(peer.granted(), "premise: the client's grant is stored");
     peer.prompt(&session, "turn-first").await;
     let live = turn_body(&server, "turn-first");
-    assert_eq!(hits(&live, CANARY), 1, "the grant must reach the next turn once ({model})");
+    assert_eq!(
+        hits(&live, CANARY),
+        1,
+        "the grant must reach the next turn once ({model})"
+    );
     let sandbox = peer.stop().await;
 
     let mut peer = Peer::start(&server, sandbox, Reply::Trust).await;
     peer.load(model, &session).await;
     peer.prompt(&session, "turn-second").await;
     let loaded = turn_body(&server, "turn-second");
-    assert_eq!(hits(&loaded, CANARY), 1, "the file must survive a new-process load once ({model})");
+    assert_eq!(
+        hits(&loaded, CANARY),
+        1,
+        "the file must survive a new-process load once ({model})"
+    );
     let sandbox = peer.stop().await;
     let saved = history(&sandbox, &session);
-    assert!(saved.contains(CANARY), "chat_history must hold the file ({model})");
-    assert_eq!(saved.contains(REMINDER_TAG), model != PLAN_MODEL, "premise: the {model} branch ran");
+    assert!(
+        saved.contains(CANARY),
+        "chat_history must hold the file ({model})"
+    );
+    assert_eq!(
+        saved.contains(REMINDER_TAG),
+        model != PLAN_MODEL,
+        "premise: the {model} branch ran"
+    );
 }
 
 fn turn_body(server: &MockInferenceServer, marker: &str) -> String {
@@ -460,7 +580,10 @@ fn turn_body(server: &MockInferenceServer, marker: &str) -> String {
 fn once(server: &MockInferenceServer, marker: &str, what: &str) {
     let body = turn_body(server, marker);
     assert_eq!(hits(&body, CANARY), 1, "{what}");
-    assert!(!body.contains("project_files_withheld"), "{what}: the bit reached the wire");
+    assert!(
+        !body.contains("project_files_withheld"),
+        "{what}: the bit reached the wire"
+    );
 }
 
 /// A new session in the same folder stores the grant, as another client would.
@@ -501,9 +624,16 @@ fn load_then_grant_then_prompt_and_a_repeat_load_stay_at_one_copy() {
             let mut peer = Peer::start(&server, sandbox, Reply::Hold).await;
             let session = peer.new_session(model).await;
             peer.prompt(&session, "turn-one").await;
-            assert_eq!(hits(&turn_body(&server, "turn-one"), CANARY), 0, "premise: withheld");
+            assert_eq!(
+                hits(&turn_body(&server, "turn-one"), CANARY),
+                0,
+                "premise: withheld"
+            );
             let sandbox = peer.stop().await;
-            assert!(history(&sandbox, &session).contains("project_files_withheld"), "the bit is on disk");
+            assert!(
+                history(&sandbox, &session).contains("project_files_withheld"),
+                "the bit is on disk"
+            );
 
             let mut peer = Peer::start(&server, sandbox, Reply::Hold).await;
             peer.load(model, &session).await;
@@ -584,7 +714,10 @@ fn a_zero_turn_switch_there_and_back_delivers_once() {
         once(&server, "turn-one", "reminder, plan, reminder, grant");
         assert_eq!(hits(&turn_body(&server, "turn-one"), USER_CANARY), 1);
         let saved = peer.stop().await;
-        assert!(history(&saved, &session).contains(REMINDER_TAG), "premise: back on the reminder agent");
+        assert!(
+            history(&saved, &session).contains(REMINDER_TAG),
+            "premise: back on the reminder agent"
+        );
 
         let sandbox = self::sandbox(&server);
         plant_user_file(&sandbox);
@@ -595,7 +728,10 @@ fn a_zero_turn_switch_there_and_back_delivers_once() {
         peer.prompt(&session, "turn-one-b").await;
         once(&server, "turn-one-b", "granted, then switched to plan");
         let saved = peer.stop().await;
-        assert!(!history(&saved, &session).contains(REMINDER_TAG), "premise: the rebuild reached the plan agent");
+        assert!(
+            !history(&saved, &session).contains(REMINDER_TAG),
+            "premise: the rebuild reached the plan agent"
+        );
     });
 }
 
@@ -651,12 +787,19 @@ fn a_durable_grant_elsewhere_delivers_on_a_trusted_load_once() {
             peer.prompt(&session, "turn-two").await;
             once(&server, "turn-two", "trusted load");
             let sandbox = peer.stop().await;
-            assert_eq!(hits(&history(&sandbox, &session), CANARY), 1, "one copy in history");
+            assert_eq!(
+                hits(&history(&sandbox, &session), CANARY),
+                1,
+                "one copy in history"
+            );
         }
     });
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn an_empty_set_then_a_user_file_inserts_the_reminder_once() {
     local(async {
@@ -677,14 +820,23 @@ fn an_empty_set_then_a_user_file_inserts_the_reminder_once() {
         let sandbox = peer.stop().await;
         let saved = history(&sandbox, &session);
         assert_eq!(hits(&saved, USER_CANARY), 1, "the reminder is stored once");
-        assert!(saved.contains(REMINDER_TAG), "premise: the reminder agent ran");
-        assert!(saved.contains("project_files_withheld"), "the bit waits for a project file");
+        assert!(
+            saved.contains(REMINDER_TAG),
+            "premise: the reminder agent ran"
+        );
+        assert!(
+            saved.contains("project_files_withheld"),
+            "the bit waits for a project file"
+        );
     });
 }
 
 /// A plan agent keeps its rules in the first message and a load never rebuilds that message, so a user file added later
 /// waits for a new session. The untrusted head behaves as a trusted one does: nothing here depends on a grant.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_plan_head_leaves_a_later_user_file_to_a_new_session() {
     local(async {
@@ -703,7 +855,10 @@ fn a_plan_head_leaves_a_later_user_file_to_a_new_session() {
         peer.prompt(&session, "turn-two").await;
         assert_eq!(hits(&turn_body(&server, "turn-two"), USER_CANARY), 0);
         let sandbox = peer.stop().await;
-        assert!(history(&sandbox, &session).contains("project_files_withheld"), "the bit waits for a project file");
+        assert!(
+            history(&sandbox, &session).contains("project_files_withheld"),
+            "the bit waits for a project file"
+        );
     });
 }
 
@@ -759,7 +914,10 @@ fn trusted_spec() -> AgentSpawnSpec<'static> {
 }
 
 /// With `U38_DUMP` set, writes the trusted sessions' bodies so a run on each build can be compared.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_trusted_session_is_unchanged_with_no_bit_and_no_late_file() {
     local(async {
@@ -767,28 +925,47 @@ fn a_trusted_session_is_unchanged_with_no_bit_and_no_late_file() {
             let server = server().await;
             let sandbox = sandbox(&server);
             let cwd = sandbox.workspace().to_path_buf();
-            let client = RawStdioClient::spawn_with_spec(&server, &cwd, sandbox, &trusted_spec()).await;
+            let client =
+                RawStdioClient::spawn_with_spec(&server, &cwd, sandbox, &trusted_spec()).await;
             let mut peer = Peer::adopt(client, cwd.clone()).await;
             let session = peer.new_session(model).await;
             peer.prompt(&session, "turn-one").await;
             let sandbox = peer.stop().await;
             std::fs::write(cwd.join("CLAUDE.md"), format!("{LATE_CANARY}\n")).expect("late file");
 
-            let client = RawStdioClient::spawn_with_spec(&server, &cwd, sandbox, &trusted_spec()).await;
+            let client =
+                RawStdioClient::spawn_with_spec(&server, &cwd, sandbox, &trusted_spec()).await;
             let mut peer = Peer::adopt(client, cwd.clone()).await;
             peer.load(model, &session).await;
             peer.prompt(&session, "turn-two").await;
             once(&server, "turn-two", "trusted load");
-            assert_eq!(hits(&turn_body(&server, "turn-two"), LATE_CANARY), 0, "{model}: no history, no delivery");
+            assert_eq!(
+                hits(&turn_body(&server, "turn-two"), LATE_CANARY),
+                0,
+                "{model}: no history, no delivery"
+            );
             let sandbox = peer.stop().await;
-            let context = std::fs::read_to_string(session_dir(&sandbox, &session).join("prompt_context.json"));
-            assert!(context.expect("prompt context").contains("CLAUDE.md"), "{model}: premise: a recognized file");
+            let context = std::fs::read_to_string(
+                session_dir(&sandbox, &session).join("prompt_context.json"),
+            );
+            assert!(
+                context.expect("prompt context").contains("CLAUDE.md"),
+                "{model}: premise: a recognized file"
+            );
             let saved = history(&sandbox, &session);
             assert!(!saved.contains("project_files_withheld"));
             assert_eq!(hits(&saved, LATE_CANARY), 0, "{model}");
-            assert_eq!(saved.contains(REMINDER_TAG), model != PLAN_MODEL, "premise: the {model} branch ran");
+            assert_eq!(
+                saved.contains(REMINDER_TAG),
+                model != PLAN_MODEL,
+                "premise: the {model} branch ran"
+            );
             if let Ok(path) = std::env::var("U38_DUMP") {
-                let bodies: Vec<String> = server.request_bodies().iter().map(Value::to_string).collect();
+                let bodies: Vec<String> = server
+                    .request_bodies()
+                    .iter()
+                    .map(Value::to_string)
+                    .collect();
                 std::fs::write(format!("{path}.{model}"), bodies.join("\n")).expect("dump");
             }
         }
@@ -829,8 +1006,13 @@ fn a_grant_before_the_first_prompt_and_a_second_after_reach_the_first_request() 
             let sandbox = self::sandbox(&server);
             let mut peer = Peer::start(&server, sandbox, Reply::Hold).await;
             let session = peer.new_session(model).await;
-            peer.prompt_releasing_after(&session, "turn-one-late", Duration::from_secs(1)).await;
-            once(&server, "turn-one-late", "grant a second after the first prompt");
+            peer.prompt_releasing_after(&session, "turn-one-late", Duration::from_secs(1))
+                .await;
+            once(
+                &server,
+                "turn-one-late",
+                "grant a second after the first prompt",
+            );
             peer.stop().await;
         }
     });
@@ -842,7 +1024,8 @@ fn expect_spawn(
     call: &str,
     task: &str,
 ) -> fuigo_test_support::InferenceExpectation {
-    let args = json!({ "description": "u38 child", "prompt": task, "subagent_type": "general-purpose" });
+    let args =
+        json!({ "description": "u38 child", "prompt": task, "subagent_type": "general-purpose" });
     server.expect_response(
         call,
         InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
@@ -868,12 +1051,20 @@ fn a_new_child_follows_the_folder_and_carries_the_file_once() {
             peer.prompt(&session, "turn-one").await;
             let _a = expect_spawn(&server, model, "call_a", "child-untrusted");
             peer.prompt(&session, "turn-two").await;
-            assert_eq!(hits(&child_body(&server, "child-untrusted"), CANARY), 0, "{model}: an untrusted child");
+            assert_eq!(
+                hits(&child_body(&server, "child-untrusted"), CANARY),
+                0,
+                "{model}: an untrusted child"
+            );
 
             peer.release().await;
             let _b = expect_spawn(&server, model, "call_b", "child-trusted");
             peer.prompt(&session, "turn-three").await;
-            assert_eq!(hits(&child_body(&server, "child-trusted"), CANARY), 1, "{model}: fork after delivery");
+            assert_eq!(
+                hits(&child_body(&server, "child-trusted"), CANARY),
+                1,
+                "{model}: fork after delivery"
+            );
             peer.stop().await;
         }
     });
@@ -890,7 +1081,11 @@ fn a_trusted_parents_new_child_has_one_copy() {
         peer.prompt(&session, "turn-one").await;
         let _a = expect_spawn(&server, PLAN_MODEL, "call_a", "child-of-trusted");
         peer.prompt(&session, "turn-two").await;
-        assert_eq!(hits(&child_body(&server, "child-of-trusted"), CANARY), 1, "trusted plan parent");
+        assert_eq!(
+            hits(&child_body(&server, "child-of-trusted"), CANARY),
+            1,
+            "trusted plan parent"
+        );
         peer.stop().await;
     });
 }
@@ -933,7 +1128,13 @@ const GOAL: &str = "/goal u38 objective marker";
 const OBJECTIVE: &str = "u38 objective marker";
 
 impl Peer {
-    async fn leave_tail(&mut self, server: &MockInferenceServer, session: &str, model: &str, tail: Tail) {
+    async fn leave_tail(
+        &mut self,
+        server: &MockInferenceServer,
+        session: &str,
+        model: &str,
+        tail: Tail,
+    ) {
         if tail == Tail::Compacted {
             self.compact(session).await;
         }
@@ -943,7 +1144,8 @@ impl Peer {
             InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
             ScriptedResponse::json(400, json!({ "error": { "message": "u38 refused" } })),
         );
-        let params = json!({ "sessionId": session, "prompt": [{ "type": "text", "text": "turn-tail" }] });
+        let params =
+            json!({ "sessionId": session, "prompt": [{ "type": "text", "text": "turn-tail" }] });
         let _ = self.call("session/prompt", params).await;
     }
 
@@ -973,19 +1175,29 @@ fn a_grant_after_a_fork_reaches_the_child_once() {
                 peer.prompt(&session, GOAL).await;
                 let child = peer.forked_child("forked_verbatim", &what);
                 let inherited = history(peer.client.sandbox(), &child);
-                assert!(inherited.contains("project_files_withheld"), "{what}: the child's bit");
+                assert!(
+                    inherited.contains("project_files_withheld"),
+                    "{what}: the child's bit"
+                );
                 assert_eq!(hits(&inherited, CANARY), 0, "{what}");
                 every_request(&server, OBJECTIVE, 0, &what);
 
                 peer.release().await;
                 let _resume = expect_resume(&server, model, "call_b", &child, "child-after");
                 peer.prompt(&session, "turn-three").await;
-                assert_eq!(hits(&child_body(&server, "child-after"), CANARY), 1, "{what}: the child after the grant");
+                assert_eq!(
+                    hits(&child_body(&server, "child-after"), CANARY),
+                    1,
+                    "{what}: the child after the grant"
+                );
                 once(&server, "turn-three", "and the parent");
                 let sandbox = peer.stop().await;
                 // A resume copies the child into a session of its own, whose user turn is the task.
                 let resumed = user_history_holding(&sandbox, &session, "child-after");
-                assert!(!resumed.contains("project_files_withheld") && hits(&resumed, CANARY) == 1, "{what}: delivered");
+                assert!(
+                    !resumed.contains("project_files_withheld") && hits(&resumed, CANARY) == 1,
+                    "{what}: delivered"
+                );
             }
         }
     });
@@ -1010,7 +1222,10 @@ fn a_fork_after_delivery_carries_the_file_once() {
                 let child = peer.forked_child("forked_verbatim", &what);
                 every_request(&server, OBJECTIVE, 1, &what);
                 let sandbox = peer.stop().await;
-                assert!(!history(&sandbox, &child).contains("project_files_withheld"), "{what}: no bit");
+                assert!(
+                    !history(&sandbox, &child).contains("project_files_withheld"),
+                    "{what}: no bit"
+                );
             }
         }
     });
@@ -1024,7 +1239,8 @@ fn a_trusted_plan_parents_fork_has_one_copy_and_no_bit() {
             let server = server().await;
             let sandbox = sandbox(&server);
             let cwd = sandbox.workspace().to_path_buf();
-            let client = RawStdioClient::spawn_with_spec(&server, &cwd, sandbox, &trusted_spec()).await;
+            let client =
+                RawStdioClient::spawn_with_spec(&server, &cwd, sandbox, &trusted_spec()).await;
             let mut peer = Peer::adopt(client, cwd).await;
             let session = peer.new_session(PLAN_MODEL).await;
             peer.prompt(&session, "turn-one").await;
@@ -1033,7 +1249,10 @@ fn a_trusted_plan_parents_fork_has_one_copy_and_no_bit() {
             let child = peer.forked_child("forked_verbatim", &what);
             every_request(&server, OBJECTIVE, 1, &what);
             let sandbox = peer.stop().await;
-            assert!(!history(&sandbox, &child).contains("project_files_withheld"), "{what}: no bit");
+            assert!(
+                !history(&sandbox, &child).contains("project_files_withheld"),
+                "{what}: no bit"
+            );
         }
     });
 }
@@ -1057,8 +1276,16 @@ fn a_mirror_fork_carries_the_file_once_and_an_untrusted_one_keeps_the_bit() {
                 peer.prompt(&session, GOAL).await;
                 let child = peer.forked_child("forked_verbatim", &what);
                 let inherited = history(peer.client.sandbox(), &child);
-                assert_eq!(hits(&inherited, CANARY), usize::from(delivered_first), "{what}: the child's history");
-                assert_eq!(inherited.contains("project_files_withheld"), !delivered_first, "{what}: the child's bit");
+                assert_eq!(
+                    hits(&inherited, CANARY),
+                    usize::from(delivered_first),
+                    "{what}: the child's history"
+                );
+                assert_eq!(
+                    inherited.contains("project_files_withheld"),
+                    !delivered_first,
+                    "{what}: the child's bit"
+                );
                 every_request(&server, OBJECTIVE, usize::from(delivered_first), &what);
 
                 if !delivered_first {
@@ -1088,7 +1315,11 @@ fn a_grant_under_a_display_cwd_delivers_one_copy_and_survives_a_load() {
                 let session = peer.new_session(model).await;
                 peer.prompt(&session, "turn-one").await;
                 let sandbox = peer.stop().await;
-                let sandbox = if live { sandbox } else { grant_elsewhere(&server, sandbox).await };
+                let sandbox = if live {
+                    sandbox
+                } else {
+                    grant_elsewhere(&server, sandbox).await
+                };
 
                 let reply = if live { Reply::Hold } else { Reply::Trust };
                 let mut peer = Peer::start(&server, sandbox, reply).await;
@@ -1100,8 +1331,15 @@ fn a_grant_under_a_display_cwd_delivers_one_copy_and_survives_a_load() {
                 peer.prompt(&session, "turn-two").await;
                 once(&server, "turn-two", &what);
                 let body = turn_body(&server, "turn-two");
-                assert!(body.contains(&format!("{DISPLAY}/AGENTS.md")), "{what}: the display path");
-                assert_eq!(hits(&body, USER_CANARY), 1, "{what}: the user file stays apart from the project set");
+                assert!(
+                    body.contains(&format!("{DISPLAY}/AGENTS.md")),
+                    "{what}: the display path"
+                );
+                assert_eq!(
+                    hits(&body, USER_CANARY),
+                    1,
+                    "{what}: the user file stays apart from the project set"
+                );
                 let sandbox = peer.stop().await;
 
                 let mut peer = Peer::start(&server, sandbox, Reply::Trust).await;
@@ -1150,7 +1388,10 @@ fn a_failed_history_write_on_load_delivers_once_on_the_next_load() {
             once(&server, "turn-two", "delivered in memory");
             let sandbox = peer.stop().await;
             assert!(append_only(&chat, false), "clear the fault");
-            assert!(history(&sandbox, &session).contains("project_files_withheld"), "premise: the write failed");
+            assert!(
+                history(&sandbox, &session).contains("project_files_withheld"),
+                "premise: the write failed"
+            );
 
             let mut peer = Peer::start(&server, sandbox, Reply::Trust).await;
             peer.load(model, &session).await;
@@ -1159,45 +1400,55 @@ fn a_failed_history_write_on_load_delivers_once_on_the_next_load() {
             let sandbox = peer.stop().await;
             let saved = history(&sandbox, &session);
             assert_eq!(hits(&saved, CANARY), 1, "{model}: one stored copy");
-            assert!(!saved.contains("project_files_withheld"), "{model}: bit cleared with the delivery");
+            assert!(
+                !saved.contains("project_files_withheld"),
+                "{model}: bit cleared with the delivery"
+            );
         }
     });
 }
 
 /// The live grant's history write fails: the conversation stays as stored, and the next start delivers once.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_failed_history_write_on_a_live_grant_delivers_at_the_next_start() {
     local(async {
         for model in [DEFAULT_MODEL, PLAN_MODEL] {
-          for compact_first in [false, true] {
-            let server = server().await;
-            let sandbox = sandbox(&server);
-            let mut peer = Peer::start(&server, sandbox, Reply::Hold).await;
-            let session = peer.new_session(model).await;
-            peer.prompt(&session, "turn-one").await;
-            peer.settle(1).await;
-            let chat = session_dir(peer.client.sandbox(), &session).join("chat_history.jsonl");
-            let stored = std::fs::read(&chat).expect("stored history");
-            std::fs::remove_file(&chat).expect("take the path");
-            std::fs::create_dir(&chat).expect("a rename can't land on this");
-            std::fs::write(chat.join("full"), "x").expect("non-empty");
+            for compact_first in [false, true] {
+                let server = server().await;
+                let sandbox = sandbox(&server);
+                let mut peer = Peer::start(&server, sandbox, Reply::Hold).await;
+                let session = peer.new_session(model).await;
+                peer.prompt(&session, "turn-one").await;
+                peer.settle(1).await;
+                let chat = session_dir(peer.client.sandbox(), &session).join("chat_history.jsonl");
+                let stored = std::fs::read(&chat).expect("stored history");
+                std::fs::remove_file(&chat).expect("take the path");
+                std::fs::create_dir(&chat).expect("a rename can't land on this");
+                std::fs::write(chat.join("full"), "x").expect("non-empty");
 
-            peer.release().await;
-            peer.prompt(&session, "turn-two").await;
-            assert_eq!(hits(&turn_body(&server, "turn-two"), CANARY), 0, "{model}: the refused write left the head as stored");
+                peer.release().await;
+                peer.prompt(&session, "turn-two").await;
+                assert_eq!(
+                    hits(&turn_body(&server, "turn-two"), CANARY),
+                    0,
+                    "{model}: the refused write left the head as stored"
+                );
 
-            std::fs::remove_dir_all(&chat).expect("clear the fault");
-            std::fs::write(&chat, stored).expect("restore");
-            if compact_first {
-                peer.compact(&session).await;
+                std::fs::remove_dir_all(&chat).expect("clear the fault");
+                std::fs::write(&chat, stored).expect("restore");
+                if compact_first {
+                    peer.compact(&session).await;
+                }
+                peer.prompt(&session, "turn-three").await;
+                once(&server, "turn-three", "the next start delivers once");
+                peer.prompt(&session, "turn-four").await;
+                once(&server, "turn-four", "and stays once");
+                peer.stop().await;
             }
-            peer.prompt(&session, "turn-three").await;
-            once(&server, "turn-three", "the next start delivers once");
-            peer.prompt(&session, "turn-four").await;
-            once(&server, "turn-four", "and stays once");
-            peer.stop().await;
-          }
         }
     });
 }
@@ -1215,9 +1466,15 @@ fn a_reject_ends_the_first_turns_wait_and_stays_gated() {
             let mut peer = Peer::start(&server, sandbox, Reply::Hold).await;
             let session = peer.new_session(model).await;
             let reply = json!({ "result": { "outcome": "reject" } });
-            let took = peer.prompt_answering_held(&session, "turn-one", reply).await;
+            let took = peer
+                .prompt_answering_held(&session, "turn-one", reply)
+                .await;
             assert!(took < WAIT_ENDED_EARLY, "{model}: {took:?}");
-            assert_eq!(hits(&turn_body(&server, "turn-one"), CANARY), 0, "{model}: a reject stays gated");
+            assert_eq!(
+                hits(&turn_body(&server, "turn-one"), CANARY),
+                0,
+                "{model}: a reject stays gated"
+            );
             assert!(!peer.granted(), "{model}");
             peer.stop().await;
         }
@@ -1234,9 +1491,15 @@ fn a_failed_trust_request_ends_the_first_turns_wait_and_stays_gated() {
             let mut peer = Peer::start(&server, sandbox, Reply::Hold).await;
             let session = peer.new_session(model).await;
             let reply = json!({ "error": { "code": -32000, "message": "client gone" } });
-            let took = peer.prompt_answering_held(&session, "turn-one", reply).await;
+            let took = peer
+                .prompt_answering_held(&session, "turn-one", reply)
+                .await;
             assert!(took < WAIT_ENDED_EARLY, "{model}: {took:?}");
-            assert_eq!(hits(&turn_body(&server, "turn-one"), CANARY), 0, "{model}: no decision stays gated");
+            assert_eq!(
+                hits(&turn_body(&server, "turn-one"), CANARY),
+                0,
+                "{model}: no decision stays gated"
+            );
             assert!(!peer.granted(), "{model}");
             peer.stop().await;
         }
@@ -1261,7 +1524,10 @@ enum Fault {
     ReadFails,
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn break_file(file: &std::path::Path, fault: Fault) {
     let away = file.with_extension("away");
     std::fs::rename(file, away).expect("move the file away");
@@ -1270,7 +1536,10 @@ fn break_file(file: &std::path::Path, fault: Fault) {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn restore_file(file: &std::path::Path, fault: Fault) {
     if matches!(fault, Fault::ReadFails) {
         std::fs::remove_dir(file).expect("clear the fault");
@@ -1295,7 +1564,11 @@ fn a_file_missing_at_the_grant_survives_a_compaction_and_reaches_the_next_prompt
                 break_file(&file, fault);
                 peer.release().await;
                 peer.prompt(&session, "turn-two").await;
-                assert_eq!(hits(&turn_body(&server, "turn-two"), CANARY), 0, "{what}: premise");
+                assert_eq!(
+                    hits(&turn_body(&server, "turn-two"), CANARY),
+                    0,
+                    "{what}: premise"
+                );
                 restore_file(&file, fault);
                 peer.compact(&session).await;
                 peer.prompt(&session, "turn-three").await;
@@ -1309,7 +1582,10 @@ fn a_file_missing_at_the_grant_survives_a_compaction_and_reaches_the_next_prompt
                 let sandbox = peer.stop().await;
                 let saved = history(&sandbox, &session);
                 assert_eq!(hits(&saved, CANARY), 1, "{what}: one stored copy");
-                assert!(!saved.contains("project_files_withheld"), "{what}: delivered");
+                assert!(
+                    !saved.contains("project_files_withheld"),
+                    "{what}: delivered"
+                );
             }
         }
     });
@@ -1335,7 +1611,11 @@ fn a_zero_turn_rebuild_from_an_empty_set_keeps_the_obligation() {
                 peer.prompt(&session, "turn-one").await;
                 once(&server, "turn-one", &format!("{what}: first prompt"));
                 let sandbox = peer.stop().await;
-                assert_eq!(history(&sandbox, &session).contains(REMINDER_TAG), to == HARNESS_MODEL, "{what}: premise");
+                assert_eq!(
+                    history(&sandbox, &session).contains(REMINDER_TAG),
+                    to == HARNESS_MODEL,
+                    "{what}: premise"
+                );
 
                 let mut peer = Peer::start(&server, sandbox, Reply::Trust).await;
                 peer.load(to, &session).await;
@@ -1344,7 +1624,10 @@ fn a_zero_turn_rebuild_from_an_empty_set_keeps_the_obligation() {
                 let sandbox = peer.stop().await;
                 let saved = history(&sandbox, &session);
                 assert_eq!(hits(&saved, CANARY), 1, "{what}: one stored copy");
-                assert!(!saved.contains("project_files_withheld"), "{what}: delivered");
+                assert!(
+                    !saved.contains("project_files_withheld"),
+                    "{what}: delivered"
+                );
             }
         }
     });
@@ -1368,7 +1651,11 @@ fn a_file_missing_at_a_trusted_load_survives_a_compaction() {
             let mut peer = Peer::start(&server, sandbox, Reply::Trust).await;
             peer.load(model, &session).await;
             peer.prompt(&session, "turn-two").await;
-            assert_eq!(hits(&turn_body(&server, "turn-two"), CANARY), 0, "{model}: premise");
+            assert_eq!(
+                hits(&turn_body(&server, "turn-two"), CANARY),
+                0,
+                "{model}: premise"
+            );
             restore_file(&file, Fault::Absent);
             peer.compact(&session).await;
             peer.prompt(&session, "turn-three").await;
@@ -1411,12 +1698,16 @@ fn over_the_window(model: &str, call: &str, path: &str) -> ScriptedResponse {
 }
 
 fn checkpoints(sandbox: &TestSandbox, session: &str) -> usize {
-    std::fs::read_dir(session_dir(sandbox, session).join("compaction_checkpoints")).map_or(0, Iterator::count)
+    std::fs::read_dir(session_dir(sandbox, session).join("compaction_checkpoints"))
+        .map_or(0, Iterator::count)
 }
 
 /// A process grant delivers, the restart is untrusted, and the load's history has no bit. A second grant must still
 /// refresh the list at the next start, or an inline compaction in that very turn rebuilds a head without the file.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_second_process_grant_carries_the_file_through_an_inline_compaction() {
     local(async {
@@ -1440,9 +1731,21 @@ fn a_second_process_grant_carries_the_file_through_an_inline_compaction() {
                 over_the_window(model, "call_big", "note.txt"),
             );
             peer.prompt(&session, "turn-two").await;
-            assert_eq!(checkpoints(peer.client.sandbox(), &session), 1, "{model}: premise: the turn compacted inline");
-            let last = server.request_bodies().last().map(Value::to_string).expect("a request");
-            assert_eq!(hits(&last, CANARY), 1, "{model}: the continuation after the inline compaction");
+            assert_eq!(
+                checkpoints(peer.client.sandbox(), &session),
+                1,
+                "{model}: premise: the turn compacted inline"
+            );
+            let last = server
+                .request_bodies()
+                .last()
+                .map(Value::to_string)
+                .expect("a request");
+            assert_eq!(
+                hits(&last, CANARY),
+                1,
+                "{model}: the continuation after the inline compaction"
+            );
             peer.stop().await;
         }
     });
@@ -1452,7 +1755,11 @@ impl Peer {
     async fn rewind(&mut self, session: &str, target: usize) {
         let params = json!({ "sessionId": session, "targetPromptIndex": target, "force": true, "mode": "all" });
         let done = self.call("_fuigo/rewind/execute", params).await;
-        assert_eq!(done["result"]["success"], json!(true), "rewind {target}: {done}");
+        assert_eq!(
+            done["result"]["success"],
+            json!(true),
+            "rewind {target}: {done}"
+        );
     }
 }
 
@@ -1485,7 +1792,10 @@ fn a_rewind_across_a_compaction_keeps_the_grants_repair() {
                 peer.prompt(&session, "turn-five").await;
                 once(&server, "turn-five", &format!("{what}: later load"));
                 let sandbox = peer.stop().await;
-                assert!(!history(&sandbox, &session).contains("project_files_withheld"), "{what}: delivered");
+                assert!(
+                    !history(&sandbox, &session).contains("project_files_withheld"),
+                    "{what}: delivered"
+                );
             }
         }
     });
@@ -1512,7 +1822,10 @@ fn a_trusted_rewind_writes_no_checkpoint_key() {
         let dir = session_dir(&sandbox, &session).join("compaction_checkpoints");
         for checkpoint in std::fs::read_dir(dir).expect("a checkpoint").flatten() {
             let text = std::fs::read_to_string(checkpoint.path()).expect("checkpoint");
-            assert!(!text.contains("withheld"), "a trusted checkpoint is byte-identical: {text}");
+            assert!(
+                !text.contains("withheld"),
+                "a trusted checkpoint is byte-identical: {text}"
+            );
         }
     });
 }
@@ -1532,8 +1845,13 @@ fn a_grant_in_a_new_childs_first_wait_reaches_its_first_request() {
             let session = peer.new_session(DEFAULT_MODEL).await;
             peer.prompt(&session, "turn-one").await;
             let _a = expect_spawn(&server, DEFAULT_MODEL, "call_a", "child-in-wait");
-            peer.prompt_releasing_after(&session, "turn-two", Duration::from_millis(1200)).await;
-            assert_eq!(hits(&child_body(&server, "child-in-wait"), CANARY), 1, "user level: {user_level}");
+            peer.prompt_releasing_after(&session, "turn-two", Duration::from_millis(1200))
+                .await;
+            assert_eq!(
+                hits(&child_body(&server, "child-in-wait"), CANARY),
+                1,
+                "user level: {user_level}"
+            );
             peer.stop().await;
         }
     });
@@ -1543,7 +1861,9 @@ fn a_grant_in_a_new_childs_first_wait_reaches_its_first_request() {
 fn child_holding(sandbox: &TestSandbox, parent: &str, marker: &str) -> String {
     let mut stack = vec![sandbox.fuigo_home().to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for path in entries.flatten().map(|e| e.path()) {
             if path.is_dir() {
                 stack.push(path);
@@ -1551,7 +1871,11 @@ fn child_holding(sandbox: &TestSandbox, parent: &str, marker: &str) -> String {
                 && !dir.to_string_lossy().contains(parent)
                 && std::fs::read_to_string(&path).is_ok_and(|text| text.contains(marker))
             {
-                return dir.file_name().expect("session dir").to_string_lossy().into_owned();
+                return dir
+                    .file_name()
+                    .expect("session dir")
+                    .to_string_lossy()
+                    .into_owned();
             }
         }
     }
@@ -1574,17 +1898,27 @@ fn a_new_child_built_untrusted_has_a_holder_for_a_later_grant() {
             peer.prompt(&session, "turn-one").await;
             let _a = expect_spawn(&server, DEFAULT_MODEL, "call_a", "child-first");
             peer.prompt(&session, "turn-two").await;
-            assert_eq!(hits(&child_body(&server, "child-first"), CANARY), 0, "{what}: premise");
+            assert_eq!(
+                hits(&child_body(&server, "child-first"), CANARY),
+                0,
+                "{what}: premise"
+            );
             let child = child_holding(peer.client.sandbox(), &session, "child-first");
             let stored = history(peer.client.sandbox(), &child);
-            assert!(stored.contains("project_files_withheld"), "{what}: the child's bit");
+            assert!(
+                stored.contains("project_files_withheld"),
+                "{what}: the child's bit"
+            );
 
             peer.release().await;
             let _b = expect_resume(&server, DEFAULT_MODEL, "call_b", &child, "child-later");
             peer.prompt(&session, "turn-three").await;
-            assert_eq!(hits(&child_body(&server, "child-later"), CANARY), 1, "{what}: a later turn");
+            assert_eq!(
+                hits(&child_body(&server, "child-later"), CANARY),
+                1,
+                "{what}: a later turn"
+            );
             peer.stop().await;
         }
     });
 }
-

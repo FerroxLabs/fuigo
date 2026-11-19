@@ -56,6 +56,10 @@ RETAIN_W=""   # non-empty while something that may still be running uses files u
 # W is used as an ABSOLUTE path after `cd`, as a symlink target and inside grep/pgrep patterns: make it physical and refuse any
 # character that is special in a pattern or to the shell (a relative or exotic KEEP/TMPDIR would silently break fixtures).
 W=$(cd "$W" 2>/dev/null && pwd -P) || { echo "selftest: cannot resolve the fixture directory"; exit 2; }
+# The demo gates below run final-gate.sh, which builds bash 3.2.57 before it prints its header (and sid) unless FUIGO_TEST_BASH32
+# names one; a fresh build per demo lane outlasts the 60 s sid wait under load. Build it once here and hand it to every demo gate.
+FUIGO_TEST_BASH32=$("$HERE/bash32.sh" "$W/bash32" 2>/dev/null) && [ -x "$FUIGO_TEST_BASH32" ] || { echo "selftest: cannot build bash 3.2.57 (bash32.sh)"; exit 2; }
+export FUIGO_TEST_BASH32
 case $W in /*) ;; *) echo "selftest: the fixture directory ($W) is not absolute"; exit 2;; esac
 case $W in *[!A-Za-z0-9/._-]*) echo "selftest: the fixture directory ($W) may contain only [A-Za-z0-9/._-]; choose another KEEP/TMPDIR"; exit 2;; esac
 NOPATH=$W/nonexistent   # a path that never exists, PRIVATE to this run (nothing below ever creates it): the negative fixtures' "missing" target
@@ -1111,7 +1115,7 @@ for u in $(systemctl list-units --all --type=scope --no-legend 2>/dev/null | awk
 chk "bg: an unrecordable unit => the command is NOT run and the status is 97" "$(cat "$W/rec.rc")/$([ -e "$W/rec.ran" ] && echo ran || echo notrun)" "rc=97/notrun"
 ( ABORT_LAUNCHER_FILE="$W/launcher.rec"; ABORT_UNITS_FILE="$W/units.rec"; : > "$ABORT_UNITS_FILE"; abort_init t "rec2$SELFTEST_UID"; FUIGO_GATE_RUN=selftest-env-$SELFTEST_UID bg sh -c 'echo "$FUIGO_GATE_RUN" > "$1"; cp "$2" "$3"' x "$W/env.seen" "$W/launcher.rec" "$W/launcher.during" > /dev/null 2>&1 )
 chk "bg: the launcher is recorded as 'pid starttime' while the command runs, then cleared; the unit is in the units file; FUIGO_GATE_RUN reaches the command" "$(grep -cE '^[0-9]+ [0-9]+$' "$W/launcher.during")/$(wc -c < "$W/launcher.rec" | tr -d ' ')/$(grep -c "^fuigo-t-rec2$SELFTEST_UID-" "$W/units.rec")/$(cat "$W/env.seen")" "1/0/1/selftest-env-$SELFTEST_UID"
-chk "final-gate: auxiliary commands carry the run marker, their containment failures are fatal (aux_check) and the launcher file is armed" "$(grep -cF 'FUIGO_GATE_RUN=$RUNID bg ' "$HERE/final-gate.sh")/$(grep -o 'aux_check \$' "$HERE/final-gate.sh" | wc -l | tr -d ' ')/$(grep -c '^ABORT_LAUNCHER_FILE=' "$HERE/final-gate.sh")" "5/5/1"
+chk "final-gate: auxiliary commands carry the run marker, their containment failures are fatal (aux_check) and the launcher file is armed" "$(grep -cF 'FUIGO_GATE_RUN=$RUNID bg ' "$HERE/final-gate.sh")/$(grep -o 'aux_check \$' "$HERE/final-gate.sh" | wc -l | tr -d ' ')/$(grep -c '^ABORT_LAUNCHER_FILE=' "$HERE/final-gate.sh")" "7/7/1"
 chk "rp.sh / iso.sh: every bg command is followed by contain_check" "$(grep -o 'contain_check \$' "$HERE/rp.sh" | wc -l | tr -d ' ')/$(grep -o 'contain_check \$' "$HERE/iso.sh" | wc -l | tr -d ' ')" "12/5"
 # the ABORT FLAG: with the flag raised a command never starts (bg returns 96, race-free, no pid involved); without it it runs
 ( ABORT_FLAG="$W/flag.raised"; : > "$ABORT_FLAG"; abort_init t "flg$SELFTEST_UID"; bg sh -c ': > "$1"' x "$W/flag.ran" > /dev/null 2>&1; echo "rc=$?" > "$W/flag.rc" ) 2> /dev/null

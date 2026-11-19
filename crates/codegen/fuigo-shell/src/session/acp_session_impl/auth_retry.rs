@@ -74,9 +74,10 @@ pub(crate) fn human_duration(d: std::time::Duration) -> String {
 pub(crate) fn paced(delay: std::time::Duration) -> std::time::Duration {
     #[cfg(test)]
     {
-        delay / TEST_PACE_DIVISOR
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .max(1)
+        delay
+            / TEST_PACE_DIVISOR
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .max(1)
     }
     #[cfg(not(test))]
     {
@@ -270,7 +271,10 @@ impl AuthRetrySchedule {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "auth_retry_tests.rs"]
 mod tests;

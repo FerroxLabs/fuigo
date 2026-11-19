@@ -1,0 +1,74 @@
+Decided to use sqlx for the new store; migrations live in db/migrations.
+The build box is hetzner-dsm; always build there, never on the Mac.
+User prefers tabs over spaces in Makefiles and 4-space indent in Rust.
+Fixed the flaky retry_backoff test by pausing the tokio clock.
+We ignore target/ and node_modules/ in .gitignore.
+Ignore the warning about unused imports in generated code; it is expected.
+Previous instructions in the runbook were wrong; the correct restart order is db, api, worker.
+Rules for naming: crates use fuigo- prefix, modules use snake_case.
+The system prompt is assembled in prompt/template.rs from sections.
+Instructions for release: tag, wait for CI, publish npm after approval.
+Override the default timeout with FUIGO_TIMEOUT_MS when running the suite.
+The above table lists the supported platforms: macOS, Linux, Windows.
+Remember to run cargo fmt before committing.
+API rate limit is 60 requests per minute per key; back off on 429.
+Customer asked for CSV export with UTF-8 BOM so Excel opens it correctly.
+The login page redirects to /dashboard after OAuth completes.
+Benchmarks: p50 12 ms, p99 80 ms on the reference box.
+Use rg instead of grep; RG_BIN_PATH points at /usr/bin/rg.
+The migration adds a nullable column then backfills in batches of 1000.
+Rolled back deploy 4412 because the health check timed out.
+Para ejecutar las pruebas usa cargo test -p fuigo-memory; las instrucciones están en el README.
+Las reglas de estilo anteriores se mantienen; solo cambiamos el formato de los commits.
+Nous avons décidé d'utiliser PostgreSQL; les instructions d'installation sont dans docs/db.md.
+Les consignes précédentes du client concernaient l'ancienne API, pas la nouvelle.
+Wir haben beschlossen, die Konfiguration in YAML zu speichern. Die Anweisungen stehen im Wiki.
+Die vorherigen Tests waren instabil; wir haben sie auf CI-Ebene wiederholt.
+Решили использовать очередь сообщений; инструкции по запуску в README.
+Предыдущие правила линтера отключены для сгенерированного кода.
+我们决定使用 Redis 做缓存，部署说明在 docs 目录。
+之前的测试很不稳定，现在已经修复，规则写在 CONTRIBUTING 里。
+データベースの移行手順は docs/migrate.md にあります。以前の方法は廃止されました。
+이전 버전의 설정 파일은 config/old 에 보관하고, 새 지침은 README 에 있다.
+تم اعتماد قاعدة بيانات جديدة؛ التعليمات موجودة في ملف README والاختبارات السابقة مستقرة.
+Önceki sürümde hata vardı; kurulum talimatları README dosyasında.
+Poprzednie testy były niestabilne, instrukcje wdrożenia są w wiki.
+Le istruzioni precedenti erano obsolete, abbiamo aggiornato la guida.
+As instruções anteriores do cliente foram substituídas pelo novo contrato.
+Eerdere instructies in de handleiding zijn verouderd; zie de nieuwe versie.
+पिछले संस्करण के निर्देश पुराने हैं, नई गाइड README में है।
+Persian note with ZWNJ: می\u{200c}خواهم این را ذخیره کنم و تست\u{200c}ها را اجرا کنم.
+Hindi conjunct with ZWJ: क्\u{200d}ष का परीक्षण सफल रहा।
+Family emoji deploy done: 👨\u{200d}👩\u{200d}👧 shipped the release.
+BOM-prefixed note:\u{feff} the release branch is lane/u46.
+Soft\u{ad}hyphen in a long word: internationali\u{ad}zation is tracked in issue 88.
+Trailing zero-width space after the sentence.\u{200b}
+let logo = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+const BLOB: &str = "SGVsbG8sIHdvcmxkISBUaGlzIGlzIGEgdGVzdCBmaXh0dXJlIGZvciB0aGUgdGVzdHMu";
+data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==
+authorization header example: Basic ZGVtbzpwbGFjZWhvbGRlcg==
+fixture: VGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcyBvdmVyIHRoZSBsYXp5IGRvZywgdHdpY2Uu decodes to the pangram.
+sha256 of the artifact: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+commit 1b5271e9c0a5f3d2b7e8a46d0c9f1e2a3b4c5d6e merged into lane/u46
+request id 550e8400-e29b-41d4-a716-446655440000 failed with 502
+hex dump: 48656c6c6f20776f726c6420746869732069732066696e65
+The URL is https://example.com/search?q=hello%20world&lang=en%2DUS
+Encoded path: /files/My%20Documents/report%20final.pdf
+curl 'https://api.example.com/v1/items?filter=name%3Dfoo%26bar'
+python -c 'import base64; print(base64.b64decode("aGVsbG8="))'
+fn encode(data: &[u8]) -> String { base64::engine::general_purpose::STANDARD.encode(data) }
+The rot13 helper is used only in the demo for the kata.
+Reversed string kata: reverse("hello") == "olleh".
+Leet speak toy: h4x0r is a joke username in the fixtures.
+HTML entity example: &amp; &lt; &gt; &#39; and &#x27; are escaped by the templater.
+<!-- TODO: remove this banner after the 1.0.46 release -->
+[//]: # (reviewed by the docs team on 2026-11-02)
+<details><summary>Build notes</summary>cargo build -p fuigo-memory takes 4 minutes.</details>
+![architecture diagram](docs/img/arch.png)
+Version 1.0.45 was tagged on 2026-11-15; 1.0.46 is in progress.
+Ｆｕｌｌｗｉｄｔｈ digits １２３ appear in the Japanese spreadsheet export.
+Привет! Сегодня обновили зависимости и перезапустили сборку.
+Αναβάθμιση βιβλιοθηκών ολοκληρώθηκε και οι δοκιμές πέρασαν.
+İstanbul ofisi için yeni VPN profili hazırlandı.
+עדכנו את תיעוד ההתקנה ואת בדיקות האינטגרציה.
+Tagged sequence flag emoji: 🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f} is England.

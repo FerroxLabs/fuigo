@@ -41,7 +41,10 @@ pub fn is_gzip(content_type: &str) -> bool {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    matches!(essence.as_str(), "application/gzip" | "application/x-gzip" | "application/x-tar+gzip" | "application/x-gtar")
+    matches!(
+        essence.as_str(),
+        "application/gzip" | "application/x-gzip" | "application/x-tar+gzip" | "application/x-gtar"
+    )
 }
 
 /// Whether a filter is installed.
@@ -61,7 +64,10 @@ pub fn is_text(content_type: &str) -> bool {
         || essence.ends_with("+json")
         || matches!(
             essence.as_str(),
-            "application/json" | "application/x-ndjson" | "application/jsonl" | "application/x-jsonlines"
+            "application/json"
+                | "application/x-ndjson"
+                | "application/jsonl"
+                | "application/x-jsonlines"
         )
 }
 
@@ -98,7 +104,10 @@ impl Drop for FilteredCopy {
 
 /// `path` through the filter when it is text and the filter changes it: a [`FilteredCopy`] to upload instead.
 /// `None` means upload the file as it is. The file itself is never changed.
-pub(crate) fn filtered_copy(path: &Path, content_type: &str) -> std::io::Result<Option<FilteredCopy>> {
+pub(crate) fn filtered_copy(
+    path: &Path,
+    content_type: &str,
+) -> std::io::Result<Option<FilteredCopy>> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     // A file that is not there has nothing to leak: the upload reports its own error for it.
@@ -107,13 +116,17 @@ pub(crate) fn filtered_copy(path: &Path, content_type: &str) -> std::io::Result<
         other => other.map(Some),
     };
     let filtered = if FILTER.get().is_some() && is_text(content_type) {
-        let Some(bytes) = read(path)? else { return Ok(None) };
+        let Some(bytes) = read(path)? else {
+            return Ok(None);
+        };
         match apply(&bytes, content_type) {
             Cow::Owned(filtered) => filtered,
             Cow::Borrowed(_) => return Ok(None),
         }
     } else if let Some(archive_filter) = ARCHIVE_FILTER.get().filter(|_| is_gzip(content_type)) {
-        let Some(bytes) = read(path)? else { return Ok(None) };
+        let Some(bytes) = read(path)? else {
+            return Ok(None);
+        };
         match archive_filter(&bytes) {
             Some(filtered) if filtered != bytes => filtered,
             _ => return Ok(None),
@@ -148,7 +161,9 @@ mod tests {
 
     /// Stands in for the shell's scrub: replaces one synthetic marker.
     fn replace_mark(bytes: Vec<u8>) -> Vec<u8> {
-        String::from_utf8_lossy(&bytes).replace(MARK, "<redacted>").into_bytes()
+        String::from_utf8_lossy(&bytes)
+            .replace(MARK, "<redacted>")
+            .into_bytes()
     }
 
     /// Stands in for the shell's tar.gz scrub.
@@ -193,16 +208,29 @@ mod tests {
         let endpoint = RecordingEndpoint::fluxrouter_class().await;
         let config = config_for(endpoint.proxy_base_url());
         let json = format!("{{\"tool_state\":\"key {MARK}\"}}");
-        crate::gcs::upload_bytes(&config, "sess/turn_0/a.json", json.as_bytes(), "application/json")
-            .await
-            .expect("upload_bytes");
+        crate::gcs::upload_bytes(
+            &config,
+            "sess/turn_0/a.json",
+            json.as_bytes(),
+            "application/json",
+        )
+        .await
+        .expect("upload_bytes");
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("b.jsonl");
         std::fs::write(&file, format!("{{\"line\":\"{MARK}\"}}\n")).unwrap();
-        crate::gcs::upload_file(&config, "sess/turn_0/b.jsonl", &file, "application/x-ndjson")
-            .await
-            .expect("upload_file");
-        assert!(std::fs::read_to_string(&file).unwrap().contains(MARK), "the file on disk is unchanged");
+        crate::gcs::upload_file(
+            &config,
+            "sess/turn_0/b.jsonl",
+            &file,
+            "application/x-ndjson",
+        )
+        .await
+        .expect("upload_file");
+        assert!(
+            std::fs::read_to_string(&file).unwrap().contains(MARK),
+            "the file on disk is unchanged"
+        );
         let image: Vec<u8> = [&[0x89u8, b'P', b'N', b'G'][..], MARK.as_bytes()].concat();
         crate::gcs::upload_bytes(&config, "sess/turn_0/c.png", &image, "image/png")
             .await
@@ -227,21 +255,47 @@ mod tests {
         // Astra r2 #2: a gzip artifact in the queue (a recovered memory-archive spill) goes through the archive filter.
         let raw_archive: Vec<u8> = [&[0x1fu8, 0x8b][..], b"p149-archive-raw"].concat();
         let _ = queue
-            .enqueue_bytes_blocking(&raw_archive, "sess/turn_0/memory.tar.gz", "application/gzip", "memory_archive", "sess", 0)
+            .enqueue_bytes_blocking(
+                &raw_archive,
+                "sess/turn_0/memory.tar.gz",
+                "application/gzip",
+                "memory_archive",
+                "sess",
+                0,
+            )
             .await;
         queue.wait_idle(std::time::Duration::from_secs(30)).await;
         endpoint.settle(std::time::Duration::from_millis(300)).await;
 
         for path in ["a.json", "b.jsonl", "tool_state.json"] {
-            assert!(endpoint.received_contains(path.as_bytes()), "control: {path} was uploaded");
+            assert!(
+                endpoint.received_contains(path.as_bytes()),
+                "control: {path} was uploaded"
+            );
         }
-        assert!(endpoint.received_contains(&image), "a binary payload is sent unchanged");
-        assert!(endpoint.received_contains(b"p149-archive-filtered"), "the queued archive went through the archive filter");
-        assert!(!endpoint.received_contains(b"p149-archive-raw"), "the raw archive left the machine");
+        assert!(
+            endpoint.received_contains(&image),
+            "a binary payload is sent unchanged"
+        );
+        assert!(
+            endpoint.received_contains(b"p149-archive-filtered"),
+            "the queued archive went through the archive filter"
+        );
+        assert!(
+            !endpoint.received_contains(b"p149-archive-raw"),
+            "the raw archive left the machine"
+        );
         let received = String::from_utf8_lossy(&endpoint.received()).into_owned();
         let without_image = received.replace(&String::from_utf8_lossy(&image).into_owned(), "");
-        assert!(!without_image.contains(MARK), "a text upload carried the marker: {received}");
-        assert_eq!(without_image.matches("<redacted>").count(), 3, "control: three text uploads filtered: {received}");
+        assert!(
+            !without_image.contains(MARK),
+            "a text upload carried the marker: {received}"
+        );
+        assert_eq!(
+            without_image.matches("<redacted>").count(),
+            3,
+            "control: three text uploads filtered: {received}"
+        );
     }
 
     /// P149 (S14/K16, Astra r2 #2/r3 #6): a text spill recovered from an earlier run (written unfiltered) is sent
@@ -278,7 +332,11 @@ mod tests {
         // A recovered gzip spill (a memory archive from an earlier version) goes through the archive filter, which the
         // upload primitives do not apply: only the queue's filtered copy does.
         let archive = home.path().join("spill.tar.gz");
-        std::fs::write(&archive, [&[0x1fu8, 0x8b][..], b"p149-archive-raw"].concat()).unwrap();
+        std::fs::write(
+            &archive,
+            [&[0x1fu8, 0x8b][..], b"p149-archive-raw"].concat(),
+        )
+        .unwrap();
         let archive_sidecar = crate::queue::QueueItemSidecar {
             gcs_path: "sess/turn_0/memory.tar.gz".into(),
             content_type: "application/gzip".into(),
@@ -286,16 +344,35 @@ mod tests {
             ..sidecar.clone()
         };
         assert!(matches!(
-            queue.enqueue_recovered(&archive, &home.path().join("spill.tar.gz.meta"), &archive_sidecar),
+            queue.enqueue_recovered(
+                &archive,
+                &home.path().join("spill.tar.gz.meta"),
+                &archive_sidecar
+            ),
             crate::queue::EnqueueOutcome::Enqueued
         ));
         queue.wait_idle(std::time::Duration::from_secs(30)).await;
         endpoint.settle(std::time::Duration::from_millis(300)).await;
-        assert!(endpoint.received_contains(b"p149-archive-filtered"), "the recovered archive was filtered");
-        assert!(!endpoint.received_contains(b"p149-archive-raw"), "the raw recovered archive left the machine");
-        assert!(endpoint.received_contains(b"recovered.json"), "control: it was uploaded");
-        assert!(endpoint.received_contains(b"<redacted>"), "the filtered copy was sent");
-        assert!(!endpoint.received_contains(MARK.as_bytes()), "the recovered spill left the machine unfiltered");
+        assert!(
+            endpoint.received_contains(b"p149-archive-filtered"),
+            "the recovered archive was filtered"
+        );
+        assert!(
+            !endpoint.received_contains(b"p149-archive-raw"),
+            "the raw recovered archive left the machine"
+        );
+        assert!(
+            endpoint.received_contains(b"recovered.json"),
+            "control: it was uploaded"
+        );
+        assert!(
+            endpoint.received_contains(b"<redacted>"),
+            "the filtered copy was sent"
+        );
+        assert!(
+            !endpoint.received_contains(MARK.as_bytes()),
+            "the recovered spill left the machine unfiltered"
+        );
     }
 
     /// P149 (S14/K16, Astra r3 #6): a text file the queue compresses (zstd, at upload time) is compressed from the
@@ -311,10 +388,21 @@ mod tests {
             UploadRetryPolicy::default(),
         );
         let file = home.path().join("big.json");
-        let body = format!("{{\"compressed\":\"key {MARK}\",\"pad\":\"{}\"}}", "x".repeat(400));
+        let body = format!(
+            "{{\"compressed\":\"key {MARK}\",\"pad\":\"{}\"}}",
+            "x".repeat(400)
+        );
         std::fs::write(&file, &body).unwrap();
         let _ = queue
-            .enqueue_file_blocking(&file, "sess/turn_0/big.json", "application/json", "big", "sess", 0, true)
+            .enqueue_file_blocking(
+                &file,
+                "sess/turn_0/big.json",
+                "application/json",
+                "big",
+                "sess",
+                0,
+                true,
+            )
             .await;
         queue.wait_idle(std::time::Duration::from_secs(30)).await;
         endpoint.settle(std::time::Duration::from_millis(300)).await;
@@ -327,9 +415,19 @@ mod tests {
         let mut text = Vec::new();
         let _ = std::io::Read::read_to_end(&mut decoder, &mut text);
         let text = String::from_utf8_lossy(&text);
-        assert!(text.contains("<redacted>") && text.contains("compressed"), "control: {text}");
-        assert!(!text.contains(MARK), "the compressed upload carried the marker: {text}");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), body, "the file on disk is unchanged");
+        assert!(
+            text.contains("<redacted>") && text.contains("compressed"),
+            "control: {text}"
+        );
+        assert!(
+            !text.contains(MARK),
+            "the compressed upload carried the marker: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            body,
+            "the file on disk is unchanged"
+        );
     }
 
     /// P149: an artifact that does not exist has nothing to filter: the filter must not turn the upload's own
@@ -339,7 +437,15 @@ mod tests {
         install(replace_mark);
         install_archive(mark_archive);
         let missing = std::path::Path::new("/nonexistent/p149_payload_filter_missing");
-        assert!(filtered_copy(missing, "application/json").expect("not an error").is_none());
-        assert!(filtered_copy(missing, "application/gzip").expect("not an error").is_none());
+        assert!(
+            filtered_copy(missing, "application/json")
+                .expect("not an error")
+                .is_none()
+        );
+        assert!(
+            filtered_copy(missing, "application/gzip")
+                .expect("not an error")
+                .is_none()
+        );
     }
 }

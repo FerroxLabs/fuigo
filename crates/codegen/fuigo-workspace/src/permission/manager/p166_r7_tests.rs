@@ -6,7 +6,10 @@
 
 use super::{PermissionState, bash_protected_write_target, evaluate_bash};
 
-fn floor_in(cwd: &std::path::Path, cmd: &str) -> Option<crate::permission::shell_access::ProtectedEditReason> {
+fn floor_in(
+    cwd: &std::path::Path,
+    cmd: &str,
+) -> Option<crate::permission::shell_access::ProtectedEditReason> {
     let state = PermissionState::default();
     let evaluation = evaluate_bash(cmd, &state, true);
     bash_protected_write_target(&evaluation, cwd, None)
@@ -24,7 +27,11 @@ fn check(rows: &[(&str, bool)]) {
             wrong.push(format!("{cmd}: expected blocked={blocked}, got {got:?}"));
         }
     }
-    assert!(wrong.is_empty(), "protected floor mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "protected floor mismatches:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// HIGH 1: every non-read `git config` writes the file it selects; `core.hooksPath` fails closed on every route.
@@ -39,7 +46,10 @@ fn p166_r7_git_config_and_hooks_path() {
         ("git config set core.hooksPath /tmp/evil-hooks", true),
         ("git config set --system user.name x", true),
         ("git config --add core.hooksPath /tmp/evil-hooks", true),
-        ("git config --replace-all core.hooksPath /tmp/evil-hooks", true),
+        (
+            "git config --replace-all core.hooksPath /tmp/evil-hooks",
+            true,
+        ),
         ("git config --unset core.hooksPath", false),
         ("git config unset core.hooksPath", false),
         ("git config --edit", true),
@@ -49,7 +59,10 @@ fn p166_r7_git_config_and_hooks_path() {
         ("git -c core.hooksPath=/tmp/evil-hooks commit -m x", true),
         ("git -c CORE.hookspath=/tmp/evil-hooks status", true),
         ("git --config-env=core.hooksPath=EVIL status", true),
-        ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/e git commit -m x", true),
+        (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/e git commit -m x",
+            true,
+        ),
         ("env GIT_CONFIG_KEY_0=core.hooksPath git status", true),
         ("export GIT_CONFIG_KEY_0=core.hooksPath", true),
         // Reads and ordinary config writes stay silent.
@@ -90,7 +103,10 @@ fn p166_r7_editor_ex_commands() {
         ("vi -c 'w .mcp.json' README.md", true),
         ("ex -c 'w .mcp.json' README.md", true),
         ("emacs --eval '(write-file \".mcp.json\")' README.md", true),
-        ("emacs --batch --eval '(write-region 1 2 \".git/hooks/pre-commit\")' README.md", true),
+        (
+            "emacs --batch --eval '(write-region 1 2 \".git/hooks/pre-commit\")' README.md",
+            true,
+        ),
         ("vim README.md", false),
         ("vim -c 'set nu' README.md", false),
     ]);
@@ -112,7 +128,10 @@ fn p166_r7_ar_dashed_mode() {
 #[test]
 fn p166_r7_rsync_log_and_batch() {
     check(&[
-        ("rsync -a src/ /tmp/out --log-file=.git/hooks/pre-commit", true),
+        (
+            "rsync -a src/ /tmp/out --log-file=.git/hooks/pre-commit",
+            true,
+        ),
         ("rsync -a src/ /tmp/out --log-file .mcp.json", true),
         ("rsync -a src/ /tmp/out --write-batch=.mcp.json", true),
         ("rsync -a src/ /tmp/out --only-write-batch=.mcp.json", true),
@@ -149,16 +168,25 @@ fn p166_r7_interpreter_one_liners_and_tripwire() {
     check(&[
         ("python3 -c \"open('.mcp.json','w').write('x')\"", true),
         ("python -c \"open('.git/hooks/pre-commit','w')\"", true),
-        ("node -e \"require('fs').writeFileSync('.mcp.json','x')\"", true),
+        (
+            "node -e \"require('fs').writeFileSync('.mcp.json','x')\"",
+            true,
+        ),
         ("perl -e 'open F, \">.mcp.json\"'", true),
         ("ruby -e 'File.write(\".mcp.json\", \"x\")'", true),
         ("php -r 'file_put_contents(\".mcp.json\", \"x\");'", true),
         ("lua -e 'io.open(\".mcp.json\", \"w\")'", true),
-        ("deno eval 'Deno.writeTextFileSync(\".mcp.json\", \"\")'", true),
+        (
+            "deno eval 'Deno.writeTextFileSync(\".mcp.json\", \"\")'",
+            true,
+        ),
         ("python3 -c \"open('~/.bashrc','w')\"", true),
         ("python3 -c \"open('$HOME/.bashrc','w')\"", true),
         ("python3 -c \"open('./out/../.mcp.json','w')\"", true),
-        ("cd .git/hooks && python3 -c \"open('pre-commit','w')\"", true),
+        (
+            "cd .git/hooks && python3 -c \"open('pre-commit','w')\"",
+            true,
+        ),
         ("some-unknown-tool --out=.mcp.json", true),
         ("some-unknown-tool -o.mcp.json", true),
         ("sh -c 'echo x > .mcp.json'", true),
@@ -299,8 +327,14 @@ fn p166_r7_sweep_table_unexpected_positions() {
         ("sqlite3 .mcp.json 'create table t(a)'", true),
         ("python -c \"open('.mcp.json','w')\"", true),
         ("python3 -c \"open('.mcp.json','w')\"", true),
-        ("node -e \"require('fs').writeFileSync('.mcp.json','')\"", true),
-        ("deno eval 'Deno.writeTextFileSync(\".mcp.json\", \"\")'", true),
+        (
+            "node -e \"require('fs').writeFileSync('.mcp.json','')\"",
+            true,
+        ),
+        (
+            "deno eval 'Deno.writeTextFileSync(\".mcp.json\", \"\")'",
+            true,
+        ),
         ("php -r 'file_put_contents(\".mcp.json\", \"\");'", true),
         ("lua -e 'io.open(\".mcp.json\", \"w\")'", true),
         ("open .mcp.json", true),

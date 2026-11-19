@@ -95,8 +95,7 @@ pub fn scrub_unsafe_display(text: &str, break_replacement: Option<char>) -> Cow<
 /// True for a character unsafe in a terminal title or tab title: the shared set, minus the two joiners that emoji
 /// sequences need (ZWJ, ZWNJ) and minus the tag block, which [`strip_loose_tags`] has already judged.
 pub fn is_unsafe_title_char(c: char) -> bool {
-    is_unsafe_display_char(c)
-        && !matches!(c, '\u{200C}' | '\u{200D}' | '\u{E0020}'..='\u{E007F}')
+    is_unsafe_display_char(c) && !matches!(c, '\u{200C}' | '\u{200D}' | '\u{E0020}'..='\u{E007F}')
 }
 
 /// Scrubs untrusted text for a terminal title: controls and invisible characters are dropped, loose tags are dropped,
@@ -127,7 +126,13 @@ pub fn replace_unsafe_display(text: &str, placeholder: char) -> Cow<'_, str> {
     }
     Cow::Owned(
         text.chars()
-            .map(|c| if is_unsafe_display_char(c) { placeholder } else { c })
+            .map(|c| {
+                if is_unsafe_display_char(c) {
+                    placeholder
+                } else {
+                    c
+                }
+            })
             .collect(),
     )
 }
@@ -207,8 +212,14 @@ pub enum Delim {
 
 fn delim_escape(c: char, d: Delim) -> Option<&'static str> {
     match (d, c) {
-        (Delim::Quote, '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' | '\u{301E}' | '"' | '\u{FF02}') => Some("\\\""),
-        (Delim::Apostrophe, '\'' | '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' | '\u{FF07}') => Some("\\'"),
+        (
+            Delim::Quote,
+            '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' | '\u{301E}' | '"' | '\u{FF02}',
+        ) => Some("\\\""),
+        (
+            Delim::Apostrophe,
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' | '\u{FF07}',
+        ) => Some("\\'"),
         (Delim::Bracket, '[' | '\u{FF3B}') => Some("\\["),
         (Delim::Bracket, ']' | '\u{FF3D}') => Some("\\]"),
         _ => None,
@@ -223,7 +234,13 @@ fn delim_escape(c: char, d: Delim) -> Option<&'static str> {
 /// exists), isolate right-to-left text, wrap in `open`/`close`. Property: the output holds exactly one opening and
 /// one closing delimiter that is not preceded by an odd number of backslashes, at the two ends, and its width is at
 /// most `max_columns` plus the two delimiters. The delimiters are not counted in `max_columns`.
-pub fn delimited<T: std::fmt::Display>(value: T, d: Delim, open: &str, close: &str, max_columns: usize) -> String {
+pub fn delimited<T: std::fmt::Display>(
+    value: T,
+    d: Delim,
+    open: &str,
+    close: &str,
+    max_columns: usize,
+) -> String {
     let raw = value.to_string();
     let clean = scrub_unsafe_display(&raw, Some(' '));
     let body = cap_core(&clean, Some(d), max_columns, true);
@@ -296,7 +313,10 @@ impl<T: std::fmt::Display> std::fmt::Debug for Untrusted<T> {
 /// Borrows the input when nothing needs changing, so the per-line call on clean text does not allocate.
 pub fn scrub_terminal_text(text: &str) -> Cow<'_, str> {
     let layout = |c: char| c == '\n' || c == '\t';
-    if !text.chars().any(|c| is_unsafe_display_char(c) && !layout(c) && !is_isolate(c)) {
+    if !text
+        .chars()
+        .any(|c| is_unsafe_display_char(c) && !layout(c) && !is_isolate(c))
+    {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
@@ -313,7 +333,6 @@ pub fn scrub_terminal_text(text: &str) -> Cow<'_, str> {
     }
     Cow::Owned(out)
 }
-
 
 /// First-strong isolate and pop-directional-isolate: the only bidi characters Fuigo writes itself.
 const FSI: char = '\u{2068}';
@@ -454,10 +473,16 @@ fn clusters(text: &str) -> impl Iterator<Item = (&str, usize)> {
 fn build_units(text: &str, d: Option<Delim>) -> Vec<(String, usize)> {
     clusters(text)
         .map(|(cl, w)| {
-            let Some(d) = d else { return (cl.to_string(), w) };
+            let Some(d) = d else {
+                return (cl.to_string(), w);
+            };
             let mut chars = cl.chars();
             let base = chars.next().unwrap_or(' ');
-            let esc = if base == '\\' { Some("\\\\") } else { delim_escape(base, d) };
+            let esc = if base == '\\' {
+                Some("\\\\")
+            } else {
+                delim_escape(base, d)
+            };
             match esc {
                 Some(e) => {
                     let text = format!("{e}{}", chars.as_str());
@@ -539,7 +564,11 @@ fn char_width(c: char) -> usize {
 /// because the start of a path says where it is and the end says what it is.
 pub fn cap_display_middle(text: &str, max: usize) -> Cow<'_, str> {
     let out = cap_core(text, None, max, false);
-    if out == text { Cow::Borrowed(text) } else { Cow::Owned(out) }
+    if out == text {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(out)
+    }
 }
 
 /// Scrubs one formatted log record (a single line ending in `\n`) for a terminal log sink. tracing-subscriber 0.3.23

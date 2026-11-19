@@ -1180,7 +1180,11 @@ mod withheld_bit_tests {
     fn normalize_moves_the_bit_to_the_background_item_only_when_the_input_has_it() {
         let mut prefix = ConversationItem::user("prefix");
         prefix.mark_project_files_withheld();
-        let withheld = vec![ConversationItem::system("s"), prefix, ConversationItem::assistant("a")];
+        let withheld = vec![
+            ConversationItem::system("s"),
+            prefix,
+            ConversationItem::assistant("a"),
+        ];
         let (items, len) = normalize_forked_context(withheld);
         assert_eq!(len, 2);
         assert!(items[1].project_files_withheld());

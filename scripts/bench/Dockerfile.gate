@@ -1,0 +1,18 @@
+# Release-gate run image: hardbench toolchains + ONE fuigo build. Both gate arms use this file, so a pair differs only
+# by the fuigo binary under test. Build context: scripts/bench (native/ holds an optional fuigo-native overlay).
+FROM node:24-trixie-slim@sha256:50c3b2f6988dfc307b86e5301d69611af31f4789bdf232863b07d3b02fe55ae0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-pip python3-dev build-essential git ca-certificates ripgrep procps jq curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+ARG FUIGO_VERSION
+RUN npm install -g --allow-scripts=fuigo "fuigo@${FUIGO_VERSION}"
+COPY native/ /tmp/native/
+# A candidate binary replaces the vendored payload of the platform package (the launcher installs it into
+# $FUIGO_HOME/bin on first launch and would otherwise restore the npm one); launcher shim and config stay identical.
+RUN if [ -f /tmp/native/fuigo-native ]; then node /tmp/native/overlay.js; fi; rm -rf /tmp/native; fuigo --version
+ENV HOME=/home/bench XDG_CONFIG_HOME=/home/bench/.config XDG_DATA_HOME=/home/bench/.local/share XDG_CACHE_HOME=/home/bench/.cache
+RUN mkdir -p /deps /work /home/bench /opt/bench && chown 1000:1000 /deps /work /home/bench
+USER 1000:1000
+WORKDIR /work
+ENTRYPOINT ["python3", "/opt/bench/entry.py"]

@@ -173,16 +173,16 @@ mod withheld_instructions;
 use withheld_instructions::*;
 #[path = "acp_session_impl/session_mode.rs"]
 mod session_mode;
-use session_mode::*;
 pub(crate) use session_mode::advertised_mode_id;
+use session_mode::*;
 #[path = "acp_session_impl/child_tool_projection.rs"]
 mod child_tool_projection;
 #[path = "acp_session_impl/length_salvage.rs"]
 mod length_salvage;
 #[path = "acp_session_impl/sampler_turn.rs"]
 mod sampler_turn;
-pub(crate) use sampler_turn::{CallRole, ParkGate, side_model_gate};
 use sampler_turn::*;
+pub(crate) use sampler_turn::{CallRole, ParkGate, side_model_gate};
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
 use tool_dispatch::*;
@@ -1527,7 +1527,11 @@ const PROMPT_CONTEXT_FILENAME: &str = "prompt_context.json";
 /// The saved JSON enables deterministic re-rendering and `fuigo prompt --json` inspection.
 /// It also enables post-hoc debugging of what went into a session's system prompt.
 /// F5-C4: every session file here is written through the session's writer; with none it is skipped with a warning.
-fn session_writer_or_warn<'w>(session_info: &SessionInfo, writer: Option<&'w fuigo_session_writer::SessionWriter>, what: &str) -> Option<&'w fuigo_session_writer::SessionWriter> {
+fn session_writer_or_warn<'w>(
+    session_info: &SessionInfo,
+    writer: Option<&'w fuigo_session_writer::SessionWriter>,
+    what: &str,
+) -> Option<&'w fuigo_session_writer::SessionWriter> {
     if writer.is_none() {
         tracing::warn!(session_id = %session_info.id.0, what, "no session writer: not writing the session file");
     }
@@ -1538,7 +1542,9 @@ fn save_prompt_context(
     writer: Option<&fuigo_session_writer::SessionWriter>,
     prompt_context: &fuigo_agent::PromptContext,
 ) {
-    let Some(writer) = session_writer_or_warn(session_info, writer, PROMPT_CONTEXT_FILENAME) else { return };
+    let Some(writer) = session_writer_or_warn(session_info, writer, PROMPT_CONTEXT_FILENAME) else {
+        return;
+    };
     match serde_json::to_string_pretty(prompt_context) {
         Ok(json) => {
             if let Err(e) = write_prompt_context_in(writer, json) {
@@ -1551,7 +1557,10 @@ fn save_prompt_context(
     }
 }
 /// Write `prompt_context.json` owner-only like every other session file (P145), as the session's writer.
-fn write_prompt_context_in(writer: &fuigo_session_writer::SessionWriter, json: String) -> std::io::Result<()> {
+fn write_prompt_context_in(
+    writer: &fuigo_session_writer::SessionWriter,
+    json: String,
+) -> std::io::Result<()> {
     writer.replace_atomic_sync(PROMPT_CONTEXT_FILENAME, json.as_bytes())
 }
 const SYSTEM_PROMPT_FILENAME: &str = "system_prompt.txt";
@@ -1568,10 +1577,16 @@ fn persist_chat_history_jsonl_sync(
     writer: Option<&fuigo_session_writer::SessionWriter>,
     conversation: &[ConversationItem],
 ) {
-    let Some(writer) = session_writer_or_warn(session_info, writer, "chat_history.jsonl") else { return };
-    let final_path = writer.dir().join(crate::session::storage::CHAT_HISTORY_FILE);
+    let Some(writer) = session_writer_or_warn(session_info, writer, "chat_history.jsonl") else {
+        return;
+    };
+    let final_path = writer
+        .dir()
+        .join(crate::session::storage::CHAT_HISTORY_FILE);
     // A load-time repair that could not be backed up holds back every rewrite until the backup exists (P96).
-    if let Err(e) = crate::session::storage::jsonl::load_repair::rewrite_gate_as(&final_path, Some(writer)) {
+    if let Err(e) =
+        crate::session::storage::jsonl::load_repair::rewrite_gate_as(&final_path, Some(writer))
+    {
         tracing::warn!(session_id = %session_info.id.0, ?e,
             "persist_chat_history_jsonl_sync: not rewriting chat_history.jsonl, its pre-repair backup could not be made");
         return;
@@ -1587,14 +1602,23 @@ fn persist_chat_history_jsonl_sync(
 /// Persist the exact rendered system prompt to `{session_dir}/system_prompt.txt`.
 /// Should match the first System entry in `chat_history.jsonl` modulo trailing newlines (`canonical_system_prompt_eq`).
 /// A trailing-newline-only difference is benign; this artifact is a convenience mirror, and the conversation head stays the source of truth.
-fn save_system_prompt(session_info: &SessionInfo, writer: Option<&fuigo_session_writer::SessionWriter>, system_prompt: &str) {
-    let Some(writer) = session_writer_or_warn(session_info, writer, SYSTEM_PROMPT_FILENAME) else { return };
+fn save_system_prompt(
+    session_info: &SessionInfo,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    system_prompt: &str,
+) {
+    let Some(writer) = session_writer_or_warn(session_info, writer, SYSTEM_PROMPT_FILENAME) else {
+        return;
+    };
     if let Err(e) = write_system_prompt_in(writer, system_prompt) {
         tracing::warn!(?e, "failed to write system_prompt.txt");
     }
 }
 /// Write `system_prompt.txt` owner-only (P145, see [`write_prompt_context_in`]), as the session's writer.
-fn write_system_prompt_in(writer: &fuigo_session_writer::SessionWriter, system_prompt: &str) -> std::io::Result<()> {
+fn write_system_prompt_in(
+    writer: &fuigo_session_writer::SessionWriter,
+    system_prompt: &str,
+) -> std::io::Result<()> {
     writer.replace_atomic_sync(SYSTEM_PROMPT_FILENAME, system_prompt.as_bytes())
 }
 const SYSTEM_PROMPT_OVERRIDE_FILENAME: &str = "system_prompt_override.txt";
@@ -1602,9 +1626,19 @@ const SYSTEM_PROMPT_OVERRIDE_FILENAME: &str = "system_prompt_override.txt";
 /// Persist the client `systemPromptOverride` to `{session_dir}/system_prompt_override.txt`.
 /// The `System` item alone cannot say whether its text was a client override or a rendered template, so a cold reload
 /// that is not handed the override again would otherwise forget it and let the next model switch replace it.
-fn save_system_prompt_override(session_info: &SessionInfo, writer: Option<&fuigo_session_writer::SessionWriter>, system_prompt: &str) {
-    let Some(writer) = session_writer_or_warn(session_info, writer, SYSTEM_PROMPT_OVERRIDE_FILENAME) else { return };
-    if let Err(e) = writer.replace_atomic_sync(SYSTEM_PROMPT_OVERRIDE_FILENAME, system_prompt.as_bytes()) {
+fn save_system_prompt_override(
+    session_info: &SessionInfo,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    system_prompt: &str,
+) {
+    let Some(writer) =
+        session_writer_or_warn(session_info, writer, SYSTEM_PROMPT_OVERRIDE_FILENAME)
+    else {
+        return;
+    };
+    if let Err(e) =
+        writer.replace_atomic_sync(SYSTEM_PROMPT_OVERRIDE_FILENAME, system_prompt.as_bytes())
+    {
         tracing::warn!(?e, "failed to write system_prompt_override.txt");
     }
 }
@@ -1653,15 +1687,24 @@ mod client_hooks_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/compaction_agent_borrow_tests.rs"]
 mod compaction_agent_borrow_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/managed_hooks_tests.rs"]
 mod managed_hooks_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/support.rs"]
 pub(crate) mod support;
@@ -1853,7 +1896,10 @@ mod managed_gateway_descriptor_tests {
         assert!(!names.contains("slack__search"));
     }
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/bang_controls_tests.rs"]
 mod bang_controls_tests;
@@ -1862,10 +1908,23 @@ mod bang_controls_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/fs_injection_regression_tests.rs"]
 mod fs_injection_regression_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/interjection_actor_tests.rs"]
 mod interjection_actor_tests;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+#[cfg(test)]
+#[path = "acp_session_tests/mcp_argument_coercion_tests.rs"]
+mod mcp_argument_coercion_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/mcp_progress_order_tests.rs"]
+mod mcp_progress_order_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/observability_bridge_mapping_tests.rs"]
 mod observability_bridge_mapping_tests;
@@ -1879,12 +1938,18 @@ mod permission_auto_mode_tests;
 #[path = "acp_session_tests/permission_prompt_notification_tests.rs"]
 mod permission_prompt_notification_tests;
 /// Tests that a resume re-parks the parked `exit_plan_mode` approval.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/plan_approval_resume_tests.rs"]
 mod plan_approval_resume_tests;
 /// Mixed-batch plan.md write and exit_plan_mode snapshot.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/plan_exit_batch_barrier_tests.rs"]
 mod plan_exit_batch_barrier_tests;
@@ -1896,15 +1961,10 @@ mod plan_mode_edit_gate_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/plan_mode_midturn_tests.rs"]
 mod plan_mode_midturn_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-#[cfg(test)]
-#[path = "acp_session_tests/u35_session_mode_tests.rs"]
-mod u35_session_mode_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-#[cfg(test)]
-#[path = "acp_session_tests/u36_mode_lookup_tests.rs"]
-mod u36_mode_lookup_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/pre_tool_use_decision_tests.rs"]
 mod pre_tool_use_decision_tests;
@@ -1913,19 +1973,15 @@ mod pre_tool_use_decision_tests;
 #[path = "acp_session_tests/project_instructions_idempotence_tests.rs"]
 mod project_instructions_idempotence_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/mcp_progress_order_tests.rs"]
-mod mcp_progress_order_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-#[cfg(test)]
-#[path = "acp_session_tests/mcp_argument_coercion_tests.rs"]
-mod mcp_argument_coercion_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/prompt_gate_tests.rs"]
 mod prompt_gate_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_mode_transition_tests.rs"]
 mod prompt_mode_transition_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_queue_actor_tests.rs"]
 mod prompt_queue_actor_tests;
@@ -1933,22 +1989,34 @@ mod prompt_queue_actor_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/record_response_token_usage_tests.rs"]
 mod record_response_token_usage_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/replay_buffer_send_update_tests.rs"]
 mod replay_buffer_send_update_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/reverse_request_session_id_tests.rs"]
 mod reverse_request_session_id_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/rewind_cross_compaction_tests.rs"]
 mod rewind_cross_compaction_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/rewind_synthetic_turn_tests.rs"]
 mod rewind_synthetic_turn_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/slash_authority_turn_tests.rs"]
 mod slash_authority_turn_tests;
@@ -1956,10 +2024,27 @@ mod slash_authority_turn_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/subagent_usage_fold_tests.rs"]
 mod subagent_usage_fold_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/turn_completion_emit_tests.rs"]
 mod turn_completion_emit_tests;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+#[cfg(test)]
+#[path = "acp_session_tests/u35_session_mode_tests.rs"]
+mod u35_session_mode_tests;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+#[cfg(test)]
+#[path = "acp_session_tests/u36_mode_lookup_tests.rs"]
+mod u36_mode_lookup_tests;
 #[cfg(test)]
 mod tool_meta_stamp_tests {
     //! Pin the `fuigo/tool` stamps on the harness emission paths.
@@ -2283,7 +2368,10 @@ impl Drop for TurnMetrics {
 }
 /// Token rotation on the sampler/inference path is owned by the proactive refresh loop and the per-turn `refresh_token_if_expired`.
 /// `handle_sampling_failure` passes auth errors to the caller and never invokes the refresher itself.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/auth_error_no_retry_tests.rs"]
 mod auth_error_no_retry_tests;
@@ -2304,7 +2392,10 @@ mod budget_denial_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/build_tool_parse_error_message_tests.rs"]
 mod build_tool_parse_error_message_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/cancel_running_task_tests.rs"]
 mod cancel_running_task_tests;
@@ -2326,19 +2417,31 @@ mod feedback_turn_lookup_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/goal_latch_tests.rs"]
 mod goal_latch_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/history_backup_owed_tests.rs"]
 mod history_backup_owed_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/idle_resume_tests.rs"]
 mod idle_resume_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/image_strip_tests.rs"]
 mod image_strip_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;
@@ -2360,7 +2463,10 @@ mod length_salvage_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/limit_denial_tests.rs"]
 mod limit_denial_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/load_user_prompts_tests.rs"]
 mod load_user_prompts_tests;
@@ -2379,43 +2485,64 @@ mod media_gen_auth_retry_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/media_gen_batch_limit_tests.rs"]
 mod media_gen_batch_limit_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/memory_config_tests.rs"]
 mod memory_config_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/p42_memory_embed_spawn_tests.rs"]
 mod p42_memory_embed_spawn_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/p42_session_delivery_wire_tests.rs"]
 mod p42_session_delivery_wire_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/parallel_dispatch_tests.rs"]
 mod parallel_dispatch_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-#[cfg(test)]
-#[path = "acp_session_tests/shell_batch_isolation_tests.rs"]
-mod shell_batch_isolation_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/park_tests.rs"]
 mod park_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/rate_limit_backoff_tests.rs"]
 mod rate_limit_backoff_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/resume_status_reminder_tests.rs"]
 mod resume_status_reminder_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/session_thread_tests.rs"]
 mod session_thread_tests;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+#[cfg(test)]
+#[path = "acp_session_tests/shell_batch_isolation_tests.rs"]
+mod shell_batch_isolation_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/startup_tasks_tests.rs"]
 mod startup_tasks_tests;
@@ -2441,14 +2568,20 @@ mod transient_retry_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/turn_end_guard_tests.rs"]
 mod turn_end_guard_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/turn_end_reporting_tests.rs"]
 mod turn_end_reporting_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn_start_snapshot_tests.rs"]
 mod turn_start_snapshot_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "acp_session_tests/wait_for_mcp_prefix_tests.rs"]
 mod wait_for_mcp_prefix_tests;
@@ -2644,20 +2777,17 @@ mod managed_gateway_tool_tests {
     }
 }
 #[cfg(test)]
-#[path = "acp_session_tests/subagent_handoff_tests.rs"]
-mod subagent_handoff_tests;
+#[path = "acp_session_tests/background_subagent_approval_tests.rs"]
+mod background_subagent_approval_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/goal/goal_compaction_reseed_tests.rs"]
 mod goal_compaction_reseed_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/background_subagent_approval_tests.rs"]
-mod background_subagent_approval_tests;
+#[path = "acp_session_tests/goal/goal_idle_pause_tests.rs"]
+mod goal_idle_pause_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/goal/goal_planner_e2e_tests.rs"]
 mod goal_planner_e2e_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/goal/goal_idle_pause_tests.rs"]
-mod goal_idle_pause_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/interjection_tests.rs"]
 mod interjection_tests;
@@ -2667,3 +2797,6 @@ mod recap_display_only_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/reminder_policy_tests.rs"]
 mod reminder_policy_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/subagent_handoff_tests.rs"]
+mod subagent_handoff_tests;

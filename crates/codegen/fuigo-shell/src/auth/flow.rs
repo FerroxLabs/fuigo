@@ -1266,12 +1266,15 @@ mod tests {
         let _held = {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
-                if let Some(lock) =
-                    crate::auth::manager::lock::try_lock_auth_file_nonblocking(manager.auth_json_path())
-                {
+                if let Some(lock) = crate::auth::manager::lock::try_lock_auth_file_nonblocking(
+                    manager.auth_json_path(),
+                ) {
                     break lock;
                 }
-                assert!(std::time::Instant::now() < deadline, "the auth lock stayed held after the save");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the auth lock stayed held after the save"
+                );
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         };
@@ -2144,6 +2147,10 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test fixture files in a tempdir, never inside a session folder"
+)]
 mod s1_f2_logout_unreadable_store {
     use super::*;
 
@@ -2154,7 +2161,9 @@ mod s1_f2_logout_unreadable_store {
         let garbage = br#"{"scope": {"key": "secret-token-text", "#;
         std::fs::write(&path, garbage).unwrap();
         let manager = AuthManager::new_at_path(path.clone(), Default::default());
-        let err = perform_logout(&manager, None).err().expect("an unreadable store must not log out as success");
+        let err = perform_logout(&manager, None)
+            .err()
+            .expect("an unreadable store must not log out as success");
         assert!(err.to_string().contains("auth.json"), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), garbage);
     }
@@ -2168,7 +2177,10 @@ mod s1_f2_logout_unreadable_store {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create and remove files in test-owned temp dirs")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create and remove files in test-owned temp dirs"
+)]
 mod s1_f6_logout_leftovers {
     use super::*;
     use crate::auth::model::{API_KEY_SCOPE, AuthMode, AuthStore, FuigoAuth};

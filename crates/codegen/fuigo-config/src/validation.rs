@@ -102,7 +102,10 @@ pub fn lockdown_entries() -> Vec<(String, toml::Value)> {
     use toml::Value::{Array, Boolean, String as S, Table};
     let off = || Boolean(false);
     let mut out: Vec<(String, toml::Value)> = Vec::new();
-    for key in REQUIREMENTS_BOOL_FEATURES.iter().chain(REQUIREMENTS_RESOLVE_BOOL_FEATURES) {
+    for key in REQUIREMENTS_BOOL_FEATURES
+        .iter()
+        .chain(REQUIREMENTS_RESOLVE_BOOL_FEATURES)
+    {
         out.push((format!("features.{key}"), off()));
     }
     let mut deny_all = toml::map::Map::new();
@@ -133,7 +136,10 @@ pub fn lockdown_entries() -> Vec<(String, toml::Value)> {
         ("telemetry.otel_log_user_prompts", off()),
         ("telemetry.otel_log_tool_details", off()),
         // No model name can match: every model is refused until the file is fixed
-        ("models.allowed_models", Array(vec![S(LOCKDOWN_NO_MODEL.to_owned())])),
+        (
+            "models.allowed_models",
+            Array(vec![S(LOCKDOWN_NO_MODEL.to_owned())]),
+        ),
     ] {
         out.push((k.to_owned(), v));
     }
@@ -158,14 +164,23 @@ pub const LOCKDOWN_NO_MODEL: &str = "fuigo-admin-policy-unreadable";
 /// `lockdown_covers_every_typed_pin` test fails for a pin that is in neither this list nor [`lockdown_entries`].
 pub const LOCKDOWN_UNSET: &[(&str, &str)] = &[
     (FAIL_CLOSED_KEY, "meta key, stripped from every layer"),
-    ("permission.deny", "the deny-every-tool rule in permission.rules already denies everything; nothing is stricter"),
-    ("permission.allow", "no allow list is stricter than none; deny outranks allow"),
+    (
+        "permission.deny",
+        "the deny-every-tool rule in permission.rules already denies everything; nothing is stricter",
+    ),
+    (
+        "permission.allow",
+        "no allow list is stricter than none; deny outranks allow",
+    ),
     ("permission.ask", "the deny-every-tool rule outranks ask"),
     ("auto_mode.prompt_type", "auto mode is off"),
     ("auto_mode.classifier_model", "auto mode is off"),
     ("auto_mode.classify_timeout_ms", "auto mode is off"),
     ("auto_mode.reasoning_effort", "auto mode is off"),
-    ("cli.minimum_version", "a version bound set here could only brick the CLI; no tool runs anyway"),
+    (
+        "cli.minimum_version",
+        "a version bound set here could only brick the CLI; no tool runs anyway",
+    ),
     ("cli.maximum_version", "as cli.minimum_version"),
     ("cli.required_minimum_version", "as cli.minimum_version"),
     ("cli.required_maximum_version", "as cli.minimum_version"),
@@ -178,17 +193,35 @@ pub const LOCKDOWN_UNSET: &[(&str, &str)] = &[
     ("toolset.bash.login_shell_capture", "Bash is denied"),
     ("toolset.bash.find_bfs", "Bash is denied"),
     ("toolset.bash.grep_ugrep", "Bash is denied"),
-    ("toolset.ask_user_question.timeout_enabled", "no stricter value; tools are denied"),
-    ("toolset.ask_user_question.timeout_secs", "no stricter value; tools are denied"),
-    ("mcp.startup_timeout_sec", "MCP servers are refused by the policy engine"),
-    ("mcp.max_output_bytes", "MCP servers are refused by the policy engine"),
-    ("hooks.*", "hooks-only-managed with no managed hooks: the policy engine drops every non-managed hook"),
+    (
+        "toolset.ask_user_question.timeout_enabled",
+        "no stricter value; tools are denied",
+    ),
+    (
+        "toolset.ask_user_question.timeout_secs",
+        "no stricter value; tools are denied",
+    ),
+    (
+        "mcp.startup_timeout_sec",
+        "MCP servers are refused by the policy engine",
+    ),
+    (
+        "mcp.max_output_bytes",
+        "MCP servers are refused by the policy engine",
+    ),
+    (
+        "hooks.*",
+        "hooks-only-managed with no managed hooks: the policy engine drops every non-managed hook",
+    ),
     ("telemetry.events_url", "telemetry is off"),
     ("telemetry.events_api_key", "telemetry is off"),
     ("telemetry.mixpanel_token", "telemetry is off"),
     ("models.default", "models.allowed_models allows no model"),
     ("models.web_search", "models.allowed_models allows no model"),
-    ("endpoints.*", "an endpoint override has no stricter value; remote_fetch, telemetry and trace upload are off and tools are denied"),
+    (
+        "endpoints.*",
+        "an endpoint override has no stricter value; remote_fetch, telemetry and trace upload are off and tools are denied",
+    ),
 ];
 
 /// What an admin policy that cannot be read enforces when there is no validated copy: [`lockdown_entries`] as a requirements
@@ -250,7 +283,10 @@ pub(crate) fn broken_admin_sources_at(
     if let Some(path) = claude_file
         && let ManagedSettingsJson::Broken(detail) = managed_settings_json(path)
     {
-        out.push(BrokenAdminFile { path: path.to_path_buf(), detail });
+        out.push(BrokenAdminFile {
+            path: path.to_path_buf(),
+            detail,
+        });
     }
     if let Err(detail) = mdm_layer_checked(forced_mdm) {
         out.push(BrokenAdminFile {
@@ -293,7 +329,10 @@ pub fn requirements_layers_checked() -> Result<Vec<RequirementsLayer>, Requireme
                     source: RequirementsSource::File(sys_path.clone()),
                     is_system: true,
                 });
-                broken.push(BrokenAdminFile { path: sys_path, detail });
+                broken.push(BrokenAdminFile {
+                    path: sys_path,
+                    detail,
+                });
             }
         }
     }
@@ -323,7 +362,10 @@ pub fn requirements_layers_checked() -> Result<Vec<RequirementsLayer>, Requireme
     if broken.is_empty() {
         Ok(out)
     } else {
-        Err(RequirementsBroken { layers: out, broken })
+        Err(RequirementsBroken {
+            layers: out,
+            broken,
+        })
     }
 }
 
@@ -371,9 +413,11 @@ fn wrong_key_detail(wrong: &[String]) -> String {
     )
 }
 
-fn last_good_user_layers() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, toml::Value>> {
-    static LAST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, toml::Value>>> =
-        std::sync::OnceLock::new();
+fn last_good_user_layers()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, toml::Value>> {
+    static LAST: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, toml::Value>>,
+    > = std::sync::OnceLock::new();
     LAST.get_or_init(Default::default)
 }
 
@@ -454,7 +498,10 @@ pub(crate) fn mdm_verdict(v: toml::Value) -> Result<toml::Value, String> {
     let v = normalize_admin_requirements_value(v)?;
     let wrong = wrong_type_security_keys(&v);
     if !wrong.is_empty() {
-        return Err(format!("security keys of the wrong type: {}", wrong.join(", ")));
+        return Err(format!(
+            "security keys of the wrong type: {}",
+            wrong.join(", ")
+        ));
     }
     Ok(v)
 }
@@ -577,10 +624,7 @@ fn validate_requirements_value(
     if !wrong.is_empty() {
         return Err(RequirementsError::Unloadable {
             path: PathBuf::from(source.label().as_ref()),
-            detail: format!(
-                "{}",
-                wrong_key_detail(&wrong)
-            ),
+            detail: format!("{}", wrong_key_detail(&wrong)),
         });
     }
     Ok(())
@@ -849,8 +893,7 @@ pub const PERMISSION_PATTERN_MODES: &[&str] = &["glob", "domain"];
 /// `pattern` and `pattern_mode` optional; each a string (the enums from the lists above). One bad entry fails the whole
 /// `rules` decode, which dropped every rule of that layer.
 pub fn permission_rule_shape_ok(rule: &toml::Value) -> bool {
-    let one_of =
-        |v: &toml::Value, names: &[&str]| v.as_str().is_some_and(|s| names.contains(&s));
+    let one_of = |v: &toml::Value, names: &[&str]| v.as_str().is_some_and(|s| names.contains(&s));
     rule.as_table().is_some_and(|t| {
         t.get("action")
             .is_some_and(|v| one_of(v, PERMISSION_RULE_ACTIONS))
@@ -1053,7 +1096,10 @@ pub(crate) struct StrictFail {
 
 impl StrictFail {
     fn other(detail: String) -> Self {
-        Self { detail, typed_pins: false }
+        Self {
+            detail,
+            typed_pins: false,
+        }
     }
 }
 
@@ -1179,7 +1225,10 @@ pub fn admin_lockdown_lifted_notice(path: &Path) -> String {
 /// once-key: it reads the files again through the same loader entries a tool call uses (a few small files; `admin_source_state`
 /// for the two TOML files, `read_managed_settings` for Claude's), so a session can compare it with what it has already shown.
 pub fn admin_lockdowns() -> Vec<AdminLockdown> {
-    admin_lockdowns_at(system_config_dir().as_deref(), crate::paths::claude_managed_settings_probe_path().as_deref())
+    admin_lockdowns_at(
+        system_config_dir().as_deref(),
+        crate::paths::claude_managed_settings_probe_path().as_deref(),
+    )
 }
 
 #[doc(hidden)]
@@ -1195,22 +1244,36 @@ pub fn admin_lockdowns_at(dir: Option<&Path>, claude_file: Option<&Path>) -> Vec
 
 /// P186f: [`admin_lockdowns_at`] with the class of every admin file (same reads, same judgement).
 #[doc(hidden)]
-pub fn admin_policy_states_at(dir: Option<&Path>, claude_file: Option<&Path>) -> Vec<AdminFileState> {
+pub fn admin_policy_states_at(
+    dir: Option<&Path>,
+    claude_file: Option<&Path>,
+) -> Vec<AdminFileState> {
     let mut out = Vec::new();
     if let Some(dir) = dir {
-        for path in [dir.join("requirements.toml"), dir.join(crate::loader::MANAGED_CONFIG_FILENAME)] {
+        for path in [
+            dir.join("requirements.toml"),
+            dir.join(crate::loader::MANAGED_CONFIG_FILENAME),
+        ] {
             let (state, read) = admin_source_state_read(&path, &admin_lockdown_requirements);
             let class = match state {
-                AdminSource::Locked { detail, version, .. } => {
-                    AdminFileClass::Locked(AdminLockdown { path: path.clone(), detail, version })
-                }
+                AdminSource::Locked {
+                    detail, version, ..
+                } => AdminFileClass::Locked(AdminLockdown {
+                    path: path.clone(),
+                    detail,
+                    version,
+                }),
                 // no content (a stable blank or comments only): `accept_admin_toml_classified` forgot the copy
                 AdminSource::Text(None) if read == SourceRead::Valid => AdminFileClass::Blank,
                 AdminSource::Text(_) if read == SourceRead::Valid => AdminFileClass::Valid,
                 // followups2 round 2: `Broken` is exactly "broken and no copy" (the callers apply the lock-down)
                 AdminSource::Broken(detail) => {
                     let version = broken_version(&path, &detail);
-                    AdminFileClass::BrokenNoCopy(AdminLockdown { path: path.clone(), detail, version })
+                    AdminFileClass::BrokenNoCopy(AdminLockdown {
+                        path: path.clone(),
+                        detail,
+                        version,
+                    })
                 }
                 AdminSource::Text(_) => AdminFileClass::Other,
             };
@@ -1220,23 +1283,36 @@ pub fn admin_policy_states_at(dir: Option<&Path>, claude_file: Option<&Path>) ->
     if let Some(path) = claude_file {
         let class = match read_managed_settings(path) {
             Ok(ClaudeFile::WrongTyped(src, detail)) if admin_requirements_copy_exists(path) => {
-                AdminFileClass::Locked(AdminLockdown { path: path.to_path_buf(), detail, version: text_version(&src) })
+                AdminFileClass::Locked(AdminLockdown {
+                    path: path.to_path_buf(),
+                    detail,
+                    version: text_version(&src),
+                })
             }
             Ok(ClaudeFile::Text(..)) => AdminFileClass::Valid,
             Ok(ClaudeFile::Blank) => AdminFileClass::Blank,
             // followups2 round 2: wrong-typed without a copy, or unusable without a copy: `managed_settings_json` is `Broken`
-            Ok(ClaudeFile::WrongTyped(src, detail)) => AdminFileClass::BrokenNoCopy(AdminLockdown {
-                path: path.to_path_buf(),
-                detail,
-                version: text_version(&src),
-            }),
+            Ok(ClaudeFile::WrongTyped(src, detail)) => {
+                AdminFileClass::BrokenNoCopy(AdminLockdown {
+                    path: path.to_path_buf(),
+                    detail,
+                    version: text_version(&src),
+                })
+            }
             Err(detail) if !admin_requirements_copy_exists(path) => {
                 let version = broken_version(path, &detail);
-                AdminFileClass::BrokenNoCopy(AdminLockdown { path: path.to_path_buf(), detail, version })
+                AdminFileClass::BrokenNoCopy(AdminLockdown {
+                    path: path.to_path_buf(),
+                    detail,
+                    version,
+                })
             }
             _ => AdminFileClass::Other,
         };
-        out.push(AdminFileState { path: path.to_path_buf(), class });
+        out.push(AdminFileState {
+            path: path.to_path_buf(),
+            class,
+        });
     }
     out
 }
@@ -1273,13 +1349,17 @@ fn announce_typed_pin_lockdown(path: &Path, src: &str, detail: &str) {
         ));
         tracing::error!("{msg}");
         #[cfg(test)]
-        test_notices().lock().unwrap().push((path.to_path_buf(), msg));
+        test_notices()
+            .lock()
+            .unwrap()
+            .push((path.to_path_buf(), msg));
     }
 }
 
 #[cfg(test)]
 fn test_notices() -> &'static std::sync::Mutex<Vec<(PathBuf, String)>> {
-    static N: std::sync::OnceLock<std::sync::Mutex<Vec<(PathBuf, String)>>> = std::sync::OnceLock::new();
+    static N: std::sync::OnceLock<std::sync::Mutex<Vec<(PathBuf, String)>>> =
+        std::sync::OnceLock::new();
     N.get_or_init(Default::default)
 }
 
@@ -1309,7 +1389,8 @@ pub(crate) fn accept_managed_settings_text(
 pub(crate) fn confirm_admin_blank(path: &Path, admin_uid: u32) -> Result<Option<String>, String> {
     let recheck = |p: &Path| {
         read_admin_bytes(p, admin_uid).and_then(|b| {
-            String::from_utf8(b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            String::from_utf8(b)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         })
     };
     match crate::loader::confirm_blank_with(path, recheck) {
@@ -1323,7 +1404,10 @@ pub(crate) fn confirm_admin_blank(path: &Path, admin_uid: u32) -> Result<Option<
 /// `symlink_metadata` sees but whose target cannot be opened) is a broken source, as it is on the first open.
 fn absent_unless_dangling(path: &Path) -> Result<Option<String>, String> {
     if std::fs::symlink_metadata(path).is_ok() {
-        return Err(format!("{} is a symlink whose target cannot be opened", path.display()));
+        return Err(format!(
+            "{} is a symlink whose target cannot be opened",
+            path.display()
+        ));
     }
     Ok(None)
 }
@@ -1331,7 +1415,10 @@ fn absent_unless_dangling(path: &Path) -> Result<Option<String>, String> {
 /// P183 round 13 (Grok r9 M2): the validated copy of an admin file that is now ABSENT, if this process holds one. One rule for
 /// every admin source and both readers: the copy stays in force (a process that never saw the file has none).
 pub(crate) fn kept_copy_of_absent_admin_file(path: &Path) -> Option<String> {
-    let kept = last_good_admin_sources().lock().ok().and_then(|m| m.get(path).cloned());
+    let kept = last_good_admin_sources()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(path).cloned());
     if kept.is_some() {
         tracing::error!(path = %path.display(), "admin policy file disappeared; keeping the last validated copy");
     }
@@ -1603,7 +1690,11 @@ fn validate_requirements_file(
 /// product build uses `ROOT_UID` directly.
 #[cfg(any(test, feature = "test-seams"))]
 fn admin_uid_for(process_euid: u32, override_is_set: bool) -> u32 {
-    if override_is_set { process_euid } else { crate::policy_sources::ROOT_UID }
+    if override_is_set {
+        process_euid
+    } else {
+        crate::policy_sources::ROOT_UID
+    }
 }
 
 /// The file's text; `Ok(None)` only when it is genuinely absent.
@@ -1639,7 +1730,8 @@ pub(crate) fn read_admin_bytes(path: &Path, admin_uid: u32) -> std::io::Result<V
     // directory, a file or directory the admin does not own, or one a group/other can write is broken, never blank or absent
     let mut file = crate::policy_sources::open_admin_file(path)?;
     let meta = file.metadata()?;
-    crate::policy_sources::admin_object_trusted(path, &meta, admin_uid).map_err(std::io::Error::other)?;
+    crate::policy_sources::admin_object_trusted(path, &meta, admin_uid)
+        .map_err(std::io::Error::other)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok(bytes)
@@ -1667,10 +1759,13 @@ fn read_requirements_source_as(
     match read {
         // P186 A1: the SAME blank predicate as every classifier downstream (`trim().is_empty()`), so Unicode-only whitespace
         // (\x0b) gets the stability re-check too
-        Ok(bytes) if stable_blank && std::str::from_utf8(&bytes).is_ok_and(|t| t.trim().is_empty()) => {
+        Ok(bytes)
+            if stable_blank && std::str::from_utf8(&bytes).is_ok_and(|t| t.trim().is_empty()) =>
+        {
             let recheck = |p: &Path| {
                 read_admin_bytes(p, admin_uid).and_then(|b| {
-                    String::from_utf8(b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                    String::from_utf8(b)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
                 })
             };
             match crate::loader::confirm_blank_with(path, recheck) {
@@ -1790,7 +1885,11 @@ pub(crate) enum AdminSource {
     /// P186c (owner decision 24): this process holds a validated copy and the new version was read completely and parsed,
     /// failing ONLY on wrong-typed pinned keys. The lock-down (as text) is enforced instead of the copy until the file is
     /// fixed. `detail` names the keys.
-    Locked { text: String, detail: String, version: u64 },
+    Locked {
+        text: String,
+        detail: String,
+        version: u64,
+    },
     /// Broken and never validated here: the caller applies the lock-down (or refuses).
     Broken(String),
 }
@@ -1820,13 +1919,20 @@ enum SourceRead {
     NotValid,
 }
 
-fn admin_source_state_read(path: &Path, lockdown: &dyn Fn() -> toml::Value) -> (AdminSource, SourceRead) {
+fn admin_source_state_read(
+    path: &Path,
+    lockdown: &dyn Fn() -> toml::Value,
+) -> (AdminSource, SourceRead) {
     let read = std::cell::Cell::new(SourceRead::Valid);
     let state = admin_source_state_inner(path, lockdown, &read);
     (state, read.get())
 }
 
-fn admin_source_state_inner(path: &Path, lockdown: &dyn Fn() -> toml::Value, read: &std::cell::Cell<SourceRead>) -> AdminSource {
+fn admin_source_state_inner(
+    path: &Path,
+    lockdown: &dyn Fn() -> toml::Value,
+    read: &std::cell::Cell<SourceRead>,
+) -> AdminSource {
     let broken = |detail: String| -> AdminSource {
         read.set(SourceRead::NotValid);
         let kept = last_good_admin_sources()
@@ -1871,7 +1977,11 @@ fn admin_source_state_inner(path: &Path, lockdown: &dyn Fn() -> toml::Value, rea
             match toml::to_string(&lockdown()) {
                 Ok(text) => {
                     announce_typed_pin_lockdown(path, &src, &f.detail);
-                    AdminSource::Locked { text, detail: f.detail, version: text_version(&src) }
+                    AdminSource::Locked {
+                        text,
+                        detail: f.detail,
+                        version: text_version(&src),
+                    }
                 }
                 Err(_) => AdminSource::Broken(f.detail),
             }
@@ -2013,7 +2123,13 @@ fn warn_unexpanded_env(path: &Path, src: &str) {
 /// `fuigo-tty-utils` (already a dependency of this crate) supplies the character set.
 pub(crate) fn display_scrub(s: &str) -> String {
     s.chars()
-        .map(|c| if fuigo_tty_utils::is_unsafe_display_char(c) { '?' } else { c })
+        .map(|c| {
+            if fuigo_tty_utils::is_unsafe_display_char(c) {
+                '?'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -2206,7 +2322,8 @@ mod tests {
         assert_eq!(v["ui"]["yolo"].as_bool(), Some(false));
         std::fs::remove_file(&path).unwrap();
         // P183 round 9 (M1): a file this process validated that is then DELETED keeps its copy for the life of the process
-        let kept = load_admin_requirements_layer(&path).expect("deleted file keeps the validated copy");
+        let kept =
+            load_admin_requirements_layer(&path).expect("deleted file keeps the validated copy");
         assert_eq!(kept["ui"]["yolo"].as_bool(), Some(false));
         // only the owner emptying it (a stable blank root-owned file) clears the policy
         std::fs::write(&path, "\n").unwrap();
@@ -2217,7 +2334,10 @@ mod tests {
         // and the cleared entry is not resurrected by a later broken read
         std::fs::write(&path, "[ui\n").unwrap();
         // P183 round 8: broken with no validated copy is the lock-down, never "no policy"
-        assert_eq!(load_admin_requirements_layer(&path), Some(admin_lockdown_requirements()));
+        assert_eq!(
+            load_admin_requirements_layer(&path),
+            Some(admin_lockdown_requirements())
+        );
     }
 
     /// P183 round 4 (Grok M3): a blank system file that is being rewritten keeps the pins; a stable blank clears them.
@@ -2412,11 +2532,17 @@ mod tests {
             "[ui]\nyolo = false\n[[version_overrides]]\nminimum_version = \"not-semver\"\n[version_overrides.ui]\nyolo = true\n",
         )
         .unwrap();
-        assert_eq!(load_admin_requirements_layer(&path), Some(admin_lockdown_requirements()));
+        assert_eq!(
+            load_admin_requirements_layer(&path),
+            Some(admin_lockdown_requirements())
+        );
         assert!(admin_requirements_source_checked(&path).is_err());
         std::fs::write(&path, "[ui\n").unwrap();
         // P183 round 8: broken with no validated copy is the lock-down, never "no policy"
-        assert_eq!(load_admin_requirements_layer(&path), Some(admin_lockdown_requirements()));
+        assert_eq!(
+            load_admin_requirements_layer(&path),
+            Some(admin_lockdown_requirements())
+        );
     }
 
     /// P183 round 6 (sweep): every key a `fuigo-shell` `resolve/*` reader takes from requirements with `as_bool`,
@@ -2617,10 +2743,14 @@ mod tests {
             PinType::Str => Value::Integer(1),
             PinType::Int => Value::String("10".into()),
             PinType::Table => Value::String("locked".into()),
-            PinType::StrArray => Value::Array(vec![table(&[("tool", Value::String("Bash".into()))])]),
+            PinType::StrArray => {
+                Value::Array(vec![table(&[("tool", Value::String("Bash".into()))])])
+            }
             PinType::Telemetry => Value::String("offf".into()),
             PinType::CodebaseIndexing => Value::Array(vec![Value::Integer(1)]),
-            PinType::PermissionRules => Value::Array(vec![table(&[("tool", Value::String("bash".into()))])]),
+            PinType::PermissionRules => {
+                Value::Array(vec![table(&[("tool", Value::String("bash".into()))])])
+            }
             PinType::HookEvent => Value::String("deny.sh".into()),
         };
         fn set(doc: &mut Value, path: &[String], v: Value) {
@@ -2637,9 +2767,17 @@ mod tests {
         }
         let mut pins: Vec<(Vec<String>, PinType)> = TYPED_PINS
             .iter()
-            .map(|(p, ty)| (p.split('.').map(|k| k.replace('*', "PreToolUse")).collect(), *ty))
+            .map(|(p, ty)| {
+                (
+                    p.split('.').map(|k| k.replace('*', "PreToolUse")).collect(),
+                    *ty,
+                )
+            })
             .collect();
-        for k in REQUIREMENTS_BOOL_FEATURES.iter().chain(REQUIREMENTS_RESOLVE_BOOL_FEATURES) {
+        for k in REQUIREMENTS_BOOL_FEATURES
+            .iter()
+            .chain(REQUIREMENTS_RESOLVE_BOOL_FEATURES)
+        {
             pins.push((vec!["features".into(), (*k).into()], PinType::Bool));
         }
         assert!(pins.len() > 100, "{}", pins.len());
@@ -2647,15 +2785,28 @@ mod tests {
         pins.sort_by_key(|(p, _)| p.len());
         let mut doc = table(&[]);
         for (path, ty) in &pins {
-            assert_eq!(pin_type(path), Some(*ty), "{path:?} is shadowed by another pin");
+            assert_eq!(
+                pin_type(path),
+                Some(*ty),
+                "{path:?} is shadowed by another pin"
+            );
             if *ty != PinType::Table || doc.get(&path[0]).is_none() {
                 set(&mut doc, path, legal(*ty));
             }
         }
-        let mdm = |v: &Value| validate_requirements_value(v.clone(), &RequirementsSource::Mdm, true);
-        assert!(mdm(&doc).is_ok(), "the all-legal document must start: {:?}", mdm(&doc));
+        let mdm =
+            |v: &Value| validate_requirements_value(v.clone(), &RequirementsSource::Mdm, true);
+        assert!(
+            mdm(&doc).is_ok(),
+            "the all-legal document must start: {:?}",
+            mdm(&doc)
+        );
         let sys = tempfile::tempdir().unwrap();
-        std::fs::write(sys.path().join("requirements.toml"), toml::to_string(&doc).unwrap()).unwrap();
+        std::fs::write(
+            sys.path().join("requirements.toml"),
+            toml::to_string(&doc).unwrap(),
+        )
+        .unwrap();
         let r = validate_requirements_from(Some(sys.path()), None, Ok(None), None);
         assert!(r.is_ok(), "all-legal system file: {r:?}");
         for (path, ty) in &pins {
@@ -2670,12 +2821,22 @@ mod tests {
             }
             let mut user = bad.clone();
             assert!(
-                validate_requirements_value(user.clone(), &RequirementsSource::File("u".into()), false).is_err(),
+                validate_requirements_value(
+                    user.clone(),
+                    &RequirementsSource::File("u".into()),
+                    false
+                )
+                .is_err(),
                 "{key}: a user layer with a malformed key refuses"
             );
-            set(&mut user, &[FAIL_CLOSED_KEY.to_owned()], Value::Boolean(true));
+            set(
+                &mut user,
+                &[FAIL_CLOSED_KEY.to_owned()],
+                Value::Boolean(true),
+            );
             assert!(
-                validate_requirements_value(user, &RequirementsSource::File("u".into()), false).is_err(),
+                validate_requirements_value(user, &RequirementsSource::File("u".into()), false)
+                    .is_err(),
                 "{key}: a fail_closed user layer refuses"
             );
         }
@@ -2694,7 +2855,11 @@ mod tests {
             let (path, _) = pins.iter().find(|(_, t)| *t == ty).unwrap();
             let mut bad = doc.clone();
             set(&mut bad, path, wrong(ty));
-            std::fs::write(sys.path().join("requirements.toml"), toml::to_string(&bad).unwrap()).unwrap();
+            std::fs::write(
+                sys.path().join("requirements.toml"),
+                toml::to_string(&bad).unwrap(),
+            )
+            .unwrap();
             assert!(
                 validate_requirements_from(Some(sys.path()), None, Ok(None), None).is_err(),
                 "{path:?}"
@@ -2734,8 +2899,14 @@ mod tests {
         ] {
             std::fs::write(&path, bad).unwrap();
             let err = check().expect_err(bad);
-            assert!(matches!(err, RequirementsError::Unloadable { .. }), "{bad}: {err}");
-            assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Broken(_)), "{bad}");
+            assert!(
+                matches!(err, RequirementsError::Unloadable { .. }),
+                "{bad}: {err}"
+            );
+            assert!(
+                matches!(managed_settings_json(&path), ManagedSettingsJson::Broken(_)),
+                "{bad}"
+            );
         }
         let legal = r#"{"env": {"DISABLE_TELEMETRY": "1", "N": 1, "B": true},
             "permissions": {"deny": ["Bash(rm *)"], "allow": [], "defaultMode": "default", "disableBypassPermissionsMode": "disable"},
@@ -2750,10 +2921,16 @@ mod tests {
         let ManagedSettingsJson::Loaded(kept) = managed_settings_json(&path) else {
             panic!("the last validated copy must be kept");
         };
-        assert_eq!(kept["deniedMcpServers"][0]["serverUrl"], "https://evil.example/*");
+        assert_eq!(
+            kept["deniedMcpServers"][0]["serverUrl"],
+            "https://evil.example/*"
+        );
         // P186c (decision 24; was: the copy is kept): a rewrite with a wrong-typed policy key is the lock-down
         std::fs::write(&path, r#"{"deniedMcpServers": {"serverUrl": "x"}}"#).unwrap();
-        assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Broken(_)));
+        assert!(matches!(
+            managed_settings_json(&path),
+            ManagedSettingsJson::Broken(_)
+        ));
         // P183 round 13 (Grok r9 M2): removal does NOT clear it (round 7 asserted `Absent` here): a process that validated the
         // file keeps enforcing that copy after an unlink; only the owner's STABLE blank file clears it, and a cleared copy is
         // not resurrected
@@ -2761,15 +2938,24 @@ mod tests {
         let ManagedSettingsJson::Loaded(still) = managed_settings_json(&path) else {
             panic!("the validated copy must survive the unlink");
         };
-        assert_eq!(still["deniedMcpServers"][0]["serverUrl"], "https://evil.example/*");
+        assert_eq!(
+            still["deniedMcpServers"][0]["serverUrl"],
+            "https://evil.example/*"
+        );
         assert!(check().is_ok());
         assert!(admin_requirements_copy_exists(&path));
         std::fs::write(&path, "\n").unwrap();
-        assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Absent));
+        assert!(matches!(
+            managed_settings_json(&path),
+            ManagedSettingsJson::Absent
+        ));
         assert!(!admin_requirements_copy_exists(&path));
         assert!(check().is_ok());
         std::fs::write(&path, "{ not json").unwrap();
-        assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Broken(_)));
+        assert!(matches!(
+            managed_settings_json(&path),
+            ManagedSettingsJson::Broken(_)
+        ));
         #[cfg(unix)]
         {
             std::fs::remove_file(&path).unwrap();
@@ -2788,7 +2974,10 @@ mod tests {
         std::fs::write(&path, "[permission\n").unwrap();
         let layers = crate::loader::managed_config_layers_at(Some(sys.path()), None);
         assert_eq!(layers.len(), 1);
-        assert_eq!(layers[0].value["permission"]["deny"][0].as_str(), Some("Bash(rm *)"));
+        assert_eq!(
+            layers[0].value["permission"]["deny"][0].as_str(),
+            Some("Bash(rm *)")
+        );
         // P186c (decision 24; was: the copy is kept): a wrong-typed pin is the lock-down until the file is fixed
         std::fs::write(&path, "[permission]\ndeny = \"Bash\"\n").unwrap();
         let layers = crate::loader::managed_config_layers_at(Some(sys.path()), None);
@@ -2796,12 +2985,18 @@ mod tests {
         assert_eq!(layers[0].value, admin_lockdown_managed_config());
         std::fs::write(&path, "[permission\n").unwrap();
         let layers = crate::loader::managed_config_layers_at(Some(sys.path()), None);
-        assert_eq!(layers[0].value["permission"]["deny"][0].as_str(), Some("Bash(rm *)"));
+        assert_eq!(
+            layers[0].value["permission"]["deny"][0].as_str(),
+            Some("Bash(rm *)")
+        );
         // P183 round 9 (M1): a deleted validated file keeps its copy
         std::fs::remove_file(&path).unwrap();
         let layers = crate::loader::managed_config_layers_at(Some(sys.path()), None);
         assert_eq!(layers.len(), 1);
-        assert_eq!(layers[0].value["permission"]["deny"][0].as_str(), Some("Bash(rm *)"));
+        assert_eq!(
+            layers[0].value["permission"]["deny"][0].as_str(),
+            Some("Bash(rm *)")
+        );
     }
 
     /// P183 round 4 (Grok L7): the startup error does not echo the raw bad bound (it can carry a secret).
@@ -3206,12 +3401,9 @@ minimum_version = "not-a-version"
     fn user_file_malformed_key_fails_closed_naming_path_and_key_p183r8() {
         let v: toml::Value = toml::from_str("[features]\nweb_fetch = \"no\"\n").unwrap();
         let path = "/home/u/.fuigo/requirements.toml";
-        let err = validate_requirements_value(
-            v,
-            &RequirementsSource::File(PathBuf::from(path)),
-            false,
-        )
-        .expect_err("a malformed key in a parsing user file must fail closed");
+        let err =
+            validate_requirements_value(v, &RequirementsSource::File(PathBuf::from(path)), false)
+                .expect_err("a malformed key in a parsing user file must fail closed");
         let msg = err.to_string();
         assert!(msg.contains(path), "{msg}");
         assert!(msg.contains("features.web_fetch"), "{msg}");
@@ -3223,7 +3415,10 @@ minimum_version = "not-a-version"
     #[test]
     fn broken_admin_layer_is_lockdown_not_absent_p183r8() {
         let lock = admin_lockdown_requirements();
-        assert_eq!(lock["ui"]["disable_bypass_permissions_mode"].as_bool(), Some(true));
+        assert_eq!(
+            lock["ui"]["disable_bypass_permissions_mode"].as_bool(),
+            Some(true)
+        );
         assert!(
             REQUIREMENTS_BOOL_FEATURES
                 .iter()
@@ -3235,10 +3430,12 @@ minimum_version = "not-a-version"
     #[test]
     fn lockdown_covers_every_typed_pin_p183r9() {
         let entries = lockdown_entries();
-        let set: std::collections::HashSet<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
+        let set: std::collections::HashSet<&str> =
+            entries.iter().map(|(k, _)| k.as_str()).collect();
         let unset = |k: &str| {
             LOCKDOWN_UNSET.iter().any(|(u, why)| {
-                !why.is_empty() && (*u == k || u.strip_suffix('*').is_some_and(|p| k.starts_with(p)))
+                !why.is_empty()
+                    && (*u == k || u.strip_suffix('*').is_some_and(|p| k.starts_with(p)))
             })
         };
         let mut missing = Vec::new();
@@ -3250,23 +3447,44 @@ minimum_version = "not-a-version"
                 missing.push((*path).to_owned());
             }
         }
-        for k in REQUIREMENTS_BOOL_FEATURES.iter().chain(REQUIREMENTS_RESOLVE_BOOL_FEATURES) {
+        for k in REQUIREMENTS_BOOL_FEATURES
+            .iter()
+            .chain(REQUIREMENTS_RESOLVE_BOOL_FEATURES)
+        {
             let p = format!("features.{k}");
             if !set.contains(p.as_str()) && !unset(&p) {
                 missing.push(p);
             }
         }
-        assert!(missing.is_empty(), "pins with no lock-down value and no reason: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "pins with no lock-down value and no reason: {missing:?}"
+        );
         let lock = admin_lockdown_requirements();
-        assert_eq!(lock["permission"]["rules"][0]["action"].as_str(), Some("deny"));
-        assert!(lock["permission"]["rules"][0].get("tool").is_none(), "tool defaults to any");
+        assert_eq!(
+            lock["permission"]["rules"][0]["action"].as_str(),
+            Some("deny")
+        );
+        assert!(
+            lock["permission"]["rules"][0].get("tool").is_none(),
+            "tool defaults to any"
+        );
         assert_eq!(lock["sandbox"]["profile"].as_str(), Some("strict"));
         assert_eq!(lock["auto_mode"]["enabled"].as_bool(), Some(false));
-        assert_eq!(lock["models"]["allowed_models"][0].as_str(), Some(LOCKDOWN_NO_MODEL));
-        assert_eq!(lock["diagnostics"]["error_reporting"].as_bool(), Some(false));
+        assert_eq!(
+            lock["models"]["allowed_models"][0].as_str(),
+            Some(LOCKDOWN_NO_MODEL)
+        );
+        assert_eq!(
+            lock["diagnostics"]["error_reporting"].as_bool(),
+            Some(false)
+        );
         assert_eq!(lock["memory"]["enabled"].as_bool(), Some(false));
         let mc = admin_lockdown_managed_config();
-        assert_eq!(mc["permission"]["rules"][0]["action"].as_str(), Some("deny"));
+        assert_eq!(
+            mc["permission"]["rules"][0]["action"].as_str(),
+            Some("deny")
+        );
         assert_eq!(mc["sandbox"]["profile"].as_str(), Some("strict"));
     }
 
@@ -3278,7 +3496,9 @@ minimum_version = "not-a-version"
         std::fs::write(&path, "[sandbox]\nprofile = \"strict\"\n").unwrap();
         assert!(admin_requirements_source_checked(&path).unwrap().is_some());
         std::fs::remove_file(&path).unwrap();
-        let again = admin_requirements_source_checked(&path).unwrap().expect("copy kept");
+        let again = admin_requirements_source_checked(&path)
+            .unwrap()
+            .expect("copy kept");
         assert!(again.contains("strict"));
         let other = sys.path().join("never-seen.toml");
         assert_eq!(admin_requirements_source_checked(&other), Ok(None));
@@ -3288,7 +3508,8 @@ minimum_version = "not-a-version"
     #[test]
     fn absent_managed_config_is_empty_without_second_read_p183r9() {
         let sys = tempfile::tempdir().unwrap();
-        let v = crate::loader::load_admin_config_file(&sys.path().join("managed_config.toml")).unwrap();
+        let v =
+            crate::loader::load_admin_config_file(&sys.path().join("managed_config.toml")).unwrap();
         assert!(v.as_table().unwrap().is_empty());
         let bad = sys.path().join("bad").join("managed_config.toml");
         std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
@@ -3301,16 +3522,27 @@ minimum_version = "not-a-version"
     fn user_file_gaining_bad_key_keeps_last_valid_copy_p183r9() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("requirements.toml");
-        std::fs::write(&path, "[permission]\ndeny = [\"Bash\"]\n[sandbox]\nprofile = \"strict\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[permission]\ndeny = [\"Bash\"]\n[sandbox]\nprofile = \"strict\"\n",
+        )
+        .unwrap();
         assert!(load_requirements_layer(&path).is_some());
-        std::fs::write(&path, "[permission]\ndeny = [\"Bash\"]\n[sandbox]\nprofile = 7\n").unwrap();
+        std::fs::write(
+            &path,
+            "[permission]\ndeny = [\"Bash\"]\n[sandbox]\nprofile = 7\n",
+        )
+        .unwrap();
         let kept = load_requirements_layer(&path).expect("kept");
         assert_eq!(kept["sandbox"]["profile"].as_str(), Some("strict"));
         assert_eq!(kept["permission"]["deny"][0].as_str(), Some("Bash"));
         let fresh = tempfile::tempdir().unwrap();
         let p2 = fresh.path().join("requirements.toml");
         std::fs::write(&p2, "[sandbox]\nprofile = 7\n").unwrap();
-        assert_eq!(load_requirements_layer(&p2), Some(admin_lockdown_requirements()));
+        assert_eq!(
+            load_requirements_layer(&p2),
+            Some(admin_lockdown_requirements())
+        );
     }
 
     /// P183 round 9 (Grok r5 M4): a forced MDM payload that does not decode is the lock-down, not an omitted layer.
@@ -3320,7 +3552,8 @@ minimum_version = "not-a-version"
         assert_eq!(mdm_layer_checked(&Ok(None)), Ok(None));
         let ok: toml::Value = toml::from_str("[sandbox]\nprofile = \"strict\"\n").unwrap();
         assert!(mdm_layer_checked(&Ok(Some(ok))).unwrap().is_some());
-        let bad: toml::Value = toml::from_str("[[version_overrides]]\nminimum_version = \"x\"\n").unwrap();
+        let bad: toml::Value =
+            toml::from_str("[[version_overrides]]\nminimum_version = \"x\"\n").unwrap();
         // the strict admin normalizer refuses what the lenient one would strip
         assert!(normalize_admin_requirements_value(bad).is_err());
     }
@@ -3336,7 +3569,8 @@ minimum_version = "not-a-version"
         std::thread::spawn(move || {
             let _ = tx.send(f());
         });
-        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the read blocked")
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the read blocked")
     }
 
     #[cfg(unix)]
@@ -3354,10 +3588,14 @@ minimum_version = "not-a-version"
     fn non_regular_replacement_keeps_validated_copy_p183r10() {
         type Make = fn(&Path);
         let kinds: [(&str, Make); 5] = [
-            ("dev-null", |p| std::os::unix::fs::symlink("/dev/null", p).unwrap()),
+            ("dev-null", |p| {
+                std::os::unix::fs::symlink("/dev/null", p).unwrap()
+            }),
             ("fifo", mkfifo),
             ("directory", |p| std::fs::create_dir(p).unwrap()),
-            ("dangling", |p| std::os::unix::fs::symlink("/nonexistent-p183r10/x", p).unwrap()),
+            ("dangling", |p| {
+                std::os::unix::fs::symlink("/nonexistent-p183r10/x", p).unwrap()
+            }),
             ("fifo-via-symlink", |p| {
                 let target = p.with_extension("fifo");
                 mkfifo(&target);
@@ -3368,24 +3606,40 @@ minimum_version = "not-a-version"
             let sys = tempfile::tempdir().unwrap();
             let path = sys.path().join("requirements.toml");
             std::fs::write(&path, GOOD).unwrap();
-            assert!(admin_requirements_source_checked(&path).unwrap().is_some(), "{name}");
+            assert!(
+                admin_requirements_source_checked(&path).unwrap().is_some(),
+                "{name}"
+            );
             std::fs::remove_file(&path).unwrap();
             make(&path);
             let p = path.clone();
             let got = within_10s(move || admin_requirements_source_checked(&p));
-            let kept = got.unwrap_or_else(|e| panic!("{name}: the copy must be served, got Err({e})")).unwrap_or_else(|| panic!("{name}: Ok(None) forgets the policy"));
+            let kept = got
+                .unwrap_or_else(|e| panic!("{name}: the copy must be served, got Err({e})"))
+                .unwrap_or_else(|| panic!("{name}: Ok(None) forgets the policy"));
             assert!(kept.contains("strict"), "{name}");
-            assert!(admin_requirements_copy_exists(&path), "{name}: the copy must not be forgotten");
+            assert!(
+                admin_requirements_copy_exists(&path),
+                "{name}: the copy must not be forgotten"
+            );
             // a second call (the cache case) sees the same, and the layer carries the copy's pin
             let p = path.clone();
-            assert!(within_10s(move || admin_requirements_source_checked(&p)).unwrap().is_some(), "{name}");
+            assert!(
+                within_10s(move || admin_requirements_source_checked(&p))
+                    .unwrap()
+                    .is_some(),
+                "{name}"
+            );
 
             // no validated copy: the same object is an Err (lock-down), never absent or blank
             let fresh = tempfile::tempdir().unwrap();
             let fp = fresh.path().join("requirements.toml");
             make(&fp);
             let err = within_10s(move || admin_requirements_source_checked(&fp));
-            assert!(err.is_err(), "{name}: with no copy this is broken, got {err:?}");
+            assert!(
+                err.is_err(),
+                "{name}: with no copy this is broken, got {err:?}"
+            );
         }
     }
 
@@ -3403,10 +3657,17 @@ minimum_version = "not-a-version"
             Err(f) => f.detail,
             Ok(v) => panic!("expected a refusal, got {v:?}"),
         };
-        assert!(err.contains("expected a file owned by root and not writable by group or others"), "{err}");
+        assert!(
+            err.contains("expected a file owned by root and not writable by group or others"),
+            "{err}"
+        );
         assert!(err.contains("owner uid"), "{err}");
         // owned by the admin uid it is fine, and the link is followed
-        assert!(read_requirements_source_as(&link, true, crate::policy_sources::process_euid()).unwrap().is_some());
+        assert!(
+            read_requirements_source_as(&link, true, crate::policy_sources::process_euid())
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// A group/other-writable directory holding the entry makes the file untrusted, kept copy or lock-down.
@@ -3419,17 +3680,27 @@ minimum_version = "not-a-version"
         std::fs::write(&path, GOOD).unwrap();
         assert!(admin_requirements_source_checked(&path).unwrap().is_some());
         std::fs::set_permissions(sys.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-        let kept = admin_requirements_source_checked(&path).expect("copy kept").expect("copy");
+        let kept = admin_requirements_source_checked(&path)
+            .expect("copy kept")
+            .expect("copy");
         assert!(kept.contains("strict"));
         // an attacker's replacement text in the writable directory is not served
         std::fs::write(&path, "[sandbox]\nprofile = \"off\"\n").unwrap();
-        assert!(admin_requirements_source_checked(&path).unwrap().unwrap().contains("strict"));
+        assert!(
+            admin_requirements_source_checked(&path)
+                .unwrap()
+                .unwrap()
+                .contains("strict")
+        );
         let fresh = tempfile::tempdir().unwrap();
         let fp = fresh.path().join("requirements.toml");
         std::fs::write(&fp, GOOD).unwrap();
         std::fs::set_permissions(fresh.path(), std::fs::Permissions::from_mode(0o775)).unwrap();
         let err = admin_requirements_source_checked(&fp).unwrap_err();
-        assert!(err.contains("its directory") && err.contains("expected a directory owned by root"), "{err}");
+        assert!(
+            err.contains("its directory") && err.contains("expected a directory owned by root"),
+            "{err}"
+        );
         std::fs::set_permissions(fresh.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::set_permissions(sys.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
@@ -3443,7 +3714,11 @@ minimum_version = "not-a-version"
         let hold = tempfile::tempdir().unwrap();
         let link = hold.path().join("fuigo");
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
-        assert!(admin_requirements_source_checked(&link.join("requirements.toml")).unwrap().is_some());
+        assert!(
+            admin_requirements_source_checked(&link.join("requirements.toml"))
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// A blank file clears the copy only when it is a trusted regular file; a fifo/device never does (the audit's clear sequence).
@@ -3481,7 +3756,11 @@ minimum_version = "not-a-version"
             let d = sys.path().to_path_buf();
             let got = within_10s(move || broken_admin_sources_at(Some(&d), None, &Ok(None)));
             assert_eq!(got.len(), 1);
-            assert!(got[0].detail.contains("not a regular file"), "{}", got[0].detail);
+            assert!(
+                got[0].detail.contains("not a regular file"),
+                "{}",
+                got[0].detail
+            );
         }
 
         let none = tempfile::tempdir().unwrap();
@@ -3494,9 +3773,18 @@ minimum_version = "not-a-version"
         let undecodable = Err("bad base64".to_owned());
         let b = broken_admin_sources_at(None, None, &undecodable);
         assert_eq!(b.len(), 1);
-        assert_eq!(b[0].path, PathBuf::from(crate::macos_managed::MDM_REQUIREMENTS_SOURCE));
-        let bad_over: toml::Value = toml::from_str("[sandbox]\nprofile = \"strict\"\n[[version_overrides]]\nminimum_version = \"x\"\n").unwrap();
-        assert_eq!(broken_admin_sources_at(None, None, &Ok(Some(bad_over.clone()))).len(), 1);
+        assert_eq!(
+            b[0].path,
+            PathBuf::from(crate::macos_managed::MDM_REQUIREMENTS_SOURCE)
+        );
+        let bad_over: toml::Value = toml::from_str(
+            "[sandbox]\nprofile = \"strict\"\n[[version_overrides]]\nminimum_version = \"x\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            broken_admin_sources_at(None, None, &Ok(Some(bad_over.clone()))).len(),
+            1
+        );
         assert!(mdm_layer_checked(&Ok(Some(bad_over))).is_err());
     }
 
@@ -3505,8 +3793,12 @@ minimum_version = "not-a-version"
     fn broken_mdm_payload_is_the_lockdown_layer_p183r10() {
         let lock = mdm_value_from(&Err("bad base64".to_owned())).expect("lock-down, not no layer");
         assert_eq!(lock, admin_lockdown_requirements());
-        let bad_over: toml::Value = toml::from_str("[[version_overrides]]\nminimum_version = \"x\"\n").unwrap();
-        assert_eq!(mdm_value_from(&Ok(Some(bad_over))), Some(admin_lockdown_requirements()));
+        let bad_over: toml::Value =
+            toml::from_str("[[version_overrides]]\nminimum_version = \"x\"\n").unwrap();
+        assert_eq!(
+            mdm_value_from(&Ok(Some(bad_over))),
+            Some(admin_lockdown_requirements())
+        );
         assert_eq!(mdm_value_from(&Ok(None)), None);
     }
 
@@ -3524,8 +3816,14 @@ minimum_version = "not-a-version"
         assert!(msg.contains("/etc/fuigo/requirements.toml"), "{msg}");
         assert!(msg.contains("administrator"), "{msg}");
         assert!(msg.contains("owner uid 1000, mode 0666"), "{msg}");
-        assert_eq!(source_kind(Path::new("/home/u/.fuigo/requirements.toml")), "your own file");
-        let e = RequirementsError::Unloadable { path: PathBuf::from("/etc/fuigo/managed_config.toml"), detail: "x".into() };
+        assert_eq!(
+            source_kind(Path::new("/home/u/.fuigo/requirements.toml")),
+            "your own file"
+        );
+        let e = RequirementsError::Unloadable {
+            path: PathBuf::from("/etc/fuigo/managed_config.toml"),
+            detail: "x".into(),
+        };
         assert!(e.to_string().contains("administrator"));
     }
 
@@ -3539,14 +3837,31 @@ minimum_version = "not-a-version"
             let sys = tempfile::tempdir().unwrap();
             let path = sys.path().join(name);
             std::fs::write(&path, "[sandbox]\nprofile = \"loose\"\n").unwrap();
-            assert!(admin_requirements_source_checked(&path).unwrap().unwrap().contains("loose"));
+            assert!(
+                admin_requirements_source_checked(&path)
+                    .unwrap()
+                    .unwrap()
+                    .contains("loose")
+            );
             let id1 = admin_requirements_copy_id(&path);
             std::fs::write(&path, "[sandbox]\nprofile = \"strict\"\n").unwrap();
-            assert!(admin_requirements_source_checked(&path).unwrap().unwrap().contains("strict"));
-            assert_ne!(admin_requirements_copy_id(&path), id1, "{name}: the copy identity must change");
+            assert!(
+                admin_requirements_source_checked(&path)
+                    .unwrap()
+                    .unwrap()
+                    .contains("strict")
+            );
+            assert_ne!(
+                admin_requirements_copy_id(&path),
+                id1,
+                "{name}: the copy identity must change"
+            );
             std::fs::write(&path, "[sandbox\nprofile =").unwrap();
             let kept = admin_requirements_source_checked(&path).unwrap().unwrap();
-            assert!(kept.contains("strict") && !kept.contains("loose"), "{name}: {kept}");
+            assert!(
+                kept.contains("strict") && !kept.contains("loose"),
+                "{name}: {kept}"
+            );
         }
     }
 
@@ -3561,12 +3876,21 @@ minimum_version = "not-a-version"
             // a wrong-typed policy bool itself is accepted by the strict check on both paths (the engine then fails that key
             // closed to the engaging value); it is not a typed pin
             ("allow_managed_hooks_only = \"no\"\n", true),
-            ("allow_managed_hooks_only = true\n[ui]\nyolo = \"no\"\n", false),
-            ("allow_managed_hooks_only = true\nfuture_key = 1\n[future_table]\nx = \"y\"\n", true),
+            (
+                "allow_managed_hooks_only = true\n[ui]\nyolo = \"no\"\n",
+                false,
+            ),
+            (
+                "allow_managed_hooks_only = true\nfuture_key = 1\n[future_table]\nx = \"y\"\n",
+                true,
+            ),
             ("[sandbox\nprofile =", false),
             ("# comments only\n", true),
             ("", true),
-            ("allow_managed_hooks_only = true\n[[version_overrides]]\nminimum_version = \"not a version\"\n", false),
+            (
+                "allow_managed_hooks_only = true\n[[version_overrides]]\nminimum_version = \"not a version\"\n",
+                false,
+            ),
             (ENV_BOUND, false),
         ];
         for (name, tier) in [
@@ -3589,8 +3913,14 @@ minimum_version = "not-a-version"
         let claude_docs: [(&str, bool); 9] = [
             (r#"{"permissions":{"deny":["Bash"]}}"#, true),
             (r#"{"permissions":{"deny":"Bash"}}"#, false),
-            (r#"{"permissions":{"deny":[]},"allowedMcpServers":{}}"#, false),
-            (r#"{"permissions":{"deny":["Bash"]},"futureKey":{"a":1}}"#, true),
+            (
+                r#"{"permissions":{"deny":[]},"allowedMcpServers":{}}"#,
+                false,
+            ),
+            (
+                r#"{"permissions":{"deny":["Bash"]},"futureKey":{"a":1}}"#,
+                true,
+            ),
             ("{not json", false),
             ("[]", false),
             ("42", false),
@@ -3611,7 +3941,10 @@ minimum_version = "not-a-version"
         }
         let mdm_docs: [(&str, bool); 4] = [
             ("allow_managed_hooks_only = true\n", true),
-            ("allow_managed_hooks_only = true\n[ui]\nyolo = \"no\"\n", false),
+            (
+                "allow_managed_hooks_only = true\n[ui]\nyolo = \"no\"\n",
+                false,
+            ),
             ("future_key = 1\n", true),
             (ENV_BOUND, false),
         ];
@@ -3634,9 +3967,21 @@ minimum_version = "not-a-version"
     fn blank_and_absent_rules_agree_on_every_source_and_reader_p183r13() {
         use crate::policy_sources::{PolicyLayerTier as T, policy_sources_at};
         let cases: [(&str, T, &str); 3] = [
-            ("requirements.toml", T::SystemRequirements, "allow_managed_hooks_only = true\n[ui]\nyolo = false\n"),
-            ("managed_config.toml", T::SystemManaged, "allow_managed_hooks_only = true\n[ui]\nyolo = false\n"),
-            ("managed-settings.json", T::Vendor, r#"{"permissions":{"deny":["Bash"]}}"#),
+            (
+                "requirements.toml",
+                T::SystemRequirements,
+                "allow_managed_hooks_only = true\n[ui]\nyolo = false\n",
+            ),
+            (
+                "managed_config.toml",
+                T::SystemManaged,
+                "allow_managed_hooks_only = true\n[ui]\nyolo = false\n",
+            ),
+            (
+                "managed-settings.json",
+                T::Vendor,
+                r#"{"permissions":{"deny":["Bash"]}}"#,
+            ),
         ];
         for (name, tier, doc) in cases {
             let d = tempfile::tempdir().unwrap();
@@ -3653,7 +3998,11 @@ minimum_version = "not-a-version"
                 } else {
                     admin_requirements_source_checked(&path)
                         .unwrap_or_else(|e| panic!("{name}: {e}"))
-                        .map(|t| toml::from_str::<toml::Value>(&t).map(|v| serde_json::to_value(v).unwrap()).unwrap())
+                        .map(|t| {
+                            toml::from_str::<toml::Value>(&t)
+                                .map(|v| serde_json::to_value(v).unwrap())
+                                .unwrap()
+                        })
                 }
             };
             let pol = || {
@@ -3669,7 +4018,11 @@ minimum_version = "not-a-version"
             let id0 = admin_requirements_copy_id(&path);
             assert!(id0.is_some(), "{name}");
             let marker = |v: &serde_json::Value| {
-                if claude { v["permissions"]["deny"][0] == "Bash" } else { v["allow_managed_hooks_only"] == true }
+                if claude {
+                    v["permissions"]["deny"][0] == "Bash"
+                } else {
+                    v["allow_managed_hooks_only"] == true
+                }
             };
             // A: blank that keeps changing, on each reader
             for reader in 0..2 {
@@ -3681,34 +4034,71 @@ minimum_version = "not-a-version"
                     std::fs::write(&p2, " ".repeat(n)).unwrap();
                 })));
                 if reader == 0 {
-                    assert!(marker(&req().expect("copy enforced")), "{name}: requirements, unstable blank");
+                    assert!(
+                        marker(&req().expect("copy enforced")),
+                        "{name}: requirements, unstable blank"
+                    );
                 } else {
-                    assert!(pol().unwrap().is_err(), "{name}: policy-sources, unstable blank is Err (copy + lock-down)");
+                    assert!(
+                        pol().unwrap().is_err(),
+                        "{name}: policy-sources, unstable blank is Err (copy + lock-down)"
+                    );
                 }
                 crate::loader::blank_hook::set(None);
-                assert_eq!(admin_requirements_copy_id(&path), id0, "{name}: unstable blank keeps the copy ({reader})");
+                assert_eq!(
+                    admin_requirements_copy_id(&path),
+                    id0,
+                    "{name}: unstable blank keeps the copy ({reader})"
+                );
             }
             // B: the file is gone
             std::fs::remove_file(&path).unwrap();
-            assert!(marker(&req().expect("copy enforced")), "{name}: requirements, absent after a copy");
-            let keys = pol().expect("layer still built from the copy").unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert!(marker(&keys), "{name}: policy-sources, absent after a copy: {keys}");
-            assert_eq!(admin_requirements_copy_id(&path), id0, "{name}: absence keeps the copy");
+            assert!(
+                marker(&req().expect("copy enforced")),
+                "{name}: requirements, absent after a copy"
+            );
+            let keys = pol()
+                .expect("layer still built from the copy")
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                marker(&keys),
+                "{name}: policy-sources, absent after a copy: {keys}"
+            );
+            assert_eq!(
+                admin_requirements_copy_id(&path),
+                id0,
+                "{name}: absence keeps the copy"
+            );
             // C: a stable blank file clears it on both readers
             std::fs::write(&path, "\n").unwrap();
             assert!(req().is_none(), "{name}: requirements, stable blank");
             assert!(!admin_requirements_copy_exists(&path), "{name}: cleared");
-            assert_eq!(pol().unwrap().unwrap(), serde_json::json!({}), "{name}: policy-sources, stable blank");
+            assert_eq!(
+                pol().unwrap().unwrap(),
+                serde_json::json!({}),
+                "{name}: policy-sources, stable blank"
+            );
             // and a process that never saw the file: absent is no policy on both
             let other = d.path().join("nested");
             std::fs::create_dir_all(&other).unwrap();
             let gone = other.join(name);
             if claude {
-                assert!(matches!(managed_settings_json(&gone), ManagedSettingsJson::Absent));
-                assert!(policy_sources_at(None, None, Some(&gone), None).into_iter().all(|s| s.tier != T::Vendor));
+                assert!(matches!(
+                    managed_settings_json(&gone),
+                    ManagedSettingsJson::Absent
+                ));
+                assert!(
+                    policy_sources_at(None, None, Some(&gone), None)
+                        .into_iter()
+                        .all(|s| s.tier != T::Vendor)
+                );
             } else {
                 assert_eq!(admin_requirements_source_checked(&gone), Ok(None));
-                assert!(policy_sources_at(Some(&other), None, None, None).into_iter().all(|s| s.tier != tier));
+                assert!(
+                    policy_sources_at(Some(&other), None, None, None)
+                        .into_iter()
+                        .all(|s| s.tier != tier)
+                );
             }
         }
     }
@@ -3720,7 +4110,10 @@ minimum_version = "not-a-version"
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("managed-settings.json");
         std::fs::write(&path, r#"{"permissions":{"deny":["Bash"]}}"#).unwrap();
-        assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Loaded(_)));
+        assert!(matches!(
+            managed_settings_json(&path),
+            ManagedSettingsJson::Loaded(_)
+        ));
         std::fs::write(&path, "\x0b").unwrap();
         let p2 = path.clone();
         let mut n = 1usize;
@@ -3744,12 +4137,19 @@ minimum_version = "not-a-version"
     fn startup_validation_leaves_the_copy_on_absence_p186() {
         let sys = tempfile::tempdir().unwrap();
         let path = sys.path().join("requirements.toml");
-        std::fs::write(&path, "allow_managed_hooks_only = true\n[ui]\nyolo = false\n").unwrap();
+        std::fs::write(
+            &path,
+            "allow_managed_hooks_only = true\n[ui]\nyolo = false\n",
+        )
+        .unwrap();
         validate_requirements_from(Some(sys.path()), None, Ok(None), None).unwrap();
         assert!(admin_requirements_copy_exists(&path));
         std::fs::remove_file(&path).unwrap();
         validate_requirements_from(Some(sys.path()), None, Ok(None), None).unwrap();
-        assert!(admin_requirements_copy_exists(&path), "absence at a second validation keeps the copy");
+        assert!(
+            admin_requirements_copy_exists(&path),
+            "absence at a second validation keeps the copy"
+        );
         let pins = load_admin_requirements_layer(&path).expect("pins still enforced");
         assert_eq!(pins["ui"]["yolo"].as_bool(), Some(false));
     }
@@ -3761,8 +4161,16 @@ minimum_version = "not-a-version"
     fn dangling_symlink_born_during_the_blank_wait_is_broken_p186() {
         use crate::policy_sources::{PolicyLayerTier as T, policy_sources_at};
         for (name, tier, doc) in [
-            ("requirements.toml", T::SystemRequirements, "allow_managed_hooks_only = true\n[ui]\nyolo = false\n"),
-            ("managed-settings.json", T::Vendor, r#"{"permissions":{"deny":["Bash"]}}"#),
+            (
+                "requirements.toml",
+                T::SystemRequirements,
+                "allow_managed_hooks_only = true\n[ui]\nyolo = false\n",
+            ),
+            (
+                "managed-settings.json",
+                T::Vendor,
+                r#"{"permissions":{"deny":["Bash"]}}"#,
+            ),
         ] {
             let d = tempfile::tempdir().unwrap();
             let path = d.path().join(name);
@@ -3785,7 +4193,10 @@ minimum_version = "not-a-version"
             })));
             let got = pol();
             crate::loader::blank_hook::set(None);
-            assert!(got.expect("layer built").is_err(), "{name}: a dangling symlink is a broken source");
+            assert!(
+                got.expect("layer built").is_err(),
+                "{name}: a dangling symlink is a broken source"
+            );
         }
     }
 
@@ -3795,7 +4206,11 @@ minimum_version = "not-a-version"
     fn deleted_requirements_toml_keeps_pins_and_policy_keys_p183r13() {
         let sys = tempfile::tempdir().unwrap();
         let path = sys.path().join("requirements.toml");
-        std::fs::write(&path, "allow_managed_hooks_only = true\n[ui]\nyolo = false\n").unwrap();
+        std::fs::write(
+            &path,
+            "allow_managed_hooks_only = true\n[ui]\nyolo = false\n",
+        )
+        .unwrap();
         assert!(load_admin_requirements_layer(&path).is_some());
         std::fs::remove_file(&path).unwrap();
         let pins = load_admin_requirements_layer(&path).expect("pins kept");
@@ -3812,11 +4227,12 @@ minimum_version = "not-a-version"
     fn a_newer_valid_claude_read_replaces_the_copy_p183r11() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("managed-settings.json");
-        let read = |p: &Path| {
-            crate::policy_sources::policy_sources_at(None, None, Some(p), None)
-        };
+        let read = |p: &Path| crate::policy_sources::policy_sources_at(None, None, Some(p), None);
         std::fs::write(&path, r#"{"permissions":{"deny":["Bash(v1)"]}}"#).unwrap();
-        assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Loaded(_)));
+        assert!(matches!(
+            managed_settings_json(&path),
+            ManagedSettingsJson::Loaded(_)
+        ));
         let id1 = admin_requirements_copy_id(&path);
         std::fs::write(&path, r#"{"permissions":{"deny":["Bash(v2)"]}}"#).unwrap();
         let src = read(&path);
@@ -3839,16 +4255,23 @@ minimum_version = "not-a-version"
         let sys = tempfile::tempdir().unwrap();
         std::fs::write(sys.path().join("requirements.toml"), ENV_BOUND).unwrap();
         let startup = validate_requirements_for_dirs(Some(sys.path()), None);
-        assert!(startup.is_err(), "startup must judge it as the runtime does: {startup:?}");
+        assert!(
+            startup.is_err(),
+            "startup must judge it as the runtime does: {startup:?}"
+        );
         let path = sys.path().join("requirements.toml");
         assert!(admin_requirements_source_checked(&path).is_err());
-        assert!(!admin_requirements_copy_exists(&path), "a refused text is never remembered");
+        assert!(
+            !admin_requirements_copy_exists(&path),
+            "a refused text is never remembered"
+        );
     }
 
     /// H2: the strict normaliser is what the layer uses; a text that fails it is the lock-down document, not the base.
     #[test]
     fn admin_layer_from_a_failing_text_is_the_lockdown_p183r11() {
-        let layer = admin_layer_from_source(Path::new("/etc/fuigo/requirements.toml"), ENV_BOUND).unwrap();
+        let layer =
+            admin_layer_from_source(Path::new("/etc/fuigo/requirements.toml"), ENV_BOUND).unwrap();
         assert_eq!(layer, admin_lockdown_requirements());
     }
 
@@ -3859,7 +4282,9 @@ minimum_version = "not-a-version"
         std::fs::write(sys.path().join("requirements.toml"), GOOD).unwrap();
         let w = validate_requirements_for_dirs(Some(sys.path()), None).unwrap();
         assert!(w.is_empty(), "{w:?}");
-        assert!(admin_requirements_copy_exists(&sys.path().join("requirements.toml")));
+        assert!(admin_requirements_copy_exists(
+            &sys.path().join("requirements.toml")
+        ));
     }
 
     /// No expansion at any admin entry point: startup, the checked reader, the layer, the config file and the policy-sources
@@ -3874,10 +4299,20 @@ minimum_version = "not-a-version"
             let src = admin_requirements_source_checked(&path).unwrap().unwrap();
             assert!(src.contains("${HOME}"), "{name}");
             let layer = admin_layer_from_source(&path, &src).unwrap();
-            assert_eq!(layer["models"]["allowed_models"][0].as_str(), Some("${HOME}/m"), "{name}");
+            assert_eq!(
+                layer["models"]["allowed_models"][0].as_str(),
+                Some("${HOME}/m"),
+                "{name}"
+            );
         }
-        let cfg = crate::loader::load_admin_config_file(&sys.path().join(crate::loader::MANAGED_CONFIG_FILENAME)).unwrap();
-        assert_eq!(cfg["models"]["allowed_models"][0].as_str(), Some("${HOME}/m"));
+        let cfg = crate::loader::load_admin_config_file(
+            &sys.path().join(crate::loader::MANAGED_CONFIG_FILENAME),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg["models"]["allowed_models"][0].as_str(),
+            Some("${HOME}/m")
+        );
         let w = validate_requirements_for_dirs(Some(sys.path()), None).unwrap();
         let req = sys.path().join("requirements.toml");
         let want = format!(
@@ -3892,7 +4327,10 @@ minimum_version = "not-a-version"
     fn warning_text_is_scrubbed_p183r11() {
         let w = env_literal_warning(Path::new("/etc/fuigo/a\u{1b}[31m\nb.toml"), "k\u{7}");
         assert!(!w.chars().any(|c| c.is_control()), "{w:?}");
-        let e = RequirementsError::Unloadable { path: PathBuf::from("/etc/fuigo/x\ny"), detail: "bad\u{1b}[2J".into() };
+        let e = RequirementsError::Unloadable {
+            path: PathBuf::from("/etc/fuigo/x\ny"),
+            detail: "bad\u{1b}[2J".into(),
+        };
         assert!(!e.to_string().chars().any(|c| c.is_control()), "{e}");
     }
 
@@ -3914,5 +4352,11 @@ mod typed_pin_tests;
 /// Test seam for the notice recorder (P186c).
 #[cfg(test)]
 pub(crate) fn lockdown_notices_for_test(path: &Path) -> Vec<String> {
-    test_notices().lock().unwrap().iter().filter(|(p, _)| p == path).map(|(_, m)| m.clone()).collect()
+    test_notices()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| p == path)
+        .map(|(_, m)| m.clone())
+        .collect()
 }

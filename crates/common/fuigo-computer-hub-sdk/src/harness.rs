@@ -27,14 +27,6 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use dashmap::DashMap;
-use futures::FutureExt;
-use futures::Stream;
-use futures::future::{BoxFuture, Shared};
-use indexmap::IndexMap;
-use parking_lot::RwLock;
-use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
-use url::Url;
 use fuigo_computer_hub_core::{
     ErasedTool, ToolHandle, decode_call_result, error_from_envelope, progress_from_frame,
     tool_error_from_wire,
@@ -52,6 +44,14 @@ use fuigo_tool_runtime::{
     ToolStreamItem, TypedToolOutput, terminal_only,
 };
 use fuigo_tool_types::ToolDescription;
+use futures::FutureExt;
+use futures::Stream;
+use futures::future::{BoxFuture, Shared};
+use indexmap::IndexMap;
+use parking_lot::RwLock;
+use serde_json::Value;
+use tokio::sync::{mpsc, oneshot};
+use url::Url;
 
 use crate::auth::{AuthCredential, AuthProvider};
 use crate::connection::{HubConnection, ReconnectCallback, ReconnectEvent};
@@ -1741,7 +1741,10 @@ impl ToolHarness {
                             match serde_json::to_string(&notif) {
                                 Ok(text) => {
                                     if let Err(err) = connection.send_outbound(text).await {
-                                        tracing::debug!(?err, "could not reject an unhandled permission request");
+                                        tracing::debug!(
+                                            ?err,
+                                            "could not reject an unhandled permission request"
+                                        );
                                     }
                                 }
                                 Err(err) => {
@@ -2425,9 +2428,9 @@ fn client_error_to_tool_error(err: ClientError) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuigo_tool_types::ToolDescription;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
-    use fuigo_tool_types::ToolDescription;
 
     #[derive(Debug)]
     struct EchoTool {
@@ -3637,13 +3640,16 @@ mod tests {
             .expect("bind ephemeral");
         let addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
-            let app = Router::new().route(
-                "/v1/tools",
-                get(move |ws: WebSocketUpgrade| {
-                    let replies = replies.clone();
-                    async move { ws.on_upgrade(move |socket| permission_handle_socket(socket, replies)) }
-                }),
-            );
+            let app =
+                Router::new().route(
+                    "/v1/tools",
+                    get(move |ws: WebSocketUpgrade| {
+                        let replies = replies.clone();
+                        async move {
+                            ws.on_upgrade(move |socket| permission_handle_socket(socket, replies))
+                        }
+                    }),
+                );
             let _ = axum::serve(listener, app.into_make_service()).await;
         });
         tokio::task::yield_now().await;
@@ -3710,10 +3716,7 @@ mod tests {
             .build()
             .await
             .expect("build harness");
-        let _events = harness
-            .subscribe_notifications()
-            .await
-            .expect("subscribe");
+        let _events = harness.subscribe_notifications().await.expect("subscribe");
         harness
             .query_remote_tools()
             .await

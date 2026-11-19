@@ -10,8 +10,8 @@ use fuigo_tools::implementations::codex::CodexReadFileTool;
 use fuigo_tools::implementations::fuigo_build::read_file::{MAX_READ_BYTES, ReadFileTool};
 use fuigo_tools::types::context::TruncationConfig;
 use fuigo_tools::types::template_renderer::TemplateRenderer;
-use fuigo_tools::types::tool_metadata::ToolMetadata;
 use fuigo_tools::types::tool::ToolKind;
+use fuigo_tools::types::tool_metadata::ToolMetadata;
 use std::collections::HashMap;
 
 #[derive(serde::Deserialize)]
@@ -28,8 +28,15 @@ fn catalog() -> Vec<Entry> {
 
 /// The two `read_file` entries: codex (file_path) first, fuigo-build (target_file) second.
 fn read_file_entries() -> (Entry, Entry) {
-    let mut entries: Vec<Entry> = catalog().into_iter().filter(|e| e.name == "read_file").collect();
-    assert_eq!(entries.len(), 2, "one codex and one fuigo-build read_file entry");
+    let mut entries: Vec<Entry> = catalog()
+        .into_iter()
+        .filter(|e| e.name == "read_file")
+        .collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "one codex and one fuigo-build read_file entry"
+    );
     entries.sort_by_key(|e| e.parameters["properties"].get("target_file").is_some());
     let fuigo_build = entries.pop().unwrap();
     let codex = entries.pop().unwrap();
@@ -40,18 +47,29 @@ fn read_file_entries() -> (Entry, Entry) {
 /// Every `N KB` figure in `text`.
 fn kb_figures(text: &str) -> Vec<usize> {
     text.match_indices(" KB")
-        .filter_map(|(i, _)| text[..i].rsplit(|c: char| !c.is_ascii_digit()).next()?.parse().ok())
+        .filter_map(|(i, _)| {
+            text[..i]
+                .rsplit(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()
+        })
         .collect()
 }
 
 fn files_param_description(parameters: &serde_json::Value) -> &str {
-    parameters["properties"]["files"]["description"].as_str().expect("files param description")
+    parameters["properties"]["files"]["description"]
+        .as_str()
+        .expect("files param description")
 }
 
 #[test]
 fn read_file_catalog_entries_state_the_live_per_call_cap() {
     let cap_kb = MAX_READ_BYTES / 1024;
-    assert_eq!(cap_kb, 40, "per-call read budget is ~10K tokens (40 KB); update this test with the cap");
+    assert_eq!(
+        cap_kb, 40,
+        "per-call read budget is ~10K tokens (40 KB); update this test with the cap"
+    );
     let (codex, fuigo_build) = read_file_entries();
     for entry in [&codex, &fuigo_build] {
         for (label, text) in [
@@ -66,7 +84,8 @@ fn read_file_catalog_entries_state_the_live_per_call_cap() {
             );
         }
         assert!(
-            entry.original.contains("several paths in one call") && entry.original.contains("whole files by default"),
+            entry.original.contains("several paths in one call")
+                && entry.original.contains("whole files by default"),
             "read_file original must keep the multi-path and whole-file wording: {}",
             entry.original
         );
@@ -76,8 +95,13 @@ fn read_file_catalog_entries_state_the_live_per_call_cap() {
 #[test]
 fn codex_read_file_catalog_entry_matches_tool_source() {
     let (codex, _) = read_file_entries();
-    let live = fuigo_tools::types::template_renderer::strip_template_markers(CodexReadFileTool.description_template());
-    assert_eq!(codex.original, live, "codex read_file catalog `original` is stale; regenerate the catalog");
+    let live = fuigo_tools::types::template_renderer::strip_template_markers(
+        CodexReadFileTool.description_template(),
+    );
+    assert_eq!(
+        codex.original, live,
+        "codex read_file catalog `original` is stale; regenerate the catalog"
+    );
 }
 
 #[test]
@@ -96,9 +120,15 @@ fn fuigo_build_read_file_catalog_entry_matches_tool_source() {
             ),
         )]),
     );
-    let rendered = renderer.render(ReadFileTool.description_template()).expect("renders");
-    let live = TruncationConfig::default().interpolate_description(&rendered, "read_file", 0, 600_000);
-    assert_eq!(fuigo_build.original, live, "fuigo-build read_file catalog `original` is stale; regenerate the catalog");
+    let rendered = renderer
+        .render(ReadFileTool.description_template())
+        .expect("renders");
+    let live =
+        TruncationConfig::default().interpolate_description(&rendered, "read_file", 0, 600_000);
+    assert_eq!(
+        fuigo_build.original, live,
+        "fuigo-build read_file catalog `original` is stale; regenerate the catalog"
+    );
 }
 
 /// The compact text replaces the description the model sees, so it must make the same whole-read promise as `original`.
@@ -106,6 +136,14 @@ fn fuigo_build_read_file_catalog_entry_matches_tool_source() {
 fn fuigo_build_read_file_compact_text_carries_the_whole_read_note() {
     let (_, fuigo_build) = read_file_entries();
     let note = "SKILL.md and AGENTS.md/CLAUDE.md files are returned whole when they fit the per-call limit; offset and limit are ignored for them";
-    assert!(fuigo_build.original.contains(note), "original: {}", fuigo_build.original);
-    assert!(fuigo_build.compact.contains(note), "compact: {}", fuigo_build.compact);
+    assert!(
+        fuigo_build.original.contains(note),
+        "original: {}",
+        fuigo_build.original
+    );
+    assert!(
+        fuigo_build.compact.contains(note),
+        "compact: {}",
+        fuigo_build.compact
+    );
 }

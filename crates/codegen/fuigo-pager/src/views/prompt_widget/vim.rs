@@ -319,8 +319,18 @@ fn reach(
     let n = count.unwrap_or(1).max(1);
     let ls = line_start(t, cur);
     let le = line_end(t, cur);
-    let excl = |target| Some(Reach { target, kind: Kind::Exclusive });
-    let incl = |target| Some(Reach { target, kind: Kind::Inclusive });
+    let excl = |target| {
+        Some(Reach {
+            target,
+            kind: Kind::Exclusive,
+        })
+    };
+    let incl = |target| {
+        Some(Reach {
+            target,
+            kind: Kind::Inclusive,
+        })
+    };
     match mk {
         Motion::Left => {
             if cur == ls {
@@ -337,7 +347,11 @@ fn reach(
         }
         Motion::Right => {
             // An operator may reach the end of the line; a bare move stops on the last character
-            let limit = if op.is_some() { le } else { last_char_pos(t, ls, le) };
+            let limit = if op.is_some() {
+                le
+            } else {
+                last_char_pos(t, ls, le)
+            };
             if cur >= limit {
                 return None;
             }
@@ -373,8 +387,15 @@ fn reach(
             if moved == 0 {
                 return None;
             }
-            let target = if op.is_some() { p } else { pos_at_col(t, p, line_end(t, p), col) };
-            Some(Reach { target, kind: Kind::Linewise })
+            let target = if op.is_some() {
+                p
+            } else {
+                pos_at_col(t, p, line_end(t, p), col)
+            };
+            Some(Reach {
+                target,
+                kind: Kind::Linewise,
+            })
         }
         Motion::WordFwd => {
             let cs: Chars = t.char_indices().collect();
@@ -416,7 +437,11 @@ fn reach(
                     let c0 = class(cs[last_start].1);
                     let target = if c0 != 0 {
                         let e = run_end(&cs, last_start);
-                        if e + 1 >= cs.len() { t.len() } else { cs[e + 1].0 }
+                        if e + 1 >= cs.len() {
+                            t.len()
+                        } else {
+                            cs[e + 1].0
+                        }
                     } else {
                         line_end(t, sb)
                     };
@@ -467,7 +492,10 @@ fn reach(
             } else {
                 first_nonblank(t, start, line_end(t, start))
             };
-            Some(Reach { target, kind: Kind::Linewise })
+            Some(Reach {
+                target,
+                kind: Kind::Linewise,
+            })
         }
         Motion::Find(kind, ch, repeat) => match kind {
             FindKind::Find | FindKind::Till => {
@@ -483,7 +511,11 @@ fn reach(
                     if c == ch {
                         seen += 1;
                         if seen == n {
-                            let target = if kind == FindKind::Find { p } else { prev_pos(t, p) };
+                            let target = if kind == FindKind::Find {
+                                p
+                            } else {
+                                prev_pos(t, p)
+                            };
                             return incl(target);
                         }
                     }
@@ -493,15 +525,17 @@ fn reach(
             }
             FindKind::FindBack | FindKind::TillBack => {
                 let mut it = t[ls..cur].char_indices().rev().peekable();
-                if repeat
-                    && kind == FindKind::TillBack
-                    && it.peek().is_some_and(|&(_, c)| c == ch)
+                if repeat && kind == FindKind::TillBack && it.peek().is_some_and(|&(_, c)| c == ch)
                 {
                     it.next();
                 }
                 let (i, _) = it.filter(|&(_, c)| c == ch).nth(n - 1)?;
                 let found = ls + i;
-                excl(if kind == FindKind::FindBack { found } else { next_pos(t, found) })
+                excl(if kind == FindKind::FindBack {
+                    found
+                } else {
+                    next_pos(t, found)
+                })
             }
         },
     }
@@ -807,7 +841,11 @@ impl VimState {
             }
             'i' => self.enter_insert(ta, cur),
             'a' => {
-                let pos = if cur < line_end(&t, cur) { next_pos(&t, cur) } else { cur };
+                let pos = if cur < line_end(&t, cur) {
+                    next_pos(&t, cur)
+                } else {
+                    cur
+                };
                 self.enter_insert(ta, pos);
             }
             'A' => self.enter_insert(ta, line_end(&t, cur)),
@@ -822,7 +860,11 @@ impl VimState {
             }
             'o' | 'O' => {
                 let below = c == 'o';
-                let at = if below { line_end(&t, cur) } else { line_start(&t, cur) };
+                let at = if below {
+                    line_end(&t, cur)
+                } else {
+                    line_start(&t, cur)
+                };
                 self.clear_pending();
                 self.open_group(ta);
                 ta.replace_range(at..at, "\n");
@@ -887,7 +929,15 @@ impl VimState {
     }
 
     /// Operate on whole lines: `a` is the start of the first, `b` the end (before the newline) of the last.
-    fn line_range_op(&mut self, ta: &mut TextArea, t: &str, cur: usize, op: Op, a: usize, b: usize) {
+    fn line_range_op(
+        &mut self,
+        ta: &mut TextArea,
+        t: &str,
+        cur: usize,
+        op: Op,
+        a: usize,
+        b: usize,
+    ) {
         self.reg_text = format!("{}\n", &t[a..b]);
         self.reg_linewise = true;
         match op {
@@ -908,7 +958,11 @@ impl VimState {
                 };
                 ta.replace_range(ds..de, "");
                 let nt = ta.text().to_string();
-                let pos = if b < t.len() { a } else { line_start(&nt, ds.min(nt.len())) };
+                let pos = if b < t.len() {
+                    a
+                } else {
+                    line_start(&nt, ds.min(nt.len()))
+                };
                 let pos = pos.min(nt.len());
                 ta.set_cursor(first_nonblank(&nt, pos, line_end(&nt, pos)));
                 self.finish_edit(ta);
@@ -969,10 +1023,18 @@ impl VimState {
             ta.set_cursor(first_nonblank(&nt, start, line_end(&nt, start)));
         } else {
             let rep = self.reg_text.repeat(n);
-            let at = if after && cur < line_end(t, cur) { next_pos(t, cur) } else { cur };
+            let at = if after && cur < line_end(t, cur) {
+                next_pos(t, cur)
+            } else {
+                cur
+            };
             ta.replace_range(at..at, &rep);
             let nt = ta.text().to_string();
-            let pos = if rep.contains('\n') { at } else { prev_pos(&nt, at + rep.len()) };
+            let pos = if rep.contains('\n') {
+                at
+            } else {
+                prev_pos(&nt, at + rep.len())
+            };
             ta.set_cursor(clamp_normal(&nt, pos));
         }
         self.finish_edit(ta);

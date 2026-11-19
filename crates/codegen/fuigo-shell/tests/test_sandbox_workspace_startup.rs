@@ -1,5 +1,10 @@
 //! A launch-folder write boundary must never take the optional bwrap fallback.
 #![cfg(target_os = "linux")]
+#![allow(clippy::print_stdout, clippy::print_stderr)] // the child-process test protocol is this harness's own stdout/stderr
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test fixture files in a tempdir, never inside a session folder"
+)]
 
 use std::{fs, path::Path, process::Command};
 

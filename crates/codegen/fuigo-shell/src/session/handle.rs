@@ -233,7 +233,8 @@ pub struct SessionHandle {
     pub plan_mode: std::sync::Arc<parking_lot::Mutex<crate::session::plan_mode::PlanModeTracker>>,
     /// The actor's live prompt mode (shared Arc), read with `plan_mode` to advertise `modes.current` on attach.
     /// Read directly so an attach never waits on an actor that is mid-turn.
-    pub current_prompt_mode: std::sync::Arc<parking_lot::Mutex<crate::session::plan_mode::PromptMode>>,
+    pub current_prompt_mode:
+        std::sync::Arc<parking_lot::Mutex<crate::session::plan_mode::PromptMode>>,
     /// Debug flag: when set to `true`, the next turn unconditionally triggers auto-compaction regardless of context window usage.
     /// Consumed (reset to `false`) atomically on use via `compare_exchange`.
     /// Set via `fuigo/debug/arm_auto_compact`.
@@ -290,7 +291,10 @@ impl SessionHandle {
                 reason: fuigo_peer::RejectReason::Unavailable,
             });
         }
-        match self.peer_admin(PeerAdminCmd::Submit(Box::new(envelope))).await {
+        match self
+            .peer_admin(PeerAdminCmd::Submit(Box::new(envelope)))
+            .await
+        {
             Some(PeerAdminReply::Submit(r)) => r,
             _ => PeerSubmit::SessionClosed,
         }
@@ -308,7 +312,10 @@ impl SessionHandle {
             return Err(ReleaseError::Unavailable);
         }
         match self
-            .peer_admin(PeerAdminCmd::Release { message_id: message_id.into(), token: token.into() })
+            .peer_admin(PeerAdminCmd::Release {
+                message_id: message_id.into(),
+                token: token.into(),
+            })
             .await
         {
             Some(PeerAdminReply::Release(r)) => r,
@@ -328,7 +335,10 @@ impl SessionHandle {
             return Err(ReleaseError::Unavailable);
         }
         match self
-            .peer_admin(PeerAdminCmd::Reject { message_id: message_id.into(), token: token.into() })
+            .peer_admin(PeerAdminCmd::Reject {
+                message_id: message_id.into(),
+                token: token.into(),
+            })
             .await
         {
             Some(PeerAdminReply::Reject(r)) => r,
@@ -368,11 +378,16 @@ impl SessionHandle {
 
     /// The host sets opt-in, inbound policy and operator presence for this session.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn configure_peer_admission(&self, config: super::peer_admission::PeerAdmissionConfig) {
+    pub(crate) async fn configure_peer_admission(
+        &self,
+        config: super::peer_admission::PeerAdmissionConfig,
+    ) {
         if !super::peer_message::peer_messaging_enabled() {
             return;
         }
-        let _ = self.peer_admin(super::peer_admission::PeerAdminCmd::Configure(config)).await;
+        let _ = self
+            .peer_admin(super::peer_admission::PeerAdminCmd::Configure(config))
+            .await;
     }
 
     /// Collect delivery notices (released, expired, refused, re-held) recorded since the last call.
@@ -381,7 +396,10 @@ impl SessionHandle {
         if !super::peer_message::peer_messaging_enabled() {
             return Vec::new();
         }
-        match self.peer_admin(super::peer_admission::PeerAdminCmd::TakeNotices).await {
+        match self
+            .peer_admin(super::peer_admission::PeerAdminCmd::TakeNotices)
+            .await
+        {
             Some(super::peer_admission::PeerAdminReply::Notices(n)) => n,
             _ => Vec::new(),
         }

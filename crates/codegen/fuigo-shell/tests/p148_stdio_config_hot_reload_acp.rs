@@ -39,7 +39,10 @@ for line in sys.stdin:
     sys.stdout.flush()
 "#;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn write_config(fuigo_home: &Path, script: &Path, marker: &Path, tag: &str) {
     std::fs::write(
         fuigo_home.join("config.toml"),
@@ -64,7 +67,10 @@ fn refuse(_: &Value) -> RawReply {
     RawReply::Refuse
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn a_no_leader_stdio_agent_follows_user_mcp_config_edits() {
     let local = tokio::task::LocalSet::new();

@@ -25,8 +25,8 @@ fn is_extended_grapheme_boundary(text: &str, byte: usize) -> bool {
 #[test]
 fn local_boundary_queries_match_a_scan_from_the_start() {
     use super::{
-        ceil_grapheme_boundary, ceil_grapheme_boundary_scan, floor_grapheme_boundary, floor_grapheme_boundary_scan,
-        is_grapheme_boundary, is_grapheme_boundary_scan,
+        ceil_grapheme_boundary, ceil_grapheme_boundary_scan, floor_grapheme_boundary,
+        floor_grapheme_boundary_scan, is_grapheme_boundary, is_grapheme_boundary_scan,
     };
     let samples = [
         "plain ascii text",
@@ -40,9 +40,21 @@ fn local_boundary_queries_match_a_scan_from_the_start() {
     ];
     for text in samples {
         for byte in 0..=text.len() + 2 {
-            assert_eq!(is_grapheme_boundary(text, byte), is_grapheme_boundary_scan(text, byte) && byte <= text.len(), "is {byte} in {text:?}");
-            assert_eq!(floor_grapheme_boundary(text, byte), floor_grapheme_boundary_scan(text, byte), "floor {byte} in {text:?}");
-            assert_eq!(ceil_grapheme_boundary(text, byte), ceil_grapheme_boundary_scan(text, byte), "ceil {byte} in {text:?}");
+            assert_eq!(
+                is_grapheme_boundary(text, byte),
+                is_grapheme_boundary_scan(text, byte) && byte <= text.len(),
+                "is {byte} in {text:?}"
+            );
+            assert_eq!(
+                floor_grapheme_boundary(text, byte),
+                floor_grapheme_boundary_scan(text, byte),
+                "floor {byte} in {text:?}"
+            );
+            assert_eq!(
+                ceil_grapheme_boundary(text, byte),
+                ceil_grapheme_boundary_scan(text, byte),
+                "ceil {byte} in {text:?}"
+            );
         }
     }
 }

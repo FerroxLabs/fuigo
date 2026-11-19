@@ -143,7 +143,10 @@ impl SessionActor {
             initial_child_prompt_ready,
             traceparent,
         } = request;
-        tracing::info!("queueing prompt: {}", crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id));
+        tracing::info!(
+            "queueing prompt: {}",
+            crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id)
+        );
         let queue_depth = { self.state.lock().await.pending_inputs.len() };
         fuigo_telemetry::unified_log::info(
             "shell.prompt.queued",
@@ -349,7 +352,10 @@ impl SessionActor {
         let cancel_running_turn =
             send_now && Self::send_now_cancels_running_turn(&state, goal_active);
         let merge_into_goal = send_now
-            && item.input_origin.as_prompt_origin().may_ride_as_interjection()
+            && item
+                .input_origin
+                .as_prompt_origin()
+                .may_ride_as_interjection()
             && turn_running
             && goal_active
             && Self::extract_bash_command(&item.prompt_blocks).is_none();
@@ -728,10 +734,12 @@ impl SessionActor {
             | PromptOrigin::GoalSummary
             | PromptOrigin::GoalClassifierNudge
             | PromptOrigin::SchedulerFired
-            | PromptOrigin::PlanResume => fuigo_interjection_core::InterjectionAuthority::ParentAgent {
-                message_id: prompt_id.clone(),
-                sender_session_id: String::new(),
-            },
+            | PromptOrigin::PlanResume => {
+                fuigo_interjection_core::InterjectionAuthority::ParentAgent {
+                    message_id: prompt_id.clone(),
+                    sender_session_id: String::new(),
+                }
+            }
             // Exhaustive on purpose: a new origin must choose its interjection authority here. Only a typed prompt is human.
             PromptOrigin::User => fuigo_interjection_core::InterjectionAuthority::User,
         };
@@ -859,7 +867,9 @@ impl SessionActor {
                 // S6.1: a peer row entering the running turn re-flags the session, even after a clear while it was queued.
                 self.mark_peer_influenced();
                 self.peer_admission.set_peer_turn_in_flight(true);
-                if let PromptOrigin::PeerMessage { message_id, .. } = item.input_origin.as_prompt_origin() {
+                if let PromptOrigin::PeerMessage { message_id, .. } =
+                    item.input_origin.as_prompt_origin()
+                {
                     self.peer_admission.note_turn_peer_message(message_id);
                 }
                 self.set_root_peer_turn(true);
@@ -927,7 +937,10 @@ impl SessionActor {
                 || state.edit_holds.contains_key(&item.prompt_id)
                 || item_owner != running_owner.as_deref()
                 || item.tool_overrides_update.is_some()
-                || !item.input_origin.as_prompt_origin().may_ride_as_interjection()
+                || !item
+                    .input_origin
+                    .as_prompt_origin()
+                    .may_ride_as_interjection()
             {
                 break;
             }
@@ -1054,7 +1067,10 @@ impl SessionActor {
             }
             let merge_into_goal = turn_running
                 && goal_active
-                && item.input_origin.as_prompt_origin().may_ride_as_interjection()
+                && item
+                    .input_origin
+                    .as_prompt_origin()
+                    .may_ride_as_interjection()
                 && Self::extract_bash_command(&item.prompt_blocks).is_none();
             if merge_into_goal {
                 self.enqueue_prompt_as_planner_steering(&item);

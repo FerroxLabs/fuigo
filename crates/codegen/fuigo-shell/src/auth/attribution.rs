@@ -465,8 +465,14 @@ mod tests {
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
         assert_eq!(payload_field(&payload, "consumer"), "Test.live");
         // Fingerprints, equal because the credential is the same
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), fp(sent).as_str());
-        assert_eq!(payload_field(&payload, "current_key_prefix"), fp(sent).as_str());
+        assert_eq!(
+            payload_field(&payload, "sent_key_prefix"),
+            fp(sent).as_str()
+        );
+        assert_eq!(
+            payload_field(&payload, "current_key_prefix"),
+            fp(sent).as_str()
+        );
         // Minted at t0 and measured at t0: age 0, expiry exactly an hour out
         assert_eq!(payload_field(&payload, "mint_age_seconds"), 0);
         assert_eq!(payload_field(&payload, "expires_at_seconds_from_now"), 3600);
@@ -483,8 +489,14 @@ mod tests {
         let payload = payload_at_t0(&am, "Test.stale", Some(stale));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), true);
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), fp(stale).as_str());
-        assert_eq!(payload_field(&payload, "current_key_prefix"), fp(live).as_str());
+        assert_eq!(
+            payload_field(&payload, "sent_key_prefix"),
+            fp(stale).as_str()
+        );
+        assert_eq!(
+            payload_field(&payload, "current_key_prefix"),
+            fp(live).as_str()
+        );
         assert_eq!(payload_field(&payload, "consumer"), "Test.stale");
     }
 
@@ -498,7 +510,10 @@ mod tests {
         let payload = payload_at_t0(&am, "Test.absent", Some("any-token"));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), fp("any-token").as_str());
+        assert_eq!(
+            payload_field(&payload, "sent_key_prefix"),
+            fp("any-token").as_str()
+        );
         assert!(payload_field(&payload, "current_key_prefix").is_null());
         assert_eq!(payload_field(&payload, "mint_age_seconds"), -1);
         assert_eq!(payload_field(&payload, "expires_at_seconds_from_now"), 0);
@@ -875,7 +890,10 @@ mod tests {
 
         // Drive the inherited callback
         // The `record_401` bumps the same global counter the parent callback would, proving they refer to the same underlying impl
-        inherited_cb.record_401(SamplingConsumer::ChatCompletionsStream, fpo("bearer").as_ref());
+        inherited_cb.record_401(
+            SamplingConsumer::ChatCompletionsStream,
+            fpo("bearer").as_ref(),
+        );
         assert_eq!(test_emit_count(), 1);
 
         // Sanity: the parent_cb still works too (it's the same Arc).
@@ -956,7 +974,12 @@ mod tests {
         }
 
         impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Collector {
-            fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, _: &tracing::Id, _: Context<'_, S>) {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                _: &tracing::Id,
+                _: Context<'_, S>,
+            ) {
                 let mut line = attrs.metadata().name().to_string();
                 attrs.record(&mut Render(&mut line));
                 self.0.lock().unwrap().push(line);
@@ -982,28 +1005,51 @@ mod tests {
         for (held, sent) in [
             // Random-looking (no English runs the captured field names could contain), obviously fake.
             ("Qx7Vw2Zk9FAKE", "k7FAKE"),
-            ("Hq3Zx8Wv1Ny6Tb4Rm0Kp2Lc9FAKE", "Sv5Gj2Xq7Dz1Wm8Pb3Yt6Nh0FAKE"),
+            (
+                "Hq3Zx8Wv1Ny6Tb4Rm0Kp2Lc9FAKE",
+                "Sv5Gj2Xq7Dz1Wm8Pb3Yt6Nh0FAKE",
+            ),
         ] {
             let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let subscriber = tracing_subscriber::registry().with(record_capture::Collector(records.clone()));
+            let subscriber =
+                tracing_subscriber::registry().with(record_capture::Collector(records.clone()));
             let _guard = subscriber.set_default();
             let (_dir, am) = empty_auth_manager();
             am.hot_swap(fresh_auth(held));
             // Shares no four-character run with either key (the scan below would otherwise match the session id).
             let sid = format!("attribution-sink-{}", sent.len());
-            record_consumer_401(&am, Some(&sid), ConsumerKind::StorageClient, "upload", fpo(sent).as_ref());
+            record_consumer_401(
+                &am,
+                Some(&sid),
+                ConsumerKind::StorageClient,
+                "upload",
+                fpo(sent).as_ref(),
+            );
 
             let traced = records.lock().unwrap().join("\n");
-            assert!(traced.contains("auth_401_attribution"), "control: the span was captured: {traced}");
+            assert!(
+                traced.contains("auth_401_attribution"),
+                "control: the span was captured: {traced}"
+            );
             let logged = String::from_utf8(
-                fuigo_telemetry::unified_log::snapshot_session_log(&sid).expect("control: the event reached the unified log"),
+                fuigo_telemetry::unified_log::snapshot_session_log(&sid)
+                    .expect("control: the event reached the unified log"),
             )
             .expect("utf-8 log");
-            assert!(logged.contains(&fp(sent)), "control: the log carries the fingerprint: {logged}");
+            assert!(
+                logged.contains(&fp(sent)),
+                "control: the log carries the fingerprint: {logged}"
+            );
             for key in [held, sent] {
                 for frag in fragments(key, 4) {
-                    assert!(!traced.contains(&frag), "tracing captured {frag:?} of {key:?}: {traced}");
-                    assert!(!logged.contains(&frag), "the unified log holds {frag:?} of {key:?}: {logged}");
+                    assert!(
+                        !traced.contains(&frag),
+                        "tracing captured {frag:?} of {key:?}: {traced}"
+                    );
+                    assert!(
+                        !logged.contains(&frag),
+                        "the unified log holds {frag:?} of {key:?}: {logged}"
+                    );
                 }
             }
         }

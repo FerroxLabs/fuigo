@@ -53,8 +53,9 @@ impl ClassifiedProxyUpload {
                 } else {
                     fuigo_auth::BearerDestination::Unrestricted
                 };
-                let creds =
-                    crate::util::fuigo_auth_credentials::FuigoAuthCredentials::new(Some(auth.key.clone()));
+                let creds = crate::util::fuigo_auth_credentials::FuigoAuthCredentials::new(Some(
+                    auth.key.clone(),
+                ));
                 Some(Arc::new(fuigo_auth::StaticAuthCredentialProvider::new(
                     Box::new(creds),
                     Some(auth.key.clone()),

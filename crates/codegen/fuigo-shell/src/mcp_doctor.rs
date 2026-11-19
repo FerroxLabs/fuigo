@@ -22,11 +22,17 @@ pub struct ConfigSourceStatus {
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ConfigSourceState {
-    Found { server_count: usize },
+    Found {
+        server_count: usize,
+    },
     NotFound,
-    Skipped { reason: String },
+    Skipped {
+        reason: String,
+    },
     /// A managed policy row (P169): what the source enforces.
-    Policy { detail: String },
+    Policy {
+        detail: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -434,7 +440,12 @@ pub(crate) fn policy_source_rows(
     ms: &fuigo_workspace::permission::resolution::ManagedSettings,
 ) -> Vec<ConfigSourceStatus> {
     let mut rows = Vec::new();
-    for source in ms.mcp_allowlist.sources.iter().filter(|s| s.is_restricted()) {
+    for source in ms
+        .mcp_allowlist
+        .sources
+        .iter()
+        .filter(|s| s.is_restricted())
+    {
         let path = source
             .source_path
             .as_deref()
@@ -599,11 +610,17 @@ pub fn print_report(report: &DoctorReport) {
                 )
             }
             ConfigSourceState::NotFound => "not found".to_string(),
-            ConfigSourceState::Skipped { reason } => format!("skipped ({})", fuigo_tty_utils::untrusted(&reason)),
+            ConfigSourceState::Skipped { reason } => {
+                format!("skipped ({})", fuigo_tty_utils::untrusted(&reason))
+            }
             // P169's policy row: the detail is scrubbed with the whole status at the print below.
             ConfigSourceState::Policy { detail } => detail.clone(),
         };
-        fuigo_tty_utils::cli_println!("    {:<40} {}", fuigo_tty_utils::untrusted(&source.path), fuigo_tty_utils::untrusted(&status));
+        fuigo_tty_utils::cli_println!(
+            "    {:<40} {}",
+            fuigo_tty_utils::untrusted(&source.path),
+            fuigo_tty_utils::untrusted(&status)
+        );
     }
     fuigo_tty_utils::cli_println!();
 
@@ -617,15 +634,26 @@ pub fn print_report(report: &DoctorReport) {
     for server in &report.servers {
         fuigo_tty_utils::cli_println!(
             "  {} ({}: {})",
-            fuigo_tty_utils::untrusted(&server.name), fuigo_tty_utils::untrusted(&server.transport), fuigo_tty_utils::untrusted(&server.target)
+            fuigo_tty_utils::untrusted(&server.name),
+            fuigo_tty_utils::untrusted(&server.transport),
+            fuigo_tty_utils::untrusted(&server.target)
         );
         for check in &server.checks {
             let icon = if check.passed { "\u{2713}" } else { "\u{2717}" };
             let detail = check.detail.as_deref().unwrap_or("");
             if detail.is_empty() {
-                fuigo_tty_utils::cli_println!("    {} {}", icon, fuigo_tty_utils::untrusted(&check.label));
+                fuigo_tty_utils::cli_println!(
+                    "    {} {}",
+                    icon,
+                    fuigo_tty_utils::untrusted(&check.label)
+                );
             } else {
-                fuigo_tty_utils::cli_println!("    {} {} ({})", icon, fuigo_tty_utils::untrusted(&check.label), fuigo_tty_utils::untrusted(&detail));
+                fuigo_tty_utils::cli_println!(
+                    "    {} {} ({})",
+                    icon,
+                    fuigo_tty_utils::untrusted(&check.label),
+                    fuigo_tty_utils::untrusted(&detail)
+                );
             }
             if let Some(hint) = &check.hint {
                 fuigo_tty_utils::cli_println!("    \u{2192} {}", fuigo_tty_utils::untrusted(&hint));
@@ -647,7 +675,10 @@ pub fn print_report(report: &DoctorReport) {
     fuigo_tty_utils::cli_println!();
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

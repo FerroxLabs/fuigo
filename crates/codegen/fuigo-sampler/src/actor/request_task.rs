@@ -236,36 +236,48 @@ pub(crate) async fn run_request_task(
             .begin_attempt();
         let attempt_number = retry_counts.total + doom_retry_count + 1;
         completion.note_attempt(attempt_number);
-        let receipt = crate::request_accounting::Attempt::new(
-            &request,
-            request_id.as_str(),
-            attempt_number,
-        );
-        let mut outcome = receipt.scope(run_one_attempt(
-            &client,
-            request.clone(),
-            request_id.clone(),
-            idle_timeout,
-            &event_tx,
-            &cancel_token,
-            doom_check,
-            Arc::clone(&output_observed),
-        )
-        .instrument(sampling_span.clone()))
-        .await;
+        let receipt =
+            crate::request_accounting::Attempt::new(&request, request_id.as_str(), attempt_number);
+        let mut outcome = receipt
+            .scope(
+                run_one_attempt(
+                    &client,
+                    request.clone(),
+                    request_id.clone(),
+                    idle_timeout,
+                    &event_tx,
+                    &cancel_token,
+                    doom_check,
+                    Arc::clone(&output_observed),
+                )
+                .instrument(sampling_span.clone()),
+            )
+            .await;
 
-        let attempt_accounting = event_tx.ledger.lock().expect("accounting ledger").current.clone();
+        let attempt_accounting = event_tx
+            .ledger
+            .lock()
+            .expect("accounting ledger")
+            .current
+            .clone();
         let receipt_outcome = match &outcome {
             AttemptOutcome::Completed { .. } => crate::request_accounting::Outcome::Completed,
             AttemptOutcome::Cancelled => crate::request_accounting::Outcome::Cancelled,
             _ => crate::request_accounting::Outcome::Failed,
         };
-        receipt.finish(receipt_outcome, attempt_accounting.usage, attempt_accounting.cost_usd_ticks);
+        receipt.finish(
+            receipt_outcome,
+            attempt_accounting.usage,
+            attempt_accounting.cost_usd_ticks,
+        );
         if matches!(&outcome, AttemptOutcome::Completed { .. })
             && receipt.settle_execution().await.is_err()
         {
-            outcome = AttemptOutcome::InitFailed { error: SamplingError::InvalidConfiguration(
-                "execution receipt settlement could not be persisted") };
+            outcome = AttemptOutcome::InitFailed {
+                error: SamplingError::InvalidConfiguration(
+                    "execution receipt settlement could not be persisted",
+                ),
+            };
         }
 
         let effective_max_retries =
@@ -280,7 +292,9 @@ pub(crate) async fn run_request_task(
                 mut response,
                 mut metrics,
             } => {
-                metrics.last_attempt_total_tokens = response.usage.as_ref()
+                metrics.last_attempt_total_tokens = response
+                    .usage
+                    .as_ref()
                     .map(|usage| u64::from(usage.total_tokens));
                 let accounting = event_tx.snapshot();
                 response.usage = accounting.usage;
@@ -585,11 +599,21 @@ async fn apply_retry_decision(
     let max_retries = retry_mod::effective_max_retries(err, configured_max_retries);
     let empty_response = matches!(err, SamplingError::EmptyResponse { .. });
     let stalled = matches!(err, SamplingError::IdleTimeout { .. });
-    let prompt_ended = config.dispatch_gate.as_ref().is_some_and(|gate| gate.on_refusal(err));
-    let decision = if prompt_ended || (empty_response || stalled) && retry_counts.total + 1 >= configured_max_retries {
+    let prompt_ended = config
+        .dispatch_gate
+        .as_ref()
+        .is_some_and(|gate| gate.on_refusal(err));
+    let decision = if prompt_ended
+        || (empty_response || stalled) && retry_counts.total + 1 >= configured_max_retries
+    {
         RetryDecision::Fatal(clone_error(err))
     } else if stalled {
-        classify_error(err, retry_counts.stalled, configured_max_retries, rate_limit_threshold)
+        classify_error(
+            err,
+            retry_counts.stalled,
+            configured_max_retries,
+            rate_limit_threshold,
+        )
     } else if empty_response {
         classify_error(
             err,
@@ -843,10 +867,11 @@ async fn run_one_attempt(
     let length_policy = request.length_policy;
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
-            let (raw, metadata) = match init_or_cancel(client.conversation_stream(request), cancel_token).await {
-                Ok(pair) => pair,
-                Err(outcome) => return outcome,
-            };
+            let (raw, metadata) =
+                match init_or_cancel(client.conversation_stream(request), cancel_token).await {
+                    Ok(pair) => pair,
+                    Err(outcome) => return outcome,
+                };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_chat_completions(teed, metadata, request_id.clone(), idle_timeout);
             drive_l2(
@@ -865,7 +890,9 @@ async fn run_one_attempt(
         ApiBackend::Responses => {
             let client_tools = crate::stream::ClientTools::of_request(&request.tools);
             let (raw, metadata, doom_loop) =
-                match init_or_cancel(client.conversation_stream_responses(request), cancel_token).await {
+                match init_or_cancel(client.conversation_stream_responses(request), cancel_token)
+                    .await
+                {
                     Ok(parts) => parts,
                     Err(outcome) => return outcome,
                 };
@@ -905,10 +932,13 @@ async fn run_one_attempt(
             .await
         }
         ApiBackend::Messages => {
-            let (raw, metadata) = match init_or_cancel(client.conversation_stream_messages(request), cancel_token).await {
-                Ok(pair) => pair,
-                Err(outcome) => return outcome,
-            };
+            let (raw, metadata) =
+                match init_or_cancel(client.conversation_stream_messages(request), cancel_token)
+                    .await
+                {
+                    Ok(pair) => pair,
+                    Err(outcome) => return outcome,
+                };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_messages(teed, metadata, request_id.clone(), idle_timeout);
             drive_l2(
@@ -1907,7 +1937,7 @@ mod tests {
     #[test]
     fn synthesize_stream_sourced_info_still_classifies_for_strip() {
         let original = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "bad image".into(),
             code: Some(ApiErrorCode::InvalidImage),
@@ -2367,26 +2397,39 @@ mod boundary_refusal_tests {
             r#"{"error":{"message":"busy","provider_specific_fields":{"message":"API key has been revoked"}}}"#, true,
         ).unwrap();
         let info = SamplingErrorInfo::from(&error);
-        let replay: SamplingErrorInfo = serde_json::from_value(serde_json::to_value(info).unwrap()).unwrap();
+        let replay: SamplingErrorInfo =
+            serde_json::from_value(serde_json::to_value(info).unwrap()).unwrap();
         let reconstructed = synthesize_from_info(&replay);
         reconstructed.assert_boundary_classified();
-        assert_eq!(reconstructed.upstream().classification(), error.upstream().classification());
+        assert_eq!(
+            reconstructed.upstream().classification(),
+            error.upstream().classification()
+        );
         assert!(reconstructed.is_terminal_refusal());
         assert!(!reconstructed.is_retryable());
     }
     #[test]
     fn r2_auth_mirror_preserves_status_without_legacy_projection() {
         let original = SamplingError::Auth {
-            message: "unauthorized".into(), credential: SentCredential::Sent, status: 401,
-            upstream: fuigo_sampling_types::error::UpstreamError { flux_routed: true, ..Default::default() }.with_body(401, b"{}"),
+            message: "unauthorized".into(),
+            credential: SentCredential::Sent,
+            status: 401,
+            upstream: fuigo_sampling_types::error::UpstreamError {
+                flux_routed: true,
+                ..Default::default()
+            }
+            .with_body(401, b"{}"),
         };
         let info = SamplingErrorInfo::from(&original);
         // 413f407d6 events.rs:331: HTTP status never occupied Auth's legacy slot.
         assert_eq!(info.status_code, None);
-        let replay: SamplingErrorInfo = serde_json::from_value(serde_json::to_value(info).unwrap()).unwrap();
+        let replay: SamplingErrorInfo =
+            serde_json::from_value(serde_json::to_value(info).unwrap()).unwrap();
         let reconstructed = synthesize_from_info(&replay);
-        assert!(matches!(reconstructed, SamplingError::Auth { status: 401, .. }));
+        assert!(matches!(
+            reconstructed,
+            SamplingError::Auth { status: 401, .. }
+        ));
         assert_eq!(reconstructed.upstream(), original.upstream());
     }
-
 }

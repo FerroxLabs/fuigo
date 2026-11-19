@@ -52,8 +52,15 @@ pub fn cached_model_ids(home: &Path, provider_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
-pub fn write_cached_model_ids(home: &Path, provider_id: &str, ids: &[String]) -> std::io::Result<()> {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder"
+)]
+pub fn write_cached_model_ids(
+    home: &Path,
+    provider_id: &str,
+    ids: &[String],
+) -> std::io::Result<()> {
     let path = cache_path(home, provider_id);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -79,8 +86,18 @@ pub fn cache_is_stale(home: &Path, provider_id: &str) -> bool {
 fn is_chat_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
     ![
-        "embed", "whisper", "tts", "dall-e", "moderation", "transcribe", "realtime", "audio",
-        "image", "davinci", "babbage", "rerank",
+        "embed",
+        "whisper",
+        "tts",
+        "dall-e",
+        "moderation",
+        "transcribe",
+        "realtime",
+        "audio",
+        "image",
+        "davinci",
+        "babbage",
+        "rerank",
     ]
     .iter()
     .any(|bad| id.contains(bad))
@@ -152,7 +169,8 @@ pub async fn fetch_model_ids(
     if bytes.len() > MAX_BODY_BYTES {
         return Err(FetchError::BadBody);
     }
-    let body: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| FetchError::BadBody)?;
+    let body: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| FetchError::BadBody)?;
     let ids = parse_model_ids(&body);
     if ids.is_empty() {
         return Err(FetchError::BadBody);
@@ -225,9 +243,8 @@ pub async fn refresh_stale(user_base_urls: impl Fn(&str) -> Option<String>) -> b
     let Some(home) = fuigo_dirs::resolve_fuigo_home() else {
         return false;
     };
-    let disabled = model_refresh_disabled(
-        std::env::var_os("FUIGO_DISABLE_MODEL_REFRESH").as_deref(),
-    );
+    let disabled =
+        model_refresh_disabled(std::env::var_os("FUIGO_DISABLE_MODEL_REFRESH").as_deref());
     refresh_stale_in(
         Path::new(&home),
         |name| std::env::var(name).ok(),
@@ -308,7 +325,10 @@ pub fn model_overrides(
     out
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,21 +347,23 @@ mod tests {
     /// A mock provider: records the path and headers of each request and answers `body`.
     async fn mock(body: serde_json::Value) -> (String, Seen) {
         let seen = Seen::default();
-        let app = Router::new()
-            .route(
-                "/v1/models",
-                get(
-                    |State((seen, body)): State<(Seen, serde_json::Value)>, headers: HeaderMap| async move {
-                        let hs = headers
-                            .iter()
-                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_owned()))
-                            .collect();
-                        seen.0.lock().unwrap().push(("/v1/models".into(), hs));
-                        axum::Json(body)
-                    },
-                ),
-            )
-            .with_state((seen.clone(), body));
+        let app =
+            Router::new()
+                .route(
+                    "/v1/models",
+                    get(
+                        |State((seen, body)): State<(Seen, serde_json::Value)>,
+                         headers: HeaderMap| async move {
+                            let hs = headers
+                                .iter()
+                                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_owned()))
+                                .collect();
+                            seen.0.lock().unwrap().push(("/v1/models".into(), hs));
+                            axum::Json(body)
+                        },
+                    ),
+                )
+                .with_state((seen.clone(), body));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -349,11 +371,19 @@ mod tests {
     }
 
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |name| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| (*v).to_owned())
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
+        }
     }
 
     fn provider(id: &str) -> &'static Provider {
-        key_discovery::PROVIDERS.iter().find(|p| p.id == id).unwrap()
+        key_discovery::PROVIDERS
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap()
     }
 
     #[test]
@@ -366,7 +396,10 @@ mod tests {
             { "id": "models/gemini-2.5-pro", "created": 200 },
             { "id": "bad id with spaces", "created": 999 },
         ]});
-        assert_eq!(parse_model_ids(&body), ["gpt-5", "gemini-2.5-pro", "gpt-4o"]);
+        assert_eq!(
+            parse_model_ids(&body),
+            ["gpt-5", "gemini-2.5-pro", "gpt-4o"]
+        );
         // No creation times: the provider's own order stands.
         let plain = serde_json::json!({ "data": [{ "id": "b" }, { "id": "a" }] });
         assert_eq!(parse_model_ids(&plain), ["b", "a"]);
@@ -378,15 +411,24 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let (base, seen) = mock(serde_json::json!({ "data": [
             { "id": "gpt-5", "created": 2 }, { "id": "gpt-4o", "created": 1 }
-        ]})).await;
+        ]}))
+        .await;
         let pairs = [("OPENAI_API_KEY", OPENAI_KEY)];
         let got = refresh(home.path(), env(&pairs), None, false, |_| base.clone()).await;
-        assert_eq!(got.len(), 1, "only the provider whose key is set is asked: {got:?}");
+        assert_eq!(
+            got.len(),
+            1,
+            "only the provider whose key is set is asked: {got:?}"
+        );
         assert_eq!((got[0].provider_id, got[0].result), ("openai", Ok(2)));
         // The provider was asked once, with the bearer scheme.
         let seen = seen.0.lock().unwrap();
         assert_eq!(seen.len(), 1);
-        let auth = seen[0].1.iter().find(|(k, _)| k == "authorization").map(|(_, v)| v.as_str());
+        let auth = seen[0]
+            .1
+            .iter()
+            .find(|(k, _)| k == "authorization")
+            .map(|(_, v)| v.as_str());
         assert_eq!(auth, Some(format!("Bearer {OPENAI_KEY}").as_str()));
         // Cached IDs, and no secret anywhere in the cache.
         assert_eq!(cached_model_ids(home.path(), "openai"), ["gpt-5", "gpt-4o"]);
@@ -395,7 +437,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(cache_path(home.path(), "openai")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(cache_path(home.path(), "openai"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o077, 0, "owner-only cache");
         }
     }
@@ -410,7 +455,10 @@ mod tests {
         assert!(again.is_empty(), "fresh cache: not asked again");
         assert_eq!(seen.0.lock().unwrap().len(), 1);
         // `force` (a login) asks again.
-        let forced = refresh(home.path(), env(&pairs), Some("openai"), true, |_| base.clone()).await;
+        let forced = refresh(home.path(), env(&pairs), Some("openai"), true, |_| {
+            base.clone()
+        })
+        .await;
         assert_eq!(forced.len(), 1);
         assert_eq!(seen.0.lock().unwrap().len(), 2);
         // No key: nothing is sent.
@@ -426,16 +474,25 @@ mod tests {
         write_cached_model_ids(home.path(), "anthropic", &["claude-old".to_owned()]).unwrap();
         let (base, seen) = mock(serde_json::json!({ "data": [{ "id": "claude-new" }] })).await;
         let pairs = [("ANTHROPIC_API_KEY", ANTHROPIC_KEY)];
-        let got = refresh(home.path(), env(&pairs), Some("anthropic"), true, |_| base.clone()).await;
+        let got = refresh(home.path(), env(&pairs), Some("anthropic"), true, |_| {
+            base.clone()
+        })
+        .await;
         assert_eq!(got[0].result, Ok(1));
         let headers = seen.0.lock().unwrap()[0].1.clone();
         let find = |n: &str| headers.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
         assert_eq!(find("x-api-key").as_deref(), Some(ANTHROPIC_KEY));
         assert!(find("anthropic-version").is_some());
-        assert!(find("authorization").is_none(), "Anthropic does not take a bearer");
+        assert!(
+            find("authorization").is_none(),
+            "Anthropic does not take a bearer"
+        );
         // The server goes away: the refresh fails and the earlier list stands.
         let dead = "http://127.0.0.1:9/v1".to_owned();
-        let failed = refresh(home.path(), env(&pairs), Some("anthropic"), true, |_| dead.clone()).await;
+        let failed = refresh(home.path(), env(&pairs), Some("anthropic"), true, |_| {
+            dead.clone()
+        })
+        .await;
         assert!(failed[0].result.is_err());
         assert_eq!(cached_model_ids(home.path(), "anthropic"), ["claude-new"]);
     }
@@ -445,7 +502,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         write_cached_model_ids(home.path(), "openai", &["gpt-5".into(), "gpt-4o".into()]).unwrap();
         write_cached_model_ids(home.path(), "anthropic", &["claude-x".into()]).unwrap();
-        let pairs = [("OPENAI_API_KEY", OPENAI_KEY), ("ANTHROPIC_API_KEY", ANTHROPIC_KEY)];
+        let pairs = [
+            ("OPENAI_API_KEY", OPENAI_KEY),
+            ("ANTHROPIC_API_KEY", ANTHROPIC_KEY),
+        ];
         let mut mine = indexmap::IndexMap::new();
         mine.insert(
             "my-gpt-4o".to_owned(),
@@ -457,18 +517,48 @@ mod tests {
         );
         let got = model_overrides(home.path(), env(&pairs), |_| None, &mine);
         let keys: Vec<&str> = got.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["anthropic-key/claude-x", "openai-key/gpt-5"], "hand-written gpt-4o is not repeated");
+        assert_eq!(
+            keys,
+            ["anthropic-key/claude-x", "openai-key/gpt-5"],
+            "hand-written gpt-4o is not repeated"
+        );
         let (_, openai) = got.iter().find(|(k, _)| k == "openai-key/gpt-5").unwrap();
-        assert_eq!(openai.base_url.as_deref(), Some(provider("openai").base_url));
-        assert_eq!(openai.env_key.as_ref().and_then(|e| e.primary()), Some("OPENAI_API_KEY"));
+        assert_eq!(
+            openai.base_url.as_deref(),
+            Some(provider("openai").base_url)
+        );
+        assert_eq!(
+            openai.env_key.as_ref().and_then(|e| e.primary()),
+            Some("OPENAI_API_KEY")
+        );
         assert_eq!(openai.name.as_deref(), Some("gpt-5 (OpenAI key)"));
-        assert!(openai.api_key.is_none(), "the secret never enters the override");
-        let (_, anthropic) = got.iter().find(|(k, _)| k == "anthropic-key/claude-x").unwrap();
+        assert!(
+            openai.api_key.is_none(),
+            "the secret never enters the override"
+        );
+        let (_, anthropic) = got
+            .iter()
+            .find(|(k, _)| k == "anthropic-key/claude-x")
+            .unwrap();
         assert!(anthropic.api_backend.is_some() && anthropic.auth_scheme.is_some());
         assert!(anthropic.extra_headers.contains_key("anthropic-version"));
         // A user's [model_providers.openai].base_url wins; no key means no entries.
-        let proxied = model_overrides(home.path(), env(&pairs), |id| (id == "openai").then(|| "http://proxy.test/v1".to_owned()), &Default::default());
-        assert_eq!(proxied.iter().find(|(k, _)| k == "openai-key/gpt-5").unwrap().1.base_url.as_deref(), Some("http://proxy.test/v1"));
+        let proxied = model_overrides(
+            home.path(),
+            env(&pairs),
+            |id| (id == "openai").then(|| "http://proxy.test/v1".to_owned()),
+            &Default::default(),
+        );
+        assert_eq!(
+            proxied
+                .iter()
+                .find(|(k, _)| k == "openai-key/gpt-5")
+                .unwrap()
+                .1
+                .base_url
+                .as_deref(),
+            Some("http://proxy.test/v1")
+        );
         assert!(model_overrides(home.path(), env(&[]), |_| None, &Default::default()).is_empty());
     }
 
@@ -484,7 +574,8 @@ mod tests {
         raw["fetched_at"] = stale.into();
         std::fs::write(&path, raw.to_string()).unwrap();
         assert!(cache_is_stale(home.path(), "openai"), "{raw}");
-        let (base, seen) = mock(serde_json::json!({ "data": [{ "id": "gpt-5", "created": 1 }]})).await;
+        let (base, seen) =
+            mock(serde_json::json!({ "data": [{ "id": "gpt-5", "created": 1 }]})).await;
         let pairs = [("OPENAI_API_KEY", OPENAI_KEY)];
         let url = |_: &str| Some(base.clone());
 

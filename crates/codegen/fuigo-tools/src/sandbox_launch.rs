@@ -68,6 +68,37 @@ pub struct LaunchReceipt {
     /// True when the command was rewritten to run inside an OS sandbox (`enforce`).
     pub sandboxed: bool,
     pub backend: Option<BackendName>,
+    /// What widens this spawn's policy for its call alone: the keys of the call-scoped (one-time) grants it
+    /// inherited and, for the re-run after a grant, the replay mark. Empty for an ordinary spawn.
+    pub grants: Vec<String>,
+}
+
+/// u46 r2: how confined one shell spawn ran, read from its [`LaunchReceipt`]. The persistent shell tags the state a
+/// spawn leaves with it: state replays as code (functions) only into a spawn no less confined than the one that
+/// wrote it. No receipt (no hook, `off`) and an unwrapped spawn (`observe`) are unconfined.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpawnConfinement {
+    sandboxed: bool,
+    grants: Vec<String>,
+}
+
+impl SpawnConfinement {
+    pub fn of(receipt: Option<&LaunchReceipt>) -> SpawnConfinement {
+        match receipt {
+            Some(receipt) if receipt.sandboxed => SpawnConfinement {
+                sandboxed: true,
+                grants: receipt.grants.clone(),
+            },
+            _ => SpawnConfinement::default(),
+        }
+    }
+
+    /// True when this spawn runs with less confinement than `producer` did: `producer` ran in the OS sandbox and
+    /// this one does not, or this one holds a call-scoped grant or replay mark `producer` lacked.
+    pub fn is_less_confined_than(&self, producer: &SpawnConfinement) -> bool {
+        producer.sandboxed
+            && (!self.sandboxed || self.grants.iter().any(|key| !producer.grants.contains(key)))
+    }
 }
 
 /// Injected by the daemon. `prepare` rewrites `cmd` in place (or leaves it alone) and must not
@@ -204,18 +235,23 @@ impl ApprovedWithoutGrant {
 /// variable of `env` that can steer what `command` runs or loads in `dir`, if any (the classifier's
 /// `inherited_env_steers`, for the command's own programs, over `env` instead of Fuigo's). Installed
 /// by the permission manager ([`install_env_judge`]).
-pub type EnvJudge = fn(command: &str, env: &[(String, String)], dir: &std::path::Path) -> Option<String>;
+pub type EnvJudge =
+    fn(command: &str, env: &[(String, String)], dir: &std::path::Path) -> Option<String>;
 
 static ENV_JUDGE: std::sync::RwLock<Option<EnvJudge>> = std::sync::RwLock::new(None);
 
 /// Install the rule the shell runner applies to a no-grant call's environment ([`check_child_env`]).
 /// u35 g11 (Grok r10 Low): a poisoned lock still takes the judge (the slot holds a plain `fn`).
 pub fn install_env_judge(judge: EnvJudge) {
-    *ENV_JUDGE.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(judge);
+    *ENV_JUDGE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(judge);
 }
 
 fn env_judge() -> Option<EnvJudge> {
-    *ENV_JUDGE.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    *ENV_JUDGE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// u35 t1 (design d2 §3.6): the folder-trust rule for a call approved without a grant: whether `command`, run in
@@ -228,11 +264,15 @@ static TRUST_JUDGE: std::sync::RwLock<Option<TrustJudge>> = std::sync::RwLock::n
 
 /// Install the folder-trust rule the shell runner applies to a no-grant call ([`check_child_env`]).
 pub fn install_trust_judge(judge: TrustJudge) {
-    *TRUST_JUDGE.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(judge);
+    *TRUST_JUDGE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(judge);
 }
 
 fn trust_judge() -> Option<TrustJudge> {
-    *TRUST_JUDGE.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    *TRUST_JUDGE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// u35 t1 (design d2 §3.6): a command approved without a grant did not run, because it starts in a folder that is not
@@ -281,7 +321,9 @@ fn check_runner_trust_with(
 ) -> Result<(), SandboxLaunchError> {
     let Some(judge) = judge else {
         if strict {
-            tracing::warn!("a command approved without a grant has no folder-trust rule installed; refused");
+            tracing::warn!(
+                "a command approved without a grant has no folder-trust rule installed; refused"
+            );
             return Err(SandboxLaunchError::new(NoTrustJudge));
         }
         return Ok(());
@@ -292,7 +334,9 @@ fn check_runner_trust_with(
         return Ok(());
     }
     tracing::warn!(dir = %exec_dir.display(), "a command approved without a grant would run outside a trusted folder; refused");
-    Err(SandboxLaunchError::new(UntrustedFolderShell { dir: exec_dir.display().to_string() }))
+    Err(SandboxLaunchError::new(UntrustedFolderShell {
+        dir: exec_dir.display().to_string(),
+    }))
 }
 
 /// u35 g10: the one judge the tests of this crate install (the rule is process-wide, so every test
@@ -307,14 +351,19 @@ pub(crate) fn u35_test_child_judge(
     if env.iter().any(|(name, _)| name == "FUIGO_U35_CHILD_STEER") {
         return Some("FUIGO_U35_CHILD_STEER".to_owned());
     }
-    command.contains("u35-g10-steer").then(|| "U35_G10_STEER".to_owned())
+    command
+        .contains("u35-g10-steer")
+        .then(|| "U35_G10_STEER".to_owned())
 }
 
 /// u35 t1: the folder-trust rule this crate's tests install (process-wide, so every test that installs one installs
 /// this): only a directory or command carrying the marker `u35-t1-untrusted` is outside a trusted folder.
 #[cfg(test)]
 pub(crate) fn u35_test_trust_judge(command: &str, dirs: &[&std::path::Path]) -> bool {
-    !command.contains("u35-t1-untrusted") && !dirs.iter().any(|dir| dir.to_string_lossy().contains("u35-t1-untrusted"))
+    !command.contains("u35-t1-untrusted")
+        && !dirs
+            .iter()
+            .any(|dir| dir.to_string_lossy().contains("u35-t1-untrusted"))
 }
 
 /// u35 g10 (Fable r9 Low): the remedies named are the ones that exist when this refuses; a remembered
@@ -365,11 +414,18 @@ pub struct NoEnvJudge;
 ///
 /// # Errors
 /// [`UnvouchedShell`]: the site must not spawn.
-pub fn check_runner_shell(shell: Option<fuigo_config::shell::WindowsShellFamily>) -> Result<(), SandboxLaunchError> {
+pub fn check_runner_shell(
+    shell: Option<fuigo_config::shell::WindowsShellFamily>,
+) -> Result<(), SandboxLaunchError> {
     match shell {
         Some(family) if !family.reads_bash_syntax() => {
-            tracing::warn!(shell = family.name(), "a command approved without a grant would run in a shell the checks do not model; refused");
-            Err(SandboxLaunchError::new(UnvouchedShell { shell: family.name().to_owned() }))
+            tracing::warn!(
+                shell = family.name(),
+                "a command approved without a grant would run in a shell the checks do not model; refused"
+            );
+            Err(SandboxLaunchError::new(UnvouchedShell {
+                shell: family.name().to_owned(),
+            }))
         }
         _ => Ok(()),
     }
@@ -415,7 +471,9 @@ impl Drop for TestRunnerShell {
 /// [`NoEnvJudge`] when `strict`.
 pub fn missing_env_judge(strict: bool) -> Result<(), SandboxLaunchError> {
     if strict {
-        tracing::warn!("a command approved without a grant has no environment rule installed; refused");
+        tracing::warn!(
+            "a command approved without a grant has no environment rule installed; refused"
+        );
         Err(SandboxLaunchError::new(NoEnvJudge))
     } else {
         Ok(())
@@ -427,7 +485,9 @@ pub fn missing_env_judge(strict: bool) -> Result<(), SandboxLaunchError> {
 /// so no pager or editor blocks). Fuigo's own constants are not the user's environment and are
 /// never judged; a different value of the same name is.
 pub fn is_fuigo_own_env(name: &str, value: &str) -> bool {
-    crate::util::pager_env().get(name).is_some_and(|own| own == value)
+    crate::util::pager_env()
+        .get(name)
+        .is_some_and(|own| own == value)
 }
 
 /// u37: a Windows `PATH` value without its empty segments (a trailing `;`, or `;;`). Windows gives an empty
@@ -459,7 +519,11 @@ pub fn windows_path_without_empty_segments(value: &str) -> std::borrow::Cow<'_, 
         }
     }
     push(&value[start..]);
-    if out == value { std::borrow::Cow::Borrowed(value) } else { std::borrow::Cow::Owned(out) }
+    if out == value {
+        std::borrow::Cow::Borrowed(value)
+    } else {
+        std::borrow::Cow::Owned(out)
+    }
 }
 
 /// u37 (round 3): the entries of a Windows `PATH` as Git Bash reads it (MSYS2 `conv_path_list`): split at every `;`,
@@ -475,14 +539,22 @@ pub fn windows_path_entries_as_git_bash_reads(value: &str) -> impl Iterator<Item
 /// current directory. The shell runner sets this value on the child ([`normalize_child_path`]) and the permission
 /// classifier judges this value, so the value judged is the value that runs.
 pub fn child_path_value(value: &str) -> std::borrow::Cow<'_, str> {
-    if cfg!(windows) { windows_path_without_empty_segments(value) } else { std::borrow::Cow::Borrowed(value) }
+    if cfg!(windows) {
+        windows_path_without_empty_segments(value)
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
 }
 
 /// u37: set on `cmd` the `PATH` its child will run under ([`child_path_value`]), once its environment is built and
 /// before it is judged ([`check_child_env`]) or spawned. On Windows the variable is found in any spelling (`Path`,
 /// `PATH`), as [`child_env`] sees it. Unix is untouched.
 pub fn normalize_child_path(cmd: &mut tokio::process::Command) {
-    normalize_child_path_for(cmd, std::env::vars_os(), crate::util::shell_env_policy::EnvPlatform::host());
+    normalize_child_path_for(
+        cmd,
+        std::env::vars_os(),
+        crate::util::shell_env_policy::EnvPlatform::host(),
+    );
 }
 
 /// The platform-parameterised core of [`normalize_child_path`], over `inherited` in place of the process's own.
@@ -494,7 +566,12 @@ pub(crate) fn normalize_child_path_for(
     let edits: Vec<(OsString, Option<OsString>)> = cmd
         .as_std()
         .get_envs()
-        .map(|(name, value)| (name.to_os_string(), value.map(std::ffi::OsStr::to_os_string)))
+        .map(|(name, value)| {
+            (
+                name.to_os_string(),
+                value.map(std::ffi::OsStr::to_os_string),
+            )
+        })
         .collect();
     if let Some((name, normalized)) = normalized_path_for(inherited, edits, platform) {
         cmd.env(name, normalized);
@@ -507,8 +584,14 @@ pub(crate) fn normalize_child_path_for(
 /// classifier judged ([`child_path_value`]). The same rule as the local runner's [`normalize_child_path`]. When
 /// the value is already clean, and always on Unix, `env` comes back unchanged. A tool call goes through
 /// [`checked_client_terminal_env`]; this one serves a command the user typed, which the local runner does not judge.
-pub fn client_terminal_env(env: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
-    client_terminal_env_for(env, std::env::vars_os(), crate::util::shell_env_policy::EnvPlatform::host())
+pub fn client_terminal_env(
+    env: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    client_terminal_env_for(
+        env,
+        std::env::vars_os(),
+        crate::util::shell_env_policy::EnvPlatform::host(),
+    )
 }
 
 /// u37: what a client terminal judges for a call approved without a grant, as the local runner's `env_check`: the
@@ -552,9 +635,18 @@ pub(crate) fn checked_client_terminal_env_with(
     let inherited: Vec<(OsString, OsString)> = inherited.into_iter().collect();
     let sent = client_terminal_env_for(env, inherited.iter().cloned(), platform);
     if let Some(check) = check {
-        let edits = sent.iter().map(|(name, value)| (OsString::from(name), Some(OsString::from(value))));
+        let edits = sent
+            .iter()
+            .map(|(name, value)| (OsString::from(name), Some(OsString::from(value))));
         let child = child_env_for(inherited, edits, std::iter::empty(), platform);
-        check_spawn_env_with(&child, check.command, check.dir, check.request_cwd, platform, judge)?;
+        check_spawn_env_with(
+            &child,
+            check.command,
+            check.dir,
+            check.request_cwd,
+            platform,
+            judge,
+        )?;
     }
     Ok(sent)
 }
@@ -566,7 +658,9 @@ pub(crate) fn client_terminal_env_for(
     platform: crate::util::shell_env_policy::EnvPlatform,
 ) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = env.into_iter().collect();
-    let edits = env.iter().map(|(name, value)| (OsString::from(name), Some(OsString::from(value))));
+    let edits = env
+        .iter()
+        .map(|(name, value)| (OsString::from(name), Some(OsString::from(value))));
     if let Some((name, normalized)) = normalized_path_for(inherited, edits, platform) {
         env.retain(|(other, _)| !platform.same_name(other, "PATH"));
         env.push((name.to_string_lossy().into_owned(), normalized));
@@ -587,7 +681,9 @@ fn normalized_path_for(
         return None;
     }
     let env = child_env_for(inherited, edits, std::iter::empty(), platform);
-    let (name, value) = env.into_iter().find(|(name, _)| platform.same_os_name(name, "PATH".as_ref()))?;
+    let (name, value) = env
+        .into_iter()
+        .find(|(name, _)| platform.same_os_name(name, "PATH".as_ref()))?;
     match windows_path_without_empty_segments(value.to_str()?) {
         std::borrow::Cow::Owned(normalized) => Some((name, normalized)),
         std::borrow::Cow::Borrowed(_) => None,
@@ -604,7 +700,13 @@ pub fn judge_child_env(
     dir: &std::path::Path,
     judge: EnvJudge,
 ) -> Option<String> {
-    judge_child_env_for(env, command, dir, judge, crate::util::shell_env_policy::EnvPlatform::host())
+    judge_child_env_for(
+        env,
+        command,
+        dir,
+        judge,
+        crate::util::shell_env_policy::EnvPlatform::host(),
+    )
 }
 
 /// The platform-parameterised core of [`judge_child_env`].
@@ -620,12 +722,19 @@ pub(crate) fn judge_child_env_for(
         .iter()
         .map(|(name, value)| {
             let name = name.to_string_lossy();
-            let name = if windows { name.to_ascii_uppercase() } else { name.into_owned() };
+            let name = if windows {
+                name.to_ascii_uppercase()
+            } else {
+                name.into_owned()
+            };
             (name, value.to_string_lossy().into_owned())
         })
         .filter(|(name, value)| !is_fuigo_own_env(name, value))
         .collect();
-    if !env.iter().any(|(name, value)| name == "PATH" && !value.is_empty()) {
+    if !env
+        .iter()
+        .any(|(name, value)| name == "PATH" && !value.is_empty())
+    {
         return Some("PATH".to_owned());
     }
     judge(command, &env, dir)
@@ -695,9 +804,12 @@ pub fn child_env(
 ) -> Vec<(OsString, OsString)> {
     child_env_for(
         std::env::vars_os(),
-        cmd.as_std()
-            .get_envs()
-            .map(|(name, value)| (name.to_os_string(), value.map(std::ffi::OsStr::to_os_string))),
+        cmd.as_std().get_envs().map(|(name, value)| {
+            (
+                name.to_os_string(),
+                value.map(std::ffi::OsStr::to_os_string),
+            )
+        }),
         restored,
         crate::util::shell_env_policy::EnvPlatform::host(),
     )
@@ -728,7 +840,9 @@ pub(crate) fn child_env_for(
     }
     let mut env: Vec<(OsString, OsString)> = Vec::new();
     let set = |env: &mut Vec<(OsString, OsString)>, name: OsString, value: Option<OsString>| {
-        let existing = env.iter().position(|(k, _)| platform.same_os_name(k, &name));
+        let existing = env
+            .iter()
+            .position(|(k, _)| platform.same_os_name(k, &name));
         match (existing, value) {
             (Some(i), Some(value)) => env[i].1 = value,
             (None, Some(value)) => env.push((name, value)),
@@ -833,7 +947,10 @@ pub fn exited(hook: Option<&dyn SandboxLaunch>, call: &CallId) {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "sandbox_launch_tests.rs"]
 mod tests;

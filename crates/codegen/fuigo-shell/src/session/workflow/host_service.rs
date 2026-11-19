@@ -842,7 +842,10 @@ impl HostService {
         Ok((files, bytes))
     }
 
-    #[allow(clippy::disallowed_methods, reason = "session-less workflow run: scratch under the temp dir; with a session writer it goes through the writer, F5-C6; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "session-less workflow run: scratch under the temp dir; with a session writer it goes through the writer, F5-C6; not inside a session folder"
+    )]
     async fn write_scratch_file(&self, name: &str, content: &str) -> Result<String, HostError> {
         if content.len() > WORKFLOW_MAX_SCRATCH_FILE_BYTES {
             return Err(HostError::Failed(format!(
@@ -893,7 +896,9 @@ impl HostService {
             if let Some(writer) = writer {
                 Self::reject_symlink(&scratch_dir, "scratch directory")?;
                 Self::reject_symlink(&path, "scratch file")?;
-                let rel = writer.rel_of(&path).map_err(|e| HostError::Failed(format!("scratch path: {e}")))?;
+                let rel = writer
+                    .rel_of(&path)
+                    .map_err(|e| HostError::Failed(format!("scratch path: {e}")))?;
                 return writer
                     .replace_atomic_sync(rel, &body)
                     .map_err(|e| HostError::Failed(format!("scratch atomic persist: {e}")));

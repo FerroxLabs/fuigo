@@ -1,7 +1,9 @@
 use std::io;
 use std::time::Duration;
 
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncWrite;
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
 
 use crate::metrics::ProxyOutcome;
 
@@ -111,6 +113,7 @@ impl ConnectionError {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn write_committed<W: AsyncWrite + Unpin>(
     writer: &mut W,
     bytes: &[u8],

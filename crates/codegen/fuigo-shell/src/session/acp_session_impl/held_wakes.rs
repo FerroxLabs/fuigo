@@ -100,7 +100,10 @@ impl HeldWakes {
     }
     /// Load the held-wake queue from `dir`. An unreadable file is quarantined as `held_wakes.json.bad` through `writer`
     /// (the session folder is written only by its `SessionWriter`), and the prompt stays terminal.
-    pub(crate) fn load(dir: &std::path::Path, writer: &fuigo_session_writer::SessionWriter) -> std::io::Result<Self> {
+    pub(crate) fn load(
+        dir: &std::path::Path,
+        writer: &fuigo_session_writer::SessionWriter,
+    ) -> std::io::Result<Self> {
         let path = dir.join(HELD_WAKE_FILE);
         let loaded = match std::fs::read(&path) {
             Ok(bytes) => (|| {
@@ -115,7 +118,9 @@ impl HeldWakes {
                 let mut queue = Self {
                     terminal: match value.get("terminal") {
                         None => false,
-                        Some(t) => t.as_bool().ok_or_else(|| std::io::Error::other("held wakes `terminal` is not a bool"))?,
+                        Some(t) => t.as_bool().ok_or_else(|| {
+                            std::io::Error::other("held wakes `terminal` is not a bool")
+                        })?,
                     },
                     wakes: VecDeque::new(),
                 };
@@ -145,7 +150,8 @@ impl HeldWakes {
             }
             Err(error) => {
                 tracing::warn!(%error, "Quarantining unreadable held wakes; prompt stays terminal");
-                if let Err(rename_error) = writer.rename_sync(HELD_WAKE_FILE, HELD_WAKE_QUARANTINE) {
+                if let Err(rename_error) = writer.rename_sync(HELD_WAKE_FILE, HELD_WAKE_QUARANTINE)
+                {
                     tracing::warn!(%rename_error, "Could not quarantine held wakes");
                 }
                 Ok(Self {
@@ -293,6 +299,10 @@ impl SessionActor {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test fixture files in a tempdir, never inside a session folder"
+)]
 mod tests {
     use super::*;
     #[test]
@@ -325,13 +335,19 @@ mod tests {
             assert_eq!(text.text, format!("payload {}", i + 7));
         }
         HeldWakes::default().save(&writer).unwrap();
-        assert!(HeldWakes::load(dir.path(), &writer).unwrap().wakes.is_empty());
+        assert!(
+            HeldWakes::load(dir.path(), &writer)
+                .unwrap()
+                .wakes
+                .is_empty()
+        );
     }
     #[test]
     fn r2_corrupt_queue_recovers_terminal() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(HELD_WAKE_FILE), b"not json").unwrap();
-        let writer = fuigo_session_writer::SessionWriter::try_claim("corrupt-queue", dir.path()).unwrap();
+        let writer =
+            fuigo_session_writer::SessionWriter::try_claim("corrupt-queue", dir.path()).unwrap();
         let queue = HeldWakes::load(dir.path(), &writer)
             .expect("corrupt queue must not prevent session load");
         assert!(queue.wakes.is_empty());
@@ -347,7 +363,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marks = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(HELD_WAKE_FILE), b"not json").unwrap();
-        let writer = fuigo_session_writer::SessionWriter::try_claim("quarantine-via-writer", dir.path()).unwrap();
+        let writer =
+            fuigo_session_writer::SessionWriter::try_claim("quarantine-via-writer", dir.path())
+                .unwrap();
         fuigo_session_writer::trace::set_test_trace_dir(Some(marks.path().to_path_buf()));
         let queue = HeldWakes::load(dir.path(), &writer);
         fuigo_session_writer::trace::set_test_trace_dir(None);
@@ -362,7 +380,9 @@ mod tests {
             let hash = fuigo_session_writer::trace::path_hash(&writer.dir().join(rel));
             for kind in ["b.", "e."] {
                 assert!(
-                    names.iter().any(|n| n.starts_with(kind) && n.ends_with(&format!(".{hash}"))),
+                    names
+                        .iter()
+                        .any(|n| n.starts_with(kind) && n.ends_with(&format!(".{hash}"))),
                     "no {kind} writer mark for {rel}: {names:?}"
                 );
             }
@@ -376,14 +396,18 @@ mod tests {
         let session = dir.path().join("session");
         std::fs::create_dir(&session).unwrap();
         std::fs::write(session.join(HELD_WAKE_FILE), b"not json").unwrap();
-        let writer = fuigo_session_writer::SessionWriter::try_claim("quarantine-gone", &session).unwrap();
+        let writer =
+            fuigo_session_writer::SessionWriter::try_claim("quarantine-gone", &session).unwrap();
         writer.delete_tree_sync().unwrap();
         // The folder is gone with the session; recreate the corrupt file where a raw rename would have reached it.
         std::fs::create_dir(&session).unwrap();
         std::fs::write(session.join(HELD_WAKE_FILE), b"not json").unwrap();
         let queue = HeldWakes::load(&session, &writer).unwrap();
         assert!(queue.terminal);
-        assert!(session.join(HELD_WAKE_FILE).exists(), "a gone writer must not rename");
+        assert!(
+            session.join(HELD_WAKE_FILE).exists(),
+            "a gone writer must not rename"
+        );
         assert!(!session.join("held_wakes.json.bad").exists());
     }
 
@@ -459,7 +483,8 @@ mod tests {
     fn r2_unreadable_queue_recovers_terminal() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(HELD_WAKE_FILE)).unwrap();
-        let writer = fuigo_session_writer::SessionWriter::try_claim("unreadable-queue", dir.path()).unwrap();
+        let writer =
+            fuigo_session_writer::SessionWriter::try_claim("unreadable-queue", dir.path()).unwrap();
         let queue = HeldWakes::load(dir.path(), &writer).unwrap();
         assert!(queue.terminal && queue.wakes.is_empty());
         assert!(dir.path().join("held_wakes.json.bad").is_dir());

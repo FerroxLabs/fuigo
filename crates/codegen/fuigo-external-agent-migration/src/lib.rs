@@ -11,6 +11,9 @@
 #![deny(clippy::indexing_slicing)]
 // The tests read parsed JSON/TOML by key and assert on the result; only shipped code must not index.
 #![cfg_attr(test, allow(clippy::indexing_slicing))]
+// Panic-path lints are denied in this crate (shipped code is panic = "abort"); tests may unwrap.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::await_holding_lock)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod config_values;
 mod error;

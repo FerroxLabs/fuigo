@@ -91,17 +91,26 @@ pub(crate) fn replay_if_latest_compaction_active(
     let Some(latest) = find_latest_compaction_checkpoint(updates_path)? else {
         return Ok(None);
     };
-    let bytes = crate::extensions::notification::read_contained_checkpoint(session_dir, &latest.checkpoint_file)?;
-    let file: CompactionCheckpointFile =
-        serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let bytes = crate::extensions::notification::read_contained_checkpoint(
+        session_dir,
+        &latest.checkpoint_file,
+    )?;
+    let file: CompactionCheckpointFile = serde_json::from_slice(&bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     if file.schema_version != 1 || latest.schema_version != 1 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported compaction checkpoint schema"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported compaction checkpoint schema",
+        ));
     }
     if file.inherited_prefix_len.is_none() {
         return Ok(None);
     }
     let replay = replay_to_prompt(updates_path, session_dir, usize::MAX)?;
-    Ok((replay.last_compaction_prompt_index == Some(file.prompt_index_at_compaction)).then_some(replay.conversation))
+    Ok(
+        (replay.last_compaction_prompt_index == Some(file.prompt_index_at_compaction))
+            .then_some(replay.conversation),
+    )
 }
 
 /// Replay `updates.jsonl` to reconstruct the conversation at `target_prompt_index`.
@@ -192,7 +201,10 @@ fn abandon_floors(updates_path: &Path) -> io::Result<Vec<usize>> {
     if let Some(iter) = UpdatesIterator::open(updates_path)? {
         for update in iter.flatten() {
             if let SessionUpdate::Fuigo(notification) = &update
-                && let FuigoSessionUpdate::RewindMarker { target_prompt_index, .. } = &notification.update
+                && let FuigoSessionUpdate::RewindMarker {
+                    target_prompt_index,
+                    ..
+                } = &notification.update
             {
                 targets.push(*target_prompt_index);
             }
@@ -442,7 +454,9 @@ impl ReplayState {
     /// Whether a rewind marker still to come can abandon a compaction at `compaction_at`.
     fn can_be_abandoned(&self, compaction_at: usize) -> bool {
         // Without a first pass (none ran), keep everything: correct, only larger
-        self.abandon_floor.get(self.markers_seen).is_none_or(|&floor| floor < compaction_at)
+        self.abandon_floor
+            .get(self.markers_seen)
+            .is_none_or(|&floor| floor < compaction_at)
     }
 
     fn handle_rewind_marker(&mut self, marker_target: usize) {
@@ -637,20 +651,36 @@ impl ReplayState {
 /// (missing or refused), `InvalidData` (corrupt), `Unsupported` (schema other than 1), else the read error's own kind.
 ///
 /// [`read_contained_checkpoint`]: crate::extensions::notification::read_contained_checkpoint
-fn read_checkpoint_file(info: &CompactionCheckpointInfo, session_dir: &Path) -> io::Result<CompactionCheckpointFile> {
+fn read_checkpoint_file(
+    info: &CompactionCheckpointInfo,
+    session_dir: &Path,
+) -> io::Result<CompactionCheckpointFile> {
     if info.schema_version != 1 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("unsupported compaction checkpoint marker schema {}", info.schema_version),
+            format!(
+                "unsupported compaction checkpoint marker schema {}",
+                info.schema_version
+            ),
         ));
     }
-    let bytes = crate::extensions::notification::read_contained_checkpoint(session_dir, &info.checkpoint_file)?;
-    let file: CompactionCheckpointFile = serde_json::from_slice(&bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("compaction checkpoint file corrupt ({e})")))?;
+    let bytes = crate::extensions::notification::read_contained_checkpoint(
+        session_dir,
+        &info.checkpoint_file,
+    )?;
+    let file: CompactionCheckpointFile = serde_json::from_slice(&bytes).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("compaction checkpoint file corrupt ({e})"),
+        )
+    })?;
     if file.schema_version != 1 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("unsupported compaction checkpoint schema version {}", file.schema_version),
+            format!(
+                "unsupported compaction checkpoint schema version {}",
+                file.schema_version
+            ),
         ));
     }
     Ok(file)
@@ -669,7 +699,10 @@ fn counts_as_replay_turn_progressive(item: &ConversationItem, seen_marker: &mut 
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,21 +836,44 @@ mod tests {
             let dir = TempDir::new().unwrap();
             let mut projection = vec![ConversationItem::system("canonical instructions")];
             if retained {
-                projection.push(ConversationItem::user("inherited correction: preserve originals"));
+                projection.push(ConversationItem::user(
+                    "inherited correction: preserve originals",
+                ));
                 projection.push(ConversationItem::assistant("inherited response"));
             }
             projection.push(ConversationItem::user("current request"));
             projection.push(ConversationItem::assistant("summary"));
             write_checkpoint_file(dir.path(), "prepared", 1, projection.clone());
-            let old = replay_updates(&[make_user_update("test", "old authority")], dir.path(), usize::MAX);
+            let old = replay_updates(
+                &[make_user_update("test", "old authority")],
+                dir.path(),
+                usize::MAX,
+            );
             assert_eq!(old.conversation.len(), 1);
             assert!(old.conversation[0].text_content().contains("old authority"));
-            let activated = replay_updates(&[make_checkpoint("prepared", 1, None)], dir.path(), usize::MAX);
-            assert_eq!(serde_json::to_value(&activated.conversation).unwrap(), serde_json::to_value(&projection).unwrap());
+            let activated = replay_updates(
+                &[make_checkpoint("prepared", 1, None)],
+                dir.path(),
+                usize::MAX,
+            );
+            assert_eq!(
+                serde_json::to_value(&activated.conversation).unwrap(),
+                serde_json::to_value(&projection).unwrap()
+            );
             projection.push(ConversationItem::user("later instruction"));
             write_checkpoint_file(dir.path(), "second", 2, projection.clone());
-            let second = replay_updates(&[make_checkpoint("prepared", 1, None), make_checkpoint("second", 2, None)], dir.path(), usize::MAX);
-            assert_eq!(serde_json::to_value(second.conversation).unwrap(), serde_json::to_value(projection).unwrap());
+            let second = replay_updates(
+                &[
+                    make_checkpoint("prepared", 1, None),
+                    make_checkpoint("second", 2, None),
+                ],
+                dir.path(),
+                usize::MAX,
+            );
+            assert_eq!(
+                serde_json::to_value(second.conversation).unwrap(),
+                serde_json::to_value(projection).unwrap()
+            );
         }
     }
 
@@ -826,13 +882,17 @@ mod tests {
     #[test]
     fn chat_rebuild_starts_from_the_checkpoint_projection_and_keeps_tools() {
         let dir = TempDir::new().unwrap();
-        let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0")];
+        let projection = vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("summary of P0"),
+        ];
         write_checkpoint_file(dir.path(), "cp", 1, projection.clone());
         let tool_call = SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
             acp::SessionId::new("test"),
-            acp::SessionUpdate::ToolCall(
-                acp::ToolCall::new(acp::ToolCallId::new("call-1"), "rm -rf build"),
-            ),
+            acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+                acp::ToolCallId::new("call-1"),
+                "rm -rf build",
+            )),
         )));
         let tool_done = SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
             acp::SessionId::new("test"),
@@ -856,15 +916,28 @@ mod tests {
             usize::MAX,
         );
         crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
-        let rebuilt: Vec<serde_json::Value> = std::fs::read_to_string(dir.path().join("chat_history.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(rebuilt[..2], serde_json::to_value(&projection).unwrap().as_array().unwrap()[..]);
+        let rebuilt: Vec<serde_json::Value> =
+            std::fs::read_to_string(dir.path().join("chat_history.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+        assert_eq!(
+            rebuilt[..2],
+            serde_json::to_value(&projection)
+                .unwrap()
+                .as_array()
+                .unwrap()[..]
+        );
         let text = serde_json::to_string(&rebuilt).unwrap();
-        assert!(!text.contains("\"P0\""), "pre-compaction turns are replaced by the projection: {text}");
-        assert!(text.contains("call-1"), "the post-compaction tool call survives the rebuild: {text}");
+        assert!(
+            !text.contains("\"P0\""),
+            "pre-compaction turns are replaced by the projection: {text}"
+        );
+        assert!(
+            text.contains("call-1"),
+            "the post-compaction tool call survives the rebuild: {text}"
+        );
     }
 
     /// P88: the rebuild keeps two prompts with no response between them (the first cancelled before any output) as two
@@ -889,27 +962,42 @@ mod tests {
             expected.push(item);
         }
         expected.push(ConversationItem::assistant("A3"));
-        let rebuilt: Vec<serde_json::Value> = std::fs::read_to_string(dir.path().join("chat_history.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(serde_json::Value::Array(rebuilt), serde_json::to_value(expected).unwrap());
+        let rebuilt: Vec<serde_json::Value> =
+            std::fs::read_to_string(dir.path().join("chat_history.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+        assert_eq!(
+            serde_json::Value::Array(rebuilt),
+            serde_json::to_value(expected).unwrap()
+        );
     }
 
     /// P88: a prompt the model answered with a tool call and no text first is rebuilt before that call, not after it.
     #[test]
     fn chat_rebuild_puts_a_prompt_before_the_tool_call_it_caused() {
         let dir = TempDir::new().unwrap();
-        let tool = |update| SessionUpdate::Acp(Box::new(acp::SessionNotification::new(acp::SessionId::new("test"), update)));
+        let tool = |update| {
+            SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                acp::SessionId::new("test"),
+                update,
+            )))
+        };
         let _ = replay_updates(
             &[
                 make_user_update_pi("test", "P0", 0),
-                tool(acp::SessionUpdate::ToolCall(acp::ToolCall::new(acp::ToolCallId::new("call-0"), "read"))),
-                tool(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                tool(acp::SessionUpdate::ToolCall(acp::ToolCall::new(
                     acp::ToolCallId::new("call-0"),
-                    acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+                    "read",
                 ))),
+                tool(acp::SessionUpdate::ToolCallUpdate(
+                    acp::ToolCallUpdate::new(
+                        acp::ToolCallId::new("call-0"),
+                        acp::ToolCallUpdateFields::new()
+                            .status(Some(acp::ToolCallStatus::Completed)),
+                    ),
+                )),
                 make_agent_update("test", "Done."),
             ],
             dir.path(),
@@ -917,7 +1005,11 @@ mod tests {
         );
         crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join("chat_history.jsonl")).unwrap();
-        let (prompt, call, done) = (text.find("P0").unwrap(), text.find("call-0").unwrap(), text.find("Done.").unwrap());
+        let (prompt, call, done) = (
+            text.find("P0").unwrap(),
+            text.find("call-0").unwrap(),
+            text.find("Done.").unwrap(),
+        );
         assert!(prompt < call && call < done, "{text}");
     }
 
@@ -926,7 +1018,10 @@ mod tests {
     #[test]
     fn chat_rebuild_after_a_post_compaction_rewind_drops_the_abandoned_branch() {
         let dir = TempDir::new().unwrap();
-        let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0")];
+        let projection = vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("summary of P0"),
+        ];
         write_resolved_checkpoint_file(dir.path(), "cp", 1, projection.clone());
         let _ = replay_updates(
             &[
@@ -944,8 +1039,14 @@ mod tests {
         );
         crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join("chat_history.jsonl")).unwrap();
-        assert!(text.contains("summary of P0") && text.contains("P1-new") && text.contains("A1-new"), "{text}");
-        assert!(!text.contains("P1-old") && !text.contains("A1-old"), "abandoned branch came back: {text}");
+        assert!(
+            text.contains("summary of P0") && text.contains("P1-new") && text.contains("A1-new"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("P1-old") && !text.contains("A1-old"),
+            "abandoned branch came back: {text}"
+        );
     }
 
     /// P88: when the rewind abandons the compaction itself, its projection is dropped and the reducer's tail (with its
@@ -954,13 +1055,21 @@ mod tests {
     fn chat_rebuild_after_a_rewind_that_abandons_the_compaction_keeps_the_tail_tools() {
         for resolved in [true, false] {
             let dir = TempDir::new().unwrap();
-            let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of the abandoned branch")];
+            let projection = vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user("summary of the abandoned branch"),
+            ];
             if resolved {
                 write_resolved_checkpoint_file(dir.path(), "cp", 2, projection);
             } else {
                 write_checkpoint_file(dir.path(), "cp", 2, projection);
             }
-            let tool = |update| SessionUpdate::Acp(Box::new(acp::SessionNotification::new(acp::SessionId::new("test"), update)));
+            let tool = |update| {
+                SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                    acp::SessionId::new("test"),
+                    update,
+                )))
+            };
             let _ = replay_updates(
                 &[
                     make_user_update_pi("test", "P0-old", 0),
@@ -971,20 +1080,33 @@ mod tests {
                     make_rewind_marker(0),
                     make_user_update_pi("test", "P0-new", 0),
                     make_agent_update("test", "Reading. "),
-                    tool(acp::SessionUpdate::ToolCall(acp::ToolCall::new(acp::ToolCallId::new("call-new"), "read"))),
-                    tool(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    tool(acp::SessionUpdate::ToolCall(acp::ToolCall::new(
                         acp::ToolCallId::new("call-new"),
-                        acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+                        "read",
                     ))),
+                    tool(acp::SessionUpdate::ToolCallUpdate(
+                        acp::ToolCallUpdate::new(
+                            acp::ToolCallId::new("call-new"),
+                            acp::ToolCallUpdateFields::new()
+                                .status(Some(acp::ToolCallStatus::Completed)),
+                        ),
+                    )),
                     make_agent_update("test", "Done."),
                 ],
                 dir.path(),
                 usize::MAX,
             );
-            crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path()).unwrap();
+            crate::session::storage::chat_rebuild::rebuild_chat_history_for_test(dir.path())
+                .unwrap();
             let text = std::fs::read_to_string(dir.path().join("chat_history.jsonl")).unwrap();
-            assert!(text.contains("P0-new") && text.contains("call-new"), "resolved={resolved}: {text}");
-            assert!(!text.contains("abandoned branch"), "resolved={resolved}: abandoned summary kept: {text}");
+            assert!(
+                text.contains("P0-new") && text.contains("call-new"),
+                "resolved={resolved}: {text}"
+            );
+            assert!(
+                !text.contains("abandoned branch"),
+                "resolved={resolved}: abandoned summary kept: {text}"
+            );
         }
     }
 
@@ -1037,9 +1159,17 @@ mod tests {
         prompt_index_at_compaction: usize,
         compacted_history: Vec<ConversationItem>,
     ) {
-        write_checkpoint_file(session_dir, checkpoint_id, prompt_index_at_compaction, compacted_history);
-        let path = session_dir.join("compaction_checkpoints").join(format!("{checkpoint_id}.json"));
-        let mut file: CompactionCheckpointFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        write_checkpoint_file(
+            session_dir,
+            checkpoint_id,
+            prompt_index_at_compaction,
+            compacted_history,
+        );
+        let path = session_dir
+            .join("compaction_checkpoints")
+            .join(format!("{checkpoint_id}.json"));
+        let mut file: CompactionCheckpointFile =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         file.inherited_prefix_len = Some(0);
         std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
     }
@@ -1545,7 +1675,11 @@ mod tests {
 
     // ── P172 (D2): a rewind needs only its own base checkpoint ──
 
-    fn try_replay_updates(updates: &[SessionUpdate], session_dir: &Path, target: usize) -> io::Result<ReplayResult> {
+    fn try_replay_updates(
+        updates: &[SessionUpdate],
+        session_dir: &Path,
+        target: usize,
+    ) -> io::Result<ReplayResult> {
         let updates_path = session_dir.join("updates.jsonl");
         let mut content = Vec::new();
         for u in updates {
@@ -1558,7 +1692,11 @@ mod tests {
     }
 
     fn texts_of(result: &ReplayResult) -> Vec<String> {
-        result.conversation.iter().map(ConversationItem::text_content).collect()
+        result
+            .conversation
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect()
     }
 
     fn two_compactions_updates() -> Vec<SessionUpdate> {
@@ -1577,7 +1715,15 @@ mod tests {
     }
 
     fn write_summary_checkpoint(session_dir: &Path, id: &str, at: usize, summary: &str) {
-        write_checkpoint_file(session_dir, id, at, vec![ConversationItem::system("sys"), ConversationItem::user(summary)]);
+        write_checkpoint_file(
+            session_dir,
+            id,
+            at,
+            vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user(summary),
+            ],
+        );
     }
 
     fn needed_base_message(at: usize, word: &str, file: &str) -> String {
@@ -1610,12 +1756,16 @@ mod tests {
 
         let first_missing = TempDir::new().unwrap();
         write_summary_checkpoint(first_missing.path(), "ckpt2", 3, "summary2");
-        let damaged = try_replay_updates(&updates, first_missing.path(), 4).expect("only the target's base is needed");
+        let damaged = try_replay_updates(&updates, first_missing.path(), 4)
+            .expect("only the target's base is needed");
 
         assert_eq!(vec!["sys", "summary2", "P3", "R3"], texts_of(&loaded));
         assert_eq!(texts_of(&loaded), texts_of(&damaged));
         assert_eq!(4, damaged.prompt_index_reached);
-        assert_eq!(loaded.last_compaction_prompt_index, damaged.last_compaction_prompt_index);
+        assert_eq!(
+            loaded.last_compaction_prompt_index,
+            damaged.last_compaction_prompt_index
+        );
         assert_eq!(Some(3), damaged.last_compaction_prompt_index);
     }
 
@@ -1649,19 +1799,29 @@ mod tests {
         let err = try_replay_updates(&two_compactions_updates(), tmp.path(), 3).unwrap_err();
 
         assert_eq!(io::ErrorKind::NotFound, err.kind());
-        assert_eq!(needed_base_message(3, "missing", "compaction_checkpoints/ckpt2.json"), err.to_string());
+        assert_eq!(
+            needed_base_message(3, "missing", "compaction_checkpoints/ckpt2.json"),
+            err.to_string()
+        );
     }
 
     #[test]
     fn corrupt_needed_checkpoint_fails_and_names_it() {
         let tmp = TempDir::new().unwrap();
         write_summary_checkpoint(tmp.path(), "ckpt1", 2, "summary1");
-        std::fs::write(tmp.path().join("compaction_checkpoints/ckpt2.json"), b"{not json").unwrap();
+        std::fs::write(
+            tmp.path().join("compaction_checkpoints/ckpt2.json"),
+            b"{not json",
+        )
+        .unwrap();
 
         let err = try_replay_updates(&two_compactions_updates(), tmp.path(), 3).unwrap_err();
 
         assert_eq!(io::ErrorKind::InvalidData, err.kind());
-        assert_eq!(needed_base_message(3, "corrupt", "compaction_checkpoints/ckpt2.json"), err.to_string());
+        assert_eq!(
+            needed_base_message(3, "corrupt", "compaction_checkpoints/ckpt2.json"),
+            err.to_string()
+        );
     }
 
     #[test]
@@ -1679,13 +1839,19 @@ mod tests {
             original_head_withheld: false,
             reread_file_paths: vec![],
         };
-        std::fs::write(tmp.path().join("compaction_checkpoints/ckpt2.json"), serde_json::to_vec(&newer).unwrap())
-            .unwrap();
+        std::fs::write(
+            tmp.path().join("compaction_checkpoints/ckpt2.json"),
+            serde_json::to_vec(&newer).unwrap(),
+        )
+        .unwrap();
 
         let err = try_replay_updates(&two_compactions_updates(), tmp.path(), 3).unwrap_err();
 
         assert_eq!(io::ErrorKind::Unsupported, err.kind());
-        assert_eq!(needed_base_message(3, "unsupported", "compaction_checkpoints/ckpt2.json"), err.to_string());
+        assert_eq!(
+            needed_base_message(3, "unsupported", "compaction_checkpoints/ckpt2.json"),
+            err.to_string()
+        );
     }
 
     /// A rewind marker that abandons the compaction also abandons its (missing) checkpoint.
@@ -1711,7 +1877,10 @@ mod tests {
 
         let result = try_replay_updates(&updates, tmp.path(), 3).unwrap();
 
-        assert_eq!(vec!["P0", "R0", "P1_prime", "R1_prime", "P2_prime", "R2_prime"], texts_of(&result));
+        assert_eq!(
+            vec!["P0", "R0", "P1_prime", "R1_prime", "P2_prime", "R2_prime"],
+            texts_of(&result)
+        );
         assert_eq!(None, result.last_compaction_prompt_index);
         assert_eq!(3, result.prompt_index_reached);
     }
@@ -1737,7 +1906,10 @@ mod tests {
 
         let result = try_replay_updates(&updates, tmp.path(), 4).unwrap();
 
-        assert_eq!(vec!["sys", "summary1", "P2", "R2", "P3_prime", "R3_prime"], texts_of(&result));
+        assert_eq!(
+            vec!["sys", "summary1", "P2", "R2", "P3_prime", "R3_prime"],
+            texts_of(&result)
+        );
         assert_eq!(Some(2), result.last_compaction_prompt_index);
         assert_eq!(4, result.prompt_index_reached);
     }
@@ -1765,7 +1937,10 @@ mod tests {
         let err = try_replay_updates(&updates, tmp.path(), 4).unwrap_err();
 
         assert_eq!(io::ErrorKind::NotFound, err.kind());
-        assert_eq!(needed_base_message(2, "missing", "compaction_checkpoints/ckpt1.json"), err.to_string());
+        assert_eq!(
+            needed_base_message(2, "missing", "compaction_checkpoints/ckpt1.json"),
+            err.to_string()
+        );
     }
 
     /// Astra r1 (HIGH): a rewind marker that abandons a loaded checkpoint exposes the base below it again. When that
@@ -1797,7 +1972,10 @@ mod tests {
         let err = try_replay_updates(&updates, tmp.path(), 4).unwrap_err();
 
         assert_eq!(io::ErrorKind::NotFound, err.kind());
-        assert_eq!(needed_base_message(2, "missing", "compaction_checkpoints/ckptA.json"), err.to_string());
+        assert_eq!(
+            needed_base_message(2, "missing", "compaction_checkpoints/ckptA.json"),
+            err.to_string()
+        );
     }
 
     /// With both checkpoints present, the same marker rebuilds the older base exactly (its summary and the turns after
@@ -1829,7 +2007,10 @@ mod tests {
 
         let result = try_replay_updates(&updates, tmp.path(), 4).unwrap();
 
-        assert_eq!(vec!["sys", "summaryA", "P2", "R2", "P3_prime", "R3_prime"], texts_of(&result));
+        assert_eq!(
+            vec!["sys", "summaryA", "P2", "R2", "P3_prime", "R3_prime"],
+            texts_of(&result)
+        );
         assert_eq!(Some(2), result.last_compaction_prompt_index);
         assert_eq!(4, result.prompt_index_reached);
     }
@@ -1872,10 +2053,16 @@ mod tests {
             make_rewind_marker(7),
         ];
         try_replay_updates(&updates, tmp.path(), usize::MAX).unwrap();
-        assert_eq!(vec![3, 3, 7, usize::MAX], abandon_floors(&tmp.path().join("updates.jsonl")).unwrap());
+        assert_eq!(
+            vec![3, 3, 7, usize::MAX],
+            abandon_floors(&tmp.path().join("updates.jsonl")).unwrap()
+        );
 
         try_replay_updates(&[make_user_update("s1", "P0")], tmp.path(), usize::MAX).unwrap();
-        assert_eq!(vec![usize::MAX], abandon_floors(&tmp.path().join("updates.jsonl")).unwrap());
+        assert_eq!(
+            vec![usize::MAX],
+            abandon_floors(&tmp.path().join("updates.jsonl")).unwrap()
+        );
     }
 
     /// P146 still holds: an older checkpoint planted as a symlink is never read (it is treated as missing) and, being
@@ -1886,17 +2073,28 @@ mod tests {
         let outside = TempDir::new().unwrap();
         let planted = outside.path().join("outside.json");
         write_summary_checkpoint(outside.path(), "x", 2, "OUTSIDE-SENTINEL");
-        std::fs::rename(outside.path().join("compaction_checkpoints/x.json"), &planted).unwrap();
+        std::fs::rename(
+            outside.path().join("compaction_checkpoints/x.json"),
+            &planted,
+        )
+        .unwrap();
 
         let tmp = TempDir::new().unwrap();
         write_summary_checkpoint(tmp.path(), "ckpt2", 3, "summary2");
-        std::os::unix::fs::symlink(&planted, tmp.path().join("compaction_checkpoints/ckpt1.json")).unwrap();
+        std::os::unix::fs::symlink(
+            &planted,
+            tmp.path().join("compaction_checkpoints/ckpt1.json"),
+        )
+        .unwrap();
         let superseded = try_replay_updates(&two_compactions_updates(), tmp.path(), 3).unwrap();
         assert_eq!(vec!["sys", "summary2"], texts_of(&superseded));
 
         let err = try_replay_updates(&two_compactions_updates(), tmp.path(), 2).unwrap_err();
         assert_eq!(io::ErrorKind::NotFound, err.kind());
-        assert_eq!(needed_base_message(2, "missing", "compaction_checkpoints/ckpt1.json"), err.to_string());
+        assert_eq!(
+            needed_base_message(2, "missing", "compaction_checkpoints/ckpt1.json"),
+            err.to_string()
+        );
         assert!(!err.to_string().contains("OUTSIDE-SENTINEL"));
     }
 
@@ -1909,15 +2107,25 @@ mod tests {
             tmp.path(),
             "ckpt2",
             3,
-            vec![ConversationItem::system("sys"), ConversationItem::user("summary2")],
+            vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user("summary2"),
+            ],
         );
         let updates_path = tmp.path().join("updates.jsonl");
-        try_replay_updates(&two_compactions_updates(), tmp.path(), usize::MAX).expect("replay of a swept session");
+        try_replay_updates(&two_compactions_updates(), tmp.path(), usize::MAX)
+            .expect("replay of a swept session");
 
         let rebuilt = replay_if_latest_compaction_active(&updates_path, tmp.path())
             .expect("the swept older checkpoint is not needed")
             .expect("the latest compaction is active");
 
-        assert_eq!(vec!["sys", "summary2", "P3", "R3"], rebuilt.iter().map(ConversationItem::text_content).collect::<Vec<_>>());
+        assert_eq!(
+            vec!["sys", "summary2", "P3", "R3"],
+            rebuilt
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>()
+        );
     }
 }

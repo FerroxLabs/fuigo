@@ -325,8 +325,11 @@ async fn discover_once(issuer_key: &str) -> anyhow::Result<Discovery> {
     }
     let raw: serde_json::Value = resp.json().await.map_err(reqwest::Error::without_url)?;
     check_discovery_document(issuer_key, &raw)?;
-    let doc: Discovery = serde_json::from_value(raw)
-        .map_err(|e| anyhow::Error::new(OidcError::DiscoveryRefused(format!("malformed document ({e})"))))?;
+    let doc: Discovery = serde_json::from_value(raw).map_err(|e| {
+        anyhow::Error::new(OidcError::DiscoveryRefused(format!(
+            "malformed document ({e})"
+        )))
+    })?;
     // The document is data from the network: log origin and path only, never userinfo or a query.
     tracing::debug!(
         authorization_endpoint = %redacted_for_log(&doc.authorization_endpoint),
@@ -345,7 +348,9 @@ fn check_discovery_document(issuer_key: &str, doc: &serde_json::Value) -> anyhow
     if let Some(claimed) = doc.get("issuer").and_then(serde_json::Value::as_str)
         && claimed.trim_end_matches('/') != issuer_key.trim_end_matches('/')
     {
-        return Err(refused("it names a different issuer than the configured one".into()));
+        return Err(refused(
+            "it names a different issuer than the configured one".into(),
+        ));
     }
     let allow_http = allow_loopback_http(
         cfg!(test),
@@ -369,7 +374,9 @@ fn check_discovery_url(field: &str, value: &str, allow_loopback_http: bool) -> R
     }
     match url.scheme() {
         "https" => Ok(()),
-        "http" if allow_loopback_http && fuigo_extra_ca::service_trust::is_local_host(&url) => Ok(()),
+        "http" if allow_loopback_http && fuigo_extra_ca::service_trust::is_local_host(&url) => {
+            Ok(())
+        }
         _ => Err(format!("{field} is not an https URL")),
     }
 }
@@ -521,7 +528,10 @@ impl std::fmt::Debug for TokenResponse {
         } = self;
         f.debug_struct("TokenResponse")
             .field("access_token", &"<redacted>")
-            .field("refresh_token", &refresh_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "refresh_token",
+                &refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("id_token", &id_token.as_ref().map(|_| "<redacted>"))
             .field("expires_in", expires_in)
             .finish()
@@ -931,7 +941,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn code_exchange_sends_no_identity_to_a_non_fluxrouter_issuer() {
         let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
-        let _ = exchange_code(&base, &format!("{base}/token"), "code", "http://127.0.0.1/cb", "id", "v").await;
+        let _ = exchange_code(
+            &base,
+            &format!("{base}/token"),
+            "code",
+            "http://127.0.0.1/cb",
+            "id",
+            "v",
+        )
+        .await;
         handle.abort();
         crate::remote::identity_tests::assert_no_identity_headers(&seen, "oidc_exchange_code");
     }
@@ -1520,9 +1538,15 @@ mod token_endpoint_binding_tests {
     #[test]
     fn checked_token_endpoint_applies_the_shared_rule() {
         for (issuer, endpoint) in [
-            ("https://acme.okta.com", "https://acme.okta.com/oauth2/v1/token"),
+            (
+                "https://acme.okta.com",
+                "https://acme.okta.com/oauth2/v1/token",
+            ),
             ("https://acme.okta.com/", "https://acme.okta.com:443/token"),
-            ("https://accounts.google.com", "https://oauth2.googleapis.com/token"),
+            (
+                "https://accounts.google.com",
+                "https://oauth2.googleapis.com/token",
+            ),
             // In-process mock issuers (test builds only).
             ("http://127.0.0.1:8080", "http://127.0.0.1:8080/token"),
         ] {
@@ -1531,14 +1555,46 @@ mod token_endpoint_binding_tests {
             assert_eq!(url, reqwest::Url::parse(endpoint).unwrap());
         }
         for (issuer, endpoint, why) in [
-            ("https://acme.okta.com", "https://evil.example/token", "issuer's origin"),
-            ("https://acme.okta.com", "https://acme.okta.com.evil.example/token", "issuer's origin"),
-            ("https://acme.okta.com", "https://acme.okta.com:8443/token", "issuer's origin"),
-            ("https://acme.okta.com", "http://acme.okta.com/token", "not https"),
-            ("https://acme.okta.com", "https://user:pw@acme.okta.com/token", "userinfo"),
-            ("https://acme.okta.com", "https://oauth2.googleapis.com/token", "issuer's origin"),
-            ("https://accounts.google.com", "https://evil.oauth2.googleapis.com/token", "issuer's origin"),
-            ("http://127.0.0.1:8080", "http://127.0.0.1:9090/token", "issuer's origin"),
+            (
+                "https://acme.okta.com",
+                "https://evil.example/token",
+                "issuer's origin",
+            ),
+            (
+                "https://acme.okta.com",
+                "https://acme.okta.com.evil.example/token",
+                "issuer's origin",
+            ),
+            (
+                "https://acme.okta.com",
+                "https://acme.okta.com:8443/token",
+                "issuer's origin",
+            ),
+            (
+                "https://acme.okta.com",
+                "http://acme.okta.com/token",
+                "not https",
+            ),
+            (
+                "https://acme.okta.com",
+                "https://user:pw@acme.okta.com/token",
+                "userinfo",
+            ),
+            (
+                "https://acme.okta.com",
+                "https://oauth2.googleapis.com/token",
+                "issuer's origin",
+            ),
+            (
+                "https://accounts.google.com",
+                "https://evil.oauth2.googleapis.com/token",
+                "issuer's origin",
+            ),
+            (
+                "http://127.0.0.1:8080",
+                "http://127.0.0.1:9090/token",
+                "issuer's origin",
+            ),
             ("https://acme.okta.com", "not a url", "not a valid URL"),
             ("https://acme.okta.com", "/oauth2/token", "not a valid URL"),
         ] {
@@ -1554,12 +1610,27 @@ mod token_endpoint_binding_tests {
     #[test]
     fn discovery_named_urls_are_redacted_for_logs() {
         for (url, logged) in [
-            ("https://idp.example/oauth2/token", "https://idp.example/oauth2/token"),
-            ("https://user:secret@idp.example/token", "https://idp.example/token"),
-            ("https://idp.example:8443/token?key=secret#frag", "https://idp.example:8443/token"),
+            (
+                "https://idp.example/oauth2/token",
+                "https://idp.example/oauth2/token",
+            ),
+            (
+                "https://user:secret@idp.example/token",
+                "https://idp.example/token",
+            ),
+            (
+                "https://idp.example:8443/token?key=secret#frag",
+                "https://idp.example:8443/token",
+            ),
             ("not a url", "<not a URL>"),
-            ("blob:https://user:secret@idp.example/token", "<not an http(s) URL>"),
-            ("ftp://user:secret@idp.example/token", "<not an http(s) URL>"),
+            (
+                "blob:https://user:secret@idp.example/token",
+                "<not an http(s) URL>",
+            ),
+            (
+                "ftp://user:secret@idp.example/token",
+                "<not an http(s) URL>",
+            ),
             ("data:text/plain,secret", "<not an http(s) URL>"),
         ] {
             let rendered = redacted_for_log(url);
@@ -1580,18 +1651,36 @@ mod token_endpoint_binding_tests {
         let port = bound.local_addr().unwrap().port();
         let issuer = format!("http://127.0.0.1:{port}");
         let endpoint = format!("{issuer}/token?tenant_key=query-secret");
-        let refresh = refresh_tokens(&issuer, &endpoint, "the-refresh-token", "client", None, None)
-            .await
-            .expect_err("nothing is listening");
-        let exchange = exchange_code(&issuer, &endpoint, "the-code", "http://127.0.0.1/cb", "client", "v")
-            .await
-            .expect_err("nothing is listening");
+        let refresh = refresh_tokens(
+            &issuer,
+            &endpoint,
+            "the-refresh-token",
+            "client",
+            None,
+            None,
+        )
+        .await
+        .expect_err("nothing is listening");
+        let exchange = exchange_code(
+            &issuer,
+            &endpoint,
+            "the-code",
+            "http://127.0.0.1/cb",
+            "client",
+            "v",
+        )
+        .await
+        .expect_err("nothing is listening");
         for error in [refresh, exchange] {
             assert!(
                 error.downcast_ref::<OidcError>().is_none(),
                 "a refused connection is a transport error, not a refusal: {error:#}"
             );
-            for text in [error.to_string(), format!("{error:#}"), format!("{error:?}")] {
+            for text in [
+                error.to_string(),
+                format!("{error:#}"),
+                format!("{error:?}"),
+            ] {
                 assert!(!text.contains("query-secret"), "{text}");
                 assert!(!text.contains("tenant_key"), "{text}");
                 assert!(!text.contains("the-refresh-token"), "{text}");
@@ -1693,7 +1782,11 @@ mod token_endpoint_binding_tests {
         .await
         .expect_err("a foreign token endpoint must be refused");
         assert!(refusal(&error).contains("issuer's origin"), "{error:#}");
-        assert!(foreign_bodies.lock().is_empty(), "{:?}", foreign_bodies.lock());
+        assert!(
+            foreign_bodies.lock().is_empty(),
+            "{:?}",
+            foreign_bodies.lock()
+        );
         assert!(own.lock().is_empty(), "a refusal sends nothing anywhere");
 
         let tokens = exchange_code(
@@ -1733,8 +1826,15 @@ mod token_endpoint_binding_tests {
         .await
         .expect_err("a foreign token endpoint must be refused");
         assert!(refusal(&error).contains("issuer's origin"), "{error:#}");
-        assert!(!is_transient_refresh_error(&error), "a refusal is not retried");
-        assert!(foreign_bodies.lock().is_empty(), "{:?}", foreign_bodies.lock());
+        assert!(
+            !is_transient_refresh_error(&error),
+            "a refusal is not retried"
+        );
+        assert!(
+            foreign_bodies.lock().is_empty(),
+            "{:?}",
+            foreign_bodies.lock()
+        );
         assert!(own.lock().is_empty(), "a refusal sends nothing anywhere");
 
         let tokens = refresh_tokens(
@@ -1750,7 +1850,10 @@ mod token_endpoint_binding_tests {
         assert_eq!(tokens.access_token, "recorder-access");
         let own = own.lock().clone();
         assert_eq!(own.len(), 1, "{own:?}");
-        assert!(own[0].contains("refresh_token=the-refresh-token"), "{own:?}");
+        assert!(
+            own[0].contains("refresh_token=the-refresh-token"),
+            "{own:?}"
+        );
         assert!(foreign_bodies.lock().is_empty());
         own_server.abort();
         foreign_server.abort();
@@ -1775,12 +1878,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }
@@ -1795,7 +1904,14 @@ mod p70_redacted_debug {
             "expires_in": 60,
         }))
         .expect("token response");
-        assert_redacted(&response, &["p70ac-FAKE-1a2b3c4d", "p70rf-FAKE-5e6f7a8b", "p70id-FAKE-9c0d1e2f"]);
+        assert_redacted(
+            &response,
+            &[
+                "p70ac-FAKE-1a2b3c4d",
+                "p70rf-FAKE-5e6f7a8b",
+                "p70id-FAKE-9c0d1e2f",
+            ],
+        );
     }
 }
 
@@ -1835,7 +1951,11 @@ mod s1_f1_expires_in_overflow {
     fn huge_expires_in_does_not_panic() {
         for secs in [u64::MAX, u64::MAX / 2, 10_000_000_000_000] {
             let auth = build_fuigo_auth(tokens(secs), user_info(), "https://i.test", "cid");
-            assert!(auth.expires_at.is_none(), "overflowing expiry must be dropped, got {:?}", auth.expires_at);
+            assert!(
+                auth.expires_at.is_none(),
+                "overflowing expiry must be dropped, got {:?}",
+                auth.expires_at
+            );
         }
         let ok = build_fuigo_auth(tokens(3600), user_info(), "https://i.test", "cid");
         assert!(ok.expires_at.is_some());
@@ -1869,7 +1989,10 @@ mod s1_f10_discovery_tests {
         ] {
             let mut doc = ok.clone();
             doc[field] = json!(value);
-            assert!(check_discovery_document("https://idp.example", &doc).is_err(), "{field}={value}");
+            assert!(
+                check_discovery_document("https://idp.example", &doc).is_err(),
+                "{field}={value}"
+            );
         }
         let mut wrong_issuer = ok.clone();
         wrong_issuer["issuer"] = json!("https://evil.example");

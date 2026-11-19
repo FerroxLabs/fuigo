@@ -1623,7 +1623,10 @@ fn expanded_verb_group_stays_open_as_calls_join() {
         let more = push_reads(&mut state, 1);
         assert_eq!(more.len(), 1);
         state.prepare_layout(80, 40);
-        assert!(state.expanded_groups.contains(&ids[0]), "key survives call {joined}");
+        assert!(
+            state.expanded_groups.contains(&ids[0]),
+            "key survives call {joined}"
+        );
         assert!(verb_header_at(&state, 0));
         assert!(
             state.layout_cache.as_ref().unwrap().entries[0].group_collapse_header,

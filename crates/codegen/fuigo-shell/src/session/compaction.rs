@@ -5,8 +5,8 @@ use super::SessionActor;
 use super::is_project_instructions;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::compaction_config::{
-    AsyncCompactionCache, MAX_CONSECUTIVE_OVERFLOW_COMPACTIONS, SUPPRESS_AUTH, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN,
-    SUPPRESS_UNTIL_SUCCESS, SUPPRESS_VALIDATING,
+    AsyncCompactionCache, MAX_CONSECUTIVE_OVERFLOW_COMPACTIONS, SUPPRESS_AUTH, SUPPRESS_NONE,
+    SUPPRESS_STICKY, SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS, SUPPRESS_VALIDATING,
 };
 use crate::session::helpers::CompactionStateContext;
 use crate::session::helpers::compaction_context::CompactionInputs;
@@ -145,8 +145,13 @@ impl SessionActor {
     /// Prefire is `spawn_local` on the same LocalSet as the turn loop.
     /// A long-lived borrow would race with turn/compact/cancel and panic on double-borrow.
     async fn two_pass_sample(&self, history: Vec<ConversationItem>) -> Option<CompactOutput> {
-        let sampling_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Side).await;
-        let client = match self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await {
+        let sampling_config = self
+            .reconstruct_full_config(crate::session::acp_session::CallRole::Side)
+            .await;
+        let client = match self
+            .prepare_chat_completion(false, crate::session::acp_session::CallRole::Side)
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %crate::sampling::error::acp_error_text(&e), "two_pass: failed to prepare sampling client");
@@ -899,17 +904,42 @@ impl SessionActor {
     /// One observation, no retry loop. Missing or ineffective usage leaves a
     /// conservative suppression until a manual compaction or context change.
     pub(crate) async fn observe_compaction_validation(&self, reported_total: Option<u64>) {
-        if self.compaction.auto_compact_suppressed.load(std::sync::atomic::Ordering::Relaxed) != SUPPRESS_VALIDATING {
+        if self
+            .compaction
+            .auto_compact_suppressed
+            .load(std::sync::atomic::Ordering::Relaxed)
+            != SUPPRESS_VALIDATING
+        {
             return;
         }
-        let before = self.compaction.validation_tokens_before.load(std::sync::atomic::Ordering::Relaxed);
-        let window = self.chat_state_handle.get_sampling_config().await
-            .map(|config| config.context_window.get()).unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        let reduced = reported_total.is_some_and(|total| total > 0 && total < before
-            && !fuigo_token_estimation::exceeds_threshold(total, window, self.compaction.threshold_percent.get()));
+        let before = self
+            .compaction
+            .validation_tokens_before
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let window = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|config| config.context_window.get())
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        let reduced = reported_total.is_some_and(|total| {
+            total > 0
+                && total < before
+                && !fuigo_token_estimation::exceeds_threshold(
+                    total,
+                    window,
+                    self.compaction.threshold_percent.get(),
+                )
+        });
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
-            SUPPRESS_VALIDATING, if reduced { SUPPRESS_NONE } else { SUPPRESS_STICKY },
-            std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed,
+            SUPPRESS_VALIDATING,
+            if reduced {
+                SUPPRESS_NONE
+            } else {
+                SUPPRESS_STICKY
+            },
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
         );
     }
     /// Credit or auth suppress; a model switch cannot clear these.
@@ -1105,7 +1135,9 @@ impl SessionActor {
         let max_retries = 3u32;
         let retry_delay_secs = 3u64;
         let (compaction_epoch, prompt_index_at_compaction, full_conversation) = self
-            .chat_state_handle.compaction_snapshot().await
+            .chat_state_handle
+            .compaction_snapshot()
+            .await
             .map_err(|e| crate::acp_error::compaction(e.to_string()))?;
         let conv_len = full_conversation.len();
         let system_message = full_conversation.iter().find_map(|item| match item {
@@ -1180,11 +1212,17 @@ impl SessionActor {
                 "{COMPACTION_FAILED_GUARD_PREFIX}no system message in simplified conversation"
             )));
         }
-        let sampling_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
-        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Main).await?;
+        let sampling_config = self
+            .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+            .await;
+        let sampling_client = self
+            .prepare_chat_completion(false, crate::session::acp_session::CallRole::Main)
+            .await?;
         // The summarization request replays the conversation, so it also replays the tool list the main turn last sent: same cached prefix
-        let compaction_tools: Vec<fuigo_sampling_types::ToolSpec> = self.side_call_tool_specs().await;
-        let compaction_tool_tokens = fuigo_chat_state::estimate_tool_specs_tokens(&compaction_tools);
+        let compaction_tools: Vec<fuigo_sampling_types::ToolSpec> =
+            self.side_call_tool_specs().await;
+        let compaction_tool_tokens =
+            fuigo_chat_state::estimate_tool_specs_tokens(&compaction_tools);
         let compaction_hosted_tools: Vec<fuigo_sampling_types::HostedTool> =
             self.hosted_tools_for_turn();
         if lossy_input {
@@ -1664,12 +1702,13 @@ impl SessionActor {
         // Upstream resets the image context for the Cursor harness. Fuigo compiles only the
         // constant-`false` twin of `is_cursor_harness`, so that harness never reaches here and the
         // guard is omitted rather than carried as dead code.
-        let harvested_paths: Vec<String> =
-            std::mem::take(&mut state_context.images.attached_paths);
+        let harvested_paths: Vec<String> = std::mem::take(&mut state_context.images.attached_paths);
         let (kept, dropped_paths) = if harvested_paths.is_empty() {
             (Vec::new(), 0)
         } else {
-            match Ok::<_, std::io::Error>(crate::session::persistence::session_dir(&self.session_info)) {
+            match Ok::<_, std::io::Error>(crate::session::persistence::session_dir(
+                &self.session_info,
+            )) {
                 // `<sessions_root>/<cwd-dir>/<session-id>`: any session's assets qualify, so a fork keeps the
                 // images its inherited transcript names in the parent's `assets/`.
                 Ok(session_dir) => match session_dir.parent().and_then(std::path::Path::parent) {
@@ -1726,7 +1765,10 @@ impl SessionActor {
                 None
             } else {
                 let (search_name, call_name) = self
-                    .tool_names_by_kind("${{ tools.by_kind.search_tool }}", "${{ tools.by_kind.use_tool }}")
+                    .tool_names_by_kind(
+                        "${{ tools.by_kind.search_tool }}",
+                        "${{ tools.by_kind.use_tool }}",
+                    )
                     .await;
                 match (search_name, call_name) {
                     (Some(search), Some(call)) => Some(McpToolNames { search, call }),
@@ -1963,7 +2005,12 @@ impl SessionActor {
             self.startup_hints.inherited_prefix_len.unwrap_or(0)
         };
         let (compacted_history, prefix_released) = if prefix_len == 0 {
-            (compacted_history, self.compaction.prefix_released.load(std::sync::atomic::Ordering::Relaxed))
+            (
+                compacted_history,
+                self.compaction
+                    .prefix_released
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
         } else {
             let child_files = {
                 let agent = self.agent.borrow();
@@ -1988,16 +2035,23 @@ impl SessionActor {
             prompt_index_at_compaction,
             auto_continue,
             original_user_info,
-            conversation.iter().any(ConversationItem::project_files_withheld),
+            conversation
+                .iter()
+                .any(ConversationItem::project_files_withheld),
             cancel.clone(),
             if prefix_released { 0 } else { prefix_len },
-        ).await?;
+        )
+        .await?;
         // The compacted history carries the live objective, but the rules cue that set the goal is gone:
         // the next sample must see the next-step continuation, not nothing (or a stale create-style cue)
         self.reseed_active_goal_after_compaction().await;
         let new_len = self.chat_state_handle.get_conversation_len().await;
-        self.compaction.prefix_released.store(prefix_released, std::sync::atomic::Ordering::Relaxed);
-        self.compaction.validation_tokens_before.store(tokens_before, std::sync::atomic::Ordering::Relaxed);
+        self.compaction
+            .prefix_released
+            .store(prefix_released, std::sync::atomic::Ordering::Relaxed);
+        self.compaction
+            .validation_tokens_before
+            .store(tokens_before, std::sync::atomic::Ordering::Relaxed);
         if self.startup_hints.inherited_prefix_len.is_some() {
             let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
             if fuigo_token_estimation::exceeds_threshold(
@@ -2174,8 +2228,10 @@ impl SessionActor {
         let window = match reported {
             Some(cw) => cw,
             None => {
-                if matches!(err.kind, SamplingErrorKind::Auth | SamplingErrorKind::RateLimited)
-                    || !error_names_context_overflow(err)
+                if matches!(
+                    err.kind,
+                    SamplingErrorKind::Auth | SamplingErrorKind::RateLimited
+                ) || !error_names_context_overflow(err)
                 {
                     return None;
                 }
@@ -2382,9 +2438,10 @@ impl SessionActor {
         // While a load-time repair owes its backup the compaction would be refused, so nothing is started: no "started"
         // note, no memory-save request, no summary request. The first refusal since the backup became owed says why; the
         // later ones return the same refusal quietly until the backup can be made (P123, K14).
-        if let Err(refused) =
-            crate::session::storage::jsonl::load_repair::refused_auto_compaction(&self.session_info, self.rebuild_spec.session_writer.as_ref())
-        {
+        if let Err(refused) = crate::session::storage::jsonl::load_repair::refused_auto_compaction(
+            &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
+        ) {
             if let Some(note) = refused.note {
                 tracing::warn!(session_id = %self.session_info.id, error = %refused.refusal, "auto-compaction refused");
                 self.send_fuigo_notification(FuigoSessionUpdate::AutoCompactFailed { error: note })
@@ -2584,18 +2641,34 @@ impl SessionActor {
                 session_id: self.session_info.id.clone(),
                 update: FuigoSessionUpdate::CompactionCheckpoint(Box::new(info)),
                 meta: Some(self.build_notification_meta()),
-            }
+            },
         ));
         let persistence_tx = self.notifications.persistence_tx.clone();
         let persist_cancel = cancel.clone();
-        self.chat_state_handle.commit_compaction(epoch, compacted_history, cancel, async move {
-            use fuigo_chat_state::commands::CompactionCommitError;
-            let (respond_to, ack) = tokio::sync::oneshot::channel();
-            persistence_tx.send(PersistenceMsg::CommitCompactionAndAck {
-                checkpoint: file_data, activation, cancel: persist_cancel, respond_to,
-            }).map_err(|_| CompactionCommitError::NotCommitted(std::io::Error::other("compaction persistence actor stopped")))?;
-            ack.await.map_err(|_| CompactionCommitError::NotCommitted(std::io::Error::other("compaction persistence acknowledgement lost")))?
-        }).await.map_err(|e| crate::acp_error::compaction(format!("compaction commit failed: {e}")))?;
+        self.chat_state_handle
+            .commit_compaction(epoch, compacted_history, cancel, async move {
+                use fuigo_chat_state::commands::CompactionCommitError;
+                let (respond_to, ack) = tokio::sync::oneshot::channel();
+                persistence_tx
+                    .send(PersistenceMsg::CommitCompactionAndAck {
+                        checkpoint: file_data,
+                        activation,
+                        cancel: persist_cancel,
+                        respond_to,
+                    })
+                    .map_err(|_| {
+                        CompactionCommitError::NotCommitted(std::io::Error::other(
+                            "compaction persistence actor stopped",
+                        ))
+                    })?;
+                ack.await.map_err(|_| {
+                    CompactionCommitError::NotCommitted(std::io::Error::other(
+                        "compaction persistence acknowledgement lost",
+                    ))
+                })?
+            })
+            .await
+            .map_err(|e| crate::acp_error::compaction(format!("compaction commit failed: {e}")))?;
         tracing::info!(
             prompt_index_at_compaction,
             "Persisted compaction checkpoint"
@@ -2662,7 +2735,10 @@ mod artifact_error_text_tests {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "compaction_inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;
@@ -2686,9 +2762,8 @@ impl SessionActor {
     ) -> (Option<String>, Option<String>) {
         let bridge = self.tool_bridge_handle();
         let empty = serde_json::json!({});
-        let resolve = |rendered: Option<String>| {
-            rendered.filter(|s| !s.is_empty() && !s.contains("by_kind"))
-        };
+        let resolve =
+            |rendered: Option<String>| rendered.filter(|s| !s.is_empty() && !s.contains("by_kind"));
         let first = resolve(bridge.render_prompt(first, &empty).await);
         let second = resolve(bridge.render_prompt(second, &empty).await);
         (first, second)

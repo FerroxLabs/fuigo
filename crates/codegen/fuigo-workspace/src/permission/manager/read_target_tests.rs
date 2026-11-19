@@ -100,7 +100,11 @@ fn manager(
 }
 
 /// A manager whose prompts go to a live ACP client (the TUI path).
-fn acp_manager(cwd: &AbsPathBuf, rules: Vec<PermissionRule>, client: RecordingClient) -> PermissionHandle {
+fn acp_manager(
+    cwd: &AbsPathBuf,
+    rules: Vec<PermissionRule>,
+    client: RecordingClient,
+) -> PermissionHandle {
     let (gateway, receiver) = fuigo_acp_lib::acp_gateway::<acp::AgentSide, _>(client);
     tokio::task::spawn_local(receiver.run());
     spawn_permission_manager_with_pin(
@@ -141,11 +145,13 @@ fn fuigo_read(target_file: &str, files: &[&str]) -> ToolInput {
 }
 
 fn image_edit(images: &[&str]) -> ToolInput {
-    ToolInput::ImageEdit(fuigo_tools::implementations::fuigo_build::image_edit::ImageEditInput {
-        prompt: "make it blue".to_owned(),
-        image: images.iter().map(|s| (*s).to_owned()).collect(),
-        aspect_ratio: String::new(),
-    })
+    ToolInput::ImageEdit(
+        fuigo_tools::implementations::fuigo_build::image_edit::ImageEditInput {
+            prompt: "make it blue".to_owned(),
+            image: images.iter().map(|s| (*s).to_owned()).collect(),
+            aspect_ratio: String::new(),
+        },
+    )
 }
 
 /// Request permission for `input` exactly as the ACP session does.
@@ -231,10 +237,18 @@ fn read_targets_name_every_file_a_read_opens() {
     let cwd = std::env::current_dir().unwrap();
     let b = cwd.join("b.png").to_string_lossy().into_owned();
     assert_eq!(
-        read_targets_for(&image_edit(&["[Image #1]", "data:image/png;base64,AA", "/w/a.png", "b.png"])),
+        read_targets_for(&image_edit(&[
+            "[Image #1]",
+            "data:image/png;base64,AA",
+            "/w/a.png",
+            "b.png"
+        ])),
         targets(&["/w/a.png", &b], ReadResolution::Literal)
     );
-    assert_eq!(read_targets_for(&image_edit(&["data:image/png;base64,AA"])), None);
+    assert_eq!(
+        read_targets_for(&image_edit(&["data:image/png;base64,AA"])),
+        None
+    );
 }
 
 /// The packet's red test: `deny = ["Read(secrets/**)"]` refuses a codex `read_file` of `["ok.txt", "secrets/key"]`.
@@ -242,12 +256,30 @@ fn read_targets_name_every_file_a_read_opens() {
 fn codex_files_list_with_a_denied_path_is_refused() {
     run(|tmp, cwd| async move {
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
-        let d = decide(&mgr, tmp.path(), &codex_read("", &["ok.txt", "secrets/key"])).await;
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &["ok.txt", "secrets/key"]),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
-        let d = decide(&mgr, tmp.path(), &codex_read("", &[&abs(&tmp, "ok.txt"), &abs(&tmp, "secrets/key")])).await;
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &[&abs(&tmp, "ok.txt"), &abs(&tmp, "secrets/key")]),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
-        assert!(hub.seen.lock().unwrap().is_empty(), "a deny refuses without a prompt");
+        assert!(
+            hub.seen.lock().unwrap().is_empty(),
+            "a deny refuses without a prompt"
+        );
     });
 }
 
@@ -256,7 +288,12 @@ fn codex_files_list_with_a_denied_path_is_refused() {
 fn codex_file_path_plus_files_judges_every_path() {
     run(|tmp, cwd| async move {
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
         let (ok, key) = (abs(&tmp, "ok.txt"), abs(&tmp, "secrets/key"));
         let d = decide(&mgr, tmp.path(), &codex_read(&ok, &[&key])).await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
@@ -269,8 +306,18 @@ fn codex_file_path_plus_files_judges_every_path() {
 fn fuigo_read_file_files_list_with_a_denied_path_is_refused() {
     run(|tmp, cwd| async move {
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
-        let d = decide(&mgr, tmp.path(), &fuigo_read("", &["ok.txt", "secrets/key"])).await;
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &fuigo_read("", &["ok.txt", "secrets/key"]),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
         let d = decide(&mgr, tmp.path(), &fuigo_read("ok.txt", &["secrets/key"])).await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
@@ -282,8 +329,18 @@ fn fuigo_read_file_files_list_with_a_denied_path_is_refused() {
 fn deny_on_any_path_binds_in_yolo() {
     run(|tmp, cwd| async move {
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), true);
-        let d = decide(&mgr, tmp.path(), &codex_read("", &["ok.txt", "secrets/key"])).await;
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            true,
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &["ok.txt", "secrets/key"]),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
     });
 }
@@ -295,8 +352,16 @@ fn ask_rule_on_one_path_prompts_listing_every_path() {
         let client = RecordingClient::default();
         let prompts = client.prompts.clone();
         let mgr = acp_manager(&cwd, vec![read_rule(RuleAction::Ask, "secrets/**")], client);
-        let d = decide(&mgr, tmp.path(), &codex_read("", &["ok.txt", "secrets/key"])).await;
-        assert!(matches!(d, Decision::Reject(_)), "the user rejected the prompt, got {d:?}");
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &["ok.txt", "secrets/key"]),
+        )
+        .await;
+        assert!(
+            matches!(d, Decision::Reject(_)),
+            "the user rejected the prompt, got {d:?}"
+        );
         // Own the prompts: no RefCell borrow may be held across an await.
         let prompts = std::mem::take(&mut *prompts.borrow_mut());
         assert_eq!(prompts.len(), 1, "the ask rule on secrets/key must prompt");
@@ -312,10 +377,19 @@ fn ask_rule_on_one_path_prompts_listing_every_path() {
 
         // Through the hub as well: the call prompts.
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Ask, "secrets/**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Ask, "secrets/**")],
+            hub.clone(),
+            false,
+        );
         let d = decide(&mgr, tmp.path(), &fuigo_read("ok.txt", &["secrets/key"])).await;
         assert_eq!(d, Decision::Allow, "the hub approved");
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "the ask rule must prompt");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "the ask rule must prompt"
+        );
     });
 }
 
@@ -324,8 +398,18 @@ fn ask_rule_on_one_path_prompts_listing_every_path() {
 fn ordinary_multi_file_read_does_not_prompt() {
     run(|tmp, cwd| async move {
         let hub = hub("reject");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
-        let d = decide(&mgr, tmp.path(), &codex_read("", &[&abs(&tmp, "a.txt"), &abs(&tmp, "b.txt")])).await;
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &[&abs(&tmp, "a.txt"), &abs(&tmp, "b.txt")]),
+        )
+        .await;
         assert_eq!(d, Decision::Allow);
         let d = decide(&mgr, tmp.path(), &fuigo_read("", &["a.txt", "src/b.rs"])).await;
         assert_eq!(d, Decision::Allow);
@@ -343,8 +427,18 @@ fn deny_sees_through_dot_dot_and_symlinks() {
         std::fs::write(tmp.path().join("secrets/key"), "k").unwrap();
         std::os::unix::fs::symlink(tmp.path().join("secrets"), tmp.path().join("alias")).unwrap();
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
-        let d = decide(&mgr, tmp.path(), &codex_read("", &[&abs(&tmp, "ok"), &abs(&tmp, "src/../secrets/key")])).await;
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &[&abs(&tmp, "ok"), &abs(&tmp, "src/../secrets/key")]),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
         let d = decide(&mgr, tmp.path(), &fuigo_read("", &["ok", "alias/key"])).await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
@@ -357,8 +451,19 @@ fn deny_follows_the_display_cwd_mapping_of_the_reader() {
     run(|tmp, cwd| async move {
         let display = std::path::Path::new("/display-root");
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
-        let d = decide_in(&mgr, tmp.path(), Some(display), &fuigo_read("", &["ok", "/display-root/secrets/key"])).await;
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
+        let d = decide_in(
+            &mgr,
+            tmp.path(),
+            Some(display),
+            &fuigo_read("", &["ok", "/display-root/secrets/key"]),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
     });
 }
@@ -368,13 +473,27 @@ fn deny_follows_the_display_cwd_mapping_of_the_reader() {
 fn image_tool_reading_a_denied_file_is_refused() {
     run(|tmp, cwd| async move {
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
-        let d = decide(&mgr, tmp.path(), &image_edit(&[&abs(&tmp, "a.png"), &abs(&tmp, "secrets/b.png")])).await;
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &image_edit(&[&abs(&tmp, "a.png"), &abs(&tmp, "secrets/b.png")]),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
         assert!(hub.seen.lock().unwrap().is_empty());
         let d = decide(&mgr, tmp.path(), &image_edit(&[&abs(&tmp, "a.png")])).await;
         assert_eq!(d, Decision::Allow, "the hub approved");
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "an image tool still prompts");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "an image tool still prompts"
+        );
     });
 }
 
@@ -383,10 +502,19 @@ fn image_tool_reading_a_denied_file_is_refused() {
 fn read_allow_on_an_image_tools_files_does_not_skip_its_prompt() {
     run(|tmp, cwd| async move {
         let hub = hub("reject");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Allow, "**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Allow, "**")],
+            hub.clone(),
+            false,
+        );
         let d = decide(&mgr, tmp.path(), &image_edit(&[&abs(&tmp, "a.png")])).await;
         assert!(matches!(d, Decision::Reject(_)), "got {d:?}");
-        assert_eq!(hub.seen.lock().unwrap().len(), 1, "the image tool must still prompt");
+        assert_eq!(
+            hub.seen.lock().unwrap().len(),
+            1,
+            "the image tool must still prompt"
+        );
     });
 }
 
@@ -397,7 +525,12 @@ fn single_fuigo_read_is_judged_as_the_reader_resolves_it() {
         std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         std::fs::write(tmp.path().join("secrets/key"), "k").unwrap();
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
         let d = decide(&mgr, tmp.path(), &fuigo_read("\"secrets/key\"", &[])).await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
     });
@@ -412,17 +545,35 @@ fn deny_follows_the_readers_unicode_fallback() {
         std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         std::fs::create_dir_all(tmp.path().join("public")).unwrap();
         std::fs::write(tmp.path().join("secrets/key"), "k").unwrap();
-        std::os::unix::fs::symlink(tmp.path().join("secrets/key"), tmp.path().join("public/k\u{a0}ey")).unwrap();
+        std::os::unix::fs::symlink(
+            tmp.path().join("secrets/key"),
+            tmp.path().join("public/k\u{a0}ey"),
+        )
+        .unwrap();
         let resolved = fuigo_tools::implementations::fuigo_build::read_file::resolve_read_target(
             tmp.path(),
             None,
             "public/k ey",
         )
         .await;
-        assert_eq!(resolved.file_name().unwrap(), "k\u{a0}ey", "the reader falls back to the no-break-space sibling");
+        assert_eq!(
+            resolved.file_name().unwrap(),
+            "k\u{a0}ey",
+            "the reader falls back to the no-break-space sibling"
+        );
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
-        let d = decide(&mgr, tmp.path(), &fuigo_read("", &["ok.txt", "public/k ey"])).await;
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &fuigo_read("", &["ok.txt", "public/k ey"]),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
     });
 }
@@ -436,14 +587,31 @@ fn deny_follows_a_backslash_named_symlink_like_the_reader() {
         std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
         std::fs::create_dir_all(tmp.path().join("public")).unwrap();
         std::fs::write(tmp.path().join("secrets/key"), "k").unwrap();
-        std::os::unix::fs::symlink(tmp.path().join("secrets/key"), tmp.path().join("public\\link")).unwrap();
+        std::os::unix::fs::symlink(
+            tmp.path().join("secrets/key"),
+            tmp.path().join("public\\link"),
+        )
+        .unwrap();
         let hub = hub("approve");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "secrets/**")], hub.clone(), false);
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "secrets/**")],
+            hub.clone(),
+            false,
+        );
         let link = abs(&tmp, "public\\link");
-        let d = decide(&mgr, tmp.path(), &codex_read("", &[&abs(&tmp, "ok.txt"), &link])).await;
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &[&abs(&tmp, "ok.txt"), &link]),
+        )
+        .await;
         assert!(matches!(d, Decision::PolicyDeny(_)), "got {d:?}");
         let d = decide(&mgr, tmp.path(), &codex_read(&link, &[])).await;
-        assert!(matches!(d, Decision::PolicyDeny(_)), "single-path form, got {d:?}");
+        assert!(
+            matches!(d, Decision::PolicyDeny(_)),
+            "single-path form, got {d:?}"
+        );
     });
 }
 
@@ -453,8 +621,18 @@ fn deny_follows_a_backslash_named_symlink_like_the_reader() {
 fn codex_paths_are_judged_literally() {
     run(|tmp, cwd| async move {
         let hub = hub("reject");
-        let mgr = manager(&cwd, vec![read_rule(RuleAction::Deny, "public/note")], hub.clone(), false);
-        let d = decide(&mgr, tmp.path(), &codex_read("", &[&abs(&tmp, "a.txt"), &abs(&tmp, "public/note'")])).await;
+        let mgr = manager(
+            &cwd,
+            vec![read_rule(RuleAction::Deny, "public/note")],
+            hub.clone(),
+            false,
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &[&abs(&tmp, "a.txt"), &abs(&tmp, "public/note'")]),
+        )
+        .await;
         assert_eq!(d, Decision::Allow);
         assert!(hub.seen.lock().unwrap().is_empty());
     });
@@ -473,7 +651,10 @@ fn ask_on_a_one_file_list_names_the_file() {
         // Own the prompts: no RefCell borrow may be held across an await.
         let prompts = std::mem::take(&mut *prompts.borrow_mut());
         assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].tool_call.fields.title.as_deref(), Some("Read: secrets/key"));
+        assert_eq!(
+            prompts[0].tool_call.fields.title.as_deref(),
+            Some("Read: secrets/key")
+        );
     });
 }
 
@@ -482,19 +663,27 @@ fn ask_on_a_one_file_list_names_the_file() {
 #[test]
 fn unresolved_read_target_is_refused() {
     use crate::permission::gate_preflight::GatePreflight;
-    let policy = crate::permission::policy::CompiledPolicy::new(PermissionConfig::new(vec![read_rule(
-        RuleAction::Deny,
-        "secrets/**",
-    )]));
+    let policy =
+        crate::permission::policy::CompiledPolicy::new(PermissionConfig::new(vec![read_rule(
+            RuleAction::Deny,
+            "secrets/**",
+        )]));
     let cwd = std::path::Path::new("/w");
     let access = AccessKind::Read(None);
     let judge = |targets: &[(Vec<String>, bool)]| {
-        GatePreflight::evaluate_read_targets(Some(&policy), &access, targets, cwd, false).policy_decision()
+        GatePreflight::evaluate_read_targets(Some(&policy), &access, targets, cwd, false)
+            .policy_decision()
     };
     assert_eq!(judge(&[(vec!["/w/a".to_owned()], true)]), None);
-    assert!(matches!(judge(&[(vec!["/w/a".to_owned()], false)]), Some(Decision::Reject(_))));
     assert!(matches!(
-        judge(&[(vec!["/w/a".to_owned()], false), (vec!["/w/secrets/k".to_owned()], false)]),
+        judge(&[(vec!["/w/a".to_owned()], false)]),
+        Some(Decision::Reject(_))
+    ));
+    assert!(matches!(
+        judge(&[
+            (vec!["/w/a".to_owned()], false),
+            (vec!["/w/secrets/k".to_owned()], false)
+        ]),
         Some(Decision::Reject(_) | Decision::PolicyDeny(_))
     ));
 }
@@ -504,18 +693,43 @@ fn unresolved_read_target_is_refused() {
 #[test]
 fn p7r2_a_human_reject_through_a_real_prompt_is_recorded_and_stamps() {
     run(|tmp, cwd| async move {
-        let mgr = acp_manager(&cwd, vec![read_rule(RuleAction::Ask, "secrets/**")], RecordingClient::default());
-        let d = decide(&mgr, tmp.path(), &codex_read("", &["ok.txt", &abs(&tmp, "fine.txt")])).await;
+        let mgr = acp_manager(
+            &cwd,
+            vec![read_rule(RuleAction::Ask, "secrets/**")],
+            RecordingClient::default(),
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &["ok.txt", &abs(&tmp, "fine.txt")]),
+        )
+        .await;
         assert_eq!(d, Decision::Allow, "no rule asks for these files");
-        assert_eq!(mgr.peer_influence().denials().ring_len(), 0, "an allowed call records nothing");
-        let d = decide(&mgr, tmp.path(), &codex_read("", &["ok.txt", "secrets/key"])).await;
-        assert!(matches!(d, Decision::Reject(_)), "the human rejected the prompt, got {d:?}");
+        assert_eq!(
+            mgr.peer_influence().denials().ring_len(),
+            0,
+            "an allowed call records nothing"
+        );
+        let d = decide(
+            &mgr,
+            tmp.path(),
+            &codex_read("", &["ok.txt", "secrets/key"]),
+        )
+        .await;
+        assert!(
+            matches!(d, Decision::Reject(_)),
+            "the human rejected the prompt, got {d:?}"
+        );
         let influence = mgr.peer_influence();
         let log = influence.denials();
         assert_eq!(log.ring_len(), 1, "the human Reject is one denial");
         assert_eq!(log.entries()[0].len(), 2, "one key per file of the call");
         let stamps = log.stamps(crate::permission::peer_denials::mono_secs());
         assert_eq!(stamps.len(), 2);
-        assert!(stamps.iter().all(|s| s.tool_kind == "read" && s.target_hash.starts_with("sha256:")));
+        assert!(
+            stamps
+                .iter()
+                .all(|s| s.tool_kind == "read" && s.target_hash.starts_with("sha256:"))
+        );
     });
 }

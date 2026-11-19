@@ -3,8 +3,8 @@
 //! Checks whether a summary exists, generates one via the LLM, persists it, syncs to remote, updates the session registry, and notifies the client.
 //! The persistence actor just calls [`SummaryGenerator::update`]; all state transitions are internal.
 
-use crate::extensions::notification::{SessionNotification, SessionUpdate as FuigoSessionUpdate};
 use crate::agent::config::TitlePolicy;
+use crate::extensions::notification::{SessionNotification, SessionUpdate as FuigoSessionUpdate};
 use crate::sampling::Client as OaiCompatClient;
 use crate::session::helpers::session_summary::generate_session_summary;
 use crate::session::info::Info;
@@ -38,7 +38,9 @@ pub struct SummaryHelper {
 
 impl std::fmt::Debug for SummaryHelper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SummaryHelper").field("model", &self.model).finish_non_exhaustive()
+        f.debug_struct("SummaryHelper")
+            .field("model", &self.model)
+            .finish_non_exhaustive()
     }
 }
 
@@ -79,7 +81,10 @@ impl SummaryGenerator {
                 self.state = State::Done;
 
                 if self.config.policy == TitlePolicy::Local {
-                    let title = crate::session::helpers::session_summary::title_fallback_from_user_text(&content);
+                    let title =
+                        crate::session::helpers::session_summary::title_fallback_from_user_text(
+                            &content,
+                        );
                     if let Some(tx) = self.config.persistence_tx.upgrade() {
                         let _ = tx.send(PersistenceMsg::GeneratedTitle(title));
                     }
@@ -87,19 +92,37 @@ impl SummaryGenerator {
                 }
 
                 // The helper client is built per agent, not per session: bind it to this session's park here.
-                let sampling_client = self.config.sampling_client.clone().with_dispatch_gate(std::sync::Arc::new(
-                    crate::session::acp_session::ParkGate::new(self.config.session_id.clone(), crate::session::acp_session::CallRole::Side, None),
-                ));
+                let sampling_client =
+                    self.config
+                        .sampling_client
+                        .clone()
+                        .with_dispatch_gate(std::sync::Arc::new(
+                            crate::session::acp_session::ParkGate::new(
+                                self.config.session_id.clone(),
+                                crate::session::acp_session::CallRole::Side,
+                                None,
+                            ),
+                        ));
                 let model = self.config.model.clone();
                 let session_id = self.config.session_id.clone();
-                let execution_admission = crate::session::execution_state::Execution::current(&session_id)
-                    .map(|execution| execution as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>);
+                let execution_admission = crate::session::execution_state::Execution::current(
+                    &session_id,
+                )
+                .map(|execution| {
+                    execution as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>
+                });
                 let persistence_tx = self.config.persistence_tx.clone();
 
                 // A background task runs the LLM call so the persistence actor keeps processing messages (updates, flushes)
                 tokio::spawn(async move {
-                    let mut title =
-                        generate_session_summary(content.clone(), sampling_client, &model, &session_id, execution_admission).await;
+                    let mut title = generate_session_summary(
+                        content.clone(),
+                        sampling_client,
+                        &model,
+                        &session_id,
+                        execution_admission,
+                    )
+                    .await;
                     if title.trim().is_empty() {
                         title =
                             crate::session::helpers::session_summary::title_fallback_from_user_text(
@@ -209,7 +232,13 @@ pub(crate) fn session_info_update_unpinned(session_id: acp::SessionId) -> acp::S
 mod tests {
     use super::*;
 
-    fn policy_generator(policy: TitlePolicy) -> (SummaryGenerator, mpsc::UnboundedSender<PersistenceMsg>, mpsc::UnboundedReceiver<PersistenceMsg>) {
+    fn policy_generator(
+        policy: TitlePolicy,
+    ) -> (
+        SummaryGenerator,
+        mpsc::UnboundedSender<PersistenceMsg>,
+        mpsc::UnboundedReceiver<PersistenceMsg>,
+    ) {
         let (tx, rx) = mpsc::unbounded_channel();
         let generator = SummaryGenerator::new(SummaryConfig {
             sampling_client: OaiCompatClient::new(fuigo_sampler::SamplerConfig::default()).unwrap(),
@@ -228,7 +257,9 @@ mod tests {
     fn local_title_is_synchronous_safe_and_generated_once() {
         let (mut generator, _tx, mut rx) = policy_generator(TitlePolicy::Local);
         generator.update("fix auth with secret=do-not-copy".into());
-        assert!(matches!(rx.try_recv(), Ok(PersistenceMsg::GeneratedTitle(title)) if title == "Fix authentication"));
+        assert!(
+            matches!(rx.try_recv(), Ok(PersistenceMsg::GeneratedTitle(title)) if title == "Fix authentication")
+        );
         generator.update("build game".into());
         assert!(rx.try_recv().is_err());
     }

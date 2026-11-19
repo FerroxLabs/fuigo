@@ -47,16 +47,30 @@ async fn script_is_handed_the_payload_on_stdin_and_the_terminal_size() {
 async fn script_is_handed_the_running_turns_prompt_id_and_start_time() {
     let mut ctx = ctx();
     ctx.prompt_id = Some("97135ed2-71a5-4581-b959-3341bbd03e5f".to_string());
-    ctx.turn = Some(fuigo_status_line::StatusLineTurn { started_at_ms: 1_730_000_123_456 });
-    let row = run_command("cat", &ctx, ROW, COMMAND_TIMEOUT).await.unwrap();
+    ctx.turn = Some(fuigo_status_line::StatusLineTurn {
+        started_at_ms: 1_730_000_123_456,
+    });
+    let row = run_command("cat", &ctx, ROW, COMMAND_TIMEOUT)
+        .await
+        .unwrap();
     let payload: serde_json::Value = serde_json::from_str(row.trim()).expect("the payload is JSON");
     assert_eq!(payload["prompt_id"], "97135ed2-71a5-4581-b959-3341bbd03e5f");
     assert_eq!(payload["turn"]["started_at_ms"], 1_730_000_123_456_i64);
 
     // Between turns both are absent, not zero or empty.
-    let idle = run_command("cat", &crate::app::status_line::test_context("/tmp"), ROW, COMMAND_TIMEOUT).await.unwrap();
+    let idle = run_command(
+        "cat",
+        &crate::app::status_line::test_context("/tmp"),
+        ROW,
+        COMMAND_TIMEOUT,
+    )
+    .await
+    .unwrap();
     let idle: serde_json::Value = serde_json::from_str(idle.trim()).unwrap();
-    assert!(idle.get("prompt_id").is_none() && idle.get("turn").is_none(), "{idle}");
+    assert!(
+        idle.get("prompt_id").is_none() && idle.get("turn").is_none(),
+        "{idle}"
+    );
 }
 
 #[tokio::test]

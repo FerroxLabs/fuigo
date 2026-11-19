@@ -283,7 +283,10 @@ mod tests {
     use super::*;
 
     fn enabled_flush_config() -> MemoryFlushConfig {
-        MemoryFlushConfig { enabled: true, ..MemoryFlushConfig::default() }
+        MemoryFlushConfig {
+            enabled: true,
+            ..MemoryFlushConfig::default()
+        }
     }
 
     #[test]

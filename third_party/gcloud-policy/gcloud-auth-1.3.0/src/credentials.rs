@@ -177,18 +177,21 @@ mod tests {
         // setup:
         let temp_credentials_dir = tempdir().expect("Cannot create temporary directory");
         let temp_credentials_path = temp_credentials_dir.path().join(CREDENTIALS_FILE);
-        let mut credentials_file = File::create(&temp_credentials_path).expect("Cannot create temporary file");
+        let mut credentials_file =
+            File::create(&temp_credentials_path).expect("Cannot create temporary file");
         credentials_file
             .write_all(CREDENTIALS_FILE_CONTENT.as_bytes())
             .expect("Cannot write content to file");
 
         // execute:
         let credentials_file_result =
-            CredentialsFile::new_from_file(temp_credentials_path.to_string_lossy().to_string()).await;
+            CredentialsFile::new_from_file(temp_credentials_path.to_string_lossy().to_string())
+                .await;
 
         // verify:
         let expected_credentials_file: CredentialsFile =
-            serde_json::from_str(CREDENTIALS_FILE_CONTENT).expect("Credentials file JSON deserialization not working");
+            serde_json::from_str(CREDENTIALS_FILE_CONTENT)
+                .expect("Credentials file JSON deserialization not working");
         match credentials_file_result {
             Err(_) => panic!(),
             Ok(cf) => assert_eq!(expected_credentials_file, cf),
@@ -202,7 +205,8 @@ mod tests {
 
         // verify:
         let expected_credentials_file: CredentialsFile =
-            serde_json::from_str(CREDENTIALS_FILE_CONTENT).expect("Credentials file JSON deserialization not working");
+            serde_json::from_str(CREDENTIALS_FILE_CONTENT)
+                .expect("Credentials file JSON deserialization not working");
         match credentials_file_result {
             Err(_) => panic!(),
             Ok(cf) => assert_eq!(expected_credentials_file, cf),
@@ -214,7 +218,10 @@ mod tests {
         // setup:
         temp_env::async_with_vars(
             [
-                ("GOOGLE_APPLICATION_CREDENTIALS_JSON", Some(CREDENTIALS_FILE_CONTENT)),
+                (
+                    "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+                    Some(CREDENTIALS_FILE_CONTENT),
+                ),
                 ("GOOGLE_APPLICATION_CREDENTIALS", None), // make sure file env is not interfering
             ],
             async {
@@ -222,8 +229,9 @@ mod tests {
                 let credentials_file_result = CredentialsFile::new().await;
 
                 // verify:
-                let expected_credentials_file: CredentialsFile = serde_json::from_str(CREDENTIALS_FILE_CONTENT)
-                    .expect("Credentials file JSON deserialization not working");
+                let expected_credentials_file: CredentialsFile =
+                    serde_json::from_str(CREDENTIALS_FILE_CONTENT)
+                        .expect("Credentials file JSON deserialization not working");
                 match credentials_file_result {
                     Err(_) => panic!(),
                     Ok(cf) => assert_eq!(expected_credentials_file, cf),
@@ -240,7 +248,9 @@ mod tests {
             [
                 (
                     "GOOGLE_APPLICATION_CREDENTIALS_JSON",
-                    Some(base64::engine::general_purpose::STANDARD.encode(CREDENTIALS_FILE_CONTENT)),
+                    Some(
+                        base64::engine::general_purpose::STANDARD.encode(CREDENTIALS_FILE_CONTENT),
+                    ),
                 ),
                 ("GOOGLE_APPLICATION_CREDENTIALS", None), // make sure file env is not interfering
             ],
@@ -249,8 +259,9 @@ mod tests {
                 let credentials_file_result = CredentialsFile::new().await;
 
                 // verify:
-                let expected_credentials_file: CredentialsFile = serde_json::from_str(CREDENTIALS_FILE_CONTENT)
-                    .expect("Credentials file JSON deserialization not working");
+                let expected_credentials_file: CredentialsFile =
+                    serde_json::from_str(CREDENTIALS_FILE_CONTENT)
+                        .expect("Credentials file JSON deserialization not working");
                 match credentials_file_result {
                     Err(_) => panic!(),
                     Ok(cf) => assert_eq!(expected_credentials_file, cf),
@@ -265,7 +276,8 @@ mod tests {
         // setup:
         let temp_credentials_dir = tempdir().expect("Cannot create temporary directory");
         let temp_credentials_path = temp_credentials_dir.path().join(CREDENTIALS_FILE);
-        let mut credentials_file = File::create(&temp_credentials_path).expect("Cannot create temporary file");
+        let mut credentials_file =
+            File::create(&temp_credentials_path).expect("Cannot create temporary file");
 
         temp_env::async_with_vars(
             [
@@ -284,8 +296,9 @@ mod tests {
                 let credentials_file_result = CredentialsFile::new().await;
 
                 // verify:
-                let expected_credentials_file: CredentialsFile = serde_json::from_str(CREDENTIALS_FILE_CONTENT)
-                    .expect("Credentials file JSON deserialization not working");
+                let expected_credentials_file: CredentialsFile =
+                    serde_json::from_str(CREDENTIALS_FILE_CONTENT)
+                        .expect("Credentials file JSON deserialization not working");
                 match credentials_file_result {
                     Err(_) => panic!(),
                     Ok(cf) => assert_eq!(expected_credentials_file, cf),

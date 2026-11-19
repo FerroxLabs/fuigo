@@ -545,7 +545,8 @@ pub struct StartupHints {
     pub(crate) fresh_child: bool,
     /// Runtime-captured durable parent grant; never accepted from client metadata.
     #[serde(skip)]
-    pub(crate) execution_parent_grant: Option<std::sync::Arc<crate::session::execution_state::ChildGrant>>,
+    pub(crate) execution_parent_grant:
+        Option<std::sync::Arc<crate::session::execution_state::ChildGrant>>,
     #[serde(default)]
     pub non_interactive: bool,
     /// This is a headless (`-p`) session, so its user-level hooks count as trusted in an untrusted folder.

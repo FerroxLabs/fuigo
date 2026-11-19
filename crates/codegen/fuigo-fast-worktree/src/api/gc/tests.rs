@@ -66,7 +66,11 @@ fn a_stray_candidate_does_not_change_how_ours_is_kept_and_named() {
     assert!(path.is_dir(), "a worktree nobody judged is still there");
     // Every candidate is counted exactly once: the tally equals the number of named entries, and covers both ours
     // and the stray (a further unexpected candidate would raise both sides together).
-    let counted = report.kept_reasons.get("gate-timed-out").copied().unwrap_or(0);
+    let counted = report
+        .kept_reasons
+        .get("gate-timed-out")
+        .copied()
+        .unwrap_or(0);
     assert_eq!(counted, report.kept.len() as u64, "{:?}", report.kept);
     assert!(counted >= 2, "ours and the stray: {:?}", report.kept);
 }
@@ -188,15 +192,31 @@ fn gc_of_a_hand_deleted_worktree_also_drops_its_git_registration() {
     let db = WorktreeDb::open(&fx.home).unwrap();
     let path = expiring_worktree(&db, &fx, "hand-deleted");
     let registrations = fx.home.join("gate-source").join(".git").join("worktrees");
-    assert!(registrations.is_dir() && registrations.read_dir().unwrap().count() == 1, "fixture: one registration");
+    assert!(
+        registrations.is_dir() && registrations.read_dir().unwrap().count() == 1,
+        "fixture: one registration"
+    );
 
     std::fs::remove_dir_all(&path).unwrap();
-    let report = gc_worktrees(&db, &GcOptions { dry_run: false, ..Default::default() }).unwrap();
+    let report = gc_worktrees(
+        &db,
+        &GcOptions {
+            dry_run: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     assert_eq!(report.dead_removed, 1);
-    assert!(db.get("hand-deleted-1").unwrap().is_none(), "the record is gone");
+    assert!(
+        db.get("hand-deleted-1").unwrap().is_none(),
+        "the record is gone"
+    );
     let left = registrations.read_dir().map(|d| d.count()).unwrap_or(0);
-    assert_eq!(left, 0, "git must not keep a registration for a folder that no longer exists");
+    assert_eq!(
+        left, 0,
+        "git must not keep a registration for a folder that no longer exists"
+    );
 }
 
 /// 51.11: a worktree whose only untracked content is empty folders holds no work, so an expired one is reclaimed.
@@ -590,7 +610,10 @@ fn unfenced_gc_pass_cannot_sweep_a_fixture_owners_grove() {
 
     let db = WorktreeDb::open(&fx.home).unwrap();
     let report = run_pass(&db, &GcOptions::default(), Pass::default(), None, None).unwrap();
-    assert_eq!(report.pin_gc_pruned, 1, "owner's pass must do the prune: {report:?}");
+    assert_eq!(
+        report.pin_gc_pruned, 1,
+        "owner's pass must do the prune: {report:?}"
+    );
     let mut show = std::process::Command::new("git");
     fuigo_tty_utils::detach_std_command(&mut show);
     assert!(

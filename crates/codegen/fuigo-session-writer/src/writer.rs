@@ -13,7 +13,10 @@
 //!   after the writer is free.
 //! - **Lock order.** `SLOTS` and `os_hold` are leaves, never nested and never held across an await. The lock module's
 //!   `HELD` map is taken only inside `os_hold` (attach, release), never under `SLOTS`.
-#![allow(clippy::disallowed_methods, reason = "the choke point: SessionWriter performs every session-folder mutation (design F5 5.1-5.3)")]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "the choke point: SessionWriter performs every session-folder mutation (design F5 5.1-5.3)"
+)]
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -46,7 +49,9 @@ impl std::fmt::Display for Refusal {
         match self {
             Self::HeldElsewhere => f.write_str(lock::HELD_ELSEWHERE),
             Self::Gone => f.write_str("this session was deleted; nothing was written"),
-            Self::PersistenceOff => f.write_str("session persistence is off for this run; nothing was written"),
+            Self::PersistenceOff => {
+                f.write_str("session persistence is off for this run; nothing was written")
+            }
         }
     }
 }
@@ -81,7 +86,9 @@ impl Busy {
     /// Wait until that writer is free, or until `deadline`. `true` when it freed.
     pub async fn freed_by(mut self, deadline: Instant) -> bool {
         // Nothing is ever sent: the only event is the sender dropping with the slot entry.
-        tokio::time::timeout_at(deadline, self.rx.changed()).await.is_ok()
+        tokio::time::timeout_at(deadline, self.rx.changed())
+            .await
+            .is_ok()
     }
 }
 
@@ -128,7 +135,11 @@ static LIVE: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Mutex::defa
 /// Debug builds: how many writer values (not clones) of `id` are alive. CT-W5 asserts it is 0 after a close.
 #[cfg(debug_assertions)]
 pub fn debug_live_writers(id: &str) -> usize {
-    LIVE.lock().unwrap_or_else(PoisonError::into_inner).get(id).copied().unwrap_or(0)
+    LIVE.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(id)
+        .copied()
+        .unwrap_or(0)
 }
 
 struct Inner {
@@ -152,7 +163,9 @@ impl Drop for Inner {
     fn drop(&mut self) {
         // The counted OS release first, then the slot: a waiter woken by the slot can attach at once.
         let hold = std::mem::replace(
-            self.os_hold.get_mut().unwrap_or_else(PoisonError::into_inner),
+            self.os_hold
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner),
             HoldState::Unattached,
         );
         drop(hold);
@@ -162,7 +175,10 @@ impl Drop for Inner {
         let removed = {
             let mut slots = slots();
             // A stale drop (its entry already replaced by a newer generation) must not free the newer one.
-            if slots.get(&self.id).is_some_and(|entry| entry.generation == self.generation) {
+            if slots
+                .get(&self.id)
+                .is_some_and(|entry| entry.generation == self.generation)
+            {
                 slots.remove(&self.id)
             } else {
                 None
@@ -189,7 +205,10 @@ pub struct SessionWriter(Arc<Inner>);
 
 impl std::fmt::Debug for SessionWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SessionWriter").field("id", &self.0.id).field("generation", &self.0.generation).finish()
+        f.debug_struct("SessionWriter")
+            .field("id", &self.0.id)
+            .field("generation", &self.0.generation)
+            .finish()
     }
 }
 
@@ -210,7 +229,9 @@ impl SessionWriter {
         let inner = {
             let mut slots = slots();
             if let Some(entry) = slots.get(&id) {
-                return Err(Busy { rx: entry.tx.subscribe() });
+                return Err(Busy {
+                    rx: entry.tx.subscribe(),
+                });
             }
             let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
             let (tx, _rx) = watch::channel(());
@@ -222,12 +243,23 @@ impl SessionWriter {
                 os_hold: Mutex::new(HoldState::Unattached),
                 replaced: Mutex::default(),
             });
-            slots.insert(id.clone(), Entry { generation, tx, writer: Arc::downgrade(&inner) });
+            slots.insert(
+                id.clone(),
+                Entry {
+                    generation,
+                    tx,
+                    writer: Arc::downgrade(&inner),
+                },
+            );
             inner
         };
         #[cfg(debug_assertions)]
         {
-            *LIVE.lock().unwrap_or_else(PoisonError::into_inner).entry(id.clone()).or_default() += 1;
+            *LIVE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(id.clone())
+                .or_default() += 1;
         }
         trace::claim(&id, inner.generation);
         Ok(Self(inner))
@@ -238,13 +270,20 @@ impl SessionWriter {
     /// through the source's own writer (design F5 §5.5, §5.6). `None` when no writer holds the id, or its last clone
     /// is already dropping.
     pub fn resident(id: &str) -> Option<Self> {
-        slots().get(id).and_then(|entry| entry.writer.upgrade()).map(Self)
+        slots()
+            .get(id)
+            .and_then(|entry| entry.writer.upgrade())
+            .map(Self)
     }
 
     /// Take the slot for `id`, waiting until `deadline` for a previous writer of the id in this process to finish.
     /// When the folder exists, the OS hold is attached here (retrying a contended lock for at most
     /// `min(300 ms, deadline - now)`), so a cold load is refused before it reads anything.
-    pub async fn claim(id: impl Into<String>, dir: impl Into<PathBuf>, deadline: Instant) -> Result<Self, ClaimError> {
+    pub async fn claim(
+        id: impl Into<String>,
+        dir: impl Into<PathBuf>,
+        deadline: Instant,
+    ) -> Result<Self, ClaimError> {
         let (id, dir) = (id.into(), dir.into());
         loop {
             match Self::try_claim_with(id.clone(), dir.clone(), lock::CONTENDED_RETRY) {
@@ -357,9 +396,14 @@ impl SessionWriter {
         let dir = &self.0.dir;
         if !dir.is_dir() {
             if !create {
-                return Err(io::Error::new(io::ErrorKind::NotFound, "session folder does not exist"));
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "session folder does not exist",
+                ));
             }
-            trace::op(self.0.generation, &[dir.as_path()], || create_dir_durable(dir))?;
+            trace::op(self.0.generation, &[dir.as_path()], || {
+                create_dir_durable(dir)
+            })?;
             trace::dir_created(self.0.generation, dir);
         }
         let key = lock::key_for(dir);
@@ -399,7 +443,14 @@ impl SessionWriter {
                 continue;
             }
             let created = trace::op(self.0.generation, &[&path], || {
-                owner_only::open(OpenOptions::new().read(true).write(true).create(true).truncate(false), &path)
+                owner_only::open(
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false),
+                    &path,
+                )
             });
             if let Err(error) = created {
                 tracing::debug!(%error, path = %path.display(), "lock sidecar not created");
@@ -409,11 +460,15 @@ impl SessionWriter {
 
     /// `dir.join(rel)` for a relative `rel` made only of normal components (no `..`, no root, no prefix, no `.`).
     fn resolve(&self, rel: &Path) -> io::Result<PathBuf> {
-        let valid = rel.components().next().is_some() && rel.components().all(|c| matches!(c, Component::Normal(_)));
+        let valid = rel.components().next().is_some()
+            && rel.components().all(|c| matches!(c, Component::Normal(_)));
         if !valid {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("session file path must be relative and stay inside the session folder: {}", rel.display()),
+                format!(
+                    "session file path must be relative and stay inside the session folder: {}",
+                    rel.display()
+                ),
             ));
         }
         Ok(self.0.dir.join(rel))
@@ -422,7 +477,9 @@ impl SessionWriter {
     /// Create the directories between the folder and `rel`'s file, owner-only, one level at a time below the folder:
     /// never anything above it (a folder removed meanwhile fails `NotFound` instead of being recreated).
     fn ensure_parents(&self, rel: &Path) -> io::Result<()> {
-        let Some(parent) = rel.parent() else { return Ok(()) };
+        let Some(parent) = rel.parent() else {
+            return Ok(());
+        };
         let mut path = self.0.dir.clone();
         for component in parent.components() {
             path.push(component);
@@ -430,7 +487,9 @@ impl SessionWriter {
             if trace::enabled() && path.is_dir() {
                 continue;
             }
-            match trace::op(self.0.generation, &[&path], || create_one_dir_owner_only(&path)) {
+            match trace::op(self.0.generation, &[&path], || {
+                create_one_dir_owner_only(&path)
+            }) {
                 Ok(()) => trace::dir_created(self.0.generation, &path),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => {}
                 Err(error) => return Err(error),
@@ -440,7 +499,12 @@ impl SessionWriter {
     }
 
     /// Hold, validate, create parents, then run `op` on the absolute path between trace marks.
-    fn mutate<T>(&self, rel: &Path, create: bool, op: impl FnOnce(&Path) -> io::Result<T>) -> io::Result<T> {
+    fn mutate<T>(
+        &self,
+        rel: &Path,
+        create: bool,
+        op: impl FnOnce(&Path) -> io::Result<T>,
+    ) -> io::Result<T> {
         let target = self.resolve(rel)?;
         self.ensure_dir_and_hold(create)?;
         if create {
@@ -458,7 +522,9 @@ impl SessionWriter {
         // The clone moves into the closure: the write keeps the writer until it has landed, even if this future is
         // dropped while it runs.
         let writer = self.clone();
-        tokio::task::spawn_blocking(move || f(&writer)).await.map_err(io::Error::other)?
+        tokio::task::spawn_blocking(move || f(&writer))
+            .await
+            .map_err(io::Error::other)?
     }
 
     // ---- the write API (design §5.3) -----------------------------------------------------------------------------
@@ -481,7 +547,10 @@ impl SessionWriter {
     pub fn append_line_checked_sync(&self, rel: impl AsRef<Path>, line: &[u8]) -> io::Result<()> {
         use std::io::{Read as _, Seek as _, SeekFrom};
         self.mutate(rel.as_ref(), true, |path| {
-            let mut file = owner_only::open(OpenOptions::new().read(true).create(true).append(true), path)?;
+            let mut file = owner_only::open(
+                OpenOptions::new().read(true).create(true).append(true),
+                path,
+            )?;
             let len = file.metadata()?.len();
             let mut torn = false;
             if len > 0 {
@@ -505,20 +574,33 @@ impl SessionWriter {
     /// Replace `rel` atomically and durably: an owner-only temporary sibling, synced, renamed over `rel`, then the
     /// directory synced. A reader sees the old bytes or the new ones, never a mix.
     pub fn replace_atomic_sync(&self, rel: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
-        self.replace_atomic_reporting_sync(rel, bytes).map_err(ReplaceError::into_io)
+        self.replace_atomic_reporting_sync(rel, bytes)
+            .map_err(ReplaceError::into_io)
     }
 
     /// [`replace_atomic_sync`](Self::replace_atomic_sync) that says, when it fails, whether the rename over the target
     /// happened (as the shell's `write_bytes_atomic_reporting`).
-    pub fn replace_atomic_reporting_sync(&self, rel: impl AsRef<Path>, bytes: &[u8]) -> Result<(), ReplaceError> {
-        self.replace_ticketed(rel.as_ref(), bytes, REPLACE_SEQ.fetch_add(1, Ordering::Relaxed))
+    pub fn replace_atomic_reporting_sync(
+        &self,
+        rel: impl AsRef<Path>,
+        bytes: &[u8],
+    ) -> Result<(), ReplaceError> {
+        self.replace_ticketed(
+            rel.as_ref(),
+            bytes,
+            REPLACE_SEQ.fetch_add(1, Ordering::Relaxed),
+        )
     }
 
     /// One replace with its call-order `ticket`. A replace called later that has already landed on `rel` makes this one
     /// a no-op (`Ok`: its bytes are superseded); otherwise it lands while holding the ticket map, so nothing older can
     /// land after it.
     fn replace_ticketed(&self, rel: &Path, bytes: &[u8], ticket: u64) -> Result<(), ReplaceError> {
-        let mut landed = self.0.replaced.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut landed = self
+            .0
+            .replaced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if landed.get(rel).is_some_and(|&newer| newer > ticket) {
             return Ok(());
         }
@@ -531,8 +613,10 @@ impl SessionWriter {
 
     fn replace_now(&self, rel: &Path, bytes: &[u8]) -> Result<(), ReplaceError> {
         let target = self.resolve(rel).map_err(ReplaceError::NotReplaced)?;
-        self.ensure_dir_and_hold(true).map_err(ReplaceError::NotReplaced)?;
-        self.ensure_parents(rel).map_err(ReplaceError::NotReplaced)?;
+        self.ensure_dir_and_hold(true)
+            .map_err(ReplaceError::NotReplaced)?;
+        self.ensure_parents(rel)
+            .map_err(ReplaceError::NotReplaced)?;
         let tmp = temp_sibling(&target);
         trace::op(self.0.generation, &[&tmp, &target], || {
             let write_synced = || -> io::Result<()> {
@@ -562,7 +646,8 @@ impl SessionWriter {
         self.blocking(move |w| {
             #[cfg(any(test, feature = "test-support"))]
             crate::seams::pass(&format!("replace:{}", w.0.id));
-            w.replace_ticketed(&rel, &bytes, ticket).map_err(ReplaceError::into_io)
+            w.replace_ticketed(&rel, &bytes, ticket)
+                .map_err(ReplaceError::into_io)
         })
         .await
     }
@@ -570,14 +655,16 @@ impl SessionWriter {
     /// Create `rel` with `bytes`; `AlreadyExists` if it is there.
     pub fn create_new_sync(&self, rel: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
         self.mutate(rel.as_ref(), true, |path| {
-            owner_only::open(OpenOptions::new().write(true).create_new(true), path)?.write_all(bytes)
+            owner_only::open(OpenOptions::new().write(true).create_new(true), path)?
+                .write_all(bytes)
         })
     }
 
     /// [`create_new_sync`](Self::create_new_sync) on the blocking pool.
     pub async fn create_new(&self, rel: impl Into<PathBuf>, bytes: Vec<u8>) -> io::Result<()> {
         let rel = rel.into();
-        self.blocking(move |w| w.create_new_sync(&rel, &bytes)).await
+        self.blocking(move |w| w.create_new_sync(&rel, &bytes))
+            .await
     }
 
     /// Remove the file `rel`. Never creates the folder.
@@ -610,7 +697,9 @@ impl SessionWriter {
         let target = self.resolve(to)?;
         self.ensure_dir_and_hold(false)?;
         self.ensure_parents(to)?;
-        trace::op(self.0.generation, &[&source, &target], || std::fs::rename(&source, &target))
+        trace::op(self.0.generation, &[&source, &target], || {
+            std::fs::rename(&source, &target)
+        })
     }
 
     /// [`rename_sync`](Self::rename_sync) on the blocking pool.
@@ -625,7 +714,11 @@ impl SessionWriter {
     }
 
     /// [`copy_in_sync`](Self::copy_in_sync) on the blocking pool.
-    pub async fn copy_in(&self, src: impl Into<PathBuf>, rel: impl Into<PathBuf>) -> io::Result<u64> {
+    pub async fn copy_in(
+        &self,
+        src: impl Into<PathBuf>,
+        rel: impl Into<PathBuf>,
+    ) -> io::Result<u64> {
         let (src, rel) = (src.into(), rel.into());
         self.blocking(move |w| w.copy_in_sync(&src, &rel)).await
     }
@@ -639,7 +732,9 @@ impl SessionWriter {
         let target = self.resolve(rel)?;
         self.ensure_dir_and_hold(true)?;
         self.ensure_parents(rel)?;
-        match trace::op(self.0.generation, &[&target], || rename_across(src, &target)) {
+        match trace::op(self.0.generation, &[&target], || {
+            rename_across(src, &target)
+        }) {
             Ok(()) => durable::sync_parent(&target),
             Err(error) if error.kind() != io::ErrorKind::CrossesDevices => Err(error),
             Err(_) => {
@@ -664,7 +759,11 @@ impl SessionWriter {
     }
 
     /// [`move_in_sync`](Self::move_in_sync) on the blocking pool.
-    pub async fn move_in(&self, src: impl Into<PathBuf>, rel: impl Into<PathBuf>) -> io::Result<()> {
+    pub async fn move_in(
+        &self,
+        src: impl Into<PathBuf>,
+        rel: impl Into<PathBuf>,
+    ) -> io::Result<()> {
         let (src, rel) = (src.into(), rel.into());
         self.blocking(move |w| w.move_in_sync(&src, &rel)).await
     }
@@ -673,7 +772,11 @@ impl SessionWriter {
     /// `AlreadyExists` when `dst_rel` is there, so of two racing publishers exactly one wins (a rename would replace).
     /// `src_rel`'s data is flushed first, so the published name never names unflushed bytes. Never creates the folder;
     /// the caller syncs the directory entry (the load repair's `.pre-repair` backup).
-    pub fn hard_link_in_no_replace_sync(&self, src_rel: impl AsRef<Path>, dst_rel: impl AsRef<Path>) -> io::Result<()> {
+    pub fn hard_link_in_no_replace_sync(
+        &self,
+        src_rel: impl AsRef<Path>,
+        dst_rel: impl AsRef<Path>,
+    ) -> io::Result<()> {
         let (src_rel, dst_rel) = (src_rel.as_ref(), dst_rel.as_ref());
         let source = self.resolve(src_rel)?;
         let target = self.resolve(dst_rel)?;
@@ -688,9 +791,16 @@ impl SessionWriter {
     /// Open `rel` (creating it owner-only, read + append) and run `f` on the open file between the trace marks: for an
     /// append that inspects the tail before it writes and reports where it failed (the shell's commit-aware JSONL
     /// append, F5-C4). The file closes when `f` returns. An open failure is the outer error; `f`'s own result is inner.
-    pub fn with_append_file<T>(&self, rel: impl AsRef<Path>, f: impl FnOnce(&mut File) -> T) -> io::Result<T> {
+    pub fn with_append_file<T>(
+        &self,
+        rel: impl AsRef<Path>,
+        f: impl FnOnce(&mut File) -> T,
+    ) -> io::Result<T> {
         self.mutate(rel.as_ref(), true, |path| {
-            let mut file = owner_only::open(OpenOptions::new().read(true).create(true).append(true), path)?;
+            let mut file = owner_only::open(
+                OpenOptions::new().read(true).create(true).append(true),
+                path,
+            )?;
             Ok(f(&mut file))
         })
     }
@@ -727,7 +837,9 @@ impl SessionWriter {
         {
             use std::os::unix::fs::PermissionsExt;
             let dir = &self.0.dir;
-            trace::op(self.0.generation, &[dir], || std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)))?;
+            trace::op(self.0.generation, &[dir], || {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            })?;
         }
         Ok(())
     }
@@ -752,7 +864,11 @@ impl SessionWriter {
         path.strip_prefix(&self.0.dir).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("{} is not inside the session folder {}", path.display(), self.0.dir.display()),
+                format!(
+                    "{} is not inside the session folder {}",
+                    path.display(),
+                    self.0.dir.display()
+                ),
             )
         })
     }
@@ -761,15 +877,28 @@ impl SessionWriter {
     /// cannot be free while the handle exists. For `events.jsonl` and the terminal logs.
     pub fn open_append(&self, rel: impl AsRef<Path>) -> io::Result<SessionAppend> {
         let rel = rel.as_ref();
-        let file = self.mutate(rel, true, |path| owner_only::open(OpenOptions::new().create(true).append(true), path))?;
-        Ok(SessionAppend { writer: self.clone(), file: Arc::new(file), path: self.0.dir.join(rel) })
+        let file = self.mutate(rel, true, |path| {
+            owner_only::open(OpenOptions::new().create(true).append(true), path)
+        })?;
+        Ok(SessionAppend {
+            writer: self.clone(),
+            file: Arc::new(file),
+            path: self.0.dir.join(rel),
+        })
     }
 
     /// Open (creating it if missing, never truncating) a lock sidecar such as `turn_owner.lock` or `snapshot.lock`, so
     /// sidecars are made through the writer and carry trace marks (design §5.6, Fable round-2 M4).
     pub fn open_lock(&self, rel: impl AsRef<Path>) -> io::Result<File> {
         self.mutate(rel.as_ref(), true, |path| {
-            owner_only::open(OpenOptions::new().read(true).write(true).create(true).truncate(false), path)
+            owner_only::open(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false),
+                path,
+            )
         })
     }
 
@@ -783,7 +912,9 @@ impl SessionWriter {
         self.ensure_dir_and_hold(false)?;
         #[cfg(any(test, feature = "test-support"))]
         crate::seams::pass(&format!("summary:{}", self.0.id));
-        trace::op(self.0.generation, &[&lock, &summary], || rmw(&summary, &lock))
+        trace::op(self.0.generation, &[&lock, &summary], || {
+            rmw(&summary, &lock)
+        })
     }
 
     /// Delete the whole session folder (design §6.3 step 3), keeping 1.0.39's local order: rename the folder to
@@ -805,11 +936,18 @@ impl SessionWriter {
             Err(error) => return Err(error),
         }
         let tombstone = dir.file_name().and_then(|name| {
-            let name = format!("{DELETING_PREFIX}{}-{}", name.to_string_lossy(), std::process::id());
+            let name = format!(
+                "{DELETING_PREFIX}{}-{}",
+                name.to_string_lossy(),
+                std::process::id()
+            );
             dir.parent().map(|parent| parent.join(name))
         });
         let renamed = tombstone.as_ref().is_some_and(|tombstone| {
-            trace::op(self.0.generation, &[&dir, tombstone], || std::fs::rename(&dir, tombstone)).is_ok()
+            trace::op(self.0.generation, &[&dir, tombstone], || {
+                std::fs::rename(&dir, tombstone)
+            })
+            .is_ok()
         });
         if renamed {
             delete_observer::note("local_rename", &dir);
@@ -818,8 +956,14 @@ impl SessionWriter {
         drop(std::mem::replace(&mut *state, HoldState::ReleasedForWipe));
         drop(state);
         delete_observer::note("hold_released", &dir);
-        let target = if renamed { tombstone.unwrap_or_else(|| dir.clone()) } else { dir.clone() };
-        let result = match trace::op(self.0.generation, &[&target], || std::fs::remove_dir_all(&target)) {
+        let target = if renamed {
+            tombstone.unwrap_or_else(|| dir.clone())
+        } else {
+            dir.clone()
+        };
+        let result = match trace::op(self.0.generation, &[&target], || {
+            std::fs::remove_dir_all(&target)
+        }) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -839,7 +983,11 @@ const SUMMARY_FILE: &str = "summary.json";
 /// The lock sidecars a fork's snapshot takes ([`SessionWriter::open_lock`]; `fuigo-shell`'s `snapshot_lock` and the
 /// append locks of `chat_history.jsonl` and `updates.jsonl`). Made when the writer's OS hold attaches, so a session held
 /// by another process always has them; a fork that finds one missing there refuses instead of copying unlocked.
-pub const LOCK_SIDECARS: [&str; 3] = ["snapshot.lock", "chat_history.jsonl.lock", "updates.jsonl.lock"];
+pub const LOCK_SIDECARS: [&str; 3] = [
+    "snapshot.lock",
+    "chat_history.jsonl.lock",
+    "updates.jsonl.lock",
+];
 /// The summary RMW's lock sidecar.
 const SUMMARY_LOCK_FILE: &str = "summary.json.lock";
 /// Prefix of a session folder being deleted (the shell's `DELETING_PREFIX`).
@@ -877,7 +1025,9 @@ impl SessionAppend {
     /// Append `bytes` (one write, at the end).
     pub fn write_all(&self, bytes: &[u8]) -> io::Result<()> {
         self.writer.ensure_dir_and_hold(false)?;
-        trace::op(self.writer.0.generation, &[&self.path], || (&*self.file).write_all(bytes))
+        trace::op(self.writer.0.generation, &[&self.path], || {
+            (&*self.file).write_all(bytes)
+        })
     }
 
     /// [`write_all`](Self::write_all) on the blocking pool; the closure owns a clone of the writer and of the file.
@@ -894,7 +1044,9 @@ impl SessionAppend {
     /// Cut the file to `len` bytes (a terminal log's size cap). Later appends land at the new end (append mode).
     pub fn set_len(&self, len: u64) -> io::Result<()> {
         self.writer.ensure_dir_and_hold(false)?;
-        trace::op(self.writer.0.generation, &[&self.path], || self.file.set_len(len))
+        trace::op(self.writer.0.generation, &[&self.path], || {
+            self.file.set_len(len)
+        })
     }
 
     /// [`set_len`](Self::set_len) on the blocking pool.
@@ -941,7 +1093,11 @@ thread_local! {
 
 fn temp_sibling(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
-    name.push(format!(".{}.{}.tmp", std::process::id(), TMP_SEQ.fetch_add(1, Ordering::Relaxed)));
+    name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     PathBuf::from(name)
 }
 
@@ -1019,12 +1175,18 @@ pub mod delete_observer {
     /// ones running concurrently on other test threads: an observer must act only on steps whose folder is its own.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set(observer: Option<Observer>) {
-        *OBSERVER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = observer;
+        *OBSERVER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = observer;
     }
 
     pub(crate) fn note(step: &'static str, dir: &std::path::Path) {
         #[cfg(any(test, feature = "test-support"))]
-        if let Some(observer) = OBSERVER.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        if let Some(observer) = OBSERVER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
             observer(step, dir);
         }
         #[cfg(not(any(test, feature = "test-support")))]
@@ -1035,7 +1197,14 @@ pub mod delete_observer {
 /// CT-W2: put a newer generation's entry in place of the current one, as if the id had been freed and claimed again.
 #[cfg(test)]
 pub(crate) fn test_replace_slot(id: &str, generation: u64, tx: watch::Sender<()>) {
-    slots().insert(id.to_owned(), Entry { generation, tx, writer: Weak::new() });
+    slots().insert(
+        id.to_owned(),
+        Entry {
+            generation,
+            tx,
+            writer: Weak::new(),
+        },
+    );
 }
 
 #[cfg(test)]

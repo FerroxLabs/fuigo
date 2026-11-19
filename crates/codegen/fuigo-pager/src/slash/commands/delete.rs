@@ -16,7 +16,9 @@ impl SlashCommand for DeleteCommand {
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         // Text after the command is not a confirmation or a target: refusing it beats deleting the session it was not meant for
         if !args.trim().is_empty() {
-            return CommandResult::Error("/delete takes no arguments; run /delete on its own to delete this session".into());
+            return CommandResult::Error(
+                "/delete takes no arguments; run /delete on its own to delete this session".into(),
+            );
         }
         if ctx.session_id.is_none() {
             return CommandResult::Error("No active session to delete".into());
@@ -52,8 +54,14 @@ mod tests {
     #[test]
     fn bare_delete_deletes_the_session() {
         let sid = agent_client_protocol::SessionId::new("s1");
-        assert!(matches!(run_with("", Some(&sid)), CommandResult::Action(Action::DeleteCurrentSession)));
-        assert!(matches!(run_with("   ", Some(&sid)), CommandResult::Action(Action::DeleteCurrentSession)));
+        assert!(matches!(
+            run_with("", Some(&sid)),
+            CommandResult::Action(Action::DeleteCurrentSession)
+        ));
+        assert!(matches!(
+            run_with("   ", Some(&sid)),
+            CommandResult::Action(Action::DeleteCurrentSession)
+        ));
     }
 
     #[test]

@@ -8,7 +8,8 @@ use fuigo_test_support::{MockInferenceServer, TestSandbox, run_headless_in_sandb
 
 fn pager_binary() -> PathBuf {
     if let Ok(p) = std::env::var("PAGER_BINARY") {
-        return std::path::absolute(&p).unwrap_or_else(|e| panic!("absolutize PAGER_BINARY {p}: {e}"));
+        return std::path::absolute(&p)
+            .unwrap_or_else(|e| panic!("absolutize PAGER_BINARY {p}: {e}"));
     }
     option_env!("CARGO_BIN_EXE_fuigo-pager")
         .map(PathBuf::from)
@@ -34,13 +35,25 @@ async fn a_resume_that_fails_before_the_session_opens_prints_one_json_error() {
     let result = run_headless_in_sandbox_borrowed(cmd, &sandbox).await;
     assert!(!result.timed_out, "stderr:\n{}", result.stderr);
     assert_ne!(result.status.code(), Some(0), "stdout:\n{}", result.stdout);
-    let lines: Vec<&str> = result.stdout.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 1, "exactly one JSON object on stdout\nstdout:\n{}\nstderr:\n{}", result.stdout, result.stderr);
+    let lines: Vec<&str> = result
+        .stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one JSON object on stdout\nstdout:\n{}\nstderr:\n{}",
+        result.stdout,
+        result.stderr
+    );
     let doc: serde_json::Value = serde_json::from_str(lines[0])
         .unwrap_or_else(|e| panic!("stdout must be JSON ({e}): {}", result.stdout));
     assert_eq!(doc["type"], "error", "{doc}");
     assert!(
-        doc["message"].as_str().is_some_and(|m| m.contains("Session does not exist")),
+        doc["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Session does not exist")),
         "{doc}"
     );
 }

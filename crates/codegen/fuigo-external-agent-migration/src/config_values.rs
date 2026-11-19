@@ -121,7 +121,10 @@ impl std::fmt::Debug for ImportableItem {
                 .field("event", event)
                 .field("matcher", matcher)
                 // A hook command may embed a credential (`curl -H 'Authorization: Bearer ...'`).
-                .field("command", &if command.is_empty() { "" } else { "<redacted>" })
+                .field(
+                    "command",
+                    &if command.is_empty() { "" } else { "<redacted>" },
+                )
                 .field("timeout", timeout)
                 .finish(),
             Self::PathEntry { kind, path } => f

@@ -263,7 +263,14 @@ fn searchable_by_this_process(dir: &Path) -> bool {
         return false;
     };
     // SAFETY: `c_path` is a valid NUL-terminated path for the duration of the call.
-    unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
+    unsafe {
+        libc::faccessat(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            libc::X_OK,
+            libc::AT_EACCESS,
+        ) == 0
+    }
 }
 
 /// [`blocked_by_foreign_directory`] with the effective uid and the search check injected (unit tests).

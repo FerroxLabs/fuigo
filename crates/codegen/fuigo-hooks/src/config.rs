@@ -153,7 +153,10 @@ impl std::fmt::Debug for RawHandler {
             .field("url", &url.as_deref().map(fuigo_auth::redact_url))
             .field("timeout", timeout)
             .field("fail_closed", fail_closed)
-            .field("env", &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "env",
+                &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -336,7 +339,13 @@ impl std::fmt::Debug for HookSpec {
             .field("timeout_ms", timeout_ms)
             .field("fail_closed", fail_closed)
             .field("source_dir", source_dir)
-            .field("extra_env", &extra_env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_env",
+                &extra_env
+                    .keys()
+                    .map(|k| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("layer", layer)
             .finish()
     }
@@ -894,13 +903,18 @@ fn build_one_spec(
 /// note per reference (which file, which key, what to do instead). Runs before any expansion, so an exported key is
 /// refused too.
 fn refuse_saved_key_references(handler: &mut RawHandler, hook_name: &str, file: &Path) {
-    use fuigo_config::key_naming::{RefusedKeyReference, refuse_key_references_in_str, report_refusals};
+    use fuigo_config::key_naming::{
+        RefusedKeyReference, refuse_key_references_in_str, report_refusals,
+    };
     let file_label = file.display().to_string();
     let mut refused = Vec::new();
     let mut scrub = |value: &mut String, key: String| {
         if let Some(clean) = refuse_key_references_in_str(value) {
             *value = clean;
-            refused.push(RefusedKeyReference { file: file_label.clone(), key });
+            refused.push(RefusedKeyReference {
+                file: file_label.clone(),
+                key,
+            });
         }
     };
     if let Some(command) = handler.command.as_mut() {
@@ -920,16 +934,23 @@ fn refuse_saved_key_references(handler: &mut RawHandler, hook_name: &str, file: 
 
 /// P118 (Astra r1 #5): expansion can build a reference out of text that held none (`echo ${D}FUIGO_API_KEY` with
 /// `env = { D = "$" }`), so a source that may not name the saved key is refused again on the expanded text.
-fn refuse_expanded(expanded: String, ctx: &SpecContext<'_>, hook_name: &str, field: &str) -> String {
+fn refuse_expanded(
+    expanded: String,
+    ctx: &SpecContext<'_>,
+    hook_name: &str,
+    field: &str,
+) -> String {
     if ctx.may_name_saved_key {
         return expanded;
     }
     match fuigo_config::key_naming::refuse_key_references_in_str(&expanded) {
         Some(clean) => {
-            fuigo_config::key_naming::report_refusals(&[fuigo_config::key_naming::RefusedKeyReference {
-                file: ctx.error_path.display().to_string(),
-                key: format!("{hook_name}.{field}"),
-            }]);
+            fuigo_config::key_naming::report_refusals(&[
+                fuigo_config::key_naming::RefusedKeyReference {
+                    file: ctx.error_path.display().to_string(),
+                    key: format!("{hook_name}.{field}"),
+                },
+            ]);
             clean
         }
         None => expanded,
@@ -1531,7 +1552,10 @@ mod tests {
         let json =
             r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x.sh"}]}]}}"#;
         let (specs, _) = parse_hook_file(json, Path::new("/home/user/.fuigo/hooks/safety.json"));
-        assert_eq!(specs[0].source_dir, PathBuf::from("/home/user/.fuigo/hooks"));
+        assert_eq!(
+            specs[0].source_dir,
+            PathBuf::from("/home/user/.fuigo/hooks")
+        );
     }
 
     #[test]

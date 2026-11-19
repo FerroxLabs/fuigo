@@ -1166,7 +1166,10 @@ async fn task_lifecycle_requests_one_coalesced_background_tasks_snapshot() {
             saw_snapshot = true;
         }
     }
-    assert!(saw_snapshot, "task completion must queue a snapshot once re-armed");
+    assert!(
+        saw_snapshot,
+        "task completion must queue a snapshot once re-armed"
+    );
 }
 
 #[tokio::test]
@@ -1979,16 +1982,20 @@ async fn task_wake_prompt_carries_an_explicit_task_completed_origin() {
         .task_output_tool_name
         .set(Some("get_command_or_subagent_output".to_string()))
         .expect("slot is fresh in this test fixture");
-    let notification = ToolNotification::TaskCompleted(make_task_snapshot("bg-origin", TaskKind::Bash));
+    let notification =
+        ToolNotification::TaskCompleted(make_task_snapshot("bg-origin", TaskKind::Bash));
     let mut offsets = HashMap::new();
-    handle_notification_with_admission(&config, notification, &mut offsets, &mut cmd_rx, true).await;
+    handle_notification_with_admission(&config, notification, &mut offsets, &mut cmd_rx, true)
+        .await;
     let command = cmd_rx.try_recv().expect("expected Prompt");
     let SessionCommand::Prompt { origin, .. } = command else {
         panic!("expected Prompt");
     };
     assert_eq!(
         origin,
-        crate::session::PromptOrigin::TaskCompleted { task_id: "bg-origin".into() }
+        crate::session::PromptOrigin::TaskCompleted {
+            task_id: "bg-origin".into()
+        }
     );
 }
 
@@ -2006,13 +2013,19 @@ async fn scheduled_task_inject_notification_carries_a_redeemable_fire_ticket() {
         revision: 0,
     };
     let mut offsets = HashMap::new();
-    handle_notification(&config, ToolNotification::ScheduledTaskFired(fired), &mut offsets).await;
+    handle_notification(
+        &config,
+        ToolNotification::ScheduledTaskFired(fired),
+        &mut offsets,
+    )
+    .await;
     let mut ticket = None;
     while let Ok(message) = gateway_rx.try_recv() {
         if let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = message
             && args.request.method.as_ref() == "fuigo/scheduled_task_inject_prompt"
         {
-            let payload: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(args.request.params.get()).unwrap();
             ticket = payload["fireTicket"].as_str().map(str::to_string);
         }
     }
@@ -2022,8 +2035,13 @@ async fn scheduled_task_inject_notification_carries_a_redeemable_fire_ticket() {
     let framed = vec![acp::ContentBlock::Text(acp::TextContent::new(
         crate::session::cron_fire_tickets::scheduled_prompt_text("check", "t-1", "every 5m"),
     ))];
-    assert!(crate::session::cron_fire_tickets::redeem(&session, &id, &framed));
-    assert!(!crate::session::cron_fire_tickets::redeem(&session, &id, &framed), "single use");
+    assert!(crate::session::cron_fire_tickets::redeem(
+        &session, &id, &framed
+    ));
+    assert!(
+        !crate::session::cron_fire_tickets::redeem(&session, &id, &framed),
+        "single use"
+    );
 }
 
 /// u36: plan entered by the tool while browser mode is on keeps the bit, so the approved exit reports `browser_use`
@@ -2061,6 +2079,10 @@ async fn u36_plan_tool_round_trip_returns_to_browser_mode() {
             }
         }
         assert_eq!(gateway_modes, ["plan", want_exit], "browser = {browser}");
-        assert_eq!(config.plan_mode.lock().browser_use(), browser, "plan tools never change the bit");
+        assert_eq!(
+            config.plan_mode.lock().browser_use(),
+            browser,
+            "plan tools never change the bit"
+        );
     }
 }

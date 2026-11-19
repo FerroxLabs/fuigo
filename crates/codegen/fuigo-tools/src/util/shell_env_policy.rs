@@ -140,8 +140,8 @@ impl ShellEnvironmentPolicy {
 // The credential registry lives in `fuigo-secrets` (P120) so the leaf crates that spawn git (`fuigo-tty-utils`,
 // `fuigo-fast-worktree`) apply the SAME filter; it is re-exported here under its old path.
 pub use fuigo_secrets::child_env::{
-    FUIGO_INTERNAL_CREDENTIAL_ENV_VARS, credential_denylist_fence, credential_denylist_generation,
-    config_registered_names, credential_env_names, inherited_fuigo_owned_secret_names,
+    FUIGO_INTERNAL_CREDENTIAL_ENV_VARS, config_registered_names, credential_denylist_fence,
+    credential_denylist_generation, credential_env_names, inherited_fuigo_owned_secret_names,
     inherited_fuigo_secret_names, is_fuigo_owned_secret, is_fuigo_secret, is_provider_credential,
     provider_key_env_vars, register_credential_env_names,
 };
@@ -242,7 +242,9 @@ impl EnvPlatform {
 
     /// Whether `name` is one of this platform's core variables (`inherit = "core"`).
     fn is_core(self, name: &str) -> bool {
-        self.core_vars().iter().any(|core| self.same_name(core, name))
+        self.core_vars()
+            .iter()
+            .any(|core| self.same_name(core, name))
     }
 
     /// Whether the policy glob `pattern` matches `name`. Unix: the glob as compiled (case-
@@ -253,17 +255,26 @@ impl EnvPlatform {
     /// lower-then-upper fold is added too, so an alias Windows' table might map differently fails
     /// toward removal; `include_only` keeps to Windows' equality, so the wide fold can never keep a
     /// variable in.
-    fn pattern_matches(self, pattern: &EnvironmentVariablePattern, name: &str, usage: PatternUse) -> bool {
+    fn pattern_matches(
+        self,
+        pattern: &EnvironmentVariablePattern,
+        name: &str,
+        usage: PatternUse,
+    ) -> bool {
         if pattern.matches(name) {
             return true;
         }
-        if self != Self::Windows || (name.is_ascii() && pattern.pattern_chars().iter().all(char::is_ascii)) {
+        if self != Self::Windows
+            || (name.is_ascii() && pattern.pattern_chars().iter().all(char::is_ascii))
+        {
             return false;
         }
         let source = pattern.pattern();
         // Case-SENSITIVE on the folded forms: both sides are already folded, and the glob's own
         // lowercase fold on top would equate more than Windows does (wrong for `include_only`).
-        let folded = |key: fn(&str) -> String| EnvironmentVariablePattern::new(&key(&source)).matches(&key(name));
+        let folded = |key: fn(&str) -> String| {
+            EnvironmentVariablePattern::new(&key(&source)).matches(&key(name))
+        };
         folded(fuigo_secrets::child_env::windows_env_name_key)
             || (usage == PatternUse::Remove && folded(fuigo_secrets::child_env::wide_env_name_key))
     }
@@ -295,7 +306,11 @@ impl EnvPlatform {
 /// holding both `Path` and `PATH` handed the child whichever one `HashMap` iteration met last, so
 /// on some starts the child's `PATH` was the wrong one and every shell spawn failed with "program
 /// not found".
-pub(crate) fn collapse_env_names<I, R>(vars: I, platform: EnvPlatform, resolve: R) -> Vec<(String, String)>
+pub(crate) fn collapse_env_names<I, R>(
+    vars: I,
+    platform: EnvPlatform,
+    resolve: R,
+) -> Vec<(String, String)>
 where
     I: IntoIterator<Item = (String, String)>,
     R: Fn(&str) -> Option<String>,
@@ -351,9 +366,10 @@ where
     let mut env: HashMap<String, String> = match policy.inherit {
         ShellEnvironmentPolicyInherit::All => vars.into_iter().collect(),
         ShellEnvironmentPolicyInherit::None => HashMap::new(),
-        ShellEnvironmentPolicyInherit::Core => {
-            vars.into_iter().filter(|(k, _)| platform.is_core(k)).collect()
-        }
+        ShellEnvironmentPolicyInherit::Core => vars
+            .into_iter()
+            .filter(|(k, _)| platform.is_core(k))
+            .collect(),
     };
 
     // Order matters: default excludes, then `exclude`, then `set`, then
@@ -392,7 +408,11 @@ where
 {
     names
         .into_iter()
-        .filter(|name| !name.to_str().is_some_and(|name| platform.contains(base, name)))
+        .filter(|name| {
+            !name
+                .to_str()
+                .is_some_and(|name| platform.contains(base, name))
+        })
         .collect()
 }
 
@@ -416,7 +436,12 @@ pub(crate) fn install_policy_base_env(
         // is removed by name instead, which both of them observe; the child's environment is the
         // same set either way.
         let base = create_env(policy);
-        install_base_env_for(cmd, std::env::vars_os().map(|(name, _)| name), base, EnvPlatform::host());
+        install_base_env_for(
+            cmd,
+            std::env::vars_os().map(|(name, _)| name),
+            base,
+            EnvPlatform::host(),
+        );
         scrub_wrap_nonce(cmd);
     }
 }
@@ -459,7 +484,10 @@ pub fn apply_shell_environment_policy(
     install_policy_base_env(cmd, Some(policy).filter(|p| !p.is_noop()));
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 pub(crate) fn t05_fresh_process(test_name: &str) -> bool {
     if std::env::var("T05_CHILD_TEST").as_deref() == Ok(test_name) {
@@ -517,7 +545,10 @@ pub(crate) const P86_CHILD_CHECK: &str = "test \"$P86_BENIGN\" = kept && test -z
 /// so the login-capture and persistent routes see an rc-only credential too.
 /// The parent asserts the child ran exactly one test, so a filter that matched nothing cannot
 /// pass vacuously.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 pub(crate) fn p86_parent_env(test_name: &str) -> bool {
     if std::env::var("P86_CHILD_TEST").as_deref() == Ok(test_name) {

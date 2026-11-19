@@ -13,8 +13,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dashmap::{DashMap, DashSet};
-use tokio_util::sync::CancellationToken;
 use fuigo_tool_protocol::ToolCallId;
+use tokio_util::sync::CancellationToken;
 
 /// Upper bound on outstanding pre-registration tombstones. Tombstones
 /// cover the microscopic window between a `Cancel` hook and the matching

@@ -1,15 +1,15 @@
 pub(crate) mod environment;
 use crate::telemetry::dc_log;
 use environment::WorkspaceIdentity;
-use prometheus::{IntCounterVec, IntGauge, register_int_counter_vec, register_int_gauge};
-use std::sync::Arc;
-use std::sync::LazyLock;
+use fuigo_auth::{AuthCredentialProvider, CredentialSnapshot};
 use fuigo_computer_hub_sdk::auth::{AuthCredential, AuthProvider};
 use fuigo_file_utils::gcs::StorageConfig;
 use fuigo_file_utils::queue::{EnqueueOutcome, TraceExportSource, UploadQueue};
 use fuigo_file_utils::storage_client::Auth401AttributionCallback;
 use fuigo_file_utils::{TraceExportConfig, UploadMethod};
-use fuigo_auth::{AuthCredentialProvider, CredentialSnapshot};
+use prometheus::{IntCounterVec, IntGauge, register_int_counter_vec, register_int_gauge};
+use std::sync::Arc;
+use std::sync::LazyLock;
 /// `…_pending_bytes` is the series the mandatory queue-memory alert fires on.
 static UPLOAD_QUEUE_PENDING_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
     register_int_gauge!(
@@ -415,7 +415,8 @@ mod tests {
         let provider = proxy_config()
             .proxy_credentials()
             .expect("proxy_credentials must be Some");
-        let reach = |u: &str| provider.bearer_may_reach(&reqwest::Url::parse(u).unwrap(), "test-token");
+        let reach =
+            |u: &str| provider.bearer_may_reach(&reqwest::Url::parse(u).unwrap(), "test-token");
         assert!(reach("https://proxy.example/v1/storage/upload").is_ok());
         for refused in [
             "http://proxy.example/v1/storage/upload",
@@ -424,7 +425,11 @@ mod tests {
             "https://evil.example/v1/storage/upload",
         ] {
             let err = reach(refused).expect_err(refused);
-            assert!(err.0.contains("The request was not made"), "{refused}: {}", err.0);
+            assert!(
+                err.0.contains("The request was not made"),
+                "{refused}: {}",
+                err.0
+            );
         }
     }
     /// `WorkspaceTraceExportSource` must delegate all four `TraceExportSource` hooks to the wrapped `ProxyStorageConfig`.
@@ -709,16 +714,25 @@ pub fn workspace_upload_scrub(buf: Vec<u8>) -> Vec<u8> {
         Err(e) => return e.into_bytes(),
     };
     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
-        let mut scrub = JsonScrub { recorded: !fuigo_secrets::sent_credentials::is_empty(), pem: Default::default() };
+        let mut scrub = JsonScrub {
+            recorded: !fuigo_secrets::sent_credentials::is_empty(),
+            pem: Default::default(),
+        };
         if !scrub.value(&mut value, None) {
             return text.into_bytes();
         }
         let pretty = text.trim().lines().count() > 1;
-        let out = if pretty { serde_json::to_vec_pretty(&value) } else { serde_json::to_vec(&value) };
+        let out = if pretty {
+            serde_json::to_vec_pretty(&value)
+        } else {
+            serde_json::to_vec(&value)
+        };
         return out.unwrap_or_else(|_| b"<redacted>".to_vec());
     }
     let exact = fuigo_secrets::sent_credentials::scrub_owned(text);
-    fuigo_secrets::redact_credential_shapes(&exact).into_owned().into_bytes()
+    fuigo_secrets::redact_credential_shapes(&exact)
+        .into_owned()
+        .into_bytes()
 }
 
 /// The structural scrub `/feedback` applies (Astra r3 #2), for a process without the shell: string values and property
@@ -732,10 +746,13 @@ struct JsonScrub {
 impl JsonScrub {
     fn text(&self, s: &str) -> Option<String> {
         use std::borrow::Cow;
-        let exact = self.recorded.then(|| fuigo_secrets::sent_credentials::scrub(s)).and_then(|c| match c {
-            Cow::Owned(o) => Some(o),
-            Cow::Borrowed(_) => None,
-        });
+        let exact = self
+            .recorded
+            .then(|| fuigo_secrets::sent_credentials::scrub(s))
+            .and_then(|c| match c {
+                Cow::Owned(o) => Some(o),
+                Cow::Borrowed(_) => None,
+            });
         let base = exact.as_deref().unwrap_or(s);
         match fuigo_secrets::redact_credential_shapes(base) {
             Cow::Owned(o) => Some(o),
@@ -760,11 +777,19 @@ impl JsonScrub {
             }
             Value::Array(items) => {
                 let bytes: Option<Vec<u8>> = (!items.is_empty())
-                    .then(|| items.iter().map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok())).collect())
+                    .then(|| {
+                        items
+                            .iter()
+                            .map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+                            .collect()
+                    })
                     .flatten();
                 if let Some(bytes) = bytes {
                     // Decode the run, scrub each valid UTF-8 stretch, keep invalid bytes as they are.
-                    let exact = self.recorded.then(|| fuigo_secrets::sent_credentials::scrub_bytes(&bytes)).flatten();
+                    let exact = self
+                        .recorded
+                        .then(|| fuigo_secrets::sent_credentials::scrub_bytes(&bytes))
+                        .flatten();
                     let current = exact.as_deref().unwrap_or(&bytes);
                     let mut out = Vec::with_capacity(current.len());
                     let mut changed = exact.is_some();
@@ -783,7 +808,9 @@ impl JsonScrub {
                     }
                     return changed;
                 }
-                items.iter_mut().fold(false, |changed, item| self.value(item, property) | changed)
+                items
+                    .iter_mut()
+                    .fold(false, |changed, item| self.value(item, property) | changed)
             }
             Value::Object(map) => {
                 let mut changed = false;
@@ -820,7 +847,7 @@ mod p149_upload_scrub_tests {
     fn workspace_upload_scrub_redacts_tool_state() {
         // Not credential-shaped, so only the sent-credential registry can catch it.
         const SENT: &str = "p149-SYNTH-workspace-sent-0001";
-        const GHP: &str = "ghp_p149SYNTHp149SYNTHp149SYNTHp149SYNTH";
+        const GHP: &str = concat!("gh", "p_p149SYNTHp149SYNTHp149SYNTHp149SYNTH");
         const PEM_BODY: &str = "MIIEp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHAA";
         fuigo_secrets::sent_credentials::record(SENT);
         let state = serde_json::json!({"scheduler": [{"prompt": format!(
@@ -833,7 +860,11 @@ mod p149_upload_scrub_tests {
         serde_json::from_str::<serde_json::Value>(&text).expect("still JSON");
         assert!(text.contains("run with <redacted>"), "control: {text}");
         let log = format!("line {GHP}\n");
-        assert!(!String::from_utf8(super::workspace_upload_scrub(log.into_bytes())).unwrap().contains(GHP));
+        assert!(
+            !String::from_utf8(super::workspace_upload_scrub(log.into_bytes()))
+                .unwrap()
+                .contains(GHP)
+        );
         let binary = vec![0x89u8, b'P', b'N', b'G', 0xff];
         assert_eq!(super::workspace_upload_scrub(binary.clone()), binary);
     }
@@ -846,10 +877,12 @@ mod p149_upload_scrub_tests {
         // base64("alice:" + SENT), URL-safe base64 of {"k":"SENT"}, and SENT with every byte percent-encoded.
         const BASIC: &str = "YWxpY2U6cDE2My1TWU5USC13b3Jrc3BhY2Utc2VudC0wMDAz";
         const BLOB: &str = "eyJrIjoicDE2My1TWU5USC13b3Jrc3BhY2Utc2VudC0wMDAzIn0=";
-        const PCT: &str =
-            "%70%31%36%33%2D%53%59%4E%54%48%2D%77%6F%72%6B%73%70%61%63%65%2D%73%65%6E%74%2D%30%30%30%33";
+        const PCT: &str = "%70%31%36%33%2D%53%59%4E%54%48%2D%77%6F%72%6B%73%70%61%63%65%2D%73%65%6E%74%2D%30%30%30%33";
         fuigo_secrets::sent_credentials::record(SENT);
-        let leaks = ["cDE2My1TWU5USC13b3Jrc3BhY2Utc2VudC0wMDAz", "%70%31%36%33%2D"];
+        let leaks = [
+            "cDE2My1TWU5USC13b3Jrc3BhY2Utc2VudC0wMDAz",
+            "%70%31%36%33%2D",
+        ];
         let state = serde_json::json!({"scheduler": [
             {"prompt": format!("curl -H 'Authorization: Basic {BASIC}'")},
             {"prompt": format!("token={BLOB}&k={PCT}")},
@@ -875,7 +908,7 @@ mod p149_upload_scrub_tests {
     #[test]
     fn workspace_upload_scrub_matches_feedback_structure() {
         const SENT: &str = "p149-SYNTH-workspace-sent-0002";
-        const GHP: &str = "ghp_p149SYNTHp149SYNTHp149SYNTHp149SYNTH";
+        const GHP: &str = concat!("gh", "p_p149SYNTHp149SYNTHp149SYNTHp149SYNTH");
         const PEM_BODY: &str = "MIIEp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHAA";
         fuigo_secrets::sent_credentials::record(SENT);
         let bytes = |s: &str| s.bytes().map(serde_json::Value::from).collect::<Vec<_>>();
@@ -884,14 +917,25 @@ mod p149_upload_scrub_tests {
             (GHP): "named by a credential",
             "raw": bytes(&format!("out {GHP} and {SENT}\n")),
         });
-        let text = String::from_utf8(super::workspace_upload_scrub(serde_json::to_vec(&state).unwrap())).unwrap();
+        let text = String::from_utf8(super::workspace_upload_scrub(
+            serde_json::to_vec(&state).unwrap(),
+        ))
+        .unwrap();
         for secret in [SENT, GHP, PEM_BODY] {
             assert!(!text.contains(secret), "{secret}: {text}");
         }
         let decoded: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let raw: Vec<u8> = decoded["raw"].as_array().unwrap().iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect();
+        let raw: Vec<u8> = decoded["raw"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_u64().map(|n| n as u8))
+            .collect();
         let raw = String::from_utf8_lossy(&raw).into_owned();
-        assert!(!raw.contains(GHP) && !raw.contains(SENT), "byte array: {raw}");
+        assert!(
+            !raw.contains(GHP) && !raw.contains(SENT),
+            "byte array: {raw}"
+        );
         assert!(raw.starts_with("out "), "control: {raw}");
     }
 }

@@ -919,7 +919,12 @@ async fn a_walk_queued_behind_another_repository_is_not_timed_out_by_the_line() 
     let started = Arc::new(AtomicUsize::new(0));
     let release = tokio::sync::watch::channel(false).0;
     let holder = {
-        let (gate, root, started, mut rx) = (gate.clone(), repo_a.path().to_path_buf(), Arc::clone(&started), release.subscribe());
+        let (gate, root, started, mut rx) = (
+            gate.clone(),
+            repo_a.path().to_path_buf(),
+            Arc::clone(&started),
+            release.subscribe(),
+        );
         tokio::spawn(async move {
             gate.run(&root, status_op(), move || {
                 let (started, mut rx) = (Arc::clone(&started), rx.clone());
@@ -944,8 +949,14 @@ async fn a_walk_queued_behind_another_repository_is_not_timed_out_by_the_line() 
     // Three walk timeouts in the line, then the holder lets go.
     tokio::time::sleep(Duration::from_millis(700)).await;
     release.send(true).unwrap();
-    let got = tokio::time::timeout(Duration::from_secs(30), queued).await.expect("queued walk hung").unwrap();
-    assert_eq!(got.expect("a walk that only waited in line must not time out"), 2);
+    let got = tokio::time::timeout(Duration::from_secs(30), queued)
+        .await
+        .expect("queued walk hung")
+        .unwrap();
+    assert_eq!(
+        got.expect("a walk that only waited in line must not time out"),
+        2
+    );
     let _ = holder.await;
 }
 
@@ -963,7 +974,12 @@ async fn the_line_for_the_permit_is_still_bounded() {
     let started = Arc::new(AtomicUsize::new(0));
     let release = tokio::sync::watch::channel(false).0;
     let holder = {
-        let (gate, root, started, rx) = (gate.clone(), repo_a.path().to_path_buf(), Arc::clone(&started), release.subscribe());
+        let (gate, root, started, rx) = (
+            gate.clone(),
+            repo_a.path().to_path_buf(),
+            Arc::clone(&started),
+            release.subscribe(),
+        );
         tokio::spawn(async move {
             gate.run(&root, status_op(), move || {
                 let (started, mut rx) = (Arc::clone(&started), rx.clone());
@@ -1019,6 +1035,10 @@ async fn a_running_walk_still_times_out_after_the_walk_timeout() {
         .await
         .expect_err("a running walk past its timeout must fail");
     assert!(err.to_string().contains("timed out"), "{err}");
-    assert!(began.elapsed() < Duration::from_secs(30), "gave up in {:?}", began.elapsed());
+    assert!(
+        began.elapsed() < Duration::from_secs(30),
+        "gave up in {:?}",
+        began.elapsed()
+    );
     release.send(true).unwrap();
 }

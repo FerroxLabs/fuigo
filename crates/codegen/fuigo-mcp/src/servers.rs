@@ -17,7 +17,7 @@ use tokio::{
 use rmcp::{
     ClientHandler, ClientLifecycleMode, ClientServiceExt,
     model::{
-        CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation,
+        CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation,
         PaginatedRequestParams,
     },
     service::{
@@ -3326,8 +3326,8 @@ enum PendingTransport {
 }
 
 /// A connected MCP service (rmcp's RunningService wrapped in Arc).
-/// Uses [`FuigoClientHandler`] rather than rmcp's default `ClientInfo` handler.
-/// rmcp 2.1 parameterizes `RunningService` over the handler type, and `ClientInfo` is only a `ClientHandler` impl with no notification routing.
+/// Uses [`FuigoClientHandler`] rather than rmcp's default `ClientConfig` handler.
+/// rmcp 2.1 parameterizes `RunningService` over the handler type, and `ClientConfig` is only a `ClientHandler` impl with no notification routing.
 /// The custom handler keeps the same protocol behavior (same `get_info`).
 /// It passes `tools/list_changed` / `resources/list_changed` notifications through to the session-actor dispatcher.
 pub type McpService = Arc<RunningService<RoleClient, FuigoClientHandler>>;
@@ -4931,7 +4931,7 @@ impl McpClient {
         E: std::error::Error + Send + Sync + 'static,
     {
         let probe_timeout = std::time::Duration::from_secs(self.probe_timeout_secs());
-        // The `ClientInfo` protocol version is irrelevant to a discover probe: the lifecycle
+        // The `ClientConfig` protocol version is irrelevant to a discover probe: the lifecycle
         // names its preferred versions itself, and rmcp stamps the negotiated one per request.
         let handler = self.make_client_handler(REQUESTED_PROTOCOL_VERSION);
         let lifecycle = ClientLifecycleMode::Discover {
@@ -5106,7 +5106,7 @@ impl McpClient {
         server_name: &str,
         advertise_elicitation: bool,
         protocol_version: rmcp::model::ProtocolVersion,
-    ) -> ClientInfo {
+    ) -> ClientConfig {
         use rmcp::model::{
             ElicitationCapability, FormElicitationCapability, UrlElicitationCapability,
         };
@@ -5128,7 +5128,7 @@ impl McpClient {
                     .with_url(UrlElicitationCapability::new()),
             );
         }
-        ClientInfo::new(
+        ClientConfig::new(
             capabilities,
             Implementation::new(
                 format!("fuigo-shell-{server_name}"),
@@ -5402,7 +5402,11 @@ impl McpClient {
                 ))
                 .await?;
             pages += 1;
-            for tool in result.tools.into_iter().take(MAX_TOOLS_PER_SERVER.saturating_sub(files.len())) {
+            for tool in result
+                .tools
+                .into_iter()
+                .take(MAX_TOOLS_PER_SERVER.saturating_sub(files.len()))
+            {
                 let descriptor = serde_json::json!({
                     "name": tool.name.as_ref(),
                     "description": tool.description.as_deref(),
@@ -5857,9 +5861,21 @@ fn apply_user_agent_policy(headers: &mut reqwest::header::HeaderMap, server_name
 }
 
 fn is_descriptive_header(name: &reqwest::header::HeaderName) -> bool {
-    use reqwest::header::{ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
-    [ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT]
-        .contains(name)
+    use reqwest::header::{
+        ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH,
+        CONTENT_TYPE, USER_AGENT,
+    };
+    [
+        ACCEPT,
+        ACCEPT_ENCODING,
+        ACCEPT_LANGUAGE,
+        CACHE_CONTROL,
+        CONNECTION,
+        CONTENT_LENGTH,
+        CONTENT_TYPE,
+        USER_AGENT,
+    ]
+    .contains(name)
 }
 
 /// Convert configured header pairs to a `HeaderMap` for every MCP streamable-HTTP request path.
@@ -6314,6 +6330,12 @@ pub async fn explain_missing_oauth(server_url: &str) -> Option<String> {
         AuthError::AuthorizationServerMissingIssuer { .. } => {
             "its authorization server metadata was refused: it does not declare its issuer".to_string()
         }
+        AuthError::DiscoveryRequestFailed { .. } => {
+            "its OAuth metadata discovery was refused (a redirect to another origin, too many redirects, or an address the network policy blocks)".to_string()
+        }
+        AuthError::ProtectedResourceMetadataInvalid { .. } => {
+            "its protected resource metadata was refused: it names a different or invalid resource".to_string()
+        }
         AuthError::MetadataError(message) if message.starts_with("OAuth metadata discovery failed for") => {
             "its OAuth metadata discovery was refused (a redirect to another origin, too many redirects, or an address the network policy blocks)".to_string()
         }
@@ -6540,8 +6562,8 @@ impl McpClient {
 /// rmcp must not see an error from a notification handler or the service loop tears down.
 #[derive(Debug)]
 pub struct FuigoClientHandler {
-    /// Static `ClientInfo` returned by [`Self::get_info`]; built once at handshake time and stored to avoid re-allocating per call.
-    info: ClientInfo,
+    /// Static `ClientConfig` returned by [`Self::get_info`]; built once at handshake time and stored to avoid re-allocating per call.
+    info: ClientConfig,
     /// MCP server name this handler is bound to.
     /// Cloned into emitted events so the dispatcher can route per-server.
     server_name: McpServerName,
@@ -6690,7 +6712,7 @@ impl ClientHandler for FuigoClientHandler {
         });
     }
 
-    fn get_info(&self) -> ClientInfo {
+    fn get_info(&self) -> ClientConfig {
         self.info.clone()
     }
 }

@@ -24,8 +24,8 @@ use std::fs;
 use std::path::Path;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use tempfile::TempDir;
 use fuigo_fsnotify::{FsConfig, FsEventSource};
+use tempfile::TempDir;
 
 const TOTAL_DIRS: usize = 12_000;
 

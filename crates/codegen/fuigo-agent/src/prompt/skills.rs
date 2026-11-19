@@ -749,8 +749,11 @@ fn is_user_config_dir(config_dir: &Path, global_dir: &Path) -> bool {
     let canonical = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let dir = canonical(config_dir);
     dir == canonical(global_dir)
-        || fuigo_dirs::home_dir()
-            .is_some_and(|home| config_dir.parent().is_some_and(|parent| canonical(parent) == canonical(&home)))
+        || fuigo_dirs::home_dir().is_some_and(|home| {
+            config_dir
+                .parent()
+                .is_some_and(|parent| canonical(parent) == canonical(&home))
+        })
 }
 
 /// Collect paths into `out`, deduplicating by canonical path. `root` is the folder their reads must stay inside
@@ -765,7 +768,11 @@ fn collect_discovered_paths(
     scope: SkillScope,
     root: Option<&fuigo_dirs::contained::PinnedRoot>,
     seen: &mut HashSet<PathBuf>,
-    out: &mut Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)>,
+    out: &mut Vec<(
+        PathBuf,
+        SkillScope,
+        Option<fuigo_dirs::contained::PinnedRoot>,
+    )>,
 ) {
     for path in paths {
         let canonical = dunce::canonicalize(&path).unwrap_or_else(|_| path.clone());
@@ -809,7 +816,11 @@ fn list_skills_with_options_blocking(
     let config_dirs =
         collect_skill_config_dirs_from_sources(project_sources.as_ref(), global_dir, &[], compat);
 
-    let mut skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
+    let mut skill_files: Vec<(
+        PathBuf,
+        SkillScope,
+        Option<fuigo_dirs::contained::PinnedRoot>,
+    )> = Vec::new();
     let mut seen_canonical_paths = HashSet::new();
 
     for config_dir in &config_dirs {
@@ -863,7 +874,11 @@ fn expand_tilde(raw: &str) -> PathBuf {
 /// `~` is expanded.
 /// Scope is `Repo` if the resolved path falls inside `git_root`, otherwise `User`.
 fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Vec<SkillInfo> {
-    let mut skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
+    let mut skill_files: Vec<(
+        PathBuf,
+        SkillScope,
+        Option<fuigo_dirs::contained::PinnedRoot>,
+    )> = Vec::new();
     let mut seen = HashSet::new();
 
     for raw in config_paths {
@@ -905,7 +920,11 @@ fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Ve
 }
 
 fn collect_injected_skills(dirs: &[String], scope: SkillScope) -> Vec<SkillInfo> {
-    let mut skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
+    let mut skill_files: Vec<(
+        PathBuf,
+        SkillScope,
+        Option<fuigo_dirs::contained::PinnedRoot>,
+    )> = Vec::new();
     let mut seen = HashSet::new();
 
     for raw in dirs {
@@ -1071,7 +1090,11 @@ fn collect_plugin_skills(registry: &crate::plugins::PluginRegistry) -> Vec<Skill
     let mut skills = Vec::new();
 
     for plugin in registry.active_plugins() {
-        let mut paths: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
+        let mut paths: Vec<(
+            PathBuf,
+            SkillScope,
+            Option<fuigo_dirs::contained::PinnedRoot>,
+        )> = Vec::new();
         // Contained to the plugin folder: a dir or file linking outside it is skipped (counted in `skipped_links`), and
         // every read of an admitted file (here and at invocation) is held to the folder too.
         let mut walk = SkillWalk::contained_pinned(plugin.pinned_root());
@@ -1155,7 +1178,8 @@ pub fn filter_skills(skills: Vec<SkillInfo>, ignore_paths: &[String]) -> Vec<Ski
                 .map(|dir| dir.join(Path::new(&skill.path).file_name().unwrap_or_default()));
             // >MAX_PATH caveat (see workspace clippy.toml); fail-open here: over-long ignored skills stay included
             !expanded.iter().any(|ignore| {
-                canonical.starts_with(ignore) || in_place.as_ref().is_some_and(|p| p.starts_with(ignore))
+                canonical.starts_with(ignore)
+                    || in_place.as_ref().is_some_and(|p| p.starts_with(ignore))
             })
         })
         .collect()
@@ -1164,9 +1188,11 @@ pub fn filter_skills(skills: Vec<SkillInfo>, ignore_paths: &[String]) -> Vec<Ski
 /// Format a skill for prompt injection (if body is populated).
 /// Injects plain markdown body — no XML envelope.
 pub(crate) fn format_skill_for_injection(skill: &SkillInfo) -> Option<String> {
-    skill.body.as_ref().filter(|b| !b.is_empty()).map(|body| {
-        fuigo_tools::implementations::skills::skill::build_skill_message(skill, body)
-    })
+    skill
+        .body
+        .as_ref()
+        .filter(|b| !b.is_empty())
+        .map(|body| fuigo_tools::implementations::skills::skill::build_skill_message(skill, body))
 }
 
 /// Format multiple skills for prompt injection.
@@ -1224,11 +1250,11 @@ pub(crate) async fn resolve_preloaded_skills(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use fuigo_tools::implementations::skills::discovery::{
         MAX_BODY_PEEK_BYTES, SkillParseError, extract_first_paragraph, is_valid_skill_name,
         normalize_skill_name, parse_skill_files, parse_skill_frontmatter,
     };
+    use std::fs;
 
     fn write_skill_md(dir: &Path, name: &str) {
         fs::create_dir_all(dir).unwrap();
@@ -2217,12 +2243,29 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let one = tmp.path().join("skills").join("one");
         write_skill_md(&one, "one");
-        let untrusted =
-            make_registry_with_skill_dirs_scoped("proj", tmp.path(), vec![one.clone()], PluginScope::Project, false);
-        assert_eq!(untrusted.enabled_plugins().len(), 1, "enabled, so only trust keeps it out");
-        assert!(collect_plugin_skills(&untrusted).is_empty(), "untrusted plugin skills must not load");
-        let trusted =
-            make_registry_with_skill_dirs_scoped("proj", tmp.path(), vec![one], PluginScope::Project, true);
+        let untrusted = make_registry_with_skill_dirs_scoped(
+            "proj",
+            tmp.path(),
+            vec![one.clone()],
+            PluginScope::Project,
+            false,
+        );
+        assert_eq!(
+            untrusted.enabled_plugins().len(),
+            1,
+            "enabled, so only trust keeps it out"
+        );
+        assert!(
+            collect_plugin_skills(&untrusted).is_empty(),
+            "untrusted plugin skills must not load"
+        );
+        let trusted = make_registry_with_skill_dirs_scoped(
+            "proj",
+            tmp.path(),
+            vec![one],
+            PluginScope::Project,
+            true,
+        );
         assert_eq!(collect_plugin_skills(&trusted).len(), 1);
     }
 
@@ -2438,7 +2481,11 @@ mod tests {
         write_skill_md(&custom_dir.join("wanted"), "wanted");
         let linked_dir = custom_dir.join("linked");
         fs::create_dir_all(&linked_dir).unwrap();
-        std::os::unix::fs::symlink(store.join("shared").join("SKILL.md"), linked_dir.join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(
+            store.join("shared").join("SKILL.md"),
+            linked_dir.join("SKILL.md"),
+        )
+        .unwrap();
 
         let list = |ignore: Vec<String>| {
             let config = SkillsConfig {
@@ -2455,10 +2502,16 @@ mod tests {
         let names = |skills: Vec<SkillInfo>| skills.into_iter().map(|s| s.name).collect::<Vec<_>>();
 
         let all = names(list(vec![]).await);
-        assert!(all.contains(&"linked".to_string()) && all.contains(&"wanted".to_string()), "fixture: {all:?}");
+        assert!(
+            all.contains(&"linked".to_string()) && all.contains(&"wanted".to_string()),
+            "fixture: {all:?}"
+        );
 
         let ignored = names(list(vec![linked_dir.to_str().unwrap().to_string()]).await);
-        assert!(!ignored.contains(&"linked".to_string()), "the symlinked skill must be ignored by its folder: {ignored:?}");
+        assert!(
+            !ignored.contains(&"linked".to_string()),
+            "the symlinked skill must be ignored by its folder: {ignored:?}"
+        );
         assert!(ignored.contains(&"wanted".to_string()), "{ignored:?}");
     }
 
@@ -2510,7 +2563,10 @@ mod tests {
         fs::create_dir_all(&repo_root).unwrap();
         init_git_repo(&repo_root);
 
-        let auto_dir = repo_root.join(".fuigo").join("skills").join("overlap-skill");
+        let auto_dir = repo_root
+            .join(".fuigo")
+            .join("skills")
+            .join("overlap-skill");
         write_skill_md(&auto_dir, "overlap-skill");
 
         let config = SkillsConfig {
@@ -3725,7 +3781,10 @@ mod discovery_budget_tests {
         let (tmp, cwd) = project_with_skill("anchor-skill");
         let skills_root = tmp.path().join(".fuigo").join("skills");
         for i in 0..600 {
-            write_skill_md(&skills_root.join(format!("bulk-{i:04}")), &format!("bulk-{i:04}"));
+            write_skill_md(
+                &skills_root.join(format!("bulk-{i:04}")),
+                &format!("bulk-{i:04}"),
+            );
         }
         let before = skill_discovery_scan_count(Some(&cwd));
         let first = discover(Duration::from_secs(60), &cwd).await;
@@ -3741,7 +3800,10 @@ mod discovery_budget_tests {
         );
         write_skill_md(&skills_root.join("zz-late"), "zz-late");
         let after = discover(Duration::from_secs(60), &cwd).await;
-        assert!(has(&after, "zz-late"), "a skill added to the large folder is picked up");
+        assert!(
+            has(&after, "zz-late"),
+            "a skill added to the large folder is picked up"
+        );
         assert_eq!(skill_discovery_scan_count(Some(&cwd)), before + 2);
     }
 
@@ -3839,10 +3901,18 @@ mod m3_containment_tests {
         symlink(root.join("shared").join("inside"), skills.join("inside")).unwrap();
         symlink(outside.join("far"), skills.join("far")).unwrap();
         fs::create_dir_all(skills.join("linkfile")).unwrap();
-        symlink(outside.join("secret.md"), skills.join("linkfile").join("SKILL.md")).unwrap();
+        symlink(
+            outside.join("secret.md"),
+            skills.join("linkfile").join("SKILL.md"),
+        )
+        .unwrap();
         let commands = root.join("commands");
         fs::create_dir_all(&commands).unwrap();
-        fs::write(commands.join("cmd-own.md"), "---\nname: cmd-own\ndescription: d\n---\nx\n").unwrap();
+        fs::write(
+            commands.join("cmd-own.md"),
+            "---\nname: cmd-own\ndescription: d\n---\nx\n",
+        )
+        .unwrap();
         symlink(outside.join("secret.md"), commands.join("leak.md")).unwrap();
         let agents = root.join("agents");
         fs::create_dir_all(&agents).unwrap();
@@ -3865,7 +3935,11 @@ mod m3_containment_tests {
         fs::create_dir_all(&root).unwrap();
         symlink(&outside, root.join("skills")).unwrap();
         let skills = collect_plugin_skills(&registry_from_dir(&root));
-        assert!(skills.is_empty(), "linked-out skills/ loaded: {:?}", sorted_names(&skills));
+        assert!(
+            skills.is_empty(),
+            "linked-out skills/ loaded: {:?}",
+            sorted_names(&skills)
+        );
     }
 
     #[test]
@@ -3877,7 +3951,9 @@ mod m3_containment_tests {
         let skills = collect_plugin_skills(&registry_from_dir(&root));
         assert_eq!(sorted_names(&skills), ["cmd-own", "inside", "own"]);
         assert!(
-            skills.iter().all(|s| s.body.as_deref().is_none_or(|b| !b.contains("TOP SECRET"))),
+            skills
+                .iter()
+                .all(|s| s.body.as_deref().is_none_or(|b| !b.contains("TOP SECRET"))),
             "outside content reached a skill"
         );
     }
@@ -3892,7 +3968,11 @@ mod m3_containment_tests {
         write_skill(&skills.join("proj-ok"), "proj-ok");
         symlink(outside.join("far"), skills.join("linkdir")).unwrap();
         fs::create_dir_all(skills.join("linkfile")).unwrap();
-        symlink(outside.join("secret.md"), skills.join("linkfile").join("SKILL.md")).unwrap();
+        symlink(
+            outside.join("secret.md"),
+            skills.join("linkfile").join("SKILL.md"),
+        )
+        .unwrap();
         let commands = repo.join(".fuigo").join("commands");
         fs::create_dir_all(&commands).unwrap();
         symlink(outside.join("secret.md"), commands.join("leak.md")).unwrap();
@@ -3907,9 +3987,15 @@ mod m3_containment_tests {
         )
         .await;
         let names = sorted_names(&found);
-        assert!(names.iter().any(|n| n == "proj-ok"), "own project skill missing: {names:?}");
+        assert!(
+            names.iter().any(|n| n == "proj-ok"),
+            "own project skill missing: {names:?}"
+        );
         for leaked in ["far-secret", "file-secret", "linkdir", "linkfile", "leak"] {
-            assert!(!names.iter().any(|n| n == leaked), "{leaked} loaded: {names:?}");
+            assert!(
+                !names.iter().any(|n| n == leaked),
+                "{leaked} loaded: {names:?}"
+            );
         }
     }
 
@@ -3923,7 +4009,11 @@ mod m3_containment_tests {
         let plugin = registry.get("m3p").unwrap();
         assert_eq!(
             plugin.skipped_links,
-            crate::plugins::registry::SkippedLinks { skills: 2, commands: 1, agents: 1 }
+            crate::plugins::registry::SkippedLinks {
+                skills: 2,
+                commands: 1,
+                agents: 1
+            }
         );
         assert_eq!(plugin.skill_count, 3, "own + inside + cmd-own");
         assert_eq!(plugin.agent_count, 0);
@@ -3952,7 +4042,11 @@ mod m4_read_time_tests {
 
     fn write_skill(dir: &Path, name: &str, body: &str) {
         fs::create_dir_all(dir).unwrap();
-        fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\ndescription: skill {name}\n---\n{body}\n")).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: skill {name}\n---\n{body}\n"),
+        )
+        .unwrap();
     }
 
     fn registry_from_dir(root: &Path) -> crate::plugins::PluginRegistry {
@@ -3984,7 +4078,10 @@ mod m4_read_time_tests {
 
     fn no_secret(read: Result<String, String>) {
         if let Ok(body) = read {
-            assert!(!body.contains("TOP SECRET"), "outside file read after the swap: {body}");
+            assert!(
+                !body.contains("TOP SECRET"),
+                "outside file read after the swap: {body}"
+            );
         }
     }
 
@@ -4000,17 +4097,35 @@ mod m4_read_time_tests {
         write_skill(&root.join("shared"), "own", "inside body");
 
         let skills = collect_plugin_skills(&registry_from_dir(&root));
-        let skill = skills.iter().find(|s| s.name == "own").expect("plugin skill").clone();
-        assert!(load_skill_content(&skill).await.unwrap().contains("own body"));
+        let skill = skills
+            .iter()
+            .find(|s| s.name == "own")
+            .expect("plugin skill")
+            .clone();
+        assert!(
+            load_skill_content(&skill)
+                .await
+                .unwrap()
+                .contains("own body")
+        );
 
         let skill_md = root.join("skills").join("own").join("SKILL.md");
         swap_for_link(&skill_md, &secret);
         no_secret(load_skill_content(&skill).await);
-        no_secret(load_skill_with_body(&skill).await.map(|s| s.body.unwrap_or_default()));
+        no_secret(
+            load_skill_with_body(&skill)
+                .await
+                .map(|s| s.body.unwrap_or_default()),
+        );
 
         // An in-plugin link swapped in still reads.
         swap_for_link(&skill_md, &root.join("shared").join("SKILL.md"));
-        assert!(load_skill_content(&skill).await.unwrap().contains("inside body"));
+        assert!(
+            load_skill_content(&skill)
+                .await
+                .unwrap()
+                .contains("inside body")
+        );
     }
 
     /// Astra r4 High: the WHOLE plugin folder is replaced with a link to an outside tree after discovery. The read is
@@ -4019,18 +4134,35 @@ mod m4_read_time_tests {
     async fn m5_plugin_root_replaced_by_link_after_discovery_is_refused_at_read() {
         let tmp = tempfile::tempdir().unwrap();
         let base = dunce::canonicalize(tmp.path()).unwrap();
-        write_skill(&base.join("outside").join("skills").join("own"), "own", "TOP SECRET");
+        write_skill(
+            &base.join("outside").join("skills").join("own"),
+            "own",
+            "TOP SECRET",
+        );
         let root = base.join("plugin");
         write_skill(&root.join("skills").join("own"), "own", "own body");
 
         let skills = collect_plugin_skills(&registry_from_dir(&root));
-        let skill = skills.iter().find(|s| s.name == "own").expect("plugin skill").clone();
-        assert!(load_skill_content(&skill).await.unwrap().contains("own body"));
+        let skill = skills
+            .iter()
+            .find(|s| s.name == "own")
+            .expect("plugin skill")
+            .clone();
+        assert!(
+            load_skill_content(&skill)
+                .await
+                .unwrap()
+                .contains("own body")
+        );
 
         fs::rename(&root, base.join("plugin.old")).unwrap();
         symlink(base.join("outside"), &root).unwrap();
         no_secret(load_skill_content(&skill).await);
-        no_secret(load_skill_with_body(&skill).await.map(|s| s.body.unwrap_or_default()));
+        no_secret(
+            load_skill_with_body(&skill)
+                .await
+                .map(|s| s.body.unwrap_or_default()),
+        );
     }
 
     /// The same for a project skill: the project folder itself is replaced with a link after discovery.
@@ -4038,21 +4170,51 @@ mod m4_read_time_tests {
     async fn m5_project_root_replaced_by_link_after_discovery_is_refused_at_read() {
         let tmp = tempfile::tempdir().unwrap();
         let base = dunce::canonicalize(tmp.path()).unwrap();
-        write_skill(&base.join("outside").join(".fuigo").join("skills").join("proj"), "proj", "TOP SECRET");
+        write_skill(
+            &base
+                .join("outside")
+                .join(".fuigo")
+                .join("skills")
+                .join("proj"),
+            "proj",
+            "TOP SECRET",
+        );
         let repo = base.join("repo");
-        write_skill(&repo.join(".fuigo").join("skills").join("proj"), "proj", "own body");
+        write_skill(
+            &repo.join(".fuigo").join("skills").join("proj"),
+            "proj",
+            "own body",
+        );
         let global = base.join("fuigo-home");
         fs::create_dir_all(&global).unwrap();
 
-        let found =
-            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
-        let skill = found.iter().find(|s| s.name == "proj").expect("project skill").clone();
-        assert!(load_skill_content(&skill).await.unwrap().contains("own body"));
+        let found = list_skills_with_options(
+            Some(repo.to_str().unwrap()),
+            None,
+            &global,
+            CompatConfig::default(),
+        )
+        .await;
+        let skill = found
+            .iter()
+            .find(|s| s.name == "proj")
+            .expect("project skill")
+            .clone();
+        assert!(
+            load_skill_content(&skill)
+                .await
+                .unwrap()
+                .contains("own body")
+        );
 
         fs::rename(&repo, base.join("repo.old")).unwrap();
         symlink(base.join("outside"), &repo).unwrap();
         no_secret(load_skill_content(&skill).await);
-        no_secret(load_skill_with_body(&skill).await.map(|s| s.body.unwrap_or_default()));
+        no_secret(
+            load_skill_with_body(&skill)
+                .await
+                .map(|s| s.body.unwrap_or_default()),
+        );
     }
 
     #[tokio::test]
@@ -4068,13 +4230,26 @@ mod m4_read_time_tests {
         let global = base.join("fuigo-home");
         fs::create_dir_all(&global).unwrap();
 
-        let found =
-            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
-        let skill = found.iter().find(|s| s.name == "proj").expect("project skill").clone();
+        let found = list_skills_with_options(
+            Some(repo.to_str().unwrap()),
+            None,
+            &global,
+            CompatConfig::default(),
+        )
+        .await;
+        let skill = found
+            .iter()
+            .find(|s| s.name == "proj")
+            .expect("project skill")
+            .clone();
         swap_for_link(&skill_dir.join("SKILL.md"), &secret);
         no_secret(load_skill_content(&skill).await);
         // Agent `skills:` preloading reads through the same path.
-        no_secret(load_skill_with_body(&skill).await.map(|s| s.body.unwrap_or_default()));
+        no_secret(
+            load_skill_with_body(&skill)
+                .await
+                .map(|s| s.body.unwrap_or_default()),
+        );
     }
 
     #[tokio::test]
@@ -4084,14 +4259,31 @@ mod m4_read_time_tests {
         write_skill(&base.join("elsewhere").join("mine"), "mine", "user body");
         let global = base.join("fuigo-home");
         fs::create_dir_all(global.join("skills")).unwrap();
-        symlink(base.join("elsewhere").join("mine"), global.join("skills").join("mine")).unwrap();
+        symlink(
+            base.join("elsewhere").join("mine"),
+            global.join("skills").join("mine"),
+        )
+        .unwrap();
         let repo = base.join("repo");
         fs::create_dir_all(&repo).unwrap();
 
-        let found =
-            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
-        let skill = found.iter().find(|s| s.name == "mine").expect("linked user skill listed");
-        assert!(load_skill_content(skill).await.unwrap().contains("user body"));
+        let found = list_skills_with_options(
+            Some(repo.to_str().unwrap()),
+            None,
+            &global,
+            CompatConfig::default(),
+        )
+        .await;
+        let skill = found
+            .iter()
+            .find(|s| s.name == "mine")
+            .expect("linked user skill listed");
+        assert!(
+            load_skill_content(skill)
+                .await
+                .unwrap()
+                .contains("user body")
+        );
     }
 
     /// Fable m3 Low 2: a session in the folder that holds the user config dir (cwd = the parent of `$FUIGO_HOME`, e.g.
@@ -4104,10 +4296,19 @@ mod m4_read_time_tests {
         let home = base.join("home");
         let global = home.join(".fuigo");
         fs::create_dir_all(global.join("skills")).unwrap();
-        symlink(base.join("elsewhere").join("mine"), global.join("skills").join("mine")).unwrap();
+        symlink(
+            base.join("elsewhere").join("mine"),
+            global.join("skills").join("mine"),
+        )
+        .unwrap();
 
-        let found =
-            list_skills_with_options(Some(home.to_str().unwrap()), None, &global, CompatConfig::default()).await;
+        let found = list_skills_with_options(
+            Some(home.to_str().unwrap()),
+            None,
+            &global,
+            CompatConfig::default(),
+        )
+        .await;
         assert!(
             found.iter().any(|s| s.name == "mine"),
             "user skill linked out of $FUIGO_HOME was skipped when cwd is its parent"
@@ -4126,9 +4327,17 @@ mod m4_read_time_tests {
         fs::create_dir_all(&repo).unwrap();
         symlink(&global, repo.join(".fuigo")).unwrap();
 
-        let found =
-            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
-        let skill = found.iter().find(|s| s.name == "usr").expect("user skill hidden by the linked project .fuigo");
+        let found = list_skills_with_options(
+            Some(repo.to_str().unwrap()),
+            None,
+            &global,
+            CompatConfig::default(),
+        )
+        .await;
+        let skill = found
+            .iter()
+            .find(|s| s.name == "usr")
+            .expect("user skill hidden by the linked project .fuigo");
         assert_eq!(skill.scope, SkillScope::User);
     }
 
@@ -4137,17 +4346,32 @@ mod m4_read_time_tests {
     async fn m4_claude_project_skill_linked_outside_is_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         let base = dunce::canonicalize(tmp.path()).unwrap();
-        write_skill(&base.join("outside").join("far"), "far-secret", "TOP SECRET");
+        write_skill(
+            &base.join("outside").join("far"),
+            "far-secret",
+            "TOP SECRET",
+        );
         let repo = base.join("repo");
         let skills = repo.join(".claude").join("skills");
         write_skill(&skills.join("own"), "claude-own", "own");
         symlink(base.join("outside").join("far"), skills.join("far")).unwrap();
         let global = base.join("fuigo-home");
         fs::create_dir_all(&global).unwrap();
-        let found =
-            list_skills_with_options(Some(repo.to_str().unwrap()), None, &global, CompatConfig::default()).await;
-        assert!(found.iter().any(|s| s.name == "claude-own"), "own .claude skill missing");
-        assert!(!found.iter().any(|s| s.name == "far-secret"), ".claude skill linked outside loaded");
+        let found = list_skills_with_options(
+            Some(repo.to_str().unwrap()),
+            None,
+            &global,
+            CompatConfig::default(),
+        )
+        .await;
+        assert!(
+            found.iter().any(|s| s.name == "claude-own"),
+            "own .claude skill missing"
+        );
+        assert!(
+            !found.iter().any(|s| s.name == "far-secret"),
+            ".claude skill linked outside loaded"
+        );
     }
 
     /// Fable m3 Low 3: a plugin whose root is itself a link (`~/.fuigo/plugins/p -> /elsewhere/p`) is contained to the
@@ -4156,12 +4380,24 @@ mod m4_read_time_tests {
     async fn m4_linked_plugin_root_contains_to_its_target() {
         let tmp = tempfile::tempdir().unwrap();
         let base = dunce::canonicalize(tmp.path()).unwrap();
-        write_skill(&base.join("outside").join("far"), "far-secret", "TOP SECRET");
+        write_skill(
+            &base.join("outside").join("far"),
+            "far-secret",
+            "TOP SECRET",
+        );
         let real = base.join("elsewhere").join("p");
         write_skill(&real.join("skills").join("own"), "own", "own body");
         write_skill(&real.join("shared").join("inside"), "inside", "inside body");
-        symlink(real.join("shared").join("inside"), real.join("skills").join("inside")).unwrap();
-        symlink(base.join("outside").join("far"), real.join("skills").join("far")).unwrap();
+        symlink(
+            real.join("shared").join("inside"),
+            real.join("skills").join("inside"),
+        )
+        .unwrap();
+        symlink(
+            base.join("outside").join("far"),
+            real.join("skills").join("far"),
+        )
+        .unwrap();
         fs::create_dir_all(base.join("plugins")).unwrap();
         let root = base.join("plugins").join("p");
         symlink(&real, &root).unwrap();
@@ -4171,7 +4407,12 @@ mod m4_read_time_tests {
         names.sort();
         assert_eq!(names, ["inside", "own"]);
         for skill in &skills {
-            assert!(!load_skill_content(skill).await.unwrap().contains("TOP SECRET"));
+            assert!(
+                !load_skill_content(skill)
+                    .await
+                    .unwrap()
+                    .contains("TOP SECRET")
+            );
         }
     }
 }

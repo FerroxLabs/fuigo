@@ -105,7 +105,9 @@ fn path_candidates(
         .iter()
         .map(|entry| entry.trim())
         .filter(|entry| is_drive_absolute(entry))
-        .filter(|entry| cwd.is_none_or(|cwd| normalize_windows_path(entry) != normalize_windows_path(cwd)))
+        .filter(|entry| {
+            cwd.is_none_or(|cwd| normalize_windows_path(entry) != normalize_windows_path(cwd))
+        })
         .map(|entry| format!("{}\\{file_name}", entry.trim_end_matches(['\\', '/'])))
         .filter(|candidate| exists(candidate))
         .collect()
@@ -113,8 +115,14 @@ fn path_candidates(
 
 /// The `pwsh.exe` to store: the first one on `PATH` (see [`path_candidates`]).
 #[cfg_attr(unix, allow(dead_code))]
-fn pwsh_from_path(path_var: &str, cwd: Option<&str>, exists: impl Fn(&str) -> bool) -> Option<String> {
-    path_candidates(path_var, "pwsh.exe", cwd, exists).into_iter().next()
+fn pwsh_from_path(
+    path_var: &str,
+    cwd: Option<&str>,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    path_candidates(path_var, "pwsh.exe", cwd, exists)
+        .into_iter()
+        .next()
 }
 
 /// Whether `path` is a Git for Windows `bash.exe`: the file is `bash.exe` and a directory on its
@@ -216,7 +224,9 @@ fn os_directory(api: unsafe fn(Option<&mut [u16]>) -> u32) -> Option<String> {
 fn system_directory() -> String {
     #[cfg(windows)]
     {
-        if let Some(dir) = os_directory(windows::Win32::System::SystemInformation::GetSystemDirectoryW) {
+        if let Some(dir) =
+            os_directory(windows::Win32::System::SystemInformation::GetSystemDirectoryW)
+        {
             return dir;
         }
     }
@@ -228,7 +238,9 @@ fn system_directory() -> String {
 fn windows_directory() -> String {
     #[cfg(windows)]
     {
-        if let Some(dir) = os_directory(windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW) {
+        if let Some(dir) =
+            os_directory(windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW)
+        {
             return dir;
         }
     }
@@ -243,7 +255,9 @@ fn path_exists(path: &str) -> bool {
 /// The current directory as a string, for [`path_candidates`].
 #[cfg(not(unix))]
 fn current_dir_string() -> Option<String> {
-    std::env::current_dir().ok().and_then(|d| d.into_os_string().into_string().ok())
+    std::env::current_dir()
+        .ok()
+        .and_then(|d| d.into_os_string().into_string().ok())
 }
 
 /// Absolute `pwsh.exe` path from this process's `PATH` (never the current directory).
@@ -256,7 +270,8 @@ fn find_pwsh() -> Option<String> {
 #[cfg(not(unix))]
 fn detect_powershell() -> WindowsShell {
     WindowsShell::PowerShell(
-        powershell_path(&system_directory(), path_exists).unwrap_or_else(|| "powershell.exe".to_string()),
+        powershell_path(&system_directory(), path_exists)
+            .unwrap_or_else(|| "powershell.exe".to_string()),
     )
 }
 
@@ -354,12 +369,23 @@ pub fn detect_windows_shell() -> &'static WindowsShell {
 #[cfg(not(unix))]
 fn find_git_bash() -> Option<String> {
     let roots = [
-        std::env::var("PROGRAMFILES").ok().map(|pf| format!("{pf}\\Git\\bin")),
-        std::env::var("PROGRAMFILES(X86)").ok().map(|pf| format!("{pf}\\Git\\bin")),
-        std::env::var("LOCALAPPDATA").ok().map(|la| format!("{la}\\Programs\\Git\\bin")),
+        std::env::var("PROGRAMFILES")
+            .ok()
+            .map(|pf| format!("{pf}\\Git\\bin")),
+        std::env::var("PROGRAMFILES(X86)")
+            .ok()
+            .map(|pf| format!("{pf}\\Git\\bin")),
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .map(|la| format!("{la}\\Programs\\Git\\bin")),
     ];
     let path_var = std::env::var("PATH").unwrap_or_default();
-    git_bash_path(&roots, &path_var, current_dir_string().as_deref(), path_exists)
+    git_bash_path(
+        &roots,
+        &path_var,
+        current_dir_string().as_deref(),
+        path_exists,
+    )
 }
 
 #[cfg(not(unix))]
@@ -378,7 +404,9 @@ impl WindowsShell {
     /// could be resolved).
     pub fn program(&self) -> &str {
         match self {
-            Self::GitBash(path) | Self::Pwsh(path) | Self::PowerShell(path) | Self::Cmd(path) => path,
+            Self::GitBash(path) | Self::Pwsh(path) | Self::PowerShell(path) | Self::Cmd(path) => {
+                path
+            }
         }
     }
 
@@ -536,7 +564,8 @@ pub fn runner_windows_shell_family() -> Option<WindowsShellFamily> {
 /// `NeedCurrentDirectoryForExePathW` returns FALSE, and cmd.exe, which calls it before its own
 /// program search, searches `%PATH%` instead of `.;%PATH%` (Microsoft Learn,
 /// NeedCurrentDirectoryForExePathW, Remarks).
-pub const NO_CURRENT_DIRECTORY_EXE_SEARCH: (&str, &str) = ("NoDefaultCurrentDirectoryInExePath", "1");
+pub const NO_CURRENT_DIRECTORY_EXE_SEARCH: (&str, &str) =
+    ("NoDefaultCurrentDirectoryInExePath", "1");
 
 /// u35 g8 (Astra r7): the variables that keep a Windows shell from running a program out of the
 /// command's working directory (the repository) when the command names it bare (`rg`), so a
@@ -546,7 +575,9 @@ pub const NO_CURRENT_DIRECTORY_EXE_SEARCH: (&str, &str) = ("NoDefaultCurrentDire
 pub fn windows_shell_lookup_env(family: WindowsShellFamily) -> Vec<(&'static str, &'static str)> {
     match family {
         WindowsShellFamily::Cmd => vec![NO_CURRENT_DIRECTORY_EXE_SEARCH],
-        WindowsShellFamily::GitBash | WindowsShellFamily::Pwsh | WindowsShellFamily::PowerShell => Vec::new(),
+        WindowsShellFamily::GitBash | WindowsShellFamily::Pwsh | WindowsShellFamily::PowerShell => {
+            Vec::new()
+        }
     }
 }
 
@@ -796,8 +827,16 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn u35_cmd_invocation_carries_the_lookup_rule() {
-        let inv = super::invocation_for(&super::WindowsShell::Cmd("C:\\Windows\\System32\\cmd.exe".into()), "rg x");
-        assert!(inv.env.contains(&("NoDefaultCurrentDirectoryInExePath", "1")), "{:?}", inv.env);
+        let inv = super::invocation_for(
+            &super::WindowsShell::Cmd("C:\\Windows\\System32\\cmd.exe".into()),
+            "rg x",
+        );
+        assert!(
+            inv.env
+                .contains(&("NoDefaultCurrentDirectoryInExePath", "1")),
+            "{:?}",
+            inv.env
+        );
     }
 
     use super::*;
@@ -814,7 +853,10 @@ mod tests {
     #[test]
     fn invocation_for_spawns_the_stored_absolute_path() {
         for (shell, path) in [
-            (WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into()), "C:\\Program Files\\Git\\bin\\bash.exe"),
+            (
+                WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into()),
+                "C:\\Program Files\\Git\\bin\\bash.exe",
+            ),
             (WindowsShell::Pwsh(PWSH.into()), PWSH),
             (WindowsShell::PowerShell(PS.into()), PS),
             (WindowsShell::Cmd(CMD.into()), CMD),
@@ -838,8 +880,13 @@ mod tests {
         let windows = windows_directory();
         assert!(std::path::Path::new(&system).is_dir(), "{system}");
         assert!(is_inside(&system, &windows), "{system} not in {windows}");
-        assert!(windows_file_name(&system).eq_ignore_ascii_case("System32"), "{system}");
-        let WindowsShell::Cmd(cmd) = detect_cmd() else { unreachable!() };
+        assert!(
+            windows_file_name(&system).eq_ignore_ascii_case("System32"),
+            "{system}"
+        );
+        let WindowsShell::Cmd(cmd) = detect_cmd() else {
+            unreachable!()
+        };
         assert!(is_inside(&cmd, &system), "{cmd}");
     }
 
@@ -848,14 +895,24 @@ mod tests {
         let pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
         let everywhere = |_: &str| true;
         let path = "C:\\repo;;.;bin;\\\\srv\\share;C:relative;C:\\Program Files\\PowerShell\\7\\";
-        assert_eq!(pwsh_from_path(path, Some("C:\\repo"), everywhere).as_deref(), Some(pwsh));
+        assert_eq!(
+            pwsh_from_path(path, Some("C:\\repo"), everywhere).as_deref(),
+            Some(pwsh)
+        );
         // The cwd entry in another spelling: case, `/`, a trailing `\.`, a `..` detour.
         for cwd_entry in ["c:\\REPO", "C:/repo/", "C:\\repo\\.", "C:\\other\\..\\repo"] {
             let path = format!("{cwd_entry};C:\\Program Files\\PowerShell\\7");
-            assert_eq!(pwsh_from_path(&path, Some("C:\\Repo"), everywhere).as_deref(), Some(pwsh), "{cwd_entry}");
+            assert_eq!(
+                pwsh_from_path(&path, Some("C:\\Repo"), everywhere).as_deref(),
+                Some(pwsh),
+                "{cwd_entry}"
+            );
         }
         // Nothing but cwd and relative entries: no pwsh (detection moves on to powershell.exe).
-        assert_eq!(pwsh_from_path("C:\\repo;.;tools", Some("C:\\repo"), everywhere), None);
+        assert_eq!(
+            pwsh_from_path("C:\\repo;.;tools", Some("C:\\repo"), everywhere),
+            None
+        );
         // A directory only counts when the file exists in it.
         let only_7 = |p: &str| p == pwsh;
         assert_eq!(
@@ -864,7 +921,9 @@ mod tests {
         );
         // A quoted entry may hold `;`.
         assert_eq!(
-            pwsh_from_path("\"C:\\odd;dir\";C:\\x", None, |p: &str| p == "C:\\odd;dir\\pwsh.exe").as_deref(),
+            pwsh_from_path("\"C:\\odd;dir\";C:\\x", None, |p: &str| p
+                == "C:\\odd;dir\\pwsh.exe")
+            .as_deref(),
             Some("C:\\odd;dir\\pwsh.exe")
         );
         assert_eq!(pwsh_from_path("", None, everywhere), None);
@@ -877,15 +936,37 @@ mod tests {
         let everywhere = |_: &str| true;
         let path = "C:\\repo\\git;C:\\Windows\\System32;D:\\PortableGit\\bin";
         assert_eq!(
-            git_bash_path(&[None, Some("relative\\Git\\bin".into())], path, Some("C:\\repo\\git"), everywhere).as_deref(),
+            git_bash_path(
+                &[None, Some("relative\\Git\\bin".into())],
+                path,
+                Some("C:\\repo\\git"),
+                everywhere
+            )
+            .as_deref(),
             Some("D:\\PortableGit\\bin\\bash.exe")
         );
         assert_eq!(
-            git_bash_path(&[Some("C:\\Program Files\\Git\\bin".into())], path, None, everywhere).as_deref(),
+            git_bash_path(
+                &[Some("C:\\Program Files\\Git\\bin".into())],
+                path,
+                None,
+                everywhere
+            )
+            .as_deref(),
             Some("C:\\Program Files\\Git\\bin\\bash.exe")
         );
-        assert_eq!(git_bash_path(&[Some("\\\\srv\\Git\\bin".into())], "C:\\Windows\\System32", None, everywhere), None);
-        assert!(is_git_bash("C:\\Users\\me\\scoop\\apps\\git\\current\\bin\\bash.exe"));
+        assert_eq!(
+            git_bash_path(
+                &[Some("\\\\srv\\Git\\bin".into())],
+                "C:\\Windows\\System32",
+                None,
+                everywhere
+            ),
+            None
+        );
+        assert!(is_git_bash(
+            "C:\\Users\\me\\scoop\\apps\\git\\current\\bin\\bash.exe"
+        ));
         assert!(!is_git_bash("C:\\Windows\\System32\\bash.exe"));
         assert!(!is_git_bash("C:\\Git\\bin\\notbash.exe"));
         // A directory that only contains the letters is not Git (u35-winenv r2, Grok/Fable Low).
@@ -912,7 +993,10 @@ mod tests {
         let sys = "C:\\Windows\\System32";
         let win = "C:\\Windows";
         let all = |_: &str| true;
-        assert_eq!(cmd_path(sys, win, Some("C:\\Windows\\SysWOW64\\cmd.exe"), all), "C:\\Windows\\System32\\cmd.exe");
+        assert_eq!(
+            cmd_path(sys, win, Some("C:\\Windows\\SysWOW64\\cmd.exe"), all),
+            "C:\\Windows\\System32\\cmd.exe"
+        );
         let no_system = |p: &str| p != "C:\\Windows\\System32\\cmd.exe";
         assert_eq!(
             cmd_path(sys, win, Some("C:\\Windows\\SysWOW64\\cmd.exe"), no_system),
@@ -927,7 +1011,11 @@ mod tests {
             "C:\\WindowsX\\cmd.exe",
             "\\\\srv\\Windows\\cmd.exe",
         ] {
-            assert_eq!(cmd_path(sys, win, Some(comspec), no_system), "cmd", "{comspec}");
+            assert_eq!(
+                cmd_path(sys, win, Some(comspec), no_system),
+                "cmd",
+                "{comspec}"
+            );
         }
         assert_eq!(cmd_path(sys, win, None, |_| false), "cmd");
     }

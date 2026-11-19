@@ -112,7 +112,8 @@ pub fn run_version_with_limit(path: &Path) -> Option<String> {
     fuigo_tty_utils::detach_std_command(&mut command);
     // A crashed or killed fuigo must not leave a probe behind.
     fuigo_tty_utils::kill_on_parent_death_std(&mut command);
-    #[allow(clippy::disallowed_methods)] // bound by kill-on-parent-death, killed below at the deadline
+    #[allow(clippy::disallowed_methods)]
+    // bound by kill-on-parent-death, killed below at the deadline
     let mut child = command.spawn().ok()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
     loop {
@@ -128,7 +129,12 @@ pub fn run_version_with_limit(path: &Path) -> Option<String> {
         }
     }
     let mut text = String::new();
-    child.stdout.take()?.take(4096).read_to_string(&mut text).ok()?;
+    child
+        .stdout
+        .take()?
+        .take(4096)
+        .read_to_string(&mut text)
+        .ok()?;
     Some(text)
 }
 
@@ -142,7 +148,12 @@ pub fn other_installs_on_path() -> Vec<OtherInstall> {
     let (Some(path_var), Ok(exe)) = (std::env::var_os("PATH"), std::env::current_exe()) else {
         return Vec::new();
     };
-    find_other_installs(&path_var, &exe, fuigo_version::VERSION, run_version_with_limit)
+    find_other_installs(
+        &path_var,
+        &exe,
+        fuigo_version::VERSION,
+        run_version_with_limit,
+    )
 }
 
 #[cfg(test)]
@@ -162,9 +173,15 @@ mod tests {
 
     #[test]
     fn parse_version_reads_the_first_semver_token() {
-        assert_eq!(parse_version("fuigo 1.0.19 (abc123)").as_deref(), Some("1.0.19"));
+        assert_eq!(
+            parse_version("fuigo 1.0.19 (abc123)").as_deref(),
+            Some("1.0.19")
+        );
         assert_eq!(parse_version("v1.0.31\n").as_deref(), Some("1.0.31"));
-        assert_eq!(parse_version("fuigo 1.0.32-rc.1+build").as_deref(), Some("1.0.32-rc.1+build"));
+        assert_eq!(
+            parse_version("fuigo 1.0.32-rc.1+build").as_deref(),
+            Some("1.0.32-rc.1+build")
+        );
         assert_eq!(parse_version("no version here"), None);
         assert_eq!(parse_version("1.0"), None);
     }
@@ -178,7 +195,12 @@ mod tests {
         fake_install(rel_dir.path(), "fuigo");
         let real_dir = tempfile::tempdir().unwrap();
         let current = fake_install(&real_dir.path().join("cur"), "fuigo");
-        let path_var = std::env::join_paths([std::ffi::OsString::from(""), std::ffi::OsString::from("."), rel_name]).unwrap();
+        let path_var = std::env::join_paths([
+            std::ffi::OsString::from(""),
+            std::ffi::OsString::from("."),
+            rel_name,
+        ])
+        .unwrap();
         let probed = std::cell::RefCell::new(Vec::new());
         let found = find_other_installs(&path_var, &current, "1.0.31", |p| {
             probed.borrow_mut().push(p.to_path_buf());
@@ -198,7 +220,13 @@ mod tests {
             &path_of(&[stale.parent().unwrap(), current.parent().unwrap()]),
             &current,
             "1.0.31",
-            |p| Some(if p == stale { "fuigo 1.0.19".into() } else { "fuigo 1.0.31".into() }),
+            |p| {
+                Some(if p == stale {
+                    "fuigo 1.0.19".into()
+                } else {
+                    "fuigo 1.0.31".into()
+                })
+            },
         );
         assert_eq!(
             found,
@@ -224,7 +252,10 @@ mod tests {
             std::fs::create_dir_all(dir.path().join("d")).unwrap();
             std::os::unix::fs::symlink(&current, dir.path().join("d/fuigo")).unwrap();
         }
-        let dirs: Vec<PathBuf> = ["a", "b", "c", "d"].iter().map(|d| dir.path().join(d)).collect();
+        let dirs: Vec<PathBuf> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|d| dir.path().join(d))
+            .collect();
         let refs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
         let found = find_other_installs(&path_of(&refs), &current, "1.0.31", |p| {
             if p == broken {

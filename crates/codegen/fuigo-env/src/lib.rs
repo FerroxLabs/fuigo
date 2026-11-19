@@ -261,8 +261,16 @@ mod tests {
     fn websocket_planes_have_no_default_endpoint() {
         let env = FuigoBuildEnvironment::Production;
         assert_eq!(env.relay_ws_url(), "", "relay must not default to a host");
-        assert_eq!(env.gateway_ws_url(), "", "gateway must not default to a host");
-        assert_eq!(env.asset_server_url(), "", "assets must not default to a host");
+        assert_eq!(
+            env.gateway_ws_url(),
+            "",
+            "gateway must not default to a host"
+        );
+        assert_eq!(
+            env.asset_server_url(),
+            "",
+            "assets must not default to a host"
+        );
         if !env.relay_ws_url().is_empty() {
             assert_ne!(env.relay_ws_url(), env.gateway_ws_url());
         }

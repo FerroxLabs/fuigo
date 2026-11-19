@@ -399,7 +399,7 @@ fn init_repo_on_branch(path: &Path, branch: &str) {
     let current = repo
         .head()
         .ok()
-        .and_then(|h| h.shorthand().map(str::to_string));
+        .and_then(|h| h.shorthand().ok().map(str::to_string));
     if current.as_deref() != Some(branch) {
         repo.branch(branch, &commit, true).unwrap();
         repo.set_head(&format!("refs/heads/{branch}")).unwrap();
@@ -732,8 +732,10 @@ fn test_effective_worktree_cwd_empty_offset() {
 
 #[test]
 fn test_effective_worktree_cwd_single_level_offset() {
-    let result =
-        effective_worktree_cwd("/home/user/.fuigo/worktrees/repo/ab-123-a", Path::new("src"));
+    let result = effective_worktree_cwd(
+        "/home/user/.fuigo/worktrees/repo/ab-123-a",
+        Path::new("src"),
+    );
     assert_eq!(result, "/home/user/.fuigo/worktrees/repo/ab-123-a/src");
 }
 
@@ -1592,7 +1594,10 @@ fn repo_with_uninitialised_submodule_worktree(
         ],
     );
     git(&repo, &["add", ".gitmodules", "tracked.txt"]);
-    git(&repo, &["commit", "-m", "initial with an uninitialised submodule"]);
+    git(
+        &repo,
+        &["commit", "-m", "initial with an uninitialised submodule"],
+    );
     let wt = temp.path().join("wt");
     fuigo_fast_worktree::WorktreeBuilder::new(&repo, &wt)
         .create()
@@ -1693,13 +1698,19 @@ fn initialised_submodule_checkout(temp: &tempfile::TempDir, linked: bool) -> std
     git_ok(&repo, &["init", "-b", "main"]);
     std::fs::write(repo.join("tracked.txt"), "original").unwrap();
     git_ok(&repo, &["add", "tracked.txt"]);
-    git_ok(&repo, &["submodule", "add", sub.to_str().unwrap(), "libs/sub"]);
+    git_ok(
+        &repo,
+        &["submodule", "add", sub.to_str().unwrap(), "libs/sub"],
+    );
     git_ok(&repo, &["commit", "-m", "initial with a submodule"]);
     if !linked {
         return repo;
     }
     let wt = temp.path().join("linked");
-    git_ok(&repo, &["worktree", "add", "--detach", wt.to_str().unwrap()]);
+    git_ok(
+        &repo,
+        &["worktree", "add", "--detach", wt.to_str().unwrap()],
+    );
     git_ok(&wt, &["submodule", "update", "--init"]);
     wt
 }

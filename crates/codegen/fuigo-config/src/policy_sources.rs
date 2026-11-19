@@ -249,7 +249,11 @@ fn read_layer_strict(
         Err(e) => return Some(Err(e.to_string())),
     };
     if !meta.is_file() {
-        return Some(Err(format!("{} is not a regular file ({})", path.display(), file_kind(&meta))));
+        return Some(Err(format!(
+            "{} is not a regular file ({})",
+            path.display(),
+            file_kind(&meta)
+        )));
     }
     // P169 (Grok 4.7 #5): an admin-path file a non-root user could have written is broken admin policy. Applied as a
     // (user-owned) layer, an emptied file would silently drop the org's rules; it fails closed instead.
@@ -292,7 +296,10 @@ fn read_layer_strict(
 /// P183 round 13 (Grok r9 M2): an ADMIN file that does not exist. A process that holds a validated copy of it keeps enforcing
 /// that copy ALONE (no lock-down: the file is gone, not broken, exactly what the requirements reader does for the same
 /// deletion); one that never saw the file has no policy to keep.
-fn absent_admin_layer(path: &Path, tier: PolicyLayerTier) -> Option<Result<serde_json::Value, String>> {
+fn absent_admin_layer(
+    path: &Path,
+    tier: PolicyLayerTier,
+) -> Option<Result<serde_json::Value, String>> {
     if tier.ownership() != PolicyLayerOwnership::Admin {
         return None;
     }
@@ -408,7 +415,8 @@ pub(crate) fn admin_object_trusted(
         dirs.push(real_parent);
     }
     for dir in dirs {
-        let dir_meta = std::fs::metadata(&dir).map_err(|e| format!("directory {} cannot be checked: {e}", dir.display()))?;
+        let dir_meta = std::fs::metadata(&dir)
+            .map_err(|e| format!("directory {} cannot be checked: {e}", dir.display()))?;
         if !dir_meta.is_dir() || !admin_owned(&dir_meta, admin_uid) {
             return Err(format!(
                 "its directory {} is not trusted: {}; expected a directory owned by root and not writable by group or others",
@@ -423,7 +431,11 @@ pub(crate) fn admin_object_trusted(
 #[cfg(unix)]
 fn owner_and_mode(meta: &std::fs::Metadata) -> String {
     use std::os::unix::fs::MetadataExt as _;
-    format!("owner uid {}, mode {:04o}", meta.uid(), meta.mode() & 0o7777)
+    format!(
+        "owner uid {}, mode {:04o}",
+        meta.uid(),
+        meta.mode() & 0o7777
+    )
 }
 
 #[cfg(not(unix))]
@@ -735,16 +747,22 @@ pub fn managed_hooks_only_pin() -> &'static PolicyPin {
 }
 
 fn managed_hooks_only_file_pin() -> &'static PolicyPin {
-    static CACHE: std::sync::Mutex<Option<(String, &'static PolicyPin)>> = std::sync::Mutex::new(None);
+    static CACHE: std::sync::Mutex<Option<(String, &'static PolicyPin)>> =
+        std::sync::Mutex::new(None);
     let sources = policy_sources();
     let key = format!("{sources:?}");
-    let mut guard = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((k, pin)) = guard.as_ref()
         && *k == key
     {
         return pin;
     }
-    let pin: &'static PolicyPin = Box::leak(Box::new(resolve_bool_pin(BoolPin::NonManagedHooks, &sources)));
+    let pin: &'static PolicyPin = Box::leak(Box::new(resolve_bool_pin(
+        BoolPin::NonManagedHooks,
+        &sources,
+    )));
     *guard = Some((key, pin));
     pin
 }

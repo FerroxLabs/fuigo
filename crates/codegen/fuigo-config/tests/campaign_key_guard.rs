@@ -12,8 +12,8 @@
 //! Same style as `fuigo-extra-ca/tests/identity_body_guard.rs`: a source scan, so a field added anywhere is seen.
 
 use fuigo_config::config_override::{
-    CAMPAIGN_ALLOW_PATHS, CAMPAIGN_MCP_SECRET_FIELDS, CAMPAIGN_STRIP_KEYS, CAMPAIGN_STRIP_PATHS, PATCH_STRIP_KEYS,
-    PATCH_STRIP_PATHS,
+    CAMPAIGN_ALLOW_PATHS, CAMPAIGN_MCP_SECRET_FIELDS, CAMPAIGN_STRIP_KEYS, CAMPAIGN_STRIP_PATHS,
+    PATCH_STRIP_KEYS, PATCH_STRIP_PATHS,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -22,39 +22,136 @@ use std::path::{Path, PathBuf};
 /// most of them: the allowlist (`CAMPAIGN_ALLOW_PATHS`) drops them before the merge, so this is the second layer. Only
 /// the `mcp_servers.*` fields below and `model.*.name` / `model.*.context_window` are reachable by a campaign.
 const CAMPAIGN_ALLOWED: &[(&str, &str)] = &[
-    ("announcements.cta.url", "a link shown in an announcement banner, opened only by the user; nothing is sent to it"),
-    ("compaction.memory_flush.soft_threshold_tokens", "a token count, not a credential"),
-    ("doom_loop_recovery.window_tokens", "a token count, not a credential"),
-    ("features.codebase_indexing", "a feature toggle (`base` is part of `codebase`)"),
-    ("mcp_servers.*.command", "a campaign may ADD a server; its command is a literal (never env-expanded) and an existing server is untouchable"),
-    ("mcp_servers.*.url", "a campaign may ADD a server; its url is a literal (never env-expanded) and carries no credential field"),
-    ("mcp_servers.*.urlTemplate", "alias of `url`: same reasoning"),
-    ("mcp_servers.*.url_template", "alias of `url`: same reasoning"),
-    ("mcp_servers.*.expose_image_base64", "a display toggle (`base` is part of `base64`)"),
-    ("mcp_servers.*.oauth_client_id", "a public OAuth client id; the flow needs the user's interactive consent and sends no stored credential"),
-    ("mcp_servers.*.oauth_scopes", "scope names for the interactive OAuth flow; no credential"),
-    ("model.*.auth_scheme", "how the user's own key is presented to the user's own host (host and key are stripped)"),
-    ("model.*.compaction_at_tokens", "a token count, not a credential"),
-    ("model.*.max_completion_tokens", "a token count, not a credential"),
-    ("models.max_completion_tokens", "a token count, not a credential"),
-    ("prompt_suggestions.max_output_tokens", "a token count, not a credential"),
-    ("session.load_envrc", "a toggle that evaluates the workspace `.envrc`; folder trust is the boundary for that code, as for the user's own setting"),
-    ("toolset.web_search.auth_scheme", "header scheme only; host, key and headers of this table are stripped"),
-    ("toolset.web_search.compaction_at_tokens", "a token count, not a credential"),
-    ("toolset.web_search.doom_loop_recovery.window_tokens", "a token count, not a credential"),
-    ("toolset.web_search.max_completion_tokens", "a token count, not a credential"),
-    ("ui.voice_keybind_enabled", "a keybinding toggle (`key` is part of `keybind`)"),
-    ("harness.block_for_upload", "whether exit waits for an upload already enabled elsewhere; enables nothing"),
-    ("harness.upload_flush_timeout_secs", "how long exit waits for that upload; enables nothing"),
+    (
+        "announcements.cta.url",
+        "a link shown in an announcement banner, opened only by the user; nothing is sent to it",
+    ),
+    (
+        "compaction.memory_flush.soft_threshold_tokens",
+        "a token count, not a credential",
+    ),
+    (
+        "doom_loop_recovery.window_tokens",
+        "a token count, not a credential",
+    ),
+    (
+        "features.codebase_indexing",
+        "a feature toggle (`base` is part of `codebase`)",
+    ),
+    (
+        "mcp_servers.*.command",
+        "a campaign may ADD a server; its command is a literal (never env-expanded) and an existing server is untouchable",
+    ),
+    (
+        "mcp_servers.*.url",
+        "a campaign may ADD a server; its url is a literal (never env-expanded) and carries no credential field",
+    ),
+    (
+        "mcp_servers.*.urlTemplate",
+        "alias of `url`: same reasoning",
+    ),
+    (
+        "mcp_servers.*.url_template",
+        "alias of `url`: same reasoning",
+    ),
+    (
+        "mcp_servers.*.expose_image_base64",
+        "a display toggle (`base` is part of `base64`)",
+    ),
+    (
+        "mcp_servers.*.oauth_client_id",
+        "a public OAuth client id; the flow needs the user's interactive consent and sends no stored credential",
+    ),
+    (
+        "mcp_servers.*.oauth_scopes",
+        "scope names for the interactive OAuth flow; no credential",
+    ),
+    (
+        "model.*.auth_scheme",
+        "how the user's own key is presented to the user's own host (host and key are stripped)",
+    ),
+    (
+        "model.*.compaction_at_tokens",
+        "a token count, not a credential",
+    ),
+    (
+        "model.*.max_completion_tokens",
+        "a token count, not a credential",
+    ),
+    (
+        "models.max_completion_tokens",
+        "a token count, not a credential",
+    ),
+    (
+        "prompt_suggestions.max_output_tokens",
+        "a token count, not a credential",
+    ),
+    (
+        "session.load_envrc",
+        "a toggle that evaluates the workspace `.envrc`; folder trust is the boundary for that code, as for the user's own setting",
+    ),
+    (
+        "toolset.web_search.auth_scheme",
+        "header scheme only; host, key and headers of this table are stripped",
+    ),
+    (
+        "toolset.web_search.compaction_at_tokens",
+        "a token count, not a credential",
+    ),
+    (
+        "toolset.web_search.doom_loop_recovery.window_tokens",
+        "a token count, not a credential",
+    ),
+    (
+        "toolset.web_search.max_completion_tokens",
+        "a token count, not a credential",
+    ),
+    (
+        "ui.voice_keybind_enabled",
+        "a keybinding toggle (`key` is part of `keybind`)",
+    ),
+    (
+        "harness.block_for_upload",
+        "whether exit waits for an upload already enabled elsewhere; enables nothing",
+    ),
+    (
+        "harness.upload_flush_timeout_secs",
+        "how long exit waits for that upload; enables nothing",
+    ),
 ];
 
 const PATTERNS: &[&str] = &[
-    "url", "uri", "endpoint", "host", "base", "proxy", "header", "token", "key", "secret", "password", "credential",
-    "auth", "cert", "env", "cmd", "command", "prefix", "exporter", "socket",
+    "url",
+    "uri",
+    "endpoint",
+    "host",
+    "base",
+    "proxy",
+    "header",
+    "token",
+    "key",
+    "secret",
+    "password",
+    "credential",
+    "auth",
+    "cert",
+    "env",
+    "cmd",
+    "command",
+    "prefix",
+    "exporter",
+    "socket",
     // Where code, instructions or updates are loaded from.
-    "registry", "installer", "dir", "paths",
+    "registry",
+    "installer",
+    "dir",
+    "paths",
     // What loads or runs, what leaves the machine, and how it is sent.
-    "definition", "discover", "sources", "upload", "transport",
+    "definition",
+    "discover",
+    "sources",
+    "upload",
+    "transport",
 ];
 
 fn matches_pattern(last: &str) -> bool {
@@ -132,7 +229,9 @@ fn split_top_level(body: &str) -> Vec<String> {
 }
 
 fn words(s: &str) -> Vec<&str> {
-    s.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).collect()
+    s.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect()
 }
 
 fn quoted_after<'a>(attr: &'a str, key: &str) -> Vec<&'a str> {
@@ -190,7 +289,10 @@ fn parse_fields(body: &str) -> Vec<Field> {
         let b = rest.as_bytes();
         let mut colon = None;
         for i in 0..b.len() {
-            if b[i] == b':' && (i + 1 >= b.len() || b[i + 1] != b':') && (i == 0 || b[i - 1] != b':') {
+            if b[i] == b':'
+                && (i + 1 >= b.len() || b[i + 1] != b':')
+                && (i == 0 || b[i - 1] != b':')
+            {
                 colon = Some(i);
                 break;
             }
@@ -202,13 +304,24 @@ fn parse_fields(body: &str) -> Vec<Field> {
         }
         let ty = rest[colon + 1..].trim().to_owned();
         let attr_words = words(&attrs);
-        if attr_words.iter().any(|w| *w == "skip" || *w == "skip_deserializing") {
+        if attr_words
+            .iter()
+            .any(|w| *w == "skip" || *w == "skip_deserializing")
+        {
             continue;
         }
         let renamed = quoted_after(&attrs, "rename");
-        let mut names = vec![renamed.first().map_or_else(|| name.to_owned(), |r| (*r).to_owned())];
+        let mut names = vec![
+            renamed
+                .first()
+                .map_or_else(|| name.to_owned(), |r| (*r).to_owned()),
+        ];
         names.extend(quoted_after(&attrs, "alias").into_iter().map(str::to_owned));
-        fields.push(Field { names, ty, flatten: attr_words.contains(&"flatten") });
+        fields.push(Field {
+            names,
+            ty,
+            flatten: attr_words.contains(&"flatten"),
+        });
     }
     fields
 }
@@ -228,7 +341,9 @@ fn scan_source(src: &str, defs: &mut HashMap<String, Vec<Def>>) {
                 continue;
             }
             let after = &src[from..];
-            let name_len = after.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(after.len());
+            let name_len = after
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
             let name = &after[..name_len];
             if name.is_empty() {
                 continue;
@@ -262,15 +377,20 @@ fn scan_source(src: &str, defs: &mut HashMap<String, Vec<Def>>) {
                 continue;
             }
             // Attributes sit between the previous item's end and this line.
-            let window_start = [src[..line_start].rfind("}\n"), src[..line_start].rfind(";\n")]
-                .into_iter()
-                .flatten()
-                .max()
-                .unwrap_or(0);
+            let window_start = [
+                src[..line_start].rfind("}\n"),
+                src[..line_start].rfind(";\n"),
+            ]
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap_or(0);
             if !src[window_start..at].contains("Deserialize") {
                 continue;
             }
-            let Some(close) = matching_brace(&src, j) else { continue };
+            let Some(close) = matching_brace(&src, j) else {
+                continue;
+            };
             let body = &src[j + 1..close];
             let is_enum = kw == "enum";
             let fields = if is_enum {
@@ -291,13 +411,17 @@ fn scan_source(src: &str, defs: &mut HashMap<String, Vec<Def>>) {
             } else {
                 parse_fields(body)
             };
-            defs.entry(name.to_owned()).or_default().push(Def { is_enum, fields });
+            defs.entry(name.to_owned())
+                .or_default()
+                .push(Def { is_enum, fields });
         }
     }
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -326,8 +450,10 @@ fn walk(
             continue;
         }
         for field in &def.fields {
-            let idents: Vec<&str> =
-                words(&field.ty).into_iter().filter(|w| defs.contains_key(*w) && !stack.iter().any(|s| s.as_str() == *w)).collect();
+            let idents: Vec<&str> = words(&field.ty)
+                .into_iter()
+                .filter(|w| defs.contains_key(*w) && !stack.iter().any(|s| s.as_str() == *w))
+                .collect();
             if field.flatten {
                 for t in idents {
                     stack.push(t.to_owned());
@@ -361,7 +487,11 @@ fn schema_keys() -> BTreeSet<String> {
     for krate in std::fs::read_dir(&codegen).expect("crates dir").flatten() {
         rust_sources(&krate.path().join("src"), &mut files);
     }
-    assert!(files.len() > 200, "source scan found only {} files; the guard cannot see the schema", files.len());
+    assert!(
+        files.len() > 200,
+        "source scan found only {} files; the guard cannot see the schema",
+        files.len()
+    );
     let mut defs: HashMap<String, Vec<Def>> = HashMap::new();
     for f in files {
         if let Ok(src) = std::fs::read_to_string(&f) {
@@ -372,7 +502,14 @@ fn schema_keys() -> BTreeSet<String> {
     let mut stack = vec!["Config".to_owned()];
     walk(&defs, "Config", &[], &mut stack, false, &mut out);
     let mut stack = vec!["ConfigModelOverride".to_owned()];
-    walk(&defs, "ConfigModelOverride", &["model".to_owned(), "*".to_owned()], &mut stack, false, &mut out);
+    walk(
+        &defs,
+        "ConfigModelOverride",
+        &["model".to_owned(), "*".to_owned()],
+        &mut stack,
+        false,
+        &mut out,
+    );
     out
 }
 
@@ -428,7 +565,10 @@ fn every_destination_credential_or_exec_key_is_classified_for_campaigns() {
         "shell_environment_policy",
         "endpoints.fuigo_api_base_url",
     ] {
-        assert!(keys.contains(known), "schema scan lost `{known}`: the scanner no longer sees the config structs");
+        assert!(
+            keys.contains(known),
+            "schema scan lost `{known}`: the scanner no longer sees the config structs"
+        );
     }
 
     let mut unclassified = Vec::new();
@@ -451,11 +591,21 @@ fn every_destination_credential_or_exec_key_is_classified_for_campaigns() {
          CAMPAIGN_STRIP_PATHS (it can send a credential or the user's content somewhere, or run something), or to \
          CAMPAIGN_ALLOWED in this test with a one-line reason (it cannot)."
     );
-    assert!(both.is_empty(), "config key(s) {both:?} are both stripped and listed in CAMPAIGN_ALLOWED: keep one");
+    assert!(
+        both.is_empty(),
+        "config key(s) {both:?} are both stripped and listed in CAMPAIGN_ALLOWED: keep one"
+    );
 
     // An allowed entry must still exist, so the list cannot rot.
-    let stale: Vec<&str> = CAMPAIGN_ALLOWED.iter().map(|(p, _)| *p).filter(|p| !keys.contains(*p)).collect();
-    assert!(stale.is_empty(), "CAMPAIGN_ALLOWED lists key(s) {stale:?} that are no longer in the config schema: remove them");
+    let stale: Vec<&str> = CAMPAIGN_ALLOWED
+        .iter()
+        .map(|(p, _)| *p)
+        .filter(|p| !keys.contains(*p))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "CAMPAIGN_ALLOWED lists key(s) {stale:?} that are no longer in the config schema: remove them"
+    );
 }
 
 /// review R3-4 / R4-4: the name-pattern scan above cannot see a SEMANTIC selector or toggle (`features.telemetry`,
@@ -536,10 +686,22 @@ fn security_relevant_selectors_and_toggles_are_stripped_from_campaigns() {
         .copied()
         .filter(|p| !CAMPAIGN_STRIP_PATHS.contains(p))
         .collect();
-    assert!(missing.is_empty(), "registered selector(s) {missing:?} are no longer in CAMPAIGN_STRIP_PATHS");
+    assert!(
+        missing.is_empty(),
+        "registered selector(s) {missing:?} are no longer in CAMPAIGN_STRIP_PATHS"
+    );
     // Each registered path really is removed from a patch (a `*` stands for one table key).
     for path in SECURITY_RELEVANT_STRIP_REGISTRY {
-        let segments: Vec<String> = path.split('.').map(|s| if s == "*" { "x".to_owned() } else { s.to_owned() }).collect();
+        let segments: Vec<String> = path
+            .split('.')
+            .map(|s| {
+                if s == "*" {
+                    "x".to_owned()
+                } else {
+                    s.to_owned()
+                }
+            })
+            .collect();
         let mut value = toml::Value::Boolean(true);
         for seg in segments.iter().rev() {
             let mut t = toml::Table::new();
@@ -548,7 +710,10 @@ fn security_relevant_selectors_and_toggles_are_stripped_from_campaigns() {
         }
         let mut patch = value.as_table().cloned().unwrap();
         fuigo_config::config_override::strip_campaign_paths(&mut patch);
-        assert!(patch.is_empty(), "campaign patch still carries `{path}`: {patch:?}");
+        assert!(
+            patch.is_empty(),
+            "campaign patch still carries `{path}`: {patch:?}"
+        );
     }
 }
 
@@ -557,24 +722,52 @@ fn security_relevant_selectors_and_toggles_are_stripped_from_campaigns() {
 /// or a local program, which is reported to the user and untrusted). `CAMPAIGN_ALLOW_PATHS` must equal this list: a path added there without a
 /// reviewed entry here fails, and so does a removal.
 const REVIEWED_CAMPAIGN_ALLOW_PATHS: &[(&str, &str)] = &[
-    ("models.default", "the soft default-model nudge, dismissed by a `/model` pick; string only"),
-    ("models.image_description", "helper-model nudge, resolved as a default, never as the user's choice; string only"),
-    ("models.session_summary", "helper-model nudge, resolved as a default, never as the user's choice; string only"),
-    ("model.*.name", "display name of a model; string only, route and credential keys stay stripped"),
-    ("model.*.context_window", "context size of a model; integer from 1024 to 10,000,000 only"),
-    ("mcp_servers", "a campaign may ADD a server: new names only, no secret fields, literal strings, marked untrusted"),
-    ("managed_mcps.enabled", "a campaign may only turn managed MCP servers OFF; `false` only"),
+    (
+        "models.default",
+        "the soft default-model nudge, dismissed by a `/model` pick; string only",
+    ),
+    (
+        "models.image_description",
+        "helper-model nudge, resolved as a default, never as the user's choice; string only",
+    ),
+    (
+        "models.session_summary",
+        "helper-model nudge, resolved as a default, never as the user's choice; string only",
+    ),
+    (
+        "model.*.name",
+        "display name of a model; string only, route and credential keys stay stripped",
+    ),
+    (
+        "model.*.context_window",
+        "context size of a model; integer from 1024 to 10,000,000 only",
+    ),
+    (
+        "mcp_servers",
+        "a campaign may ADD a server: new names only, no secret fields, literal strings, marked untrusted",
+    ),
+    (
+        "managed_mcps.enabled",
+        "a campaign may only turn managed MCP servers OFF; `false` only",
+    ),
 ];
 
 #[test]
 fn campaign_allow_paths_match_the_reviewed_list() {
     let listed: BTreeSet<String> = CAMPAIGN_ALLOW_PATHS.iter().map(|p| p.join(".")).collect();
-    let reviewed: BTreeSet<String> = REVIEWED_CAMPAIGN_ALLOW_PATHS.iter().map(|(p, _)| (*p).to_owned()).collect();
+    let reviewed: BTreeSet<String> = REVIEWED_CAMPAIGN_ALLOW_PATHS
+        .iter()
+        .map(|(p, _)| (*p).to_owned())
+        .collect();
     assert_eq!(
         listed, reviewed,
         "CAMPAIGN_ALLOW_PATHS changed: review each added path (it must be a key campaigns use that cannot send data to a \
          campaign-chosen destination, set a credential or widen a permission, with a value constraint where needed) and list it with its reason \
          in REVIEWED_CAMPAIGN_ALLOW_PATHS"
     );
-    assert_eq!(REVIEWED_CAMPAIGN_ALLOW_PATHS.len(), reviewed.len(), "duplicate entry in REVIEWED_CAMPAIGN_ALLOW_PATHS");
+    assert_eq!(
+        REVIEWED_CAMPAIGN_ALLOW_PATHS.len(),
+        reviewed.len(),
+        "duplicate entry in REVIEWED_CAMPAIGN_ALLOW_PATHS"
+    );
 }

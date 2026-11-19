@@ -250,9 +250,12 @@ fn u42_b23_unknown_reasoning_effort_reads_as_default_and_known_ones_still_parse(
     .unwrap();
     let obj = base.as_object_mut().unwrap();
     obj.insert("reasoning_effort".into(), serde_json::json!("ludicrous"));
-    let unknown: Summary = serde_json::from_value(base.clone()).expect("an unknown effort must not fail the summary");
+    let unknown: Summary =
+        serde_json::from_value(base.clone()).expect("an unknown effort must not fail the summary");
     assert_eq!(unknown.reasoning_effort, None);
-    base.as_object_mut().unwrap().insert("reasoning_effort".into(), serde_json::json!("high"));
+    base.as_object_mut()
+        .unwrap()
+        .insert("reasoning_effort".into(), serde_json::json!("high"));
     let known: Summary = serde_json::from_value(base.clone()).unwrap();
     assert_eq!(known.reasoning_effort, Some(ReasoningEffort::High));
     base.as_object_mut().unwrap().remove("reasoning_effort");

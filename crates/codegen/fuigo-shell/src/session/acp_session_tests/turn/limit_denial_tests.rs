@@ -21,7 +21,8 @@
 //! silently evicts another test's execution record from the process-global registry).
 
 use super::disk_full_tests::{
-    actor_with_mock_sampler, block_on_session, current_thread_local, run_prompt, spawn_persistence_stub,
+    actor_with_mock_sampler, block_on_session, current_thread_local, run_prompt,
+    spawn_persistence_stub,
 };
 use super::support::*;
 use super::*;
@@ -71,7 +72,9 @@ fn assert_denial_wire(err: &acp::Error, rule: ExecutionBudgetRule) -> ExecutionB
     assert_eq!(data["rule"], rule.id(), "{wire}");
     assert_eq!(data["remedy"], rule.remedy(), "{wire}");
     assert!(
-        data["message"].as_str().is_some_and(|m| m.contains(rule.id())),
+        data["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(rule.id())),
         "the human line names the rule: {wire}"
     );
     let denial = ExecutionBudgetDenial::from_acp_error(err)
@@ -294,7 +297,8 @@ async fn a_process_limit_refusal_ends_the_turn_as_that_limits_denial() {
         .run_until(async {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut actor = create_test_actor(50_000, 100_000, 85, gateway_tx, persistence_tx).await;
+            let mut actor =
+                create_test_actor(50_000, 100_000, 85, gateway_tx, persistence_tx).await;
             actor.session_info.id = acp::SessionId::new("p44-process-limit");
             let actor = std::sync::Arc::new(actor);
             let fail = |error: SamplingError| {
@@ -410,7 +414,10 @@ fn a_stop_hook_continuation_after_the_reserved_answer_is_the_call_limit_denial()
         });
     });
     let run = cell.lock().unwrap().take().expect("a result");
-    assert_eq!(run.model_requests, 1, "the reserved call answered; the continuation sent nothing");
+    assert_eq!(
+        run.model_requests, 1,
+        "the reserved call answered; the continuation sent nothing"
+    );
     let err = match &run.result {
         Err(err) => err,
         Ok(ok) => panic!("the call limit ended this turn: {:?}", ok.stop_reason),
@@ -445,7 +452,8 @@ fn run_completion_requirement_retries(run: &'static str, max_retries: u32) -> Li
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             spawn_persistence_stub(persistence_rx, || Ok(()));
             let actor =
-                actor_with_mock_sampler(&server, run, persistence_tx, gateway_tx, Some(4), None).await;
+                actor_with_mock_sampler(&server, run, persistence_tx, gateway_tx, Some(4), None)
+                    .await;
             *actor.agent.borrow_mut() =
                 test_agent_with_completion_requirement("never_called_tool", max_retries).await;
             // One model call: the turn loop reserves it for the final answer from the start.
@@ -479,7 +487,10 @@ fn run_completion_requirement_retries(run: &'static str, max_retries: u32) -> Li
 }
 
 fn assert_call_limit_denial_with_receipt(run: &LimitedRun) {
-    assert_eq!(run.model_requests, 1, "the reserved call answered; no retry sent anything");
+    assert_eq!(
+        run.model_requests, 1,
+        "the reserved call answered; no retry sent anything"
+    );
     let err = match &run.result {
         Err(err) => err,
         Ok(ok) => panic!("the call limit ended this turn: {:?}", ok.stop_reason),
@@ -497,5 +508,8 @@ fn a_completion_requirement_with_one_retry_ends_as_the_call_limit_denial() {
 
 #[test]
 fn a_completion_requirement_with_three_retries_ends_as_the_call_limit_denial() {
-    assert_call_limit_denial_with_receipt(&run_completion_requirement_retries("p195-retry-three", 3));
+    assert_call_limit_denial_with_receipt(&run_completion_requirement_retries(
+        "p195-retry-three",
+        3,
+    ));
 }

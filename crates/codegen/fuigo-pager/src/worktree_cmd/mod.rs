@@ -503,7 +503,10 @@ mod tests {
             let err = Cli::try_parse_from(args.clone())
                 .err()
                 .unwrap_or_else(|| panic!("{args:?} must be refused"));
-            assert!(err.to_string().contains("may not begin with '-'"), "{args:?}: {err}");
+            assert!(
+                err.to_string().contains("may not begin with '-'"),
+                "{args:?}: {err}"
+            );
         }
     }
     /// A-R8-3: `83112ed` converted this file's other renders to `data.message` and left the envelope

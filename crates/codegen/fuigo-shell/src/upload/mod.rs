@@ -15,8 +15,11 @@ pub fn install_upload_scrub() {
 pub mod gcs;
 pub(crate) mod manifest;
 pub(crate) mod memory;
-pub(crate) mod trace;
-pub(crate) mod turn;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod p71_gate_tests;
+pub(crate) mod trace;
+pub(crate) mod turn;

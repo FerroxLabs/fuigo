@@ -25,16 +25,16 @@ use super::active_message::ActiveMessageIngress;
 use super::admission::Admission;
 use super::coordinator_state::{
     ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, CompletedChild, ForegroundChild,
-    InternalEvent, ListRequest, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture,
-    active_summary, background_at_deadline, background_if_caller_gone, completed_snapshot,
-    completion_summary, hand_off_to_background, sleep_until, workflow_outstanding,
+    InternalEvent, ListRequest, PendingChild, ProgressFuture, ProgressTarget, ReplyFuture,
+    TaggedFuture, active_summary, background_at_deadline, background_if_caller_gone,
+    completed_snapshot, completion_summary, hand_off_to_background, sleep_until,
+    workflow_outstanding,
 };
 use super::types::{
     ActiveAgentMessageOutcome, HandedOffForegroundSubagent, SpawnedSubagentRef,
-    SubagentCancelOutcome, SubagentCancelTarget,
-    SubagentDescribeOutcome, SubagentEvent, SubagentOutstandingReply, SubagentRegistryCounts,
-    SubagentRequest, SubagentResult, SubagentResumeLookup, SubagentResumeSource,
-    SubagentValidateTypeOutcome,
+    SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent,
+    SubagentOutstandingReply, SubagentRegistryCounts, SubagentRequest, SubagentResult,
+    SubagentResumeLookup, SubagentResumeSource, SubagentValidateTypeOutcome,
 };
 use active_message::{
     ActiveChildGeneration, ActiveMessageFuture, ActiveMessageLifecycle, SpawnReadyMessages,
@@ -1557,7 +1557,10 @@ impl<R: ChildRunner> Drop for SubagentCoordinator<R> {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "coordinator_tests.rs"]
 mod tests;

@@ -196,7 +196,9 @@ fn write_mapping_no_follow(path: &Path, content: &str) -> std::io::Result<()> {
     }
     let file = opts.open(path)?;
     #[cfg(windows)]
-    if file.metadata()?.file_type().is_symlink() || std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+    if file.metadata()?.file_type().is_symlink()
+        || std::fs::symlink_metadata(path)?.file_type().is_symlink()
+    {
         return Err(std::io::Error::other("link"));
     }
     file.set_len(0)?;
@@ -347,9 +349,8 @@ fn classify_push_failure(failure: ExportGithubFailure) -> ExportGithubFailure {
 }
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String, ExportGithubFailure> {
-    let mut cmd = fuigo_tty_utils::git_command_in(dir).map_err(|e| {
-        ExportGithubFailure::new(ExportGithubError::GitFailed, e.to_string())
-    })?;
+    let mut cmd = fuigo_tty_utils::git_command_in(dir)
+        .map_err(|e| ExportGithubFailure::new(ExportGithubError::GitFailed, e.to_string()))?;
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_AUTHOR_NAME", AUTHOR_NAME)
         .env("GIT_AUTHOR_EMAIL", AUTHOR_EMAIL)
@@ -456,9 +457,18 @@ mod tests {
         std::fs::write(outside.join("mapping"), "attacker/repo\n").unwrap();
         std::os::unix::fs::symlink(outside.join("mapping"), mapping_file_path(&project)).unwrap();
         let err = resolve_repo_mapping(&project, None).unwrap_err();
-        assert!(matches!(err.kind, ExportGithubError::RepoNotSpecified), "outside mapping must not name the push target");
-        assert!(resolve_repo_mapping(&project, Some("user/app")).is_err(), "never write through the link");
-        assert_eq!(std::fs::read_to_string(outside.join("mapping")).unwrap(), "attacker/repo\n");
+        assert!(
+            matches!(err.kind, ExportGithubError::RepoNotSpecified),
+            "outside mapping must not name the push target"
+        );
+        assert!(
+            resolve_repo_mapping(&project, Some("user/app")).is_err(),
+            "never write through the link"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("mapping")).unwrap(),
+            "attacker/repo\n"
+        );
     }
 
     #[tokio::test]

@@ -6,8 +6,17 @@ use super::p166_r13b_branch_tests::{git, hub_prompts, real_repo};
 use std::path::Path;
 
 fn git_out(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git").current_dir(dir).args(args).env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
@@ -31,7 +40,14 @@ fn repo_with_upstream() -> (tempfile::TempDir, String) {
     git(dir, &["checkout", "-q", "main"]);
     git(dir, &["branch", "-q", "-D", "up"]);
     git(dir, &["config", "remote.origin.url", "."]);
-    git(dir, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    git(
+        dir,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    );
     git(dir, &["config", "branch.main.remote", "origin"]);
     git(dir, &["config", "branch.main.merge", "refs/heads/up"]);
     (repo, tree)
@@ -43,12 +59,21 @@ fn repo_with_upstream() -> (tempfile::TempDir, String) {
 fn p175_item1_optional_tree_that_cannot_be_listed_keeps_the_floor() {
     let (repo, tree) = repo_with_upstream();
     let dir = repo.path();
-    assert!(hub_prompts("git pull", dir), "listable upstream tree tracks .mcp.json");
+    assert!(
+        hub_prompts("git pull", dir),
+        "listable upstream tree tracks .mcp.json"
+    );
     delete_loose_object(dir, &tree);
-    assert!(hub_prompts("git pull", dir), "upstream listing failed: undetermined, floor kept");
+    assert!(
+        hub_prompts("git pull", dir),
+        "upstream listing failed: undetermined, floor kept"
+    );
     // A pull whose optional tree really does not exist is still cleared.
     let plain = real_repo(&[]);
-    assert!(!hub_prompts("git pull", plain.path()), "no upstream: optional tree not present, skipped");
+    assert!(
+        !hub_prompts("git pull", plain.path()),
+        "no upstream: optional tree not present, skipped"
+    );
 }
 
 /// Item 1, stash flavour: `stash^3` (untracked files) cannot be listed.
@@ -59,9 +84,15 @@ fn p175_item1_stash_untracked_tree_that_cannot_be_listed_keeps_the_floor() {
     std::fs::write(dir.join(".mcp.json"), "{}").unwrap();
     git(dir, &["stash", "push", "-q", "-u"]);
     let tree = git_out(dir, &["rev-parse", "stash@{0}^3^{tree}"]);
-    assert!(hub_prompts("git stash pop", dir), "untracked part of the stash tracks .mcp.json");
+    assert!(
+        hub_prompts("git stash pop", dir),
+        "untracked part of the stash tracks .mcp.json"
+    );
     delete_loose_object(dir, &tree);
-    assert!(hub_prompts("git stash pop", dir), "stash^3 listing failed: floor kept");
+    assert!(
+        hub_prompts("git stash pop", dir),
+        "stash^3 listing failed: floor kept"
+    );
 }
 
 /// Item 2: a partial clone whose promisor remote would run a program if contacted. The check must fail instead
@@ -86,36 +117,65 @@ fn p175_item2_partial_clone_check_never_contacts_the_promisor_remote() {
     git(&src, &["checkout", "-q", "main"]);
     let dst = scratch.path().join("dst");
     let url = format!("file://{}", src.display());
-    git(scratch.path(), &["clone", "-q", "--filter=tree:0", &url, "dst"]);
+    git(
+        scratch.path(),
+        &["clone", "-q", "--filter=tree:0", &url, "dst"],
+    );
     // Control: main's trees were fetched by the clone's checkout, so no remote is needed.
-    assert!(!hub_prompts("git checkout main", &dst), "partial clone, trees present: cleared");
+    assert!(
+        !hub_prompts("git checkout main", &dst),
+        "partial clone, trees present: cleared"
+    );
     // Now the promisor remote is a program that leaves a marker.
     let marker = scratch.path().join("marker");
     let prog = scratch.path().join("remote.sh");
-    std::fs::write(&prog, format!("#!/bin/sh\ntouch {}\nexit 1\n", marker.display())).unwrap();
+    std::fs::write(
+        &prog,
+        format!("#!/bin/sh\ntouch {}\nexit 1\n", marker.display()),
+    )
+    .unwrap();
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    git(&dst, &["config", "remote.origin.url", &format!("ext::{}", prog.display())]);
+    git(
+        &dst,
+        &[
+            "config",
+            "remote.origin.url",
+            &format!("ext::{}", prog.display()),
+        ],
+    );
     git(&dst, &["config", "protocol.ext.allow", "always"]);
     // The listing child itself (the hub path flags the repository's `protocol.ext.allow` as ambient config and prompts
     // before any probe, so the probe is driven directly here).
     let plan = crate::permission::exec_risk::branch_switch_plan(
-        &[vec!["git".to_owned(), "checkout".to_owned(), "origin/feature".to_owned()]],
+        &[vec![
+            "git".to_owned(),
+            "checkout".to_owned(),
+            "origin/feature".to_owned(),
+        ]],
         &dst,
     );
     assert!(
-        crate::permission::branch_switch::plan_keeps_floor(&plan, &crate::permission::branch_switch::GitTreeLister),
+        crate::permission::branch_switch::plan_keeps_floor(
+            &plan,
+            &crate::permission::branch_switch::GitTreeLister
+        ),
         "missing tree: undetermined, floor kept"
     );
-    assert!(hub_prompts("git checkout origin/feature", &dst), "hub path: floor kept");
+    assert!(
+        hub_prompts("git checkout origin/feature", &dst),
+        "hub path: floor kept"
+    );
     assert!(!marker.exists(), "the check contacted the promisor remote");
 }
 
 /// A clone of `src_files`' repository (branch `feature` tracks `feature_files`), so that `feature` exists only as
 /// `refs/remotes/origin/feature` in the clone.
-fn clone_with_remote_only_feature(feature_files: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
+fn clone_with_remote_only_feature(
+    feature_files: &[&str],
+) -> (tempfile::TempDir, std::path::PathBuf) {
     let scratch = tempfile::tempdir().unwrap();
     let src = scratch.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -131,7 +191,10 @@ fn clone_with_remote_only_feature(feature_files: &[&str]) -> (tempfile::TempDir,
     git(&src, &["add", "-A"]);
     git(&src, &["commit", "-q", "-m", "feature"]);
     git(&src, &["checkout", "-q", "main"]);
-    git(scratch.path(), &["clone", "-q", &format!("file://{}", src.display()), "dst"]);
+    git(
+        scratch.path(),
+        &["clone", "-q", &format!("file://{}", src.display()), "dst"],
+    );
     let dst = scratch.path().join("dst");
     (scratch, dst)
 }
@@ -140,16 +203,28 @@ fn clone_with_remote_only_feature(feature_files: &[&str]) -> (tempfile::TempDir,
 #[test]
 fn p175_item3_remote_only_branch_is_judged_by_its_remote_tracking_tree() {
     let (_keep, clean) = clone_with_remote_only_feature(&[]);
-    assert!(!hub_prompts("git checkout feature", &clean), "clean remote-only branch: cleared");
+    assert!(
+        !hub_prompts("git checkout feature", &clean),
+        "clean remote-only branch: cleared"
+    );
     assert!(!hub_prompts("git switch feature", &clean));
     let (_keep2, risky) = clone_with_remote_only_feature(&[".mcp.json"]);
-    assert!(hub_prompts("git checkout feature", &risky), "remote-only branch tracks .mcp.json");
+    assert!(
+        hub_prompts("git checkout feature", &risky),
+        "remote-only branch tracks .mcp.json"
+    );
     // No such branch anywhere: undetermined.
     assert!(hub_prompts("git checkout nosuch", &clean));
     // Two remotes with the same short name: git would need checkout.defaultRemote; undetermined.
     let origin_feature = git_out(&clean, &["rev-parse", "refs/remotes/origin/feature"]);
-    git(&clean, &["update-ref", "refs/remotes/other/feature", &origin_feature]);
-    assert!(hub_prompts("git checkout feature", &clean), "ambiguous remote-tracking name");
+    git(
+        &clean,
+        &["update-ref", "refs/remotes/other/feature", &origin_feature],
+    );
+    assert!(
+        hub_prompts("git checkout feature", &clean),
+        "ambiguous remote-tracking name"
+    );
 }
 
 /// Item 4d: `git stash pop|apply` when no stash exists rewrites nothing (git errors out): cleared, also where a
@@ -158,9 +233,19 @@ fn p175_item3_remote_only_branch_is_judged_by_its_remote_tracking_tree() {
 fn p175_item4d_stash_pop_without_a_stash_is_not_applicable() {
     let none = real_repo(&[]);
     let tracked = real_repo(&[".mcp.json"]);
-    for cmd in ["git stash pop", "git stash apply", "git stash pop stash@{3}"] {
-        assert!(!hub_prompts(cmd, none.path()), "{cmd}: no stash, clean repo");
-        assert!(!hub_prompts(cmd, tracked.path()), "{cmd}: no stash, nothing can be rewritten");
+    for cmd in [
+        "git stash pop",
+        "git stash apply",
+        "git stash pop stash@{3}",
+    ] {
+        assert!(
+            !hub_prompts(cmd, none.path()),
+            "{cmd}: no stash, clean repo"
+        );
+        assert!(
+            !hub_prompts(cmd, tracked.path()),
+            "{cmd}: no stash, nothing can be rewritten"
+        );
     }
 }
 
@@ -171,9 +256,18 @@ fn p175_item4e_new_branch_at_a_start_point_probes_head_and_start() {
     assert!(!hub_prompts("git checkout -b new origin/main", &clean));
     assert!(!hub_prompts("git switch -c new origin/feature", &clean));
     let (_keep2, risky) = clone_with_remote_only_feature(&[".mcp.json"]);
-    assert!(hub_prompts("git checkout -b new origin/feature", &risky), "start point tracks .mcp.json");
-    assert!(hub_prompts("git switch -c new nosuchstart", &risky), "start point unresolved");
-    assert!(!hub_prompts("git switch -c new", &risky), "new branch at HEAD still rewrites nothing");
+    assert!(
+        hub_prompts("git checkout -b new origin/feature", &risky),
+        "start point tracks .mcp.json"
+    );
+    assert!(
+        hub_prompts("git switch -c new nosuchstart", &risky),
+        "start point unresolved"
+    );
+    assert!(
+        !hub_prompts("git switch -c new", &risky),
+        "new branch at HEAD still rewrites nothing"
+    );
 }
 
 /// Item 4f: an unborn HEAD with a resolvable target probes only the target; a bare repository has no working tree.
@@ -182,23 +276,43 @@ fn p175_item4f_unborn_head_and_bare_repository() {
     for (files, expect_prompt) in [(&[][..], false), (&[".mcp.json"][..], true)] {
         let repo = real_repo(files);
         git(repo.path(), &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
-        assert_eq!(hub_prompts("git checkout main", repo.path()), expect_prompt, "unborn HEAD, files {files:?}");
+        assert_eq!(
+            hub_prompts("git checkout main", repo.path()),
+            expect_prompt,
+            "unborn HEAD, files {files:?}"
+        );
     }
     let (_keep, clone) = clone_with_remote_only_feature(&[".mcp.json"]);
     let bare = clone.parent().unwrap().join("bare.git");
-    git(clone.parent().unwrap(), &["clone", "-q", "--bare", clone.to_str().unwrap(), "bare.git"]);
-    assert!(!hub_prompts("git checkout main", &bare), "bare repository: nothing to rewrite");
+    git(
+        clone.parent().unwrap(),
+        &["clone", "-q", "--bare", clone.to_str().unwrap(), "bare.git"],
+    );
+    assert!(
+        !hub_prompts("git checkout main", &bare),
+        "bare repository: nothing to rewrite"
+    );
 }
 
 /// Item 4a: an earlier segment that can move refs makes the probe stale: undetermined.
 #[test]
 fn p175_item4a_earlier_ref_moving_segment_is_undetermined() {
     let repo = real_repo(&[]);
-    for cmd in ["git fetch origin && git checkout main", "git pull; git checkout main", "git remote update && git checkout main"] {
+    for cmd in [
+        "git fetch origin && git checkout main",
+        "git pull; git checkout main",
+        "git remote update && git checkout main",
+    ] {
         assert!(hub_prompts(cmd, repo.path()), "{cmd}");
     }
-    for cmd in ["git status && git checkout main", "git log && git checkout main"] {
-        assert!(!hub_prompts(cmd, repo.path()), "{cmd}: read-only earlier segment");
+    for cmd in [
+        "git status && git checkout main",
+        "git log && git checkout main",
+    ] {
+        assert!(
+            !hub_prompts(cmd, repo.path()),
+            "{cmd}: read-only earlier segment"
+        );
     }
 }
 
@@ -218,25 +332,49 @@ fn p175_item4c_replace_refs_do_not_hide_the_real_tree() {
     let twin = git_out(dir, &["rev-parse", "HEAD"]);
     git(dir, &["checkout", "-q", "main"]);
     git(dir, &["replace", &risky, &twin]);
-    assert!(hub_prompts("git checkout risky", dir), "the real tree of risky tracks .mcp.json");
+    assert!(
+        hub_prompts("git checkout risky", dir),
+        "the real tree of risky tracks .mcp.json"
+    );
 }
 
 /// The listing child's guards: the lazy-fetch switch, an empty protocol allow-list and every transport denied.
 #[test]
 fn p175_item2_hardened_command_denies_lazy_fetch_and_every_transport() {
-    let command = crate::permission::branch_switch::hardened_git_command(Path::new("/"), &["rev-parse", "HEAD"])
-        .expect("test builds allow without a judge");
+    let command = crate::permission::branch_switch::hardened_git_command(
+        Path::new("/"),
+        &["rev-parse", "HEAD"],
+    )
+    .expect("test builds allow without a judge");
     let env: Vec<(String, Option<String>)> = command
         .get_envs()
-        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
         .collect();
-    let has = |k: &str, v: &str| env.iter().any(|(key, val)| key == k && val.as_deref() == Some(v));
+    let has = |k: &str, v: &str| {
+        env.iter()
+            .any(|(key, val)| key == k && val.as_deref() == Some(v))
+    };
     assert!(has("GIT_NO_LAZY_FETCH", "1"), "git 2.45+ lazy-fetch switch");
-    assert!(has("GIT_ALLOW_PROTOCOL", ""), "empty allow-list: no transport");
-    let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert!(
+        has("GIT_ALLOW_PROTOCOL", ""),
+        "empty allow-list: no transport"
+    );
+    let args: Vec<String> = command
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     assert!(args.iter().any(|a| a == "protocol.allow=never"));
     for name in ["file", "git", "ssh", "http", "https", "ext"] {
-        assert!(args.iter().any(|a| *a == format!("protocol.{name}.allow=never")), "{name}");
+        assert!(
+            args.iter()
+                .any(|a| *a == format!("protocol.{name}.allow=never")),
+            "{name}"
+        );
     }
 }
 
@@ -263,7 +401,10 @@ fn p175_false_positive_table() {
     ];
     let mut wrong = Vec::new();
     for (cmd, a, b) in rows {
-        let (x, y) = (hub_prompts(cmd, none.path()), hub_prompts(cmd, tracked.path()));
+        let (x, y) = (
+            hub_prompts(cmd, none.path()),
+            hub_prompts(cmd, tracked.path()),
+        );
         eprintln!("FP175 {cmd} => none={x} tracked={y}");
         if (x, y) != (a, b) {
             wrong.push(format!("{cmd}: none={x} tracked={y}, expected {a}/{b}"));
@@ -275,20 +416,37 @@ fn p175_false_positive_table() {
 // ---- Problem 1: child count -------------------------------------------------------------------------------------
 
 fn plan_for(cmds: &[&str], cwd: &Path) -> crate::permission::branch_switch::BranchSwitchPlan {
-    let raw: Vec<Vec<String>> = cmds.iter().map(|c| c.split_whitespace().map(str::to_owned).collect()).collect();
+    let raw: Vec<Vec<String>> = cmds
+        .iter()
+        .map(|c| c.split_whitespace().map(str::to_owned).collect())
+        .collect();
     crate::permission::exec_risk::branch_switch_plan(&raw, cwd)
 }
 
 /// (keeps floor, git children spawned for `cwd`, listing children among them).
 fn run_counted(cmds: &[&str], cwd: &Path) -> (bool, usize, usize) {
     let plan = plan_for(cmds, cwd);
-    let before = crate::permission::branch_switch::SPAWNED.lock().unwrap().len();
+    let before = crate::permission::branch_switch::SPAWNED
+        .lock()
+        .unwrap()
+        .len();
     let started = std::time::Instant::now();
-    let keeps = crate::permission::branch_switch::plan_keeps_floor(&plan, &crate::permission::branch_switch::GitTreeLister);
+    let keeps = crate::permission::branch_switch::plan_keeps_floor(
+        &plan,
+        &crate::permission::branch_switch::GitTreeLister,
+    );
     eprintln!("P175 check {cmds:?} took {:?}", started.elapsed());
     let log = crate::permission::branch_switch::SPAWNED.lock().unwrap();
-    let mine: Vec<&Vec<String>> = log.iter().skip(before).filter(|(dir, _)| dir == cwd).map(|(_, args)| args).collect();
-    let listings = mine.iter().filter(|a| a.iter().any(|x| x == "ls-tree" || x == "ls-files")).count();
+    let mine: Vec<&Vec<String>> = log
+        .iter()
+        .skip(before)
+        .filter(|(dir, _)| dir == cwd)
+        .map(|(_, args)| args)
+        .collect();
+    let listings = mine
+        .iter()
+        .filter(|a| a.iter().any(|x| x == "ls-tree" || x == "ls-files"))
+        .count();
     (keeps, mine.len(), listings)
 }
 
@@ -322,7 +480,9 @@ fn repo_with_gitmodules() -> tempfile::TempDir {
 
 fn config_children(dir: &Path) -> usize {
     let log = crate::permission::branch_switch::SPAWNED.lock().unwrap();
-    log.iter().filter(|(d, a)| d == dir && a.iter().any(|x| x == "config")).count()
+    log.iter()
+        .filter(|(d, a)| d == dir && a.iter().any(|x| x == "config"))
+        .count()
 }
 
 #[test]
@@ -342,14 +502,26 @@ fn p175_item4b_submodule_recursion_flag_is_undetermined() {
 fn p175_item4b_local_config_recursion_keeps_the_floor() {
     let repo = repo_with_gitmodules();
     let dir = repo.path();
-    assert!(!hub_prompts("git checkout feature", dir), "no recursion configured");
+    assert!(
+        !hub_prompts("git checkout feature", dir),
+        "no recursion configured"
+    );
     git(dir, &["config", "submodule.recurse", "true"]);
-    assert!(hub_prompts("git checkout feature", dir), "submodule.recurse=true");
+    assert!(
+        hub_prompts("git checkout feature", dir),
+        "submodule.recurse=true"
+    );
     git(dir, &["config", "--unset", "submodule.recurse"]);
     git(dir, &["config", "checkout.recurseSubmodules", "true"]);
-    assert!(hub_prompts("git checkout feature", dir), "checkout.recurseSubmodules=true");
+    assert!(
+        hub_prompts("git checkout feature", dir),
+        "checkout.recurseSubmodules=true"
+    );
     git(dir, &["config", "checkout.recurseSubmodules", "false"]);
-    assert!(!hub_prompts("git checkout feature", dir), "explicitly false");
+    assert!(
+        !hub_prompts("git checkout feature", dir),
+        "explicitly false"
+    );
 }
 
 /// The global config is visible to the one config child, through a fixture HOME.
@@ -357,14 +529,24 @@ fn p175_item4b_local_config_recursion_keeps_the_floor() {
 fn p175_item4b_global_config_recursion_keeps_the_floor() {
     let repo = repo_with_gitmodules();
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join(".gitconfig"), "[submodule]\n\trecurse = true\n").unwrap();
+    std::fs::write(
+        home.path().join(".gitconfig"),
+        "[submodule]\n\trecurse = true\n",
+    )
+    .unwrap();
     assert_eq!(
-        crate::permission::branch_switch::submodule_recursion_with_home(repo.path(), Some(home.path().as_os_str())),
+        crate::permission::branch_switch::submodule_recursion_with_home(
+            repo.path(),
+            Some(home.path().as_os_str())
+        ),
         Some(true)
     );
     let clean_home = tempfile::tempdir().unwrap();
     assert_eq!(
-        crate::permission::branch_switch::submodule_recursion_with_home(repo.path(), Some(clean_home.path().as_os_str())),
+        crate::permission::branch_switch::submodule_recursion_with_home(
+            repo.path(),
+            Some(clean_home.path().as_os_str())
+        ),
         Some(false)
     );
     // End to end: a lister whose config child sees the fixture HOME.
@@ -383,13 +565,22 @@ fn p175_item4b_global_config_recursion_keeps_the_floor() {
             crate::permission::branch_switch::GitTreeLister.resolve_probe(probe)
         }
         fn submodule_recursion(&self, cwd: &Path) -> Option<bool> {
-            crate::permission::branch_switch::submodule_recursion_with_home(cwd, Some(self.0.as_os_str()))
+            crate::permission::branch_switch::submodule_recursion_with_home(
+                cwd,
+                Some(self.0.as_os_str()),
+            )
         }
     }
     use crate::permission::branch_switch::TreeLister as _;
     let plan = plan_for(&["git checkout feature"], repo.path());
-    assert!(crate::permission::branch_switch::plan_keeps_floor(&plan, &WithHome(home.path().to_path_buf())));
-    assert!(!crate::permission::branch_switch::plan_keeps_floor(&plan, &WithHome(clean_home.path().to_path_buf())));
+    assert!(crate::permission::branch_switch::plan_keeps_floor(
+        &plan,
+        &WithHome(home.path().to_path_buf())
+    ));
+    assert!(!crate::permission::branch_switch::plan_keeps_floor(
+        &plan,
+        &WithHome(clean_home.path().to_path_buf())
+    ));
 }
 
 #[test]
@@ -398,10 +589,18 @@ fn p175_item4b_no_gitmodules_means_no_config_child() {
     git(repo.path(), &["branch", "feature"]);
     let (keeps, _, _) = run_counted(&["git checkout feature"], repo.path());
     assert!(!keeps);
-    assert_eq!(config_children(repo.path()), 0, "no .gitmodules: nothing read");
+    assert_eq!(
+        config_children(repo.path()),
+        0,
+        "no .gitmodules: nothing read"
+    );
     let with = repo_with_gitmodules();
     let (_, _, _) = run_counted(&["git checkout feature"], with.path());
-    assert_eq!(config_children(with.path()), 1, "a .gitmodules at the top: one config child");
+    assert_eq!(
+        config_children(with.path()),
+        1,
+        "a .gitmodules at the top: one config child"
+    );
 }
 
 // ---- Earlier-segment verb rule ----------------------------------------------------------------------------------
@@ -434,7 +633,17 @@ fn p175_r2_add_force_spellings_keep_the_floor() {
     git(dir, &["branch", "other"]);
     std::fs::write(dir.join(".gitignore"), ".mcp.json\n").unwrap();
     std::fs::write(dir.join(".mcp.json"), "{}").unwrap();
-    for spelling in ["-f", "--force", "--force=true", "--force=yes", "--forc", "--for", "--fo", "--f", "-Af"] {
+    for spelling in [
+        "-f",
+        "--force",
+        "--force=true",
+        "--force=yes",
+        "--forc",
+        "--for",
+        "--fo",
+        "--f",
+        "-Af",
+    ] {
         let cmd = format!("git add {spelling} .mcp.json && git commit -m x && git checkout other");
         assert!(hub_prompts(&cmd, dir), "{cmd}");
     }
@@ -443,11 +652,35 @@ fn p175_r2_add_force_spellings_keep_the_floor() {
 #[test]
 fn p175_r2_add_force_detector_unit() {
     let v = |s: &[&str]| s.iter().map(|a| a.to_string()).collect::<Vec<_>>();
-    for yes in ["--f", "--fo", "--for", "--forc", "--force", "--force=true", "--for=yes", "-f", "-Af"] {
-        assert!(super::super::exec_risk::git_add_is_force_for_tests(&v(&[yes, "x"])), "{yes}");
+    for yes in [
+        "--f",
+        "--fo",
+        "--for",
+        "--forc",
+        "--force",
+        "--force=true",
+        "--for=yes",
+        "-f",
+        "-Af",
+    ] {
+        assert!(
+            super::super::exec_risk::git_add_is_force_for_tests(&v(&[yes, "x"])),
+            "{yes}"
+        );
     }
-    for no in ["--no-ignore-removal", "--ignore-removal", "--all", "-A", "-n", "--dry-run", "--intent-to-add"] {
-        assert!(!super::super::exec_risk::git_add_is_force_for_tests(&v(&[no, "x"])), "{no}");
+    for no in [
+        "--no-ignore-removal",
+        "--ignore-removal",
+        "--all",
+        "-A",
+        "-n",
+        "--dry-run",
+        "--intent-to-add",
+    ] {
+        assert!(
+            !super::super::exec_risk::git_add_is_force_for_tests(&v(&[no, "x"])),
+            "{no}"
+        );
     }
 }
 
@@ -498,13 +731,37 @@ fn p175_r2_readonly_listing_forms_do_not_unsettle() {
     let dir = repo.path();
     git(dir, &["branch", "feature"]);
     for pre in [
-        "git branch", "git branch --list", "git branch -l", "git branch -a", "git branch -r", "git branch -v", "git branch -vv",
-        "git branch -avv", "git branch --show-current", "git branch --contains HEAD", "git branch --merged", "git branch --no-merged main",
-        "git branch --format='%(refname)'", "git branch --format '%(refname)'", "git branch --sort=-committerdate", "git branch --color",
-        "git tag", "git tag -l", "git tag --list", "git tag -n", "git tag -n5",
-        "git reflog", "git reflog show",
-        "git reflog main", "git reflog show main", "git reflog HEAD", "git reflog show HEAD", "git tag -ln", "git tag -nl",
-        "git tag -ln5", "git tag -n3",
+        "git branch",
+        "git branch --list",
+        "git branch -l",
+        "git branch -a",
+        "git branch -r",
+        "git branch -v",
+        "git branch -vv",
+        "git branch -avv",
+        "git branch --show-current",
+        "git branch --contains HEAD",
+        "git branch --merged",
+        "git branch --no-merged main",
+        "git branch --format='%(refname)'",
+        "git branch --format '%(refname)'",
+        "git branch --sort=-committerdate",
+        "git branch --color",
+        "git tag",
+        "git tag -l",
+        "git tag --list",
+        "git tag -n",
+        "git tag -n5",
+        "git reflog",
+        "git reflog show",
+        "git reflog main",
+        "git reflog show main",
+        "git reflog HEAD",
+        "git reflog show HEAD",
+        "git tag -ln",
+        "git tag -nl",
+        "git tag -ln5",
+        "git tag -n3",
     ] {
         let cmd = format!("{pre} && git checkout feature");
         assert!(!hub_prompts(&cmd, dir), "{cmd}");
@@ -523,23 +780,52 @@ fn p175_r3_mutating_forms_make_the_plan_undetermined() {
     use crate::permission::branch_switch::BranchSwitchPlan;
     let dir = tempfile::tempdir().unwrap();
     for pre in [
-        "git branch -d x", "git branch -m a b", "git branch -c a b", "git branch new", "git branch -f main x",
-        "git branch --set-upstream-to=o/m", "git tag -d v1", "git tag v1", "git reflog expire --all",
-        "git reflog delete main@{0}", "git tag -a v1", "git reflog drop",
+        "git branch -d x",
+        "git branch -m a b",
+        "git branch -c a b",
+        "git branch new",
+        "git branch -f main x",
+        "git branch --set-upstream-to=o/m",
+        "git tag -d v1",
+        "git tag v1",
+        "git reflog expire --all",
+        "git reflog delete main@{0}",
+        "git tag -a v1",
+        "git reflog drop",
     ] {
         let plan = plan_for(&[pre, "git checkout main"], dir.path());
         assert_eq!(plan, BranchSwitchPlan::Undetermined, "{pre}");
     }
-    for pre in ["git branch", "git branch -l", "git tag -ln", "git tag -n3", "git reflog main", "git reflog show main"] {
+    for pre in [
+        "git branch",
+        "git branch -l",
+        "git tag -ln",
+        "git tag -n3",
+        "git reflog main",
+        "git reflog show main",
+    ] {
         let plan = plan_for(&[pre, "git checkout main"], dir.path());
         assert_ne!(plan, BranchSwitchPlan::Undetermined, "{pre}");
     }
     // Reflog forms that are not a listing: flags and subcommand names in the revision slot.
-    for pre in ["git reflog -p", "git reflog --all", "git reflog show -p", "git reflog exists main", "git reflog show expire"] {
+    for pre in [
+        "git reflog -p",
+        "git reflog --all",
+        "git reflog show -p",
+        "git reflog exists main",
+        "git reflog show expire",
+    ] {
         let plan = plan_for(&[pre, "git checkout main"], dir.path());
         assert_eq!(plan, BranchSwitchPlan::Undetermined, "{pre}");
     }
-    for pre in ["git tag -d", "git tag -a", "git tag -f", "git tag -s", "git tag -m", "git tag -dn"] {
+    for pre in [
+        "git tag -d",
+        "git tag -a",
+        "git tag -f",
+        "git tag -s",
+        "git tag -m",
+        "git tag -dn",
+    ] {
         let plan = plan_for(&[pre, "git checkout main"], dir.path());
         assert_eq!(plan, BranchSwitchPlan::Undetermined, "{pre}");
     }
@@ -555,9 +841,23 @@ fn p175_r2_mutating_forms_stay_unsettled() {
     git(dir, &["commit", "-q", "-m", "mcp"]);
     git(dir, &["branch", "tracked"]);
     for pre in [
-        "git branch -f main x", "git branch new", "git branch -d feature", "git branch -m a b", "git branch --set-upstream-to=x", "git branch --bogus",
-        "git branch -a foo", "git tag v1", "git tag -d v1", "git tag -a v1 -m x", "git tag --bogus", "git reflog expire --all", "git reflog delete HEAD@{0}",
-        "git restore x", "git gc", "git notes add -m x", "git apply p.diff",
+        "git branch -f main x",
+        "git branch new",
+        "git branch -d feature",
+        "git branch -m a b",
+        "git branch --set-upstream-to=x",
+        "git branch --bogus",
+        "git branch -a foo",
+        "git tag v1",
+        "git tag -d v1",
+        "git tag -a v1 -m x",
+        "git tag --bogus",
+        "git reflog expire --all",
+        "git reflog delete HEAD@{0}",
+        "git restore x",
+        "git gc",
+        "git notes add -m x",
+        "git apply p.diff",
     ] {
         let cmd = format!("{pre} && git checkout feature");
         assert!(hub_prompts(&cmd, dir), "{cmd}");
@@ -571,7 +871,20 @@ fn p175_r2_newline_in_worktree_path_is_undetermined() {
     let odd = parent.path().join("a\nb");
     std::fs::create_dir(&odd).unwrap();
     git(&odd, &["init", "-q", "-b", "main"]);
-    git(&odd, &["-c", "user.name=t", "-c", "user.email=t@e.com", "commit", "-q", "--allow-empty", "-m", "i"]);
+    git(
+        &odd,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "i",
+        ],
+    );
     git(&odd, &["branch", "feature"]);
     assert!(hub_prompts("git checkout feature", &odd));
 }
@@ -608,24 +921,35 @@ fn p175_item4g_shallow_home_inner() {
 fn p175_item4g_shallow_home_tilde_name_is_rewritten_to_home() {
     let exe = std::env::current_exe().unwrap();
     let out = std::process::Command::new(exe)
-        .args(["--exact", "permission::manager::p175_tests::p175_item4g_shallow_home_inner", "--nocapture"])
+        .args([
+            "--exact",
+            "permission::manager::p175_tests::p175_item4g_shallow_home_inner",
+            "--nocapture",
+        ])
         .env("P175_SHALLOW_HOME", "1")
         .env("HOME", "/u")
         .env("USER", "u")
         .env_remove("LOGNAME")
         .output()
         .unwrap();
-    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    let text =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success() && text.contains("1 passed"), "{text}");
     // The inner body ran to its end with the env the outer set (a silent early return prints neither marker).
-    assert!(text.contains("P175_SHALLOW_HOME_INNER_DONE home=/u user=u"), "inner body did not run to the end: {text}");
+    assert!(
+        text.contains("P175_SHALLOW_HOME_INNER_DONE home=/u user=u"),
+        "inner body did not run to the end: {text}"
+    );
 }
 
 // ---- Part B (decision 11): an earlier non-git write into the git directory unsettles the switch plan ----------------
 
 fn plan_with_facts(cmd: &str, cwd: &Path) -> crate::permission::branch_switch::BranchSwitchPlan {
     let mut evaluation = super::evaluate_bash(cmd, &super::PermissionState::default(), true);
-    let raw = evaluation.ambient_segments.take().expect("git command gives segments");
+    let raw = evaluation
+        .ambient_segments
+        .take()
+        .expect("git command gives segments");
     crate::permission::exec_risk::branch_switch_plan_with(&raw, cwd, Some(&evaluation.write_facts))
 }
 
@@ -633,12 +957,37 @@ fn plan_with_facts(cmd: &str, cwd: &Path) -> crate::permission::branch_switch::B
 fn prompts_allowing_writers(cmd: &str, cwd: &Path) -> bool {
     use crate::permission::rules::parse_permission_rule;
     use crate::permission::types::{PermissionConfig, RuleAction};
-    let rules = ["git", "cp", "mv", "echo", "tee", "ln", "install", "npm", "cat", "cd", "rm", "ls", "nohup", "time", "caffeinate", "mkdir", "touch"]
-        .iter()
-        .map(|c| parse_permission_rule(&format!("Bash({c}:*)"), RuleAction::Allow).unwrap())
-        .collect();
+    let rules = [
+        "git",
+        "cp",
+        "mv",
+        "echo",
+        "tee",
+        "ln",
+        "install",
+        "npm",
+        "cat",
+        "cd",
+        "rm",
+        "ls",
+        "nohup",
+        "time",
+        "caffeinate",
+        "mkdir",
+        "touch",
+    ]
+    .iter()
+    .map(|c| parse_permission_rule(&format!("Bash({c}:*)"), RuleAction::Allow).unwrap())
+    .collect();
     let policy = crate::permission::policy::CompiledPolicy::new(PermissionConfig::new(rules));
-    (0..3).all(|_| super::hub_needs_default_prompt(&super::AccessKind::Bash(cmd.to_owned()), Some(&policy), true, cwd))
+    (0..3).all(|_| {
+        super::hub_needs_default_prompt(
+            &super::AccessKind::Bash(cmd.to_owned()),
+            Some(&policy),
+            true,
+            cwd,
+        )
+    })
 }
 
 fn part_b_repo() -> tempfile::TempDir {
@@ -660,7 +1009,10 @@ fn p175b_earlier_write_into_git_dir_unsettles_the_switch() {
         ("ln -sf x .git/refs/heads/main && git checkout main", cwd),
         ("install x .git/refs/heads/main && git checkout main", cwd),
         ("echo ref: > .git/HEAD && git checkout main", cwd),
-        ("cd sub && cp x ../.git/refs/heads/main && git checkout main", cwd),
+        (
+            "cd sub && cp x ../.git/refs/heads/main && git checkout main",
+            cwd,
+        ),
         ("cp x /ABS/.git/refs/heads/main && git checkout main", cwd),
     ];
     let mut wrong = Vec::new();
@@ -691,14 +1043,24 @@ fn p175b_other_writes_do_not_unsettle_the_switch() {
     ] {
         let plan = plan_with_facts(cmd, cwd);
         let prompts = prompts_allowing_writers(cmd, cwd);
-        if matches!(plan, crate::permission::branch_switch::BranchSwitchPlan::Undetermined) || prompts {
+        if matches!(
+            plan,
+            crate::permission::branch_switch::BranchSwitchPlan::Undetermined
+        ) || prompts
+        {
             wrong.push(format!("{cmd}: plan={plan:?} prompts={prompts}"));
         }
     }
     // A plain output redirect already prompts on its own (the redirect-write floor, unrelated to the branch check), so
     // this shape is judged on the plan only.
     let plan = plan_with_facts("echo hi > notes.txt && git checkout main", cwd);
-    assert!(matches!(plan, crate::permission::branch_switch::BranchSwitchPlan::Probe(_)), "{plan:?}");
+    assert!(
+        matches!(
+            plan,
+            crate::permission::branch_switch::BranchSwitchPlan::Probe(_)
+        ),
+        "{plan:?}"
+    );
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
@@ -717,7 +1079,10 @@ fn assert_rows(repo: &Path, rows: &[&str], undetermined: bool) {
     for cmd in rows {
         let plan = plan_with_facts(cmd, repo);
         let prompts = prompts_allowing_writers(cmd, repo);
-        let is_und = matches!(plan, crate::permission::branch_switch::BranchSwitchPlan::Undetermined);
+        let is_und = matches!(
+            plan,
+            crate::permission::branch_switch::BranchSwitchPlan::Undetermined
+        );
         if is_und != undetermined || prompts != undetermined {
             wrong.push(format!("{cmd}: plan={plan:?} prompts={prompts}"));
         }
@@ -795,7 +1160,11 @@ fn p175b_r3_copy_onto_an_existing_file_does_not_unsettle_the_switch() {
         false,
     );
     // Writing the ref itself still unsettles the plan.
-    assert_rows(repo.path(), &["cp x .git/refs/heads/main && git checkout main"], true);
+    assert_rows(
+        repo.path(),
+        &["cp x .git/refs/heads/main && git checkout main"],
+        true,
+    );
 }
 
 #[cfg(unix)]
@@ -872,7 +1241,10 @@ fn p175b_r4_dotdot_after_a_symlink_is_resolved_in_kernel_order() {
     );
     assert_rows(
         repo.path(),
-        &["cp a docs2/../README.md && git checkout main", "cp a docs2/../newfile && git checkout main"],
+        &[
+            "cp a docs2/../README.md && git checkout main",
+            "cp a docs2/../newfile && git checkout main",
+        ],
         false,
     );
 }
@@ -912,10 +1284,18 @@ fn p175b_r4_ln_bsd_short_flags_are_parsed() {
     let repo = r4_repo();
     assert_rows(
         repo.path(),
-        &["ln -sfh ../pg sub/g && git checkout main", "ln -sfhw ../pg sub/g && git checkout main", "ln -sFivbLP ../pg sub/g && git checkout main"],
+        &[
+            "ln -sfh ../pg sub/g && git checkout main",
+            "ln -sfhw ../pg sub/g && git checkout main",
+            "ln -sFivbLP ../pg sub/g && git checkout main",
+        ],
         true,
     );
-    assert_rows(repo.path(), &["ln -sfh ../x sub/g && git checkout main"], false);
+    assert_rows(
+        repo.path(),
+        &["ln -sfh ../x sub/g && git checkout main"],
+        false,
+    );
 }
 
 #[cfg(unix)]
@@ -950,13 +1330,19 @@ fn p175b_r4_ln_cwd_tilde_source_is_the_cwd() {
     let repo = r4_repo();
     assert_rows(
         repo.path(),
-        &["ln -s ~+/.git /tmp/out && git checkout main", "ln -s ~+/pg /tmp/out && git checkout main"],
+        &[
+            "ln -s ~+/.git /tmp/out && git checkout main",
+            "ln -s ~+/pg /tmp/out && git checkout main",
+        ],
         true,
     );
     // u35 r1: `~+` (and every tilde form other than `~` / `~/x`) is unresolved in the word normaliser, so the plan is
     // still determined but the request prompts.
     let cmd = "ln -s ~+/build /tmp/out && git checkout main";
-    assert!(!matches!(plan_with_facts(cmd, repo.path()), crate::permission::branch_switch::BranchSwitchPlan::Undetermined));
+    assert!(!matches!(
+        plan_with_facts(cmd, repo.path()),
+        crate::permission::branch_switch::BranchSwitchPlan::Undetermined
+    ));
     assert!(prompts_allowing_writers(cmd, repo.path()), "{cmd}");
 }
 
@@ -966,8 +1352,16 @@ fn p175b_r4_ln_cwd_tilde_source_is_the_cwd() {
 #[test]
 fn p175b_r4_ln_trailing_slash_destination_is_a_directory() {
     let repo = r4_repo();
-    assert_rows(repo.path(), &["ln -s .git sub/ && git checkout main"], false);
-    assert_rows(repo.path(), &["ln -s ../.git sub/ && git checkout main"], true);
+    assert_rows(
+        repo.path(),
+        &["ln -s .git sub/ && git checkout main"],
+        false,
+    );
+    assert_rows(
+        repo.path(),
+        &["ln -s ../.git sub/ && git checkout main"],
+        true,
+    );
 }
 
 #[cfg(unix)]
@@ -1000,7 +1394,11 @@ fn p175b_r4_everyday_lines_stay_silent() {
 fn p175b_r2_distinct_upper_case_git_dir_is_not_this_git_dir() {
     let repo = part_b_repo();
     std::fs::create_dir_all(repo.path().join(".GIT/refs/heads")).unwrap();
-    assert_rows(repo.path(), &["cp x .GIT/refs/heads/main && git checkout main"], false);
+    assert_rows(
+        repo.path(),
+        &["cp x .GIT/refs/heads/main && git checkout main"],
+        false,
+    );
 }
 
 /// Compile-only on Linux: on APFS / Windows `.GIT` is this repository's `.git`.
@@ -1010,7 +1408,10 @@ fn p175b_r2_case_insensitive_volume_upper_case_git_is_this_git_dir() {
     let repo = part_b_repo();
     assert_rows(
         repo.path(),
-        &["cp x .GIT/refs/heads/main && git checkout main", "cp -r evil .GIT && git checkout main"],
+        &[
+            "cp x .GIT/refs/heads/main && git checkout main",
+            "cp -r evil .GIT && git checkout main",
+        ],
         true,
     );
 }
@@ -1033,16 +1434,37 @@ fn p175b_r2_launcher_before_git_keeps_the_ordinal_aligned() {
 fn p175b_r2_git_count_mismatch_between_parsers_is_undetermined() {
     use crate::permission::branch_switch::BranchSwitchPlan;
     let cwd = part_b_repo();
-    let mut two = super::evaluate_bash("git status && git checkout main", &super::PermissionState::default(), true);
-    let mut one = super::evaluate_bash("git checkout main", &super::PermissionState::default(), true);
+    let mut two = super::evaluate_bash(
+        "git status && git checkout main",
+        &super::PermissionState::default(),
+        true,
+    );
+    let mut one = super::evaluate_bash(
+        "git checkout main",
+        &super::PermissionState::default(),
+        true,
+    );
     let raw_one = one.ambient_segments.take().unwrap();
     let raw_two = two.ambient_segments.take().unwrap();
     let plan = |raw: &Vec<Vec<String>>, facts: &super::BashEvaluation| {
-        crate::permission::exec_risk::branch_switch_plan_with(raw, cwd.path(), Some(&facts.write_facts))
+        crate::permission::exec_risk::branch_switch_plan_with(
+            raw,
+            cwd.path(),
+            Some(&facts.write_facts),
+        )
     };
-    assert!(matches!(plan(&raw_one, &one), BranchSwitchPlan::Probe(_)), "agreeing counts must plan normally");
-    assert!(matches!(plan(&raw_one, &two), BranchSwitchPlan::Undetermined), "planner saw fewer gits than facts");
-    assert!(matches!(plan(&raw_two, &one), BranchSwitchPlan::Undetermined), "planner saw more gits than facts");
+    assert!(
+        matches!(plan(&raw_one, &one), BranchSwitchPlan::Probe(_)),
+        "agreeing counts must plan normally"
+    );
+    assert!(
+        matches!(plan(&raw_one, &two), BranchSwitchPlan::Undetermined),
+        "planner saw fewer gits than facts"
+    );
+    assert!(
+        matches!(plan(&raw_two, &one), BranchSwitchPlan::Undetermined),
+        "planner saw more gits than facts"
+    );
 }
 
 #[cfg(unix)]
@@ -1093,7 +1515,11 @@ fn p175b_r5_ln_target_directory_inside_git_is_a_write_into_it() {
         ],
         true,
     );
-    assert_rows(repo.path(), &["ln -s -t build /tmp/main && git checkout main"], false);
+    assert_rows(
+        repo.path(),
+        &["ln -s -t build /tmp/main && git checkout main"],
+        false,
+    );
 }
 
 /// The P166 protected-file floor with an abbreviated `--target-directory`.
@@ -1149,10 +1575,13 @@ fn p175b_r6_cp_parents_writes_the_full_source_path() {
 fn p175b_r6_cp_parents_keeps_the_protected_floor() {
     let (_root, deep) = super::p166_r13_tests::deep_project();
     std::fs::create_dir_all(deep.join("evil")).unwrap();
-    let rows: Vec<String> = ["cp --parents evil/.mcp.json .", "cd evil && cp --parents .mcp.json .."]
-        .iter()
-        .map(|row| (*row).to_owned())
-        .collect();
+    let rows: Vec<String> = [
+        "cp --parents evil/.mcp.json .",
+        "cd evil && cp --parents .mcp.json ..",
+    ]
+    .iter()
+    .map(|row| (*row).to_owned())
+    .collect();
     super::p166_r13_tests::check_floor(&deep, &rows, true);
 }
 
@@ -1191,18 +1620,36 @@ fn gitfile_fixture() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(tmp.path()).unwrap();
     let main = root.join("main");
-    for dir in [".git/refs/heads", ".git/worktrees/wt1", ".git/modules/sub/refs/heads", "sub", "other/.git/refs/heads"] {
+    for dir in [
+        ".git/refs/heads",
+        ".git/worktrees/wt1",
+        ".git/modules/sub/refs/heads",
+        "sub",
+        "other/.git/refs/heads",
+    ] {
         std::fs::create_dir_all(main.join(dir)).unwrap();
     }
     std::fs::create_dir_all(root.join("wt/src")).unwrap();
     // Git's own validity test for a git directory is a `HEAD` file; the fixture has one in every directory it names.
-    for head in [".git/HEAD", ".git/worktrees/wt1/HEAD", ".git/modules/sub/HEAD"] {
+    for head in [
+        ".git/HEAD",
+        ".git/worktrees/wt1/HEAD",
+        ".git/modules/sub/HEAD",
+    ] {
         std::fs::write(main.join(head), "ref: refs/heads/main\n").unwrap();
     }
     std::fs::create_dir_all(root.join("detached/gits/sub")).unwrap();
-    std::fs::write(root.join("detached/gits/sub/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        root.join("detached/gits/sub/HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .unwrap();
     std::fs::write(main.join(".git/worktrees/wt1/commondir"), "../..\n").unwrap();
-    std::fs::write(root.join("wt/.git"), format!("gitdir: {}\n", main.join(".git/worktrees/wt1").display())).unwrap();
+    std::fs::write(
+        root.join("wt/.git"),
+        format!("gitdir: {}\n", main.join(".git/worktrees/wt1").display()),
+    )
+    .unwrap();
     std::fs::write(main.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
     // A checkout whose git directory is NOT under any ancestor (a relative `gitdir:` that leaves the tree).
     std::fs::create_dir_all(root.join("detached/gits/sub/refs/heads")).unwrap();
@@ -1270,7 +1717,13 @@ fn p175d_gitfile_guards_keep_today_verdicts() {
     for cmd in rows {
         // Judged on the plan: the hand-built repository cannot be probed, so the final prompt is not its verdict.
         let plan = plan_with_facts(cmd, &root.join("wt"));
-        assert!(matches!(plan, crate::permission::branch_switch::BranchSwitchPlan::Probe(_)), "{cmd}: {plan:?}");
+        assert!(
+            matches!(
+                plan,
+                crate::permission::branch_switch::BranchSwitchPlan::Probe(_)
+            ),
+            "{cmd}: {plan:?}"
+        );
     }
     // Hostile `.git` files never panic and add no gitdir (so nothing is weaker than before: the write below is not
     // recognised, exactly as today).
@@ -1286,7 +1739,13 @@ fn p175d_gitfile_guards_keep_today_verdicts() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".git"), content).unwrap();
         let plan = plan_with_facts(&write, &dir);
-        assert!(!matches!(plan, crate::permission::branch_switch::BranchSwitchPlan::Undetermined), "{name}: {plan:?}");
+        assert!(
+            !matches!(
+                plan,
+                crate::permission::branch_switch::BranchSwitchPlan::Undetermined
+            ),
+            "{name}: {plan:?}"
+        );
     }
     let dir = root.join("h-symlink");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1298,7 +1757,11 @@ fn p175d_gitfile_guards_keep_today_verdicts() {
 
 /// Runs the plan on a thread so a hang is a failed assertion, not a hung suite.
 #[cfg(unix)]
-fn plan_within(cmd: &str, cwd: &Path, secs: u64) -> Option<crate::permission::branch_switch::BranchSwitchPlan> {
+fn plan_within(
+    cmd: &str,
+    cwd: &Path,
+    secs: u64,
+) -> Option<crate::permission::branch_switch::BranchSwitchPlan> {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd, cwd) = (cmd.to_owned(), cwd.to_path_buf());
     std::thread::spawn(move || {
@@ -1312,7 +1775,13 @@ fn plan_within(cmd: &str, cwd: &Path, secs: u64) -> Option<crate::permission::br
 fn assert_plans_settled(cwd: &Path, rows: &[&str]) {
     for cmd in rows {
         let plan = plan_with_facts(cmd, cwd);
-        assert!(matches!(plan, crate::permission::branch_switch::BranchSwitchPlan::Probe(_)), "{cmd}: {plan:?}");
+        assert!(
+            matches!(
+                plan,
+                crate::permission::branch_switch::BranchSwitchPlan::Probe(_)
+            ),
+            "{cmd}: {plan:?}"
+        );
     }
 }
 
@@ -1333,14 +1802,28 @@ fn p175d_r2_fifo_commondir_does_not_hang_and_keeps_the_integration_verdict() {
     std::fs::remove_file(&common).unwrap();
     mkfifo_at(&common);
     // Plain switch: integration settles it (a probe), and so must this.
-    let plan = plan_within("git checkout x", &root.join("wt"), 2).expect("a FIFO commondir hung the check");
-    assert!(matches!(plan, crate::permission::branch_switch::BranchSwitchPlan::Probe(_)), "{plan:?}");
+    let plan = plan_within("git checkout x", &root.join("wt"), 2)
+        .expect("a FIFO commondir hung the check");
+    assert!(
+        matches!(
+            plan,
+            crate::permission::branch_switch::BranchSwitchPlan::Probe(_)
+        ),
+        "{plan:?}"
+    );
     // The same through a symlink to a FIFO.
     std::fs::remove_file(&common).unwrap();
     mkfifo_at(&main.join("ff"));
     std::os::unix::fs::symlink(main.join("ff"), &common).unwrap();
-    let plan = plan_within("git checkout x", &root.join("wt"), 2).expect("a symlinked FIFO commondir hung the check");
-    assert!(matches!(plan, crate::permission::branch_switch::BranchSwitchPlan::Probe(_)), "{plan:?}");
+    let plan = plan_within("git checkout x", &root.join("wt"), 2)
+        .expect("a symlinked FIFO commondir hung the check");
+    assert!(
+        matches!(
+            plan,
+            crate::permission::branch_switch::BranchSwitchPlan::Probe(_)
+        ),
+        "{plan:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -1351,8 +1834,15 @@ fn p175d_r2_fifo_swapped_in_for_the_git_file_does_not_hang() {
     let dot_git = root.join("wt/.git");
     std::fs::remove_file(&dot_git).unwrap();
     mkfifo_at(&dot_git);
-    let plan = plan_within("git checkout x", &root.join("wt"), 2).expect("a FIFO .git hung the check");
-    assert!(matches!(plan, crate::permission::branch_switch::BranchSwitchPlan::Probe(_)), "{plan:?}");
+    let plan =
+        plan_within("git checkout x", &root.join("wt"), 2).expect("a FIFO .git hung the check");
+    assert!(
+        matches!(
+            plan,
+            crate::permission::branch_switch::BranchSwitchPlan::Probe(_)
+        ),
+        "{plan:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -1371,7 +1861,11 @@ fn p175d_r2_non_utf8_bytes_in_the_git_file_do_not_hide_the_gitdir() {
     std::fs::write(root.join("wt/.git"), &body).unwrap();
     assert_rows(&root.join("wt"), &rows, true);
     // A path with a non-UTF-8 component on the first line.
-    std::fs::create_dir_all(main.join(".git/worktrees").join(std::ffi::OsStr::from_bytes(b"\xff"))).unwrap();
+    std::fs::create_dir_all(
+        main.join(".git/worktrees")
+            .join(std::ffi::OsStr::from_bytes(b"\xff")),
+    )
+    .unwrap();
     let mut body = b"gitdir: ".to_vec();
     body.extend_from_slice(main.join(".git/worktrees").as_os_str().as_bytes());
     body.extend_from_slice(b"/\xff/../wt1\r\n");
@@ -1386,13 +1880,28 @@ fn p175d_r2_bogus_gitdir_targets_add_no_prompt_to_unrelated_writes() {
     let root = dunce::canonicalize(tmp.path()).unwrap();
     // Give the ancestors a HEAD so only the "not the worktree or an ancestor" rule can reject them.
     std::fs::write(root.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-    for (name, target) in [("root", "/".to_owned()), ("self", String::new()), ("parent", "..".to_owned()), ("home", root.display().to_string())] {
+    for (name, target) in [
+        ("root", "/".to_owned()),
+        ("self", String::new()),
+        ("parent", "..".to_owned()),
+        ("home", root.display().to_string()),
+    ] {
         let dir = root.join("wt").join(format!("bog-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        let target = if name == "self" { dir.display().to_string() } else { target };
+        let target = if name == "self" {
+            dir.display().to_string()
+        } else {
+            target
+        };
         std::fs::write(dir.join(".git"), format!("gitdir: {target}\n")).unwrap();
-        assert_plans_settled(&dir, &["cp x notes.txt && git checkout x", "echo a > ../unrelated && git checkout x"]);
+        assert_plans_settled(
+            &dir,
+            &[
+                "cp x notes.txt && git checkout x",
+                "echo a > ../unrelated && git checkout x",
+            ],
+        );
     }
 }
 
@@ -1404,8 +1913,15 @@ fn p175d_r2_gitdir_without_a_head_file_is_not_a_git_directory() {
     let plain = root.join("plain");
     std::fs::create_dir_all(root.join("wt/nohead")).unwrap();
     std::fs::create_dir_all(&plain).unwrap();
-    std::fs::write(root.join("wt/nohead/.git"), format!("gitdir: {}\n", plain.display())).unwrap();
-    assert_plans_settled(&root.join("wt/nohead"), &[&format!("cp x {}/f && git checkout x", plain.display())]);
+    std::fs::write(
+        root.join("wt/nohead/.git"),
+        format!("gitdir: {}\n", plain.display()),
+    )
+    .unwrap();
+    assert_plans_settled(
+        &root.join("wt/nohead"),
+        &[&format!("cp x {}/f && git checkout x", plain.display())],
+    );
 }
 
 #[cfg(unix)]
@@ -1416,7 +1932,9 @@ fn p175d_r2_symlinked_git_file_is_followed() {
     let main = root.display().to_string() + "/main";
     std::fs::create_dir_all(root.join("wt2")).unwrap();
     std::os::unix::fs::symlink(root.join("wt/.git"), root.join("wt2/.git")).unwrap();
-    let rows = [format!("cp x {main}/.git/worktrees/wt1/HEAD && git checkout x")];
+    let rows = [format!(
+        "cp x {main}/.git/worktrees/wt1/HEAD && git checkout x"
+    )];
     let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
     assert_rows(&root.join("wt2"), &rows, true);
 }
@@ -1464,11 +1982,25 @@ fn p175f_gitdir_whose_head_is_a_directory_or_fifo_is_still_not_a_git_directory()
     std::fs::create_dir_all(root.join("wt/hd")).unwrap();
     std::fs::create_dir_all(root.join("wt/hf")).unwrap();
     std::fs::create_dir_all(plain.join("HEAD")).unwrap();
-    std::fs::write(root.join("wt/hd/.git"), format!("gitdir: {}\n", plain.display())).unwrap();
-    assert_plans_settled(&root.join("wt/hd"), &[&format!("cp x {}/f && git checkout x", plain.display())]);
+    std::fs::write(
+        root.join("wt/hd/.git"),
+        format!("gitdir: {}\n", plain.display()),
+    )
+    .unwrap();
+    assert_plans_settled(
+        &root.join("wt/hd"),
+        &[&format!("cp x {}/f && git checkout x", plain.display())],
+    );
     let fifo_dir = root.join("plain2");
     std::fs::create_dir_all(&fifo_dir).unwrap();
     mkfifo_at(&fifo_dir.join("HEAD"));
-    std::fs::write(root.join("wt/hf/.git"), format!("gitdir: {}\n", fifo_dir.display())).unwrap();
-    assert_plans_settled(&root.join("wt/hf"), &[&format!("cp x {}/f && git checkout x", fifo_dir.display())]);
+    std::fs::write(
+        root.join("wt/hf/.git"),
+        format!("gitdir: {}\n", fifo_dir.display()),
+    )
+    .unwrap();
+    assert_plans_settled(
+        &root.join("wt/hf"),
+        &[&format!("cp x {}/f && git checkout x", fifo_dir.display())],
+    );
 }

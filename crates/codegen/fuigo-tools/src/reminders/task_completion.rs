@@ -22,11 +22,11 @@ use crate::types::output::ToolOutput;
 use crate::types::resources::{SharedResources, State, Terminal};
 use crate::types::tool::{Reminder, ToolKind};
 use crate::util::truncate::{PREVIEW_SIZE, PartialOutput, truncate_str, truncate_with_preview};
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use fuigo_tool_types::KillTaskOutput;
 use fuigo_tool_types::SubagentCompletedOutput;
 use fuigo_tool_types::TaskOutputOutput;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 /// Default tool name used in auto-wake completion messages.
 pub const DEFAULT_TASK_OUTPUT_TOOL: &str = "get_task_output";
 /// UI/Stop kill with no live waiter: tell the model not to relaunch the task.
@@ -1540,10 +1540,10 @@ mod tests {
         BackgroundHandle, KillOutcome, TerminalBackend, TerminalRunRequest, TerminalRunResult,
     };
     use crate::types::resources::Resources;
-    use std::sync::Arc;
-    use std::time::Duration;
     use fuigo_tool_types::KillTaskResult;
     use fuigo_tool_types::{MultiTaskOutputResult, TaskOutputResult};
+    use std::sync::Arc;
+    use std::time::Duration;
     struct MockTerminal {
         tasks: Vec<TaskSnapshot>,
     }
@@ -1750,8 +1750,14 @@ mod tests {
             .collect_reminders(shared, &output)
             .await;
         let joined = reminders.join("\n\n");
-        assert!(joined.contains("bg-1"), "background completion surfaces: {joined}");
-        assert!(!joined.contains("fg-1"), "foreground completion must not surface: {joined}");
+        assert!(
+            joined.contains("bg-1"),
+            "background completion surfaces: {joined}"
+        );
+        assert!(
+            !joined.contains("fg-1"),
+            "foreground completion must not surface: {joined}"
+        );
     }
     #[tokio::test]
     async fn suppressed_after_kill_task() {
@@ -2454,7 +2460,8 @@ mod tests {
                 c
             })
             .collect();
-        let msg = format_between_turn_completions(&completions, Some("get_task_output"), None, None);
+        let msg =
+            format_between_turn_completions(&completions, Some("get_task_output"), None, None);
         // Headroom for 256 entries of header, truncation marker and pointer.
         const CEILING: usize = BETWEEN_TURN_INLINE_OUTPUT_BYTES + 64 * 1024;
         assert!(

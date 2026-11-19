@@ -1496,7 +1496,10 @@ fn try_remove_from_json_object(
 
 // ── Tests ───────────────────────────────────────────────────────────
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2285,7 +2288,10 @@ mod tests {
         let blocked =
             direct_install_block_reason_with(&restricted, &git("https://github.com/evil/repo.git"))
                 .unwrap();
-        assert!(blocked.starts_with("Plugin install blocked by managed policy:"), "{blocked}");
+        assert!(
+            blocked.starts_with("Plugin install blocked by managed policy:"),
+            "{blocked}"
+        );
         let local = git_install::InstallSource::Local {
             path: std::path::PathBuf::from("/tmp/plugin"),
             subdir: None,
@@ -2314,7 +2320,9 @@ mod tests {
             }
             dir.to_path_buf()
         };
-        let install = |key: &str, origin: Option<&str>| checkout(&root.join("installed-plugins").join(key), origin);
+        let install = |key: &str, origin: Option<&str>| {
+            checkout(&root.join("installed-plugins").join(key), origin)
+        };
         let repo = |kind: InstallKind,
                     marketplace: Option<MarketplaceProvenance>,
                     plugin: &str,
@@ -2345,15 +2353,28 @@ mod tests {
         let good_path = install("good", Some("https://github.com/ok/repo.git"));
         registry.insert(
             "good".into(),
-            repo(git("https://github.com/ok/repo.git"), None, "good-plugin", good_path.clone()),
+            repo(
+                git("https://github.com/ok/repo.git"),
+                None,
+                "good-plugin",
+                good_path.clone(),
+            ),
         );
         let bad_path = install("bad", Some("https://github.com/evil/repo.git"));
         registry.insert(
             "bad".into(),
-            repo(git("https://github.com/evil/repo.git"), None, "bad-plugin", bad_path),
+            repo(
+                git("https://github.com/evil/repo.git"),
+                None,
+                "bad-plugin",
+                bad_path,
+            ),
         );
         // A marketplace copy: bound to the checkout it was copied from, whose origin is the marketplace source.
-        let market_src = checkout(&root.join("cache").join("ok"), Some("https://github.com/ok/repo.git"));
+        let market_src = checkout(
+            &root.join("cache").join("ok"),
+            Some("https://github.com/ok/repo.git"),
+        );
         let market_path = install("market", None);
         registry.insert(
             "via-market".into(),
@@ -2371,7 +2392,10 @@ mod tests {
                 market_path.clone(),
             ),
         );
-        assert_eq!(plugin_enable_block_reason_with(&restricted, &registry, "good-plugin"), None);
+        assert_eq!(
+            plugin_enable_block_reason_with(&restricted, &registry, "good-plugin"),
+            None
+        );
         assert_eq!(
             plugin_enable_block_reason_with(
                 &restricted,
@@ -2383,19 +2407,20 @@ mod tests {
         );
         assert!(plugin_enable_block_reason_with(&restricted, &registry, "bad-plugin").is_some());
         assert!(
-            plugin_enable_block_reason_with(&restricted, &registry, "unknown-path-plugin").is_some(),
+            plugin_enable_block_reason_with(&restricted, &registry, "unknown-path-plugin")
+                .is_some(),
             "no recorded source fails closed"
         );
         let open = fuigo_workspace::permission::resolution::MarketplacePolicy::default();
-        assert_eq!(plugin_enable_block_reason_with(&open, &registry, "bad-plugin"), None);
+        assert_eq!(
+            plugin_enable_block_reason_with(&open, &registry, "bad-plugin"),
+            None
+        );
 
         // Astra r2: the CLI's bare name is persisted as the one allowed install's full id under a restriction.
         assert_eq!(
             plugin_enable_target_with(&restricted, &registry, "good-plugin"),
-            Ok(format!(
-                "user/{}/good-plugin",
-                plugin_root_hex8(&good_path)
-            ))
+            Ok(format!("user/{}/good-plugin", plugin_root_hex8(&good_path)))
         );
         assert!(plugin_enable_target_with(&restricted, &registry, "bad-plugin").is_err());
         // Astra r3: the post-install auto-enable and ACP enable share this id.
@@ -2403,7 +2428,10 @@ mod tests {
             installed_plugin_id(registry.get_repo("good").unwrap(), "good-plugin"),
             plugin_enable_target_with(&restricted, &registry, "good-plugin").ok()
         );
-        assert_eq!(installed_plugin_id(registry.get_repo("good").unwrap(), "nope"), None);
+        assert_eq!(
+            installed_plugin_id(registry.get_repo("good").unwrap(), "nope"),
+            None
+        );
         assert_eq!(
             plugin_enable_target_with(&open, &registry, "bad-plugin"),
             Ok("bad-plugin".to_string()),
@@ -2412,9 +2440,19 @@ mod tests {
 
         // Astra r1 N1: two installs named `demo`, one allowed, one not. The full id picks the right one.
         let ok_path = install("ok-demo", Some("https://github.com/ok/repo.git"));
-        let ok_repo = repo(git("https://github.com/ok/repo.git"), None, "demo", ok_path.clone());
+        let ok_repo = repo(
+            git("https://github.com/ok/repo.git"),
+            None,
+            "demo",
+            ok_path.clone(),
+        );
         let bad_path = install("bad-demo", Some("https://github.com/evil/repo.git"));
-        let bad_repo = repo(git("https://github.com/evil/repo.git"), None, "demo", bad_path.clone());
+        let bad_repo = repo(
+            git("https://github.com/evil/repo.git"),
+            None,
+            "demo",
+            bad_path.clone(),
+        );
         registry.insert("ok-demo".into(), ok_repo);
         registry.insert("bad-demo".into(), bad_repo);
         let id_for = |dir: &std::path::Path| format!("user/{}/demo", plugin_root_hex8(dir));
@@ -2432,7 +2470,12 @@ mod tests {
             "an ambiguous bare name needs every install allowed"
         );
         assert!(
-            plugin_enable_block_reason_with(&restricted, &registry, &id_for(std::path::Path::new("/p169/elsewhere"))).is_some(),
+            plugin_enable_block_reason_with(
+                &restricted,
+                &registry,
+                &id_for(std::path::Path::new("/p169/elsewhere"))
+            )
+            .is_some(),
             "an id matching no install record fails closed"
         );
     }
@@ -2578,11 +2621,22 @@ mod tests {
         let git_ok = |dir: &Path, args: &[&str]| {
             let out = std::process::Command::new("git")
                 .current_dir(dir)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
                 .args(args)
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         let remote = tempfile::tempdir().unwrap();
         write_marketplace_plugin(remote.path(), "demo", "1.0.0");
@@ -2608,7 +2662,15 @@ mod tests {
         let name = resolve_marketplace_source_name_with(&sources, &cache_root, "demo", None)
             .expect("an install the user typed syncs a fresh cache");
         assert_eq!(name, "Remote");
-        assert!(git::sync_source_cache_with_mode(url, None, &refused_root().join("background"), git::SyncMode::Force).is_err());
+        assert!(
+            git::sync_source_cache_with_mode(
+                url,
+                None,
+                &refused_root().join("background"),
+                git::SyncMode::Force
+            )
+            .is_err()
+        );
         let _ = std::fs::remove_dir_all(refused_root());
     }
 

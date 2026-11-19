@@ -9,7 +9,10 @@ mod flow;
 pub(crate) mod inference;
 mod manual;
 mod storage;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests;
 
@@ -22,7 +25,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use storage::SubscriptionStore;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, clap::ValueEnum,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    clap::ValueEnum,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum SubscriptionProvider {

@@ -81,9 +81,17 @@ pub enum ConflictChoice {
 
 /// Rows of the conflict prompt for `scope`: key, label, choice. `KeepFiles` only makes sense when the conversation also rewinds.
 pub fn conflict_options(scope: RewindScope) -> Vec<(char, &'static str, ConflictChoice)> {
-    let mut rows = vec![('o', "Overwrite them with the checkpoint", ConflictChoice::Overwrite)];
+    let mut rows = vec![(
+        'o',
+        "Overwrite them with the checkpoint",
+        ConflictChoice::Overwrite,
+    )];
     if scope == RewindScope::All {
-        rows.push(('c', "Rewind the conversation only, keep these files", ConflictChoice::KeepFiles));
+        rows.push((
+            'c',
+            "Rewind the conversation only, keep these files",
+            ConflictChoice::KeepFiles,
+        ));
     }
     rows.push(('n', "Cancel", ConflictChoice::Cancel));
     rows
@@ -243,7 +251,9 @@ pub fn handle_rewind_key(state: &RewindState, key: &KeyEvent) -> RewindInput {
             KeyCode::Char(c) => conflict_options(*scope)
                 .into_iter()
                 .find(|(k, _, _)| *k == c)
-                .map_or(RewindInput::Consumed, |(_, _, choice)| RewindInput::Conflict(choice)),
+                .map_or(RewindInput::Consumed, |(_, _, choice)| {
+                    RewindInput::Conflict(choice)
+                }),
             _ => RewindInput::Consumed,
         },
         RewindPhase::Error { .. } => match key.code {
@@ -276,7 +286,9 @@ pub fn move_cursor(phase: &mut RewindPhase, delta: i32) {
             let new = (*active_idx as i32 + delta).clamp(0, CONFIRM_OPTIONS as i32 - 1);
             *active_idx = new as usize;
         }
-        RewindPhase::Conflicts { active_idx, scope, .. } => {
+        RewindPhase::Conflicts {
+            active_idx, scope, ..
+        } => {
             let max = conflict_options(*scope).len() as i32 - 1;
             *active_idx = (*active_idx as i32 + delta).clamp(0, max) as usize;
         }
@@ -305,7 +317,9 @@ pub fn confirm_cursor(phase: &RewindPhase) -> RewindInput {
             scope, active_idx, ..
         } => conflict_options(*scope)
             .get(*active_idx)
-            .map_or(RewindInput::Consumed, |(_, _, choice)| RewindInput::Conflict(*choice)),
+            .map_or(RewindInput::Consumed, |(_, _, choice)| {
+                RewindInput::Conflict(*choice)
+            }),
         _ => RewindInput::Consumed,
     }
 }
@@ -358,7 +372,9 @@ pub fn rewind_row_at(phase: &RewindPhase, area: Rect, col: u16, row: u16) -> Opt
                 None
             }
         }
-        RewindPhase::Loading | RewindPhase::Executing { .. } | RewindPhase::Previewing { .. } => None,
+        RewindPhase::Loading | RewindPhase::Executing { .. } | RewindPhase::Previewing { .. } => {
+            None
+        }
     }
 }
 
@@ -396,7 +412,9 @@ pub fn set_rewind_cursor(phase: &mut RewindPhase, idx: usize) -> bool {
                 false
             }
         }
-        RewindPhase::Conflicts { active_idx, scope, .. } => {
+        RewindPhase::Conflicts {
+            active_idx, scope, ..
+        } => {
             let new = idx.min(conflict_options(*scope).len() - 1);
             if *active_idx != new {
                 *active_idx = new;
@@ -676,7 +694,15 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             }
             for (n, (key, label, _)) in conflict_options(*scope).into_iter().enumerate() {
                 render_radio_row(
-                    buf, content_x, y, content_w, key, label, *active_idx == n, focused, &theme,
+                    buf,
+                    content_x,
+                    y,
+                    content_w,
+                    key,
+                    label,
+                    *active_idx == n,
+                    focused,
+                    &theme,
                 );
                 y += 1;
             }
@@ -829,7 +855,12 @@ mod tests {
             prompt_preview: Some("add a test".to_string()),
         };
         let h = rewind_overlay_height(&phase, 40);
-        let area = Rect { x: 0, y: 0, width: 90, height: h };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 90,
+            height: h,
+        };
         let mut buf = Buffer::empty(area);
         render_rewind_overlay(&mut buf, area, &phase, true);
         let text: String = (0..area.height)
@@ -846,7 +877,10 @@ mod tests {
     #[test]
     fn confirm_keys_pick_the_scope() {
         let st = confirm_state();
-        assert!(matches!(handle_rewind_key(&st, &key(KeyCode::Char('y'))), RewindInput::Confirm(3)));
+        assert!(matches!(
+            handle_rewind_key(&st, &key(KeyCode::Char('y'))),
+            RewindInput::Confirm(3)
+        ));
         assert!(matches!(
             handle_rewind_key(&st, &key(KeyCode::Char('c'))),
             RewindInput::ConfirmScoped(3, RewindScope::ConversationOnly)
@@ -874,7 +908,12 @@ mod tests {
         let _theme = crate::theme::cache::pin_theme();
         let phase = conflict_phase(RewindScope::All);
         let h = rewind_overlay_height(&phase, 40);
-        let area = Rect { x: 0, y: 0, width: 90, height: h };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 90,
+            height: h,
+        };
         let mut buf = Buffer::empty(area);
         render_rewind_overlay(&mut buf, area, &phase, true);
         let text: String = (0..area.height)
@@ -906,7 +945,10 @@ mod tests {
             stashed_draft: None,
             selected_prompt_index: Some(1),
         };
-        assert!(matches!(handle_rewind_key(&st, &key(KeyCode::Char('c'))), RewindInput::Consumed));
+        assert!(matches!(
+            handle_rewind_key(&st, &key(KeyCode::Char('c'))),
+            RewindInput::Consumed
+        ));
     }
 
     fn confirm_state() -> RewindState {
@@ -1045,7 +1087,10 @@ mod tests {
             RewindInput::Confirm(4)
         ));
 
-        for (idx, scope) in [(1, RewindScope::ConversationOnly), (2, RewindScope::FilesOnly)] {
+        for (idx, scope) in [
+            (1, RewindScope::ConversationOnly),
+            (2, RewindScope::FilesOnly),
+        ] {
             let phase = RewindPhase::Confirm {
                 target_prompt_index: 4,
                 active_idx: idx,

@@ -129,7 +129,9 @@ pub async fn run_command_hook(
         &spec.extra_env,
         !matches!(
             crate::config::hook_origin(spec),
-            crate::config::HookOrigin::ProjectFile | crate::config::HookOrigin::Plugin | crate::config::HookOrigin::Agent
+            crate::config::HookOrigin::ProjectFile
+                | crate::config::HookOrigin::Plugin
+                | crate::config::HookOrigin::Agent
         ),
     );
 
@@ -165,7 +167,9 @@ pub async fn run_command_hook(
     #[cfg(not(unix))]
     let env_root = {
         use fuigo_config::shell::{WindowsShell, detect_windows_shell};
-        if named_posix_shell || (is_shell_command && matches!(detect_windows_shell(), WindowsShell::GitBash(_))) {
+        if named_posix_shell
+            || (is_shell_command && matches!(detect_windows_shell(), WindowsShell::GitBash(_)))
+        {
             Cow::Owned(ctx.workspace_root.replace('\\', "/"))
         } else {
             Cow::Borrowed(ctx.workspace_root)
@@ -176,42 +180,57 @@ pub async fn run_command_hook(
 
     // Whether the child's PATH is set, for the spawn-failure log (recorded by the configurator).
     let mut path_set = false;
-    let mut child = match fuigo_tools::util::ProcessScope::spawn_placed(ctx.process_scope.as_ref(), || tokio::process::Command::new(&program), |cmd, _hook| {
-        // P189: spawn_placed has already registered the placement as the first pre_exec
-        // (apply_shell_environment_policy, detach_command and restrict_child_network all register one).
-        cmd.args(&base_args).envs(base_env.iter().copied());
-        fuigo_tools::util::apply_shell_environment_policy(cmd, None);
-        fuigo_tools::util::detach_command(cmd);
-        fuigo_sandbox::child_net::restrict_child_network(cmd);
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .current_dir(ctx.workspace_root)
-            // SECURITY: extra_env is applied before the FUIGO_* identity vars so a hook cannot spoof them. It is applied
-            // after `apply_shell_environment_policy`, which strips `FUIGO_API_KEY` by name, so the key reaches this child
-            // only through `child_env`, i.e. when this hook's config names it (P70a).
-            .envs(child_env.iter())
-            .env("FUIGO_HOOK_EVENT", envelope.hook_event_name.to_string())
-            .env("FUIGO_HOOK_NAME", &spec.name)
-            .env("FUIGO_SESSION_ID", ctx.session_id)
-            .env("FUIGO_WORKSPACE_ROOT", env_root.as_ref())
-            .env("CLAUDE_PROJECT_DIR", env_root.as_ref())
-            .kill_on_drop(true);
-        path_set = fuigo_tools::util::spawn::child_path_is_set(cmd.as_std());
-        Ok::<(), std::convert::Infallible>(())
-    })
+    let mut child = match fuigo_tools::util::ProcessScope::spawn_placed(
+        ctx.process_scope.as_ref(),
+        || tokio::process::Command::new(&program),
+        |cmd, _hook| {
+            // P189: spawn_placed has already registered the placement as the first pre_exec
+            // (apply_shell_environment_policy, detach_command and restrict_child_network all register one).
+            cmd.args(&base_args).envs(base_env.iter().copied());
+            fuigo_tools::util::apply_shell_environment_policy(cmd, None);
+            fuigo_tools::util::detach_command(cmd);
+            fuigo_sandbox::child_net::restrict_child_network(cmd);
+            cmd.stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .current_dir(ctx.workspace_root)
+                // SECURITY: extra_env is applied before the FUIGO_* identity vars so a hook cannot spoof them. It is applied
+                // after `apply_shell_environment_policy`, which strips `FUIGO_API_KEY` by name, so the key reaches this child
+                // only through `child_env`, i.e. when this hook's config names it (P70a).
+                .envs(child_env.iter())
+                .env("FUIGO_HOOK_EVENT", envelope.hook_event_name.to_string())
+                .env("FUIGO_HOOK_NAME", &spec.name)
+                .env("FUIGO_SESSION_ID", ctx.session_id)
+                .env("FUIGO_WORKSPACE_ROOT", env_root.as_ref())
+                .env("CLAUDE_PROJECT_DIR", env_root.as_ref())
+                .kill_on_drop(true);
+            path_set = fuigo_tools::util::spawn::child_path_is_set(cmd.as_std());
+            Ok::<(), std::convert::Infallible>(())
+        },
+    )
     .map_err(|e| match e {
         fuigo_tools::util::SpawnPlacedError::Spawn(e) => {
-            fuigo_tools::util::spawn::ShellSpawnFailure::new("hooks", program.as_os_str(), &e, path_set).log();
+            fuigo_tools::util::spawn::ShellSpawnFailure::new(
+                "hooks",
+                program.as_os_str(),
+                &e,
+                path_set,
+            )
+            .log();
             e
         }
         fuigo_tools::util::SpawnPlacedError::Build(never) => match never {},
-        fuigo_tools::util::SpawnPlacedError::Stopping => std::io::Error::other("session is stopping; command not started"),
+        fuigo_tools::util::SpawnPlacedError::Stopping => {
+            std::io::Error::other("session is stopping; command not started")
+        }
     }) {
         Ok(c) => c,
         Err(e) => {
             let elapsed = start.elapsed();
-            let message = format!("failed to spawn command: {}: {e}", program.to_string_lossy());
+            let message = format!(
+                "failed to spawn command: {}: {e}",
+                program.to_string_lossy()
+            );
             // A program that is missing or not executable can never run: a CONFIG failure, like a missing placeholder.
             let message = if matches!(
                 e.kind(),
@@ -353,12 +372,13 @@ pub async fn run_command_hook(
             };
             // `failClosed`: exit 2 is the gate's own denial; any other way of not exiting 0 is an execution failure
             // that an allowing decision printed before it must not hide.
-            let exec_failure = (exit_code != 0 && exit_code != GATE_EXIT_CODE).then(|| {
-                match output.status.code() {
-                    Some(code) => format!("hook '{}' failed with exit code {code}", spec.name),
-                    None => format!("hook '{}' was terminated by a signal", spec.name),
-                }
-            });
+            let exec_failure =
+                (exit_code != 0 && exit_code != GATE_EXIT_CODE).then(|| {
+                    match output.status.code() {
+                        Some(code) => format!("hook '{}' failed with exit code {code}", spec.name),
+                        None => format!("hook '{}' was terminated by a signal", spec.name),
+                    }
+                });
             let result = super::enforce_fail_closed(
                 spec,
                 mode,
@@ -593,7 +613,11 @@ pub(crate) fn plan_command(
     if !unresolved.is_empty() {
         return Err(format!(
             "required env var(s) not set: {}",
-            unresolved.iter().map(|v| format!("${{{v}}}")).collect::<Vec<_>>().join(", ")
+            unresolved
+                .iter()
+                .map(|v| format!("${{{v}}}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     if let Some(name) = &spec.shell {
@@ -624,7 +648,8 @@ pub(crate) fn plan_command(
         let command_str = rewrite_hook_command_for_windows_shell(command_str, child_env);
         if matches!(
             fuigo_config::shell::detect_windows_shell(),
-            fuigo_config::shell::WindowsShell::Pwsh(_) | fuigo_config::shell::WindowsShell::PowerShell(_)
+            fuigo_config::shell::WindowsShell::Pwsh(_)
+                | fuigo_config::shell::WindowsShell::PowerShell(_)
         ) {
             warn_if_reads_powershell_input(spec, command_str.as_ref());
         }
@@ -643,7 +668,10 @@ pub(crate) fn plan_command(
 fn validate_shell_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let starts_ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric());
-    if starts_ok && name.len() <= 32 && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+')) {
+    if starts_ok
+        && name.len() <= 32
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+'))
+    {
         Ok(())
     } else {
         Err(format!(
@@ -661,7 +689,9 @@ pub(crate) fn reads_powershell_input(command: &str) -> bool {
     while let Some(found) = command[from..].to_ascii_lowercase().find("$input") {
         let at = from + found;
         let end = at + "$input".len();
-        let continues = bytes.get(end).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+        let continues = bytes
+            .get(end)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
         let escaped = at > 0 && bytes[at - 1] == b'`';
         if !continues && !escaped && powershell_ctx_at(command, at).0 != PsQuote::Single {
             return true;
@@ -685,7 +715,10 @@ fn warn_if_reads_powershell_input(spec: &HookSpec, command: &str) {
 
 /// Whether `name` is a POSIX-style shell (`sh -c` syntax), as opposed to PowerShell or cmd.
 fn is_posix_shell_name(name: &str) -> bool {
-    !matches!(name.to_ascii_lowercase().as_str(), "powershell" | "pwsh" | "cmd")
+    !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "powershell" | "pwsh" | "cmd"
+    )
 }
 
 /// `(program, args, env)` for a hook that names its shell: the shell is resolved on the hook's `PATH`, and when it is not
@@ -695,13 +728,24 @@ fn named_shell_invocation(
     name: &str,
     command_str: &str,
     child_env: &std::collections::HashMap<String, String>,
-) -> Result<(std::ffi::OsString, Vec<std::ffi::OsString>, Vec<(&'static str, &'static str)>), String> {
+) -> Result<
+    (
+        std::ffi::OsString,
+        Vec<std::ffi::OsString>,
+        Vec<(&'static str, &'static str)>,
+    ),
+    String,
+> {
     validate_shell_name(name)?;
     let not_found = || format!("{name} not found on PATH (this hook sets \"shell\": \"{name}\")");
     let path_override = child_env.get("PATH").map(String::as_str);
     let program = resolve_named_shell(name, path_override).ok_or_else(not_found)?;
     let args: Vec<std::ffi::OsString> = match name.to_ascii_lowercase().as_str() {
-        "powershell" | "pwsh" => ["-NoProfile", "-NonInteractive", "-Command"].iter().map(Into::into).chain([command_str.into()]).collect(),
+        "powershell" | "pwsh" => ["-NoProfile", "-NonInteractive", "-Command"]
+            .iter()
+            .map(Into::into)
+            .chain([command_str.into()])
+            .collect(),
         "cmd" => vec!["/C".into(), command_str.into()],
         _ => vec!["-c".into(), command_str.into()],
     };
@@ -739,7 +783,10 @@ fn resolve_named_shell(name: &str, path_override: Option<&str>) -> Option<std::p
 /// runs a different filesystem) or `WindowsApps` (the Store alias stubs). Separators are normalised so the check is the
 /// same for `C:\Windows\System32` and a POSIX test layout.
 fn is_wsl_launcher_dir(path: &std::path::Path) -> bool {
-    let lower = path.to_string_lossy().to_ascii_lowercase().replace('\\', "/");
+    let lower = path
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('\\', "/");
     lower.contains("/windows/system32") || lower.contains("/windowsapps")
 }
 
@@ -765,7 +812,10 @@ fn resolve_named_shell_in(
 
 /// The directory a relative `./x.sh` hook path resolves against: the plugin root for a plugin hook, else the hook's own directory.
 fn relative_root(spec: &HookSpec) -> std::path::PathBuf {
-    if matches!(crate::config::hook_origin(spec), crate::config::HookOrigin::Plugin) {
+    if matches!(
+        crate::config::hook_origin(spec),
+        crate::config::HookOrigin::Plugin
+    ) {
         for key in ["CLAUDE_PLUGIN_ROOT", "FUIGO_PLUGIN_ROOT"] {
             if let Some(root) = spec.extra_env.get(key).filter(|v| !v.is_empty()) {
                 return std::path::PathBuf::from(root);
@@ -794,7 +844,10 @@ fn resolve_program(
     if command.contains('/') || command.contains(std::path::MAIN_SEPARATOR) {
         return exists(relative_root(spec).join(path));
     }
-    let is_plugin = matches!(crate::config::hook_origin(spec), crate::config::HookOrigin::Plugin);
+    let is_plugin = matches!(
+        crate::config::hook_origin(spec),
+        crate::config::HookOrigin::Plugin
+    );
     // A non-plugin hook written as a bare script name has always meant "the script beside my hook file", so that stays first.
     // A plugin hook, or any hook in the `command` + `args` form, means a program on PATH (`node`).
     let beside_first = spec.args.is_none() && !is_plugin;
@@ -824,7 +877,10 @@ fn spawnable_pathext(pathext: Option<&str>) -> Vec<String> {
         }
     }
     if out.is_empty() {
-        out = [".com", ".exe", ".bat", ".cmd"].iter().map(|e| (*e).to_string()).collect();
+        out = [".com", ".exe", ".bat", ".cmd"]
+            .iter()
+            .map(|e| (*e).to_string())
+            .collect();
     }
     out
 }
@@ -862,7 +918,11 @@ fn find_on_path(name: &str, path_override: Option<&str>) -> Option<std::path::Pa
         Some(p) => std::ffi::OsString::from(p),
         None => std::env::var_os("PATH")?,
     };
-    let exts = if cfg!(windows) { spawnable_pathext(std::env::var("PATHEXT").ok().as_deref()) } else { Vec::new() };
+    let exts = if cfg!(windows) {
+        spawnable_pathext(std::env::var("PATHEXT").ok().as_deref())
+    } else {
+        Vec::new()
+    };
     find_in_dirs(name, &path_var, &exts, &is_executable_file)
 }
 
@@ -901,7 +961,11 @@ fn expand_args(
     } else {
         Err(format!(
             "required env var(s) not set: {}",
-            missing.iter().map(|v| format!("${{{v}}}")).collect::<Vec<_>>().join(", ")
+            missing
+                .iter()
+                .map(|v| format!("${{{v}}}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ))
     }
 }
@@ -920,7 +984,8 @@ fn expand_known_placeholders(
         out.push_str(&arg[cursor..r.start]);
         cursor = r.end;
         let literal = &arg[r.start..r.end];
-        if r.name.is_empty() || r.has_modifier || !crate::config::is_known_hook_placeholder(r.name) {
+        if r.name.is_empty() || r.has_modifier || !crate::config::is_known_hook_placeholder(r.name)
+        {
             out.push_str(literal);
             continue;
         }
@@ -946,10 +1011,17 @@ fn placeholder_value(
         "FUIGO_HOOK_EVENT" => return Some(inputs.event.to_string()),
         "FUIGO_HOOK_NAME" => return Some(spec.name.clone()),
         "FUIGO_SESSION_ID" => return Some(inputs.session_id.to_string()),
-        "FUIGO_WORKSPACE_ROOT" | "CLAUDE_PROJECT_DIR" => return Some(inputs.workspace_root.to_string()),
+        "FUIGO_WORKSPACE_ROOT" | "CLAUDE_PROJECT_DIR" => {
+            return Some(inputs.workspace_root.to_string());
+        }
         _ => {}
     }
-    let from_env = |key: &str| child_env.get(key).cloned().or_else(|| std::env::var(key).ok());
+    let from_env = |key: &str| {
+        child_env
+            .get(key)
+            .cloned()
+            .or_else(|| std::env::var(key).ok())
+    };
     from_env(name).or_else(|| {
         // The bare `PLUGIN_ROOT` some plugins write is the plugin root under either spelling.
         (name == "PLUGIN_ROOT")
@@ -1577,8 +1649,14 @@ mod tests {
                 r#"{"decision":"allow","continue":false,"systemMessage":"hi"}"#,
                 "stop: stopped by hook 'test' (continue: false)",
             ),
-            (r#"{"continue":false,"stopReason":"enough"}"#, "stop: enough"),
-            (r#"{"decision":"deny","reason":"why","continue":false}"#, "stop: why"),
+            (
+                r#"{"continue":false,"stopReason":"enough"}"#,
+                "stop: enough",
+            ),
+            (
+                r#"{"decision":"deny","reason":"why","continue":false}"#,
+                "stop: why",
+            ),
             (r#"{"continue":true,"stopReason":"enough"}"#, "allow"),
             (
                 r#"{"decision":"allow","hookSpecificOutput":{"updateInput":{"command":"x"}}}"#,
@@ -2362,16 +2440,29 @@ mod tests {
     async fn read_capped_bounds_what_a_noisy_hook_can_buffer() {
         let flood = tokio::io::repeat(b'x').take(MAX_OUTPUT_BYTES as u64 * 8);
         let kept = read_capped(Some(flood)).await.unwrap();
-        assert!(kept.len() <= MAX_OUTPUT_BYTES + 1, "kept {} bytes", kept.len());
-        assert!(truncate_output(&kept).1, "an over-cap stream is marked truncated");
+        assert!(
+            kept.len() <= MAX_OUTPUT_BYTES + 1,
+            "kept {} bytes",
+            kept.len()
+        );
+        assert!(
+            truncate_output(&kept).1,
+            "an over-cap stream is marked truncated"
+        );
         let small = read_capped(Some(&b"ok"[..])).await.unwrap();
         assert_eq!(small, b"ok");
     }
 
     #[test]
     fn truncate_output_respects_limit() {
-        assert_eq!(truncate_output(b"hello world"), ("hello world".to_string(), false));
-        assert!(!truncate_output(&vec![b'x'; MAX_OUTPUT_BYTES]).1, "exactly the cap is not truncated");
+        assert_eq!(
+            truncate_output(b"hello world"),
+            ("hello world".to_string(), false)
+        );
+        assert!(
+            !truncate_output(&vec![b'x'; MAX_OUTPUT_BYTES]).1,
+            "exactly the cap is not truncated"
+        );
 
         let (large, truncated) = truncate_output(&vec![b'x'; MAX_OUTPUT_BYTES + 1000]);
         assert!(large.ends_with(" [truncated]"));
@@ -2563,7 +2654,8 @@ mod tests {
             // `FUIGO_API_KEY` is given the key on purpose (P70a), and this test is about inheritance.
             let dir = tempfile::tempdir().expect("tempdir");
             let script = dir.path().join("p86-probe.sh");
-            std::fs::write(&script, format!("{check} && /bin/sh -c '{check}'\n")).expect("write probe");
+            std::fs::write(&script, format!("{check} && /bin/sh -c '{check}'\n"))
+                .expect("write probe");
             let mut spec = make_shell_spec(&format!("/bin/sh '{}'", script.display()));
             if selected {
                 spec.extra_env
@@ -2595,7 +2687,10 @@ mod tests {
         let script = out("reads-inherited.sh");
         std::fs::write(
             &script,
-            format!("printf '%s' \"${{FUIGO_API_KEY-unset}}\" > '{}'\n", out("implicit").display()),
+            format!(
+                "printf '%s' \"${{FUIGO_API_KEY-unset}}\" > '{}'\n",
+                out("implicit").display()
+            ),
         )
         .expect("write script");
 
@@ -2617,17 +2712,43 @@ mod tests {
             out("nested").display()
         ));
 
-        for (label, spec) in [("explicit", &explicit), ("via-env", &via_env), ("implicit", &implicit), ("nested", &nested)] {
+        for (label, spec) in [
+            ("explicit", &explicit),
+            ("via-env", &via_env),
+            ("implicit", &implicit),
+            ("nested", &nested),
+        ] {
             let result = run_command_hook(spec, &make_envelope(), &make_ctx(), GateKind::Observe)
                 .await
                 .0;
-            assert!(matches!(result, HookRunnerResult::Success), "{label}: {result:?}");
+            assert!(
+                matches!(result, HookRunnerResult::Success),
+                "{label}: {result:?}"
+            );
         }
-        let read = |name: &str| std::fs::read_to_string(out(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
-        assert_eq!(read("explicit"), KEY, "a hook whose command names $FUIGO_API_KEY gets the key");
-        assert_eq!(read("via-env"), format!("Bearer {KEY}"), "a hook env value naming ${{FUIGO_API_KEY}} gets the key");
-        assert_eq!(read("implicit"), "unset", "a script reading an inherited FUIGO_API_KEY got it");
-        assert_eq!(read("nested"), KEY, "a reference nested in a default did not get the key");
+        let read = |name: &str| {
+            std::fs::read_to_string(out(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+        };
+        assert_eq!(
+            read("explicit"),
+            KEY,
+            "a hook whose command names $FUIGO_API_KEY gets the key"
+        );
+        assert_eq!(
+            read("via-env"),
+            format!("Bearer {KEY}"),
+            "a hook env value naming ${{FUIGO_API_KEY}} gets the key"
+        );
+        assert_eq!(
+            read("implicit"),
+            "unset",
+            "a script reading an inherited FUIGO_API_KEY got it"
+        );
+        assert_eq!(
+            read("nested"),
+            KEY,
+            "a reference nested in a default did not get the key"
+        );
         assert!(
             !std::env::vars().any(|(_, v)| v.contains(KEY)),
             "the key entered this process's environment"
@@ -2653,9 +2774,7 @@ mod tests {
         crate::test_support::install_p70a_key_resolver();
         let dir = tempfile::tempdir().expect("tempdir");
         let out = |name: &str| dir.path().join(name).display().to_string();
-        let hook = |command: String, env: serde_json::Value| {
-            serde_json::json!({ "type": "command", "command": command, "env": env })
-        };
+        let hook = |command: String, env: serde_json::Value| serde_json::json!({ "type": "command", "command": command, "env": env });
         let json = serde_json::json!({ "hooks": { "Stop": [ { "hooks": [
             hook(format!("printf '%s|%s' \"$FUIGO_API_KEY\" \"$${{FUIGO_API_KEY}}\" > '{}'", out("mixed")), serde_json::json!({})),
             hook(format!("printf '%s' \"$TOKEN\" > '{}'", out("alias")), serde_json::json!({ "TOKEN": "${FUIGO_API_KEY}" })),
@@ -2671,25 +2790,52 @@ mod tests {
             hook(format!("printf '%s' \"$$${{FUIGO_API_KEY}}\" > '{}'", out("odd-run")), serde_json::json!({})),
         ] } ] } })
         .to_string();
-        let (specs, errors) = crate::config::parse_hook_file_with_key_naming(&json, std::path::Path::new("/tmp/p70a-hooks.json"), true);
+        let (specs, errors) = crate::config::parse_hook_file_with_key_naming(
+            &json,
+            std::path::Path::new("/tmp/p70a-hooks.json"),
+            true,
+        );
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(specs.len(), 6);
         for spec in &specs {
-            let result = run_command_hook(spec, &make_envelope(), &make_ctx(), GateKind::Observe).await.0;
-            assert!(matches!(result, HookRunnerResult::Success), "{}: {result:?}", spec.name);
+            let result = run_command_hook(spec, &make_envelope(), &make_ctx(), GateKind::Observe)
+                .await
+                .0;
+            assert!(
+                matches!(result, HookRunnerResult::Success),
+                "{}: {result:?}",
+                spec.name
+            );
         }
-        let read = |name: &str| std::fs::read_to_string(out(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let read = |name: &str| {
+            std::fs::read_to_string(out(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+        };
         let mixed = read("mixed");
         let (plain, escaped) = mixed.split_once('|').expect("two fields");
         assert_eq!(plain, KEY, "the plain reference did not get the key");
-        assert!(!escaped.contains(KEY) && escaped.ends_with("{FUIGO_API_KEY}"), "the escaped one: {escaped:?}");
+        assert!(
+            !escaped.contains(KEY) && escaped.ends_with("{FUIGO_API_KEY}"),
+            "the escaped one: {escaped:?}"
+        );
         assert_eq!(read("alias"), KEY, "an alias naming the key did not get it");
-        assert!(!read("escaped-alias").contains(KEY), "an alias holding the escaped form got the key");
+        assert!(
+            !read("escaped-alias").contains(KEY),
+            "an alias holding the escaped form got the key"
+        );
         let modifier = read("escaped-modifier");
-        assert!(!modifier.contains(KEY) && modifier.ends_with("{FUIGO_API_KEY:-fallback}"), "{modifier:?}");
+        assert!(
+            !modifier.contains(KEY) && modifier.ends_with("{FUIGO_API_KEY:-fallback}"),
+            "{modifier:?}"
+        );
         let pua = read("pua-alias");
-        assert!(!pua.contains(KEY) && pua.starts_with("\u{e000}{FUIGO_API_KEY}|"), "{pua:?}");
-        assert!(read("odd-run").ends_with(KEY), "an odd run is a reference the hook named");
+        assert!(
+            !pua.contains(KEY) && pua.starts_with("\u{e000}{FUIGO_API_KEY}|"),
+            "{pua:?}"
+        );
+        assert!(
+            read("odd-run").ends_with(KEY),
+            "an odd run is a reference the hook named"
+        );
     }
 
     fn make_envelope() -> HookEventEnvelope {
@@ -2740,12 +2886,16 @@ mod tests {
             Ok(h) => h,
             Err(r) => {
                 println!("P189-CGROUP-SKIP {r} (hook)");
-                assert!(std::env::var("FUIGO_TEST_REQUIRE_CGROUP").as_deref() != Ok("1"), "cgroup required: {r}");
+                assert!(
+                    std::env::var("FUIGO_TEST_REQUIRE_CGROUP").as_deref() != Ok("1"),
+                    "cgroup required: {r}"
+                );
                 return;
             }
         };
         println!("P189-CGROUP-RAN hook");
-        let scope = fuigo_tools::util::ProcessScope::with_session_cgroup(host.create_session().unwrap());
+        let scope =
+            fuigo_tools::util::ProcessScope::with_session_cgroup(host.create_session().unwrap());
         let want = scope
             .session_cgroup()
             .unwrap()
@@ -2757,11 +2907,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("cg");
         let spec = make_shell_spec(&format!("cat /proc/self/cgroup > {}", out.display()));
-        let (result, _, _) =
-            run_command_hook(&spec, &make_envelope(), &make_scoped_ctx(scope.clone()), GateKind::Observe).await;
+        let (result, _, _) = run_command_hook(
+            &spec,
+            &make_envelope(),
+            &make_scoped_ctx(scope.clone()),
+            GateKind::Observe,
+        )
+        .await;
         assert!(matches!(result, HookRunnerResult::Success), "{result:?}");
         let seen = std::fs::read_to_string(&out).unwrap();
-        assert!(seen.contains(&want), "hook child not in session cgroup: {seen}");
+        assert!(
+            seen.contains(&want),
+            "hook child not in session cgroup: {seen}"
+        );
         scope.release_session_cgroup();
     }
 
@@ -2771,11 +2929,20 @@ mod tests {
     fn hook_spawn_goes_through_spawn_placed_with_placement_first() {
         let src = include_str!("command.rs");
         let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").unwrap()];
-        assert!(!prod.contains(".spawn()"), "raw `.spawn()` in the hooks runner; use ProcessScope::spawn_placed");
+        assert!(
+            !prod.contains(".spawn()"),
+            "raw `.spawn()` in the hooks runner; use ProcessScope::spawn_placed"
+        );
         // Placement is registered by `spawn_placed` right after `new_command`, so the
         // configure closure must hold no placement or pre_exec call of its own.
-        assert!(!prod.contains("hook.place("), "placement is registered by spawn_placed itself");
-        assert!(prod.contains("spawn_placed(") && prod.contains("|| tokio::process::Command::new(&program)"));
+        assert!(
+            !prod.contains("hook.place("),
+            "placement is registered by spawn_placed itself"
+        );
+        assert!(
+            prod.contains("spawn_placed(")
+                && prod.contains("|| tokio::process::Command::new(&program)")
+        );
     }
 
     #[tokio::test]
@@ -3065,7 +3232,8 @@ mod tests {
             workspace_root: "/nonexistent-u35-winenv-r2/workspace",
             ..make_ctx()
         };
-        let (result, _, _) = run_command_hook(&spec, &make_envelope(), &ctx, GateKind::Observe).await;
+        let (result, _, _) =
+            run_command_hook(&spec, &make_envelope(), &ctx, GateKind::Observe).await;
         assert!(matches!(result, HookRunnerResult::Failed(_)), "{result:?}");
         let logged = capture.text();
         let line = logged
@@ -3076,7 +3244,10 @@ mod tests {
         assert!(line.contains("program=/bin/sh"), "{line}");
         assert!(line.contains("os_error=Some("), "{line}");
         assert!(line.contains("path_set="), "{line}");
-        assert!(!logged.contains("u35-canary"), "an environment value was logged: {logged}");
+        assert!(
+            !logged.contains("u35-canary"),
+            "an environment value was logged: {logged}"
+        );
     }
 
     #[tokio::test]
@@ -3318,7 +3489,8 @@ mod tests {
     // ---- Windows program resolution, driven by injected PATH / PATHEXT layouts so it runs on every host ----
 
     fn fake_fs(files: &[&str]) -> impl Fn(&std::path::Path) -> bool {
-        let set: std::collections::HashSet<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
+        let set: std::collections::HashSet<std::path::PathBuf> =
+            files.iter().map(std::path::PathBuf::from).collect();
         move |p| set.contains(p)
     }
 
@@ -3335,7 +3507,10 @@ mod tests {
 
     #[test]
     fn named_shell_powershell_and_cmd_resolve_from_system32() {
-        let fs = fake_fs(&["/c/Windows/System32/cmd.exe", "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"]);
+        let fs = fake_fs(&[
+            "/c/Windows/System32/cmd.exe",
+            "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+        ]);
         let path = path_of(&[SYS32, PS_DIR]);
         assert_eq!(
             resolve_named_shell_in("cmd", &path, &fs),
@@ -3343,7 +3518,9 @@ mod tests {
         );
         assert_eq!(
             resolve_named_shell_in("powershell", &path, &fs),
-            Some(std::path::PathBuf::from("/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"))
+            Some(std::path::PathBuf::from(
+                "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+            ))
         );
     }
 
@@ -3358,7 +3535,10 @@ mod tests {
         let launcher_only = path_of(&[SYS32, "/c/Users/u/AppData/Local/Microsoft/WindowsApps"]);
         assert_eq!(resolve_named_shell_in("bash", &launcher_only, &fs), None);
         assert_eq!(resolve_named_shell_in("BASH", &launcher_only, &fs), None);
-        assert_eq!(resolve_named_shell_in("bash.exe", &launcher_only, &fs), None);
+        assert_eq!(
+            resolve_named_shell_in("bash.exe", &launcher_only, &fs),
+            None
+        );
         // A real bash later on PATH still wins.
         let with_git = path_of(&[SYS32, "/c/Git/bin"]);
         assert_eq!(
@@ -3375,18 +3555,29 @@ mod tests {
         ]);
         assert_eq!(
             resolve_named_shell_in("pwsh", &path_of(&["/c/Program Files/PowerShell/7"]), &fs),
-            Some(std::path::PathBuf::from("/c/Program Files/PowerShell/7/pwsh.exe"))
+            Some(std::path::PathBuf::from(
+                "/c/Program Files/PowerShell/7/pwsh.exe"
+            ))
         );
         assert_eq!(
-            resolve_named_shell_in("pwsh", &path_of(&["/c/Users/u/AppData/Local/Microsoft/WindowsApps"]), &fs),
-            Some(std::path::PathBuf::from("/c/Users/u/AppData/Local/Microsoft/WindowsApps/pwsh.exe"))
+            resolve_named_shell_in(
+                "pwsh",
+                &path_of(&["/c/Users/u/AppData/Local/Microsoft/WindowsApps"]),
+                &fs
+            ),
+            Some(std::path::PathBuf::from(
+                "/c/Users/u/AppData/Local/Microsoft/WindowsApps/pwsh.exe"
+            ))
         );
     }
 
     #[test]
     fn pathext_keeps_spawnable_extensions_in_order() {
         let all = |v: Vec<String>| v.join(",");
-        assert_eq!(all(exts(Some(".COM;.EXE;.BAT;.CMD;.VBS;.JS;.MSC"))), ".com,.exe,.bat,.cmd");
+        assert_eq!(
+            all(exts(Some(".COM;.EXE;.BAT;.CMD;.VBS;.JS;.MSC"))),
+            ".com,.exe,.bat,.cmd"
+        );
         assert_eq!(all(exts(Some(".CMD;.EXE"))), ".cmd,.exe");
         assert_eq!(all(exts(Some(".exe;;.EXE; .bat "))), ".exe,.bat");
         // Unset, empty or nothing spawnable: the Windows default.
@@ -3400,14 +3591,26 @@ mod tests {
         let fs = fake_fs(&["/n/node.exe"]);
         let path = path_of(&["/x", "/n"]);
         let e = exts(None);
-        assert_eq!(find_in_dirs("node", &path, &e, &fs), Some(std::path::PathBuf::from("/n/node.exe")));
+        assert_eq!(
+            find_in_dirs("node", &path, &e, &fs),
+            Some(std::path::PathBuf::from("/n/node.exe"))
+        );
         // Already carries an extension: tried as written.
-        assert_eq!(find_in_dirs("node.exe", &path, &e, &fs), Some(std::path::PathBuf::from("/n/node.exe")));
-        assert_eq!(find_in_dirs("node.EXE", &path, &e, &fake_fs(&["/n/node.EXE"])), Some(std::path::PathBuf::from("/n/node.EXE")));
+        assert_eq!(
+            find_in_dirs("node.exe", &path, &e, &fs),
+            Some(std::path::PathBuf::from("/n/node.exe"))
+        );
+        assert_eq!(
+            find_in_dirs("node.EXE", &path, &e, &fake_fs(&["/n/node.EXE"])),
+            Some(std::path::PathBuf::from("/n/node.EXE"))
+        );
         // POSIX (no extensions): the name is taken literally.
         assert_eq!(find_in_dirs("node", &path, &[], &fs), None);
         // An empty PATH entry is never the current directory.
-        assert_eq!(find_in_dirs("node", &path_of(&[""]), &e, &fake_fs(&["node.exe"])), None);
+        assert_eq!(
+            find_in_dirs("node", &path_of(&[""]), &e, &fake_fs(&["node.exe"])),
+            None
+        );
     }
 
     #[test]
@@ -3418,7 +3621,10 @@ mod tests {
             find_in_dirs("node", &path, &exts(Some(".CMD;.EXE")), &both),
             Some(std::path::PathBuf::from("/n/node.cmd"))
         );
-        assert_eq!(find_in_dirs("node", &path, &exts(None), &both), Some(std::path::PathBuf::from("/n/node.exe")));
+        assert_eq!(
+            find_in_dirs("node", &path, &exts(None), &both),
+            Some(std::path::PathBuf::from("/n/node.exe"))
+        );
         // Directory by directory: an earlier directory's .cmd beats a later directory's .exe.
         let split = fake_fs(&["/a/node.cmd", "/b/node.exe"]);
         assert_eq!(
@@ -3443,12 +3649,25 @@ mod tests {
         std::fs::write(&shim, "@echo off\r\n").expect("write shim");
         let mut spec = make_shell_spec(&shim.to_string_lossy());
         spec.args = Some(vec!["install".into(), "a b&c".into(), "%PATH%".into()]);
-        let inputs = PlanInputs { workspace_root: "/w", session_id: "s", event: "Stop" };
-        let plan = plan_command(&spec, &shim.to_string_lossy(), &std::collections::HashMap::new(), &inputs)
-            .expect("plan");
+        let inputs = PlanInputs {
+            workspace_root: "/w",
+            session_id: "s",
+            event: "Stop",
+        };
+        let plan = plan_command(
+            &spec,
+            &shim.to_string_lossy(),
+            &std::collections::HashMap::new(),
+            &inputs,
+        )
+        .expect("plan");
         assert!(!plan.shell);
         assert_eq!(std::path::PathBuf::from(&plan.program), shim);
-        let args: Vec<String> = plan.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = plan
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(args, ["install", "a b&c", "%PATH%"]);
     }
 
@@ -3461,18 +3680,37 @@ mod tests {
         let mut spec = make_shell_spec("bin/run.cmd");
         spec.layer = crate::config::HookProvenance::Plugin;
         spec.args = Some(vec!["--x".into()]);
-        spec.extra_env.insert("CLAUDE_PLUGIN_ROOT".into(), root.path().to_string_lossy().into_owned());
-        let inputs = PlanInputs { workspace_root: "/w", session_id: "s", event: "Stop" };
-        let plan = plan_command(&spec, "bin/run.cmd", &std::collections::HashMap::new(), &inputs).expect("plan");
+        spec.extra_env.insert(
+            "CLAUDE_PLUGIN_ROOT".into(),
+            root.path().to_string_lossy().into_owned(),
+        );
+        let inputs = PlanInputs {
+            workspace_root: "/w",
+            session_id: "s",
+            event: "Stop",
+        };
+        let plan = plan_command(
+            &spec,
+            "bin/run.cmd",
+            &std::collections::HashMap::new(),
+            &inputs,
+        )
+        .expect("plan");
         assert_eq!(std::path::PathBuf::from(&plan.program), tool);
         // The native separator form resolves the same way.
         let native = format!("bin{}run.cmd", std::path::MAIN_SEPARATOR);
-        let plan = plan_command(&spec, &native, &std::collections::HashMap::new(), &inputs).expect("plan");
+        let plan =
+            plan_command(&spec, &native, &std::collections::HashMap::new(), &inputs).expect("plan");
         assert_eq!(std::path::PathBuf::from(&plan.program), tool);
         // A path that is not there is a config failure naming it.
-        let err = plan_command(&spec, "bin/missing.cmd", &std::collections::HashMap::new(), &inputs)
-            .err()
-            .expect("missing");
+        let err = plan_command(
+            &spec,
+            "bin/missing.cmd",
+            &std::collections::HashMap::new(),
+            &inputs,
+        )
+        .err()
+        .expect("missing");
         assert!(err.contains("command not found"), "{err}");
     }
 }

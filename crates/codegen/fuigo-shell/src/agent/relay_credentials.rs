@@ -95,7 +95,10 @@ pub(crate) fn gate_relay_message(message: &serde_json::Value) -> RelayMessage {
     else {
         return RelayMessage::Forward(message.to_string());
     };
-    warn!(method, "relay: a request for a credential from a relay that is not FluxRouter-operated was refused");
+    warn!(
+        method,
+        "relay: a request for a credential from a relay that is not FluxRouter-operated was refused"
+    );
     match object.get("id") {
         Some(id) => RelayMessage::Refuse(refusal(id, method)),
         None => RelayMessage::Drop,
@@ -156,7 +159,9 @@ const HOOK_KEYS: [&str; 2] = ["command", "url"];
 /// not a JSON object, or has a duplicate key at a level on those paths, which value a reader takes is the reader's
 /// choice, so it is not sent (an empty string). Everything not on those paths is carried as raw text.
 pub(crate) fn withhold_credentials(disclosure: IdentityDisclosure, msg: String) -> String {
-    if disclosure.is_permitted() || !(CREDENTIAL_KEYS.iter().any(|key| msg.contains(key)) || msg.contains("\\u")) {
+    if disclosure.is_permitted()
+        || !(CREDENTIAL_KEYS.iter().any(|key| msg.contains(key)) || msg.contains("\\u"))
+    {
         return msg;
     }
     match withhold_frame_credentials(&msg) {
@@ -218,7 +223,9 @@ fn edit_in(
     if !edit(&mut child)? {
         return Ok(false);
     }
-    parent.0.insert(key.to_owned(), serde_json::value::to_raw_value(&child.0)?);
+    parent
+        .0
+        .insert(key.to_owned(), serde_json::value::to_raw_value(&child.0)?);
     Ok(true)
 }
 
@@ -245,14 +252,18 @@ fn edit_rows(
         }
     }
     if changed {
-        parent.0.insert(key.to_owned(), serde_json::value::to_raw_value(&rows)?);
+        parent
+            .0
+            .insert(key.to_owned(), serde_json::value::to_raw_value(&rows)?);
     }
     Ok(changed)
 }
 
 /// Remove `value` from every object in `parent[list]` (a secret's or an environment variable's value; its name stays).
 fn withhold_values(parent: &mut StrictObject, list: &str) -> serde_json::Result<bool> {
-    edit_rows(parent, list, |entry| Ok(entry.0.shift_remove("value").is_some()))
+    edit_rows(parent, list, |entry| {
+        Ok(entry.0.shift_remove("value").is_some())
+    })
 }
 
 /// The scripts of a cloud environment (`SandboxEnvironment`, camel case).
@@ -310,12 +321,13 @@ fn withhold_frame_credentials(frame: &str) -> serde_json::Result<Option<String>>
         Ok(withheld)
     })?;
     // The agent's `terminal/create` requests to the client.
-    let terminal_create = frame
-        .0
-        .get("method")
-        .is_some_and(|method| serde_json::from_str::<String>(method.get()).is_ok_and(|method| method == "terminal/create"));
+    let terminal_create = frame.0.get("method").is_some_and(|method| {
+        serde_json::from_str::<String>(method.get()).is_ok_and(|method| method == "terminal/create")
+    });
     if terminal_create {
-        withheld |= edit_in(&mut frame, "params", |params| Ok(params.0.shift_remove("env").is_some()))?;
+        withheld |= edit_in(&mut frame, "params", |params| {
+            Ok(params.0.shift_remove("env").is_some())
+        })?;
     }
     // `fuigo/mcp/servers_updated`; the `hooks_changed` session notification.
     withheld |= edit_in(&mut frame, "params", |params| {

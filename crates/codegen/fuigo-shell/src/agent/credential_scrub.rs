@@ -18,7 +18,7 @@ use fuigo_telemetry::sent_credentials;
 /// discriminators this agent wrote and clients decide on; rewriting one because a credential happened to spell it
 /// would change behaviour, not just display.
 pub fn scrub_acp_error(mut err: acp::Error) -> acp::Error {
-    if let Some(upstream)=err.data.as_mut().and_then(|data|data.get_mut("upstream")) {
+    if let Some(upstream) = err.data.as_mut().and_then(|data| data.get_mut("upstream")) {
         fuigo_sampling_types::upstream_vocab::project_json(upstream);
     }
     if sent_credentials::is_empty() {

@@ -4,10 +4,9 @@
 use super::*;
 
 fn effective_with_campaign() -> TomlValue {
-    let mut user: TomlValue = toml::from_str(
-        "[mcp_servers.own]\ncommand = \"own-srv\"\nargs = [\"--p=${PATH}\"]\n",
-    )
-    .unwrap();
+    let mut user: TomlValue =
+        toml::from_str("[mcp_servers.own]\ncommand = \"own-srv\"\nargs = [\"--p=${PATH}\"]\n")
+            .unwrap();
     fuigo_config::expand_env_vars_in_toml(&mut user);
     let patch: toml::Table = toml::from_str(
         "[mcp_servers.fresh]\ncommand = \"${PATH}/srv\"\nargs = [\"--k=${PATH}\"]\n\
@@ -15,13 +14,19 @@ fn effective_with_campaign() -> TomlValue {
          [mcp_servers.tilde]\ncommand = \"~/bin/srv\"\nargs = [\"~/data\"]\n",
     )
     .unwrap();
-    let entries = vec![fuigo_config::campaigns::CampaignEntry { id: "c".into(), patch }];
+    let entries = vec![fuigo_config::campaigns::CampaignEntry {
+        id: "c".into(),
+        patch,
+    }];
     fuigo_config::campaigns::apply_active_campaign_patches(&mut user, &entries);
     user
 }
 
 fn materialize(root: &TomlValue, name: &str) -> acp::McpServer {
-    let config = parse_mcp_servers_from_toml(root).get(name).unwrap_or_else(|| panic!("no server {name}")).clone();
+    let config = parse_mcp_servers_from_toml(root)
+        .get(name)
+        .unwrap_or_else(|| panic!("no server {name}"))
+        .clone();
     materialize_mcp_config(
         name,
         config,
@@ -53,13 +58,25 @@ fn campaign_added_server_strings_are_not_environment_expanded_at_use() {
     // A leading `~` is the user's home, no secret: it still expands for a campaign's stdio server.
     match materialize(&root, "tilde") {
         acp::McpServer::Stdio(s) => {
-            assert!(!s.command.to_string_lossy().starts_with('~') && s.command.ends_with("bin/srv"), "{:?}", s.command);
-            assert!(!s.args[0].starts_with('~') && s.args[0].ends_with("data"), "{:?}", s.args);
+            assert!(
+                !s.command.to_string_lossy().starts_with('~') && s.command.ends_with("bin/srv"),
+                "{:?}",
+                s.command
+            );
+            assert!(
+                !s.args[0].starts_with('~') && s.args[0].ends_with("data"),
+                "{:?}",
+                s.args
+            );
         }
         other => panic!("not stdio: {other:?}"),
     }
     match materialize(&root, "own") {
-        acp::McpServer::Stdio(s) => assert!(!s.args[0].contains("${PATH}"), "the user's own server expands: {:?}", s.args),
+        acp::McpServer::Stdio(s) => assert!(
+            !s.args[0].contains("${PATH}"),
+            "the user's own server expands: {:?}",
+            s.args
+        ),
         other => panic!("not stdio: {other:?}"),
     }
 }

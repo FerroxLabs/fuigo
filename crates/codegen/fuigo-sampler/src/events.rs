@@ -44,6 +44,10 @@ impl StripReason {
 /// Events are sent on the shared event channel that callers subscribe to.
 /// The session translates these into ACP notifications.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "SamplingError inlines the upstream classification; boxing it touches every construction site and is a separate refactor"
+)]
 pub enum SamplingEvent {
     /// HTTP stream established, headers read. Emitted before any content.
     StreamStarted {
@@ -110,10 +114,7 @@ pub enum SamplingEvent {
     /// A `redacted_thinking` block finished: the model's encrypted reasoning, opaque to the client, with its `data` blob.
     /// Emitted at the block's stop, in wire order with the `ReasoningCompleted` events around it, so a headless consumer keeps
     /// the block where the model put it. Emitted by the Messages L2 transform only; an empty blob is not forwarded.
-    RedactedThinking {
-        request_id: RequestId,
-        data: String,
-    },
+    RedactedThinking { request_id: RequestId, data: String },
 
     /// Streaming completed successfully.
     Completed {
@@ -229,11 +230,26 @@ pub struct SamplingErrorInfo {
     /// Serializes as the plain wire string; `None` when absent or from an older peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<ApiErrorCode>,
-    #[serde(default, deserialize_with = "fuigo_sampling_types::upstream_vocab::deserialize_optional", serialize_with = "fuigo_sampling_types::upstream_vocab::serialize_optional", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "fuigo_sampling_types::upstream_vocab::deserialize_optional",
+        serialize_with = "fuigo_sampling_types::upstream_vocab::serialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub upstream_state: Option<String>,
-    #[serde(default, deserialize_with = "fuigo_sampling_types::upstream_vocab::deserialize_optional", serialize_with = "fuigo_sampling_types::upstream_vocab::serialize_optional", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "fuigo_sampling_types::upstream_vocab::deserialize_optional",
+        serialize_with = "fuigo_sampling_types::upstream_vocab::serialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub upstream_type: Option<String>,
-    #[serde(default,skip_serializing_if="fuigo_sampling_types::error::UpstreamError::is_empty",serialize_with="fuigo_sampling_types::upstream_vocab::serialize_internal",deserialize_with="fuigo_sampling_types::upstream_vocab::deserialize_internal")]
+    #[serde(
+        default,
+        skip_serializing_if = "fuigo_sampling_types::error::UpstreamError::is_empty",
+        serialize_with = "fuigo_sampling_types::upstream_vocab::serialize_internal",
+        deserialize_with = "fuigo_sampling_types::upstream_vocab::deserialize_internal"
+    )]
     pub upstream_details: fuigo_sampling_types::error::UpstreamError,
     pub model_metadata: Option<ResponseModelMetadata>,
     /// Present only when `kind == EmptyResponse`.
@@ -256,10 +272,19 @@ pub struct SamplingErrorInfo {
 
 impl SamplingErrorInfo {
     pub fn upstream(&self) -> fuigo_sampling_types::error::UpstreamError {
-        let mut u=self.upstream_details.clone();
-        u.http_status=self.status_code.or(u.http_status);
-        u.state=u.state.or_else(||self.upstream_state.clone().filter(|s|fuigo_sampling_types::error::is_upstream_slug(s)));
-        u.error_type=u.error_type.or_else(||self.upstream_type.clone().filter(|s|fuigo_sampling_types::error::is_upstream_slug(s)));u
+        let mut u = self.upstream_details.clone();
+        u.http_status = self.status_code.or(u.http_status);
+        u.state = u.state.or_else(|| {
+            self.upstream_state
+                .clone()
+                .filter(|s| fuigo_sampling_types::error::is_upstream_slug(s))
+        });
+        u.error_type = u.error_type.or_else(|| {
+            self.upstream_type
+                .clone()
+                .filter(|s| fuigo_sampling_types::error::is_upstream_slug(s))
+        });
+        u
     }
 }
 
@@ -412,14 +437,17 @@ impl From<&SamplingError> for SamplingErrorInfo {
             should_retry: err.should_retry_header(),
             error_code,
             upstream_state: match err {
-                SamplingError::Api { upstream_state, .. } => upstream_state.clone().filter(|s| fuigo_sampling_types::error::is_upstream_slug(s)),
+                SamplingError::Api { upstream_state, .. } => upstream_state
+                    .clone()
+                    .filter(|s| fuigo_sampling_types::error::is_upstream_slug(s)),
                 _ => None,
             },
             upstream_type: match err {
                 SamplingError::Api { upstream_type, .. } => upstream_type.clone(),
                 SamplingError::StreamError { error_type, .. } => Some(error_type.clone()),
                 _ => None,
-            }.filter(|s| fuigo_sampling_types::error::is_upstream_slug(s)),
+            }
+            .filter(|s| fuigo_sampling_types::error::is_upstream_slug(s)),
             is_retryable,
             retry_after_secs,
             model_metadata,
@@ -455,7 +483,7 @@ mod tests {
 
         // Non-Api variants have no header
         let stream_err = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "overloaded_error".into(),
             message: "Overloaded".into(),
             code: None,
@@ -482,7 +510,7 @@ mod tests {
         );
 
         let stream = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "bad image".into(),
             code: Some(ApiErrorCode::InvalidImage),
@@ -614,7 +642,7 @@ mod tests {
     #[test]
     fn stream_error_classified_as_api_and_retryable() {
         let err = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "server_error".into(),
             message: "transient".into(),
             code: None,
@@ -719,13 +747,19 @@ mod upstream_contract_tests {
             serde_json::json!(17),
             serde_json::json!(["hold"]),
         ] {
-            let invalid_wire_string_expected=invalid.is_string().then_some("other");
+            let invalid_wire_string_expected = invalid.is_string().then_some("other");
             let mut invalid_wire = wire.clone();
             invalid_wire["upstream_type"] = invalid.clone();
             invalid_wire["upstream_state"] = invalid;
             let restored: SamplingErrorInfo = serde_json::from_value(invalid_wire).unwrap();
-            assert_eq!(restored.upstream_type.as_deref(),invalid_wire_string_expected);
-            assert_eq!(restored.upstream_state.as_deref(),invalid_wire_string_expected);
+            assert_eq!(
+                restored.upstream_type.as_deref(),
+                invalid_wire_string_expected
+            );
+            assert_eq!(
+                restored.upstream_state.as_deref(),
+                invalid_wire_string_expected
+            );
         }
         let mut legacy = wire;
         legacy.as_object_mut().unwrap().remove("upstream_state");

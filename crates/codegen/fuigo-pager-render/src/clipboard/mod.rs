@@ -4,11 +4,11 @@
 
 mod trust;
 
+pub use fuigo_ratatui_textarea::{ClipboardProvider, InternalClipboard};
 pub use trust::{
     ClipboardDelivery, ClipboardEnvironment, NativeClipboardPreflight, Osc52Capability,
     expected_delivery, native_clipboard_preflight,
 };
-pub use fuigo_ratatui_textarea::{ClipboardProvider, InternalClipboard};
 
 use std::sync::OnceLock;
 
@@ -818,12 +818,10 @@ pub fn log_paste_key_empty_host_clipboard(surface: &str) {
     if !fuigo_telemetry::client::is_enabled() {
         return;
     }
-    fuigo_telemetry::session_ctx::log_event(
-        fuigo_telemetry::events::PasteKeyEmptyHostClipboard {
-            terminal,
-            surface: surface.to_owned(),
-        },
-    );
+    fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::PasteKeyEmptyHostClipboard {
+        terminal,
+        surface: surface.to_owned(),
+    });
 }
 
 fn lone_http_url_trimmed(t: &str) -> bool {
@@ -2190,7 +2188,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&target).expect("read"), "keep me");
         let dangling = dir.path().join("dangling.md");
         std::os::unix::fs::symlink(dir.path().join("missing.txt"), &dangling).expect("symlink");
-        write_text_to_new_file("x", &dangling, false).expect_err("a dangling link is not a free name");
+        write_text_to_new_file("x", &dangling, false)
+            .expect_err("a dangling link is not a free name");
         assert!(!dir.path().join("missing.txt").exists());
     }
 
@@ -2201,7 +2200,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("copy.txt");
         write_text_to_new_file("secret", &path, true).expect("write");
-        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 

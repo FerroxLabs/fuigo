@@ -4,7 +4,6 @@
 //! clients will later replay. They are not produced by serializing the Rust
 //! types. Harness locations: `fixtures/bot_relay/README.md`.
 
-use serde_json::{Value, json};
 use fuigo_tool_protocol::{
     BotBindConversationParams, BotCommandParams, BotEmptyResult, BotEventChannel, BotEventEnvelope,
     BotRelayError, BotRelayErrorCode, BotRosterResult, BotStatusResult, BotSubscribeParams,
@@ -16,6 +15,7 @@ use fuigo_tool_protocol::{
     COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE, COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD,
     HubChannel, HubResyncRequiredEvent, HubTurnFinishedEvent,
 };
+use serde_json::{Value, json};
 
 const ERROR_IDENTITY_UNAVAILABLE: &str =
     include_str!("../fixtures/bot_relay/error_identity_unavailable.json");
@@ -674,7 +674,10 @@ fn method_roster_status_subscribe_bind() {
     assert_eq!(roster.agents[0].last_turn_at, Some(1_700_000_123_000));
 
     let status: BotStatusResult = serde_json::from_str(METHOD_STATUS_RESULT).expect("status");
-    assert_eq!(status.run_state, fuigo_tool_protocol::BotRunState::Hibernated);
+    assert_eq!(
+        status.run_state,
+        fuigo_tool_protocol::BotRunState::Hibernated
+    );
 
     let sub: BotSubscribeParams = serde_json::from_str(METHOD_SUBSCRIBE_PARAMS).expect("subscribe");
     assert_eq!(sub.agent_ids, ["agt_a", "agt_b"]);

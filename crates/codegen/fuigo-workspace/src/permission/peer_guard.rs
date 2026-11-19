@@ -16,7 +16,11 @@ use crate::permission::types::{AccessKind, EditTargets};
 
 /// The live peer-influenced flag of one session, shared by every clone of its permission handle (read on every request).
 #[derive(Clone, Debug, Default)]
-pub struct PeerInfluence(Arc<AtomicBool>, Arc<AtomicBool>, crate::permission::peer_denials::DenialLog);
+pub struct PeerInfluence(
+    Arc<AtomicBool>,
+    Arc<AtomicBool>,
+    crate::permission::peer_denials::DenialLog,
+);
 
 impl PeerInfluence {
     /// S7: the session tree's denial ring and carried denials (shared with subagents like the flag).
@@ -107,18 +111,34 @@ pub(crate) fn is_peer_bare_container(path: &Path) -> bool {
     let bare = |p: &Path| {
         p.components().next_back().is_some_and(|c| match c {
             std::path::Component::Normal(n) => {
-                matches!(n.to_string_lossy().to_ascii_lowercase().as_str(), ".claude" | ".fuigo" | ".cursor")
+                matches!(
+                    n.to_string_lossy().to_ascii_lowercase().as_str(),
+                    ".claude" | ".fuigo" | ".cursor"
+                )
             }
             _ => false,
         })
     };
     bare(&fuigo_paths::normalize_lexically(path))
-        || crate::permission::policy::resolve_following_symlinks(path).is_some_and(|resolved| bare(&resolved))
+        || crate::permission::policy::resolve_following_symlinks(path)
+            .is_some_and(|resolved| bare(&resolved))
 }
 
 /// Directories under the Fuigo home that load rules, skills, agents, commands, plugins, hooks, peer config or memory.
 const HOME_DIRS: [&str; 13] = [
-    "sessions", "rules", "skills", "agents", "commands", "peers", "plugins", "hooks", "memory", "personas", "roles", "prompts", "workflows",
+    "sessions",
+    "rules",
+    "skills",
+    "agents",
+    "commands",
+    "peers",
+    "plugins",
+    "hooks",
+    "memory",
+    "personas",
+    "roles",
+    "prompts",
+    "workflows",
 ];
 
 /// The audit log and its one rotation, by exact name (`peer_audit.rs` `FILE_NAME`, `ROTATED_NAME`).
@@ -128,7 +148,9 @@ fn is_audit_file_name(name: &str) -> bool {
 
 fn file_starts_with_audit(path: &Path, home: &Path) -> bool {
     path.parent() == Some(home)
-        && path.file_name().is_some_and(|n| is_audit_file_name(&n.to_string_lossy().to_ascii_lowercase()))
+        && path
+            .file_name()
+            .is_some_and(|n| is_audit_file_name(&n.to_string_lossy().to_ascii_lowercase()))
 }
 
 /// The additions to the floor. Names compare case-insensitively, like the floor.
@@ -145,13 +167,19 @@ fn instruction_set_match(path: &Path) -> bool {
         return false;
     };
     // Instruction files read at every level (`fuigo-tools/src/types/compat.rs:425-440`, `agents_md_tracker.rs:20-31`).
-    if matches!(file, "claude.md" | "claude.local.md" | "agents.md" | "agent.md") {
+    if matches!(
+        file,
+        "claude.md" | "claude.local.md" | "agents.md" | "agent.md"
+    ) {
         return true;
     }
     // Rule, skill, agent and command directories (`agents_md_tracker.rs` RULES_DIRS, `skills/discovery.rs:26-29`).
     let in_rule_dir = parts.windows(2).any(|w| {
         matches!(w[0], ".claude" | ".fuigo" | ".cursor")
-            && matches!(w[1], "rules" | "skills" | "skills-cursor" | "agents" | "commands")
+            && matches!(
+                w[1],
+                "rules" | "skills" | "skills-cursor" | "agents" | "commands"
+            )
     });
     if in_rule_dir {
         return true;
@@ -159,7 +187,11 @@ fn instruction_set_match(path: &Path) -> bool {
     // Peer config, held store and audit log; plugins and their marketplace list; the `.fuigo` bundle directories that
     // define personas, roles, prompts and workflows (`fuigo-bundle/src/lib.rs`); the memory directory.
     if parts.windows(2).any(|w| {
-        (w[0] == ".fuigo" && matches!(w[1], "peers" | "personas" | "roles" | "prompts" | "workflows" | "memory" | "sessions"))
+        (w[0] == ".fuigo"
+            && matches!(
+                w[1],
+                "peers" | "personas" | "roles" | "prompts" | "workflows" | "memory" | "sessions"
+            ))
             || (matches!(w[0], ".claude" | ".fuigo" | ".cursor") && w[1] == "plugins")
     }) {
         return true;
@@ -170,11 +202,14 @@ fn instruction_set_match(path: &Path) -> bool {
         return true;
     }
     // A relocated Fuigo home (`FUIGO_HOME`, no `.fuigo` component): the floor's helper handles case and a symlinked home.
-    if crate::permission::shell_access::fuigo_home_matches(fuigo_config::user_fuigo_home().as_deref(), |home| {
-        HOME_DIRS.iter().any(|d| path.starts_with(home.join(d))) || {
-            file_starts_with_audit(path, home)
-        }
-    }) {
+    if crate::permission::shell_access::fuigo_home_matches(
+        fuigo_config::user_fuigo_home().as_deref(),
+        |home| {
+            HOME_DIRS.iter().any(|d| path.starts_with(home.join(d))) || {
+                file_starts_with_audit(path, home)
+            }
+        },
+    ) {
         return true;
     }
     // The runtime socket directory `$XDG_RUNTIME_DIR/fuigo/<hash>/peers`, used when the home path is too long for a socket
@@ -194,7 +229,11 @@ fn instruction_set_match(path: &Path) -> bool {
 /// `$XDG_RUNTIME_DIR/fuigo/<hash>/peers` for this process's Fuigo home, computed by the same pure function the inbox uses.
 fn runtime_peers_dir_for_home() -> Option<std::path::PathBuf> {
     #[cfg(test)]
-    if let Some((runtime, home)) = TEST_RUNTIME_DIR.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+    if let Some((runtime, home)) = TEST_RUNTIME_DIR
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
         return Some(fuigo_peer::runtime_peers_dir(&runtime, &home));
     }
     let runtime = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
@@ -207,8 +246,9 @@ fn runtime_peers_dir_for_home() -> Option<std::path::PathBuf> {
 
 /// Test seam: the (runtime directory, Fuigo home) the guard assumes; the process environment is never touched.
 #[cfg(test)]
-pub(crate) static TEST_RUNTIME_DIR: std::sync::RwLock<Option<(std::path::PathBuf, std::path::PathBuf)>> =
-    std::sync::RwLock::new(None);
+pub(crate) static TEST_RUNTIME_DIR: std::sync::RwLock<
+    Option<(std::path::PathBuf, std::path::PathBuf)>,
+> = std::sync::RwLock::new(None);
 
 /// The guard (S6.3). `Some(reason)` means DENY. Consulted only when the session is peer-influenced; the caller checks
 /// the flag first so a non-influenced session never reaches this.
@@ -248,8 +288,19 @@ pub fn peer_guard_denial(
 /// Whether `path` is a directory that holds one of the protected set's fixed well-known names (bounded: no walk).
 pub(crate) fn peer_holds_protected(path: &Path) -> bool {
     const NAMES: &[&str] = &[
-        "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENT.md", ".git", ".gitconfig", ".claude", ".fuigo", ".cursor",
+        "CLAUDE.md",
+        "CLAUDE.local.md",
+        "AGENTS.md",
+        "AGENT.md",
+        ".git",
+        ".gitconfig",
+        ".claude",
+        ".fuigo",
+        ".cursor",
     ];
     path.file_name().is_some_and(|n| n == ".git") && path.exists()
-        || path.is_dir() && NAMES.iter().any(|n| path.join(n).symlink_metadata().is_ok())
+        || path.is_dir()
+            && NAMES
+                .iter()
+                .any(|n| path.join(n).symlink_metadata().is_ok())
 }

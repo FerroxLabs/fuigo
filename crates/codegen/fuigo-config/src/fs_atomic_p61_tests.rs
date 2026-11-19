@@ -24,11 +24,7 @@ fn lines(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn append_line_with(
-    path: &Path,
-    lock: &Path,
-    line: &str,
-) -> Result<(), EditError<std::io::Error>> {
+fn append_line_with(path: &Path, lock: &Path, line: &str) -> Result<(), EditError<std::io::Error>> {
     edit_locked_with_lock(
         path,
         lock,
@@ -72,7 +68,10 @@ struct LiveProcess(std::process::Child);
 impl LiveProcess {
     fn start() -> Self {
         #[allow(clippy::disallowed_methods)] // test fixture; killed on drop
-        let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
         Self(child)
     }
     fn pid(&self) -> u32 {
@@ -208,7 +207,10 @@ fn temp_names_are_recognised_and_nothing_else() {
     assert_eq!(temp_owner_pid("config.toml.12.3.tmp", name), Some(12));
     assert_eq!(temp_owner_pid(".config.toml.12.3.tmp", name), Some(12));
     assert_eq!(temp_owner_pid("config.toml.tmp.12.99999", name), Some(12));
-    assert_eq!(temp_owner_pid("config.toml.dashboard.tmp.12", name), Some(12));
+    assert_eq!(
+        temp_owner_pid("config.toml.dashboard.tmp.12", name),
+        Some(12)
+    );
     for other in [
         "config.toml",
         "config.toml.lock",
@@ -300,7 +302,10 @@ fn a_live_writers_temp_is_never_swept() {
     assert!(tmp.exists());
     // Once that writer is gone, the same temp is stale.
     drop(live);
-    assert_eq!(sweep_stale_temps(&path, Duration::ZERO), std::slice::from_ref(&tmp));
+    assert_eq!(
+        sweep_stale_temps(&path, Duration::ZERO),
+        std::slice::from_ref(&tmp)
+    );
 }
 
 /// A fresh temp is never swept, even when its writer is gone.
@@ -309,7 +314,9 @@ fn a_live_writers_temp_is_never_swept() {
 fn a_fresh_temp_is_never_swept() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
-    let tmp = dir.path().join(format!(".config.toml.{}.1.tmp", dead_pid()));
+    let tmp = dir
+        .path()
+        .join(format!(".config.toml.{}.1.tmp", dead_pid()));
     std::fs::write(&tmp, "t").unwrap();
     assert!(sweep_stale_temps(&path, STALE_TEMP_AGE).is_empty());
     assert!(tmp.exists());
@@ -416,7 +423,10 @@ fn the_sweep_clears_a_dead_writers_staging_directory_and_only_ours() {
             .unwrap();
     }
     let removed = sweep_stale_temps(&path, STALE_TEMP_AGE);
-    assert!(removed.contains(&ours) && removed.contains(&empty_after), "{removed:?}");
+    assert!(
+        removed.contains(&ours) && removed.contains(&empty_after),
+        "{removed:?}"
+    );
     assert!(!empty_after.exists());
     assert!(foreign.exists() && busy.is_dir());
     assert!(live_temp.exists() && fresh_temp.exists() && mixed.is_dir());
@@ -434,7 +444,11 @@ fn a_restrictive_umask_does_not_change_the_replacement_mode() {
     let out = spawn_role(&format!("umask|{}", path.display()))
         .wait_with_output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "b");
     assert_eq!(mode_of(&path), 0o600);
 }
@@ -670,7 +684,11 @@ fn two_processes_editing_one_file_lose_no_update() {
         for mut c in children {
             drop(c.stdin.take());
             let out = c.wait_with_output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
         }
         let mut got = lines(&path);
         got.sort();

@@ -57,7 +57,11 @@ fn no_temps(dir: &Path) {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.contains(".tmp"))
         .collect();
-    assert!(temps.is_empty(), "temps left in {}: {temps:?}", dir.display());
+    assert!(
+        temps.is_empty(),
+        "temps left in {}: {temps:?}",
+        dir.display()
+    );
 }
 
 /// Five different writers of the user's `config.toml` -- MCP server save,
@@ -100,7 +104,11 @@ fn five_writers_of_the_user_config_in_five_processes_lose_nothing() {
         }
     }
     assert!(missing.is_empty(), "lost updates: {missing:?}");
-    assert_eq!(v["ui"]["compact_mode"].as_bool(), Some(true), "settings save lost");
+    assert_eq!(
+        v["ui"]["compact_mode"].as_bool(),
+        Some(true),
+        "settings save lost"
+    );
     no_temps(home.path());
 }
 
@@ -128,7 +136,11 @@ fn two_writers_of_a_project_config_in_two_processes_lose_nothing() {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(entries, ["config.toml"], "nothing but the config in the repo");
+    assert_eq!(
+        entries,
+        ["config.toml"],
+        "nothing but the config in the repo"
+    );
 }
 
 /// `hooks-paths`: adds from one process and adds-then-removes from another;
@@ -175,8 +187,14 @@ fn json_state_files_edited_from_two_processes_lose_nothing() {
         serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
     for who in ["a", "b"] {
         for i in 0..EACH {
-            assert!(p["servers"].get(format!("{who}{i}")).is_some(), "prefs {who}{i}");
-            assert!(s["projects"].get(format!("/{who}/{i}")).is_some(), "state /{who}/{i}");
+            assert!(
+                p["servers"].get(format!("{who}{i}")).is_some(),
+                "prefs {who}{i}"
+            );
+            assert!(
+                s["projects"].get(format!("/{who}/{i}")).is_some(),
+                "state /{who}/{i}"
+            );
         }
     }
     no_temps(home.path());
@@ -217,7 +235,8 @@ fn p61_shell_child_role() {
         .unwrap();
     let home = crate::util::fuigo_home::fuigo_home();
     let user_config = home.join("config.toml");
-    let server: fuigo_config_types::McpServerConfig = toml::from_str("command = \"echo\"\n").unwrap();
+    let server: fuigo_config_types::McpServerConfig =
+        toml::from_str("command = \"echo\"\n").unwrap();
     let env_item = |i: usize| crate::claude_import::ImportableItem::EnvVar {
         key: format!("P61_{i}"),
         value: "v".to_owned(),
@@ -256,7 +275,9 @@ fn p61_shell_child_role() {
         }
         ["import"] => {
             for i in 0..EACH {
-                retrying(|| crate::claude_import::apply_items_to_config(&user_config, &[env_item(i)]));
+                retrying(|| {
+                    crate::claude_import::apply_items_to_config(&user_config, &[env_item(i)])
+                });
             }
         }
         ["settings"] => {
@@ -282,19 +303,26 @@ fn p61_shell_child_role() {
         }
         ["project-import", path] => {
             for i in 0..EACH {
-                retrying(|| crate::claude_import::apply_items_to_config(Path::new(path), &[env_item(i)]));
+                retrying(|| {
+                    crate::claude_import::apply_items_to_config(Path::new(path), &[env_item(i)])
+                });
             }
         }
         ["hooks-add", file] => {
             for i in 0..EACH {
-                retrying(|| crate::config::add_hooks_path_to_file(&format!("/keep/{i}"), Path::new(file)));
+                retrying(|| {
+                    crate::config::add_hooks_path_to_file(&format!("/keep/{i}"), Path::new(file))
+                });
             }
         }
         ["hooks-churn", file] => {
             for i in 0..EACH {
                 let line = format!("/gone/{i}");
                 retrying(|| crate::config::add_hooks_path_to_file(&line, Path::new(file)));
-                assert!(retrying(|| crate::config::remove_hooks_path_from_file(&line, Path::new(file))));
+                assert!(retrying(|| crate::config::remove_hooks_path_from_file(
+                    &line,
+                    Path::new(file)
+                )));
             }
         }
         ["prefs", path, who] => {
@@ -302,16 +330,19 @@ fn p61_shell_child_role() {
                 let name = format!("{who}{i}");
                 retrying(|| {
                     let name = name.clone();
-                    rt.block_on(super::super::mcp::update_mcp_preferences_at(Path::new(path), move |p| {
-                        p.servers.insert(
-                            name.clone(),
-                            crate::util::config::McpServerPreferences {
-                                values: std::collections::HashMap::new(),
-                                source: None,
-                                updated_at: None,
-                            },
-                        );
-                    }))
+                    rt.block_on(super::super::mcp::update_mcp_preferences_at(
+                        Path::new(path),
+                        move |p| {
+                            p.servers.insert(
+                                name.clone(),
+                                crate::util::config::McpServerPreferences {
+                                    values: std::collections::HashMap::new(),
+                                    source: None,
+                                    updated_at: None,
+                                },
+                            );
+                        },
+                    ))
                 });
             }
         }
@@ -363,7 +394,13 @@ fn entries(dir: &Path) -> Vec<String> {
 const ORIGINAL: &str = "[ui]\ntheme = \"dark\"\n";
 
 /// A directory holding `name` = [`ORIGINAL`], every stage under it failing.
-fn failing_dir(name: &str) -> (tempfile::TempDir, PathBuf, fuigo_config::fs_atomic::stage_fault::FailUnder) {
+fn failing_dir(
+    name: &str,
+) -> (
+    tempfile::TempDir,
+    PathBuf,
+    fuigo_config::fs_atomic::stage_fault::FailUnder,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(name);
     std::fs::write(&path, ORIGINAL).unwrap();
@@ -373,14 +410,18 @@ fn failing_dir(name: &str) -> (tempfile::TempDir, PathBuf, fuigo_config::fs_atom
 
 fn assert_untouched(dir: &Path, path: &Path, original: &str) {
     assert_eq!(std::fs::read_to_string(path).unwrap(), original);
-    let temps: Vec<String> = entries(dir).into_iter().filter(|n| n.contains(".tmp")).collect();
+    let temps: Vec<String> = entries(dir)
+        .into_iter()
+        .filter(|n| n.contains(".tmp"))
+        .collect();
     assert!(temps.is_empty(), "{temps:?}");
 }
 
 #[tokio::test]
 async fn a_failed_mcp_write_leaves_the_config_and_no_temp() {
     let (dir, path, _fail) = failing_dir("config.toml");
-    let server: fuigo_config_types::McpServerConfig = toml::from_str("command = \"echo\"\n").unwrap();
+    let server: fuigo_config_types::McpServerConfig =
+        toml::from_str("command = \"echo\"\n").unwrap();
     let err = super::super::mcp::save_mcp_server_config_at(&path, "srv", &server)
         .await
         .unwrap_err();
@@ -475,7 +516,11 @@ fn a_failed_settings_write_leaves_the_user_config_and_no_temp() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     assert_untouched(home.path(), &path, ORIGINAL);
 }
 
@@ -492,7 +537,10 @@ fn project_files_lock_out_of_tree_and_by_identity() {
     assert!(!lock.starts_with(project.path()), "{}", lock.display());
     assert!(lock.starts_with(crate::util::fuigo_home::fuigo_home().join("locks")));
     let user = super::user_config_path();
-    assert_eq!(super::rmw_lock_path(&user), fuigo_config::fs_atomic::config_lock_path(&user));
+    assert_eq!(
+        super::rmw_lock_path(&user),
+        fuigo_config::fs_atomic::config_lock_path(&user)
+    );
 }
 
 /// A project reached through a symlinked directory and through its real path

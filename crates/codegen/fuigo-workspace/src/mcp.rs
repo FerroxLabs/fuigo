@@ -1308,9 +1308,15 @@ mod tests {
         let client = idle_client();
         let weak = Arc::downgrade(&client);
         let adapter = McpClientTransportAdapter::new(client);
-        assert!(weak.upgrade().is_some(), "fixture: the adapter holds the client");
+        assert!(
+            weak.upgrade().is_some(),
+            "fixture: the adapter holds the client"
+        );
         adapter.close().await.expect("close");
-        assert!(weak.upgrade().is_none(), "a closed adapter still owns the stopped server's client");
+        assert!(
+            weak.upgrade().is_none(),
+            "a closed adapter still owns the stopped server's client"
+        );
     }
 
     /// A call a handler routes in after the stop fails at the adapter instead of reaching (or restarting) the server.

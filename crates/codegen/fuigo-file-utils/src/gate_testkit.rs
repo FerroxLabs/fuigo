@@ -111,7 +111,11 @@ impl RecordingEndpoint {
                 })
             })
             .collect();
-        Self { authority, captured, tasks }
+        Self {
+            authority,
+            captured,
+            tasks,
+        }
     }
 
     /// `http://host:port/v1`: the storage-proxy base URL of this mock.
@@ -136,7 +140,10 @@ impl RecordingEndpoint {
 
     /// Every byte received, in arrival order.
     pub fn received(&self) -> Vec<u8> {
-        self.captured.lock().map(|c| c.bytes.clone()).unwrap_or_default()
+        self.captured
+            .lock()
+            .map(|c| c.bytes.clone())
+            .unwrap_or_default()
     }
 
     /// Whether `needle` appears anywhere in what was received.
@@ -208,7 +215,10 @@ fn request_len(buf: &[u8]) -> Option<usize> {
         loop {
             let line_end = buf[at..].windows(2).position(|w| w == b"\r\n")? + at;
             let size = usize::from_str_radix(
-                String::from_utf8_lossy(&buf[at..line_end]).split(';').next()?.trim(),
+                String::from_utf8_lossy(&buf[at..line_end])
+                    .split(';')
+                    .next()?
+                    .trim(),
                 16,
             )
             .ok()?;

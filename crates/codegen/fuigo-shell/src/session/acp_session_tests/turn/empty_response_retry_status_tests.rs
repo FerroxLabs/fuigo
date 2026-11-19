@@ -23,6 +23,10 @@ const AGENT_MESSAGE: &str = "agent_message_chunk";
 const AGENT_THOUGHT: &str = "agent_thought_chunk";
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "SamplingError inlines the upstream classification; boxing it touches every construction site and is a separate refactor"
+)]
 enum Frame {
     /// `_fuigo/session_notification` `retry_state`.
     Fuigo(RetryState),
@@ -187,8 +191,13 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
             // P188: each discard names its attempt's wall-clock stream start; pin that it is there, then compare the rest
             for frame in &mut frames {
                 match frame {
-                    Frame::Fuigo(RetryState::Retrying { stream_start_ms, .. }) => {
-                        assert!(stream_start_ms.take().is_some(), "a discard names its attempt");
+                    Frame::Fuigo(RetryState::Retrying {
+                        stream_start_ms, ..
+                    }) => {
+                        assert!(
+                            stream_start_ms.take().is_some(),
+                            "a discard names its attempt"
+                        );
                     }
                     Frame::Standard {
                         retry_status: Some(status),
@@ -510,13 +519,23 @@ fn main_session_rate_limit_status_shows_the_attempts_it_really_makes() {
             let texts: Vec<&str> = frames
                 .iter()
                 .filter_map(|frame| match frame {
-                    Frame::Standard { text, retry_status: Some(_), .. } => Some(text.as_str()),
+                    Frame::Standard {
+                        text,
+                        retry_status: Some(_),
+                        ..
+                    } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect();
             assert_eq!(texts.len(), 2, "{frames:#?}");
-            assert!(texts[0].starts_with("Retrying the model (1/2)"), "{texts:#?}");
-            assert!(texts[1].starts_with("The model request failed after 2 attempts:"), "{texts:#?}");
+            assert!(
+                texts[0].starts_with("Retrying the model (1/2)"),
+                "{texts:#?}"
+            );
+            assert!(
+                texts[1].starts_with("The model request failed after 2 attempts:"),
+                "{texts:#?}"
+            );
         })
     });
 }
@@ -1232,7 +1251,8 @@ fn a_rewound_turn_charges_the_request_it_had_in_flight() {
             )
             .await;
             let session = actor.session_info.id.to_string();
-            let execution = open_execution_with_budget(&actor, "req-rewind-charge", 1_000_000).await;
+            let execution =
+                open_execution_with_budget(&actor, "req-rewind-charge", 1_000_000).await;
             fuigo_sampling_types::ExecutionAdmission::admit(
                 execution.as_ref(),
                 fuigo_sampling_types::RequestPurpose::Work,
@@ -1240,8 +1260,10 @@ fn a_rewound_turn_charges_the_request_it_had_in_flight() {
             )
             .await
             .expect("the request is admitted");
-            *actor.current_prompt_id.lock().expect("current_prompt_id mutex poisoned") =
-                Some("rw".to_string());
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("rw".to_string());
             let (item, _rx) = super::turn_completion_emit_tests::pending_input("rw");
             {
                 let mut state = actor.state.lock().await;
@@ -1251,13 +1273,18 @@ fn a_rewound_turn_charges_the_request_it_had_in_flight() {
             }
             let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
-                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput { prompt_id: None },
+                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                        prompt_id: None,
+                    },
                     user_initiated: true,
                     ..Default::default()
                 })
                 .await;
             let state = execution.snapshot().await.expect("execution snapshot");
-            assert!(state.pending.is_empty(), "the in-flight request is settled: {state:?}");
+            assert!(
+                state.pending.is_empty(),
+                "the in-flight request is settled: {state:?}"
+            );
             assert!(state.total_tokens > 0, "and charged an estimate: {state:?}");
             assert!(!state.unknown_usage, "{state:?}");
             execution.release(&session);

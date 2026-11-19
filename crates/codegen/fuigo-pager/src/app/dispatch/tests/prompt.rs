@@ -5620,7 +5620,10 @@ fn unbound_image_placeholder_send_shows_a_notice() {
         image_toast(&app, id).as_deref(),
         Some("Image #1 not attached — placeholder sent as text")
     );
-    assert!(app.pending_image_notices.is_empty(), "flushed when the dispatch ends");
+    assert!(
+        app.pending_image_notices.is_empty(),
+        "flushed when the dispatch ends"
+    );
 }
 
 /// Minimal mode renders no toasts: the notice lands in the transcript instead.
@@ -5635,7 +5638,10 @@ fn minimal_mode_image_notice_goes_to_scrollback() {
 
     dispatch(Action::SendPrompt("see [Image #1]".into()), &mut app);
 
-    assert!(image_toast(&app, id).is_none(), "minimal mode must not rely on a toast");
+    assert!(
+        image_toast(&app, id).is_none(),
+        "minimal mode must not rely on a toast"
+    );
     assert_eq!(
         last_system_text(&app, id),
         "Image #1 not attached — placeholder sent as text"
@@ -5663,7 +5669,8 @@ fn unreadable_queued_image_shows_a_notice_on_drain() {
 
     let effects = {
         let agent = app.agents.get_mut(&id).unwrap();
-        crate::app::dispatch::queue::maybe_drain_queue(agent, &mut app.pending_image_notices).effects
+        crate::app::dispatch::queue::maybe_drain_queue(agent, &mut app.pending_image_notices)
+            .effects
     };
 
     assert!(
@@ -5690,7 +5697,10 @@ fn nested_dispatch_defers_the_image_notice_to_the_outermost() {
     app.pending_image_notices
         .push("Image #1 not attached — placeholder sent as text".to_owned());
 
-    assert!(!app.flush_image_notices_if_root(), "an outer dispatch is still running");
+    assert!(
+        !app.flush_image_notices_if_root(),
+        "an outer dispatch is still running"
+    );
     assert_eq!(app.pending_image_notices.len(), 1);
 
     app.dispatch_depth = 0;
@@ -5720,9 +5730,14 @@ fn send_now_from_dashboard_view_still_flushes_image_notice() {
         &mut app,
     );
 
-    assert!(effects.is_empty(), "no session view: the send bails, got {effects:?}");
+    assert!(
+        effects.is_empty(),
+        "no session view: the send bails, got {effects:?}"
+    );
     assert_eq!(
-        app.dashboard.as_ref().and_then(|d| d.error_toast.as_deref()),
+        app.dashboard
+            .as_ref()
+            .and_then(|d| d.error_toast.as_deref()),
         Some("Image #1 not attached — placeholder sent as text")
     );
 }
@@ -5736,10 +5751,9 @@ fn composer_send_now_carries_the_unbound_placeholder_notice() {
         agent.session.state = AgentState::TurnRunning;
         agent.prompt.set_text("steer [Image #3]");
     }
-    let action = app
-        .agents
-        .get_mut(&id)
-        .and_then(|agent| agent.resume_deferred_send(crate::app::agent_view::AgentDeferredSend::Interject));
+    let action = app.agents.get_mut(&id).and_then(|agent| {
+        agent.resume_deferred_send(crate::app::agent_view::AgentDeferredSend::Interject)
+    });
     let Some(Action::SendPromptNow { image_notice, .. }) = action else {
         panic!("expected a SendPromptNow action, got {action:?}");
     };
@@ -5804,9 +5818,17 @@ fn skill_prompt_drops_images_with_a_notice_queued_for_both_modes() {
     enqueue_local(&mut app, id, "run the skill");
     compose_with_image(&mut app, id, "run the skill ");
     let agent = app.agents.get_mut(&id).unwrap();
-    agent.session.pending_prompts.back_mut().unwrap().wire_blocks = Some(Vec::new());
+    agent
+        .session
+        .pending_prompts
+        .back_mut()
+        .unwrap()
+        .wire_blocks = Some(Vec::new());
 
-    crate::app::dispatch::queue::drain_prompt_state_to_last_queued(agent, &mut app.pending_image_notices);
+    crate::app::dispatch::queue::drain_prompt_state_to_last_queued(
+        agent,
+        &mut app.pending_image_notices,
+    );
 
     assert_eq!(
         app.pending_image_notices,
@@ -5875,7 +5897,10 @@ fn send_now_image_and_chip_come_back_on_cancel() {
     dispatch(Action::SendPrompt("first".into()), &mut app);
 
     let (text, effects) = send_now_from_composer(&mut app, id, "  look at [Image #1]  ");
-    assert_eq!(text, "look at [Image #1]", "the payload is the trimmed text");
+    assert_eq!(
+        text, "look at [Image #1]",
+        "the payload is the trimmed text"
+    );
     let prompt_id = match effects.as_slice() {
         [Effect::SendPromptNow { prompt_id, .. }] => prompt_id.clone(),
         other => panic!("expected SendPromptNow effect, got {other:?}"),
@@ -5889,14 +5914,21 @@ fn send_now_image_and_chip_come_back_on_cancel() {
         "prompt",
         None,
     );
-    assert!(agent.send_now_attachments.is_empty(), "the adoption takes the payload");
+    assert!(
+        agent.send_now_attachments.is_empty(),
+        "the adoption takes the payload"
+    );
 
     let _ = dispatch(Action::CancelTurn, &mut app);
 
     let agent = &app.agents[&id];
     assert_eq!(agent.prompt.text(), text);
     assert_eq!(agent.prompt.images.len(), 1, "the image comes back");
-    assert_eq!(image_chip_ranges(agent), vec![8..18], "with its chip on `[Image #1]`");
+    assert_eq!(
+        image_chip_ranges(agent),
+        vec![8..18],
+        "with its chip on `[Image #1]`"
+    );
 }
 
 /// A text-only Send Now cancels back to plain text, as before.
@@ -5919,7 +5951,10 @@ fn send_now_without_images_cancels_to_plain_text() {
         other => panic!("expected SendPromptNow effect, got {other:?}"),
     };
     let agent = app.agents.get_mut(&id).unwrap();
-    assert!(agent.send_now_attachments.is_empty(), "nothing to keep for a text-only send");
+    assert!(
+        agent.send_now_attachments.is_empty(),
+        "nothing to keep for a text-only send"
+    );
     crate::app::dispatch::queue::apply_turn_start_shim(
         agent,
         prompt_id,
@@ -5944,9 +5979,11 @@ fn failed_send_now_requeues_image_with_its_chip() {
     dispatch(Action::SendPrompt("first".into()), &mut app);
     let (text, effects) = send_now_from_composer(&mut app, id, "look at [Image #1]");
     let (prompt_id, blocks) = match effects.as_slice() {
-        [Effect::SendPromptNow {
-            prompt_id, blocks, ..
-        }] => (prompt_id.clone(), blocks.clone()),
+        [
+            Effect::SendPromptNow {
+                prompt_id, blocks, ..
+            },
+        ] => (prompt_id.clone(), blocks.clone()),
         other => panic!("expected SendPromptNow effect, got {other:?}"),
     };
     let _ = dispatch(
@@ -5971,7 +6008,10 @@ fn failed_send_now_requeues_image_with_its_chip() {
         "with its chip: {:?}",
         row.chip_elements
     );
-    assert!(row.wire_blocks.is_none(), "the drain rebuilds the blocks from the same payload");
+    assert!(
+        row.wire_blocks.is_none(),
+        "the drain rebuilds the blocks from the same payload"
+    );
     assert!(agent.send_now_attachments.is_empty());
 }
 
@@ -6048,7 +6088,10 @@ fn rewind_to_prompt_without_image_is_text_only() {
 
 // Sent vs typed-only `[Image #N]` placeholders in the transcript.
 
-fn user_block_by_id(agent: &AgentView, id: crate::scrollback::EntryId) -> crate::scrollback::blocks::UserPromptBlock {
+fn user_block_by_id(
+    agent: &AgentView,
+    id: crate::scrollback::EntryId,
+) -> crate::scrollback::blocks::UserPromptBlock {
     let idx = agent.scrollback.index_of_id(id).expect("block present");
     match &agent.scrollback.entry(idx).unwrap().block {
         RenderBlock::UserPrompt(ub) => ub.clone(),
@@ -6066,7 +6109,12 @@ fn live_send_marks_attached_image_sent_and_typed_only_unsent() {
     dispatch(Action::SendPrompt(text.into()), &mut app);
 
     let agent = &app.agents[&id];
-    let entry = agent.session.in_flight_prompt.as_ref().unwrap().scrollback_entry;
+    let entry = agent
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .unwrap()
+        .scrollback_entry;
     let block = user_block_by_id(agent, entry);
     assert_eq!(block.text, text);
     assert_eq!(block.sent_image_numbers, vec![1]);
@@ -6080,7 +6128,12 @@ fn live_send_without_image_leaves_placeholder_unsent() {
     let id = AgentId(0);
     dispatch(Action::SendPrompt("just [Image #4]".into()), &mut app);
     let agent = &app.agents[&id];
-    let entry = agent.session.in_flight_prompt.as_ref().unwrap().scrollback_entry;
+    let entry = agent
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .unwrap()
+        .scrollback_entry;
     let block = user_block_by_id(agent, entry);
     assert!(block.sent_image_numbers.is_empty());
     assert_eq!(block.unsent_image_ranges(), vec![5..15]);
@@ -6105,8 +6158,19 @@ fn send_now_marks_sent_image_on_its_block() {
     assert_eq!(block.sent_image_numbers, vec![1]);
     assert_eq!(block.unsent_image_ranges(), vec![19..29]);
 
-    crate::app::dispatch::queue::apply_turn_start_shim(agent, prompt_id, Some(text), "prompt", None);
-    let adopted = agent.session.in_flight_prompt.as_ref().unwrap().scrollback_entry;
+    crate::app::dispatch::queue::apply_turn_start_shim(
+        agent,
+        prompt_id,
+        Some(text),
+        "prompt",
+        None,
+    );
+    let adopted = agent
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .unwrap()
+        .scrollback_entry;
     assert_eq!(adopted, entry, "the adoption reuses the painted block");
     assert_eq!(user_block_by_id(agent, adopted).sent_image_numbers, vec![1]);
 }
@@ -6129,12 +6193,31 @@ fn send_now_block_painted_at_adoption_shows_sent_image_as_sent() {
         "no block is painted at dispatch on this path"
     );
 
-    crate::app::dispatch::queue::apply_turn_start_shim(agent, prompt_id, Some(text.clone()), "prompt", None);
-    let adopted = agent.session.in_flight_prompt.as_ref().unwrap().scrollback_entry;
+    crate::app::dispatch::queue::apply_turn_start_shim(
+        agent,
+        prompt_id,
+        Some(text.clone()),
+        "prompt",
+        None,
+    );
+    let adopted = agent
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .unwrap()
+        .scrollback_entry;
     let block = user_block_by_id(agent, adopted);
     assert_eq!(block.text, text);
-    assert_eq!(block.sent_image_numbers, vec![1], "marked as painted, before any echo");
-    assert_eq!(block.unsent_image_ranges(), vec![19..29], "only the typed-only `[Image #2]` is struck");
+    assert_eq!(
+        block.sent_image_numbers,
+        vec![1],
+        "marked as painted, before any echo"
+    );
+    assert_eq!(
+        block.unsent_image_ranges(),
+        vec![19..29],
+        "only the typed-only `[Image #2]` is struck"
+    );
 }
 
 // `/rewind` on a resumed session: the prompt images come from the stored session.
@@ -6145,17 +6228,24 @@ fn replay_prompt(agent: &mut AgentView, text: &str, images: Vec<acp::ImageConten
         is_replay: true,
         ..Default::default()
     };
-    let mut updates = vec![acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
-        acp::ContentBlock::Text(acp::TextContent::new(text.to_string())),
-    ))];
+    let mut updates = vec![acp::SessionUpdate::UserMessageChunk(
+        acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+            text.to_string(),
+        ))),
+    )];
     updates.extend(images.into_iter().map(|img| {
         acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Image(img)))
     }));
-    updates.push(acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-        acp::ContentBlock::Text(acp::TextContent::new("ok".to_string())),
-    )));
+    updates.push(acp::SessionUpdate::AgentMessageChunk(
+        acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+            "ok".to_string(),
+        ))),
+    ));
     for update in updates {
-        agent.session.tracker.handle_update(update, &replay, &mut agent.scrollback);
+        agent
+            .session
+            .tracker
+            .handle_update(update, &replay, &mut agent.scrollback);
     }
     agent.session.tracker.finish_turn(&mut agent.scrollback);
 }
@@ -6163,8 +6253,13 @@ fn replay_prompt(agent: &mut AgentView, text: &str, images: Vec<acp::ImageConten
 /// A stored user-message image block: inline bytes (base64), an optional `file://` uri, and its `[Image #N]` number.
 fn stored_image(data: &str, uri: Option<String>, display_number: usize) -> acp::ImageContent {
     let mut meta = acp::Meta::new();
-    meta.insert("fuigo.dev/imageDisplayNumber".to_owned(), serde_json::json!(display_number));
-    acp::ImageContent::new(data, "image/png").uri(uri).meta(Some(meta))
+    meta.insert(
+        "fuigo.dev/imageDisplayNumber".to_owned(),
+        serde_json::json!(display_number),
+    );
+    acp::ImageContent::new(data, "image/png")
+        .uri(uri)
+        .meta(Some(meta))
 }
 
 /// A real PNG, base64-encoded as a stored image block carries it.
@@ -6196,16 +6291,26 @@ fn rewind_after_resume_restores_the_stored_image() {
     replay_prompt(
         agent,
         "look at [Image #1]",
-        vec![stored_image(&b64, Some(format!("file://{}", file.display())), 1)],
+        vec![stored_image(
+            &b64,
+            Some(format!("file://{}", file.display())),
+            1,
+        )],
     );
     replay_prompt(agent, "plain words", vec![]);
     replay_prompt(agent, "later", vec![]);
-    assert!(agent.sent_prompt_attachments.is_empty(), "nothing recorded live: a resumed session");
+    assert!(
+        agent.sent_prompt_attachments.is_empty(),
+        "nothing recorded live: a resumed session"
+    );
 
     rewind_to(&mut app, id, 1, "plain words");
     let agent = &app.agents[&id];
     assert_eq!(agent.prompt.text(), "plain words");
-    assert!(agent.prompt.images.is_empty(), "text-only prompts are unchanged");
+    assert!(
+        agent.prompt.images.is_empty(),
+        "text-only prompts are unchanged"
+    );
     assert!(agent.prompt.textarea.elements().is_empty());
 
     rewind_to(&mut app, id, 0, "look at [Image #1]");
@@ -6214,10 +6319,18 @@ fn rewind_after_resume_restores_the_stored_image() {
     assert_eq!(agent.prompt.images.len(), 1, "the stored image comes back");
     let img = &agent.prompt.images[0];
     assert_eq!(img.display_number, 1);
-    assert_eq!(img.encoded_bytes.as_deref(), Some(png.as_slice()), "the stored bytes, never the file");
+    assert_eq!(
+        img.encoded_bytes.as_deref(),
+        Some(png.as_slice()),
+        "the stored bytes, never the file"
+    );
     assert!(img.session_image_path.is_none() && img.source_path.is_none());
     assert_eq!(image_chip_ranges(agent), vec![8..18]);
-    let toast = agent.toast.as_ref().map(|(s, _)| s.clone()).unwrap_or_default();
+    let toast = agent
+        .toast
+        .as_ref()
+        .map(|(s, _)| s.clone())
+        .unwrap_or_default();
     assert!(!toast.contains("not re-attached"), "{toast}");
 }
 
@@ -6234,15 +6347,26 @@ fn rewind_after_resume_says_when_the_image_is_gone() {
     replay_prompt(
         agent,
         "look at [Image #1]",
-        vec![stored_image("", Some(format!("file://{}", external.display())), 1)],
+        vec![stored_image(
+            "",
+            Some(format!("file://{}", external.display())),
+            1,
+        )],
     );
     replay_prompt(agent, "later", vec![]);
 
     rewind_to(&mut app, id, 0, "look at [Image #1]");
     let agent = &app.agents[&id];
     assert_eq!(agent.prompt.text(), "look at [Image #1]");
-    assert!(agent.prompt.images.is_empty(), "the named file is never attached");
-    let toast = agent.toast.as_ref().map(|(s, _)| s.clone()).unwrap_or_default();
+    assert!(
+        agent.prompt.images.is_empty(),
+        "the named file is never attached"
+    );
+    let toast = agent
+        .toast
+        .as_ref()
+        .map(|(s, _)| s.clone())
+        .unwrap_or_default();
     assert!(
         toast.contains("Image #1 is no longer available and was not re-attached"),
         "{toast}"

@@ -383,7 +383,10 @@ pub enum RewindPointsLine {
     Point(RewindPoint),
     /// A line that does not parse, kept byte for byte. An append cut short (a kill, a power loss, `ENOSPC`) leaves one,
     /// which the next append terminates as its own line (`append_jsonl_line_sync` in the shell).
-    Damaged { line: usize, raw: Vec<u8> },
+    Damaged {
+        line: usize,
+        raw: Vec<u8>,
+    },
 }
 
 /// How long a read waits for an append in progress (another process writing a large row) before giving up for now.
@@ -437,7 +440,10 @@ fn lock_rewind_points_for_read(path: &Path) -> io::Result<AppendLockForRead> {
                 if std::time::Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
-                        format!("{} is being written by another Fuigo process", path.display()),
+                        format!(
+                            "{} is being written by another Fuigo process",
+                            path.display()
+                        ),
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -460,7 +466,11 @@ pub fn read_rewind_points_lines(path: &Path) -> io::Result<Vec<RewindPointsLine>
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let lock = if is_file { lock_rewind_points_for_read(path)? } else { AppendLockForRead::Unavailable };
+    let lock = if is_file {
+        lock_rewind_points_for_read(path)?
+    } else {
+        AppendLockForRead::Unavailable
+    };
     read_rewind_points_lines_with(path, lock)
 }
 
@@ -468,7 +478,9 @@ pub fn read_rewind_points_lines(path: &Path) -> io::Result<Vec<RewindPointsLine>
 /// across a read-modify-write of the file, as the shell's truncate and merge do (P123): taking the shared lock here
 /// would wait for the caller's own lock, and no append is in progress while it is held, so an unfinished last row is read
 /// as damage.
-pub fn read_rewind_points_lines_holding_append_lock(path: &Path) -> io::Result<Vec<RewindPointsLine>> {
+pub fn read_rewind_points_lines_holding_append_lock(
+    path: &Path,
+) -> io::Result<Vec<RewindPointsLine>> {
     match std::fs::metadata(path) {
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -477,7 +489,10 @@ pub fn read_rewind_points_lines_holding_append_lock(path: &Path) -> io::Result<V
     read_rewind_points_lines_with(path, AppendLockForRead::HeldByCaller)
 }
 
-fn read_rewind_points_lines_with(path: &Path, lock: AppendLockForRead) -> io::Result<Vec<RewindPointsLine>> {
+fn read_rewind_points_lines_with(
+    path: &Path,
+    lock: AppendLockForRead,
+) -> io::Result<Vec<RewindPointsLine>> {
     let Some(mut reader) = open_rewind_points(path)? else {
         return Ok(Vec::new());
     };
@@ -508,7 +523,10 @@ fn read_rewind_points_lines_with(path: &Path, lock: AppendLockForRead) -> io::Re
             }
             Err(e) => {
                 tracing::warn!(error = %e, path = %path.display(), line = number, "damaged rewind_points.jsonl line");
-                out.push(RewindPointsLine::Damaged { line: number, raw: trimmed.to_vec() });
+                out.push(RewindPointsLine::Damaged {
+                    line: number,
+                    raw: trimmed.to_vec(),
+                });
             }
         }
     }
@@ -619,7 +637,9 @@ fn is_single_value_prefix(raw: &[u8]) -> bool {
                 },
                 b'-' | b'0'..=b'9' => {
                     i += 1;
-                    while i < raw.len() && matches!(raw[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                    while i < raw.len()
+                        && matches!(raw[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                    {
                         i += 1;
                     }
                     expect = Expect::CommaOrEnd;
@@ -689,7 +709,9 @@ fn is_single_value_prefix(raw: &[u8]) -> bool {
         return false;
     }
     // Cut short: the innermost open object must already have a complete key, or its `{` may be another record's.
-    stack.last().is_none_or(|(object, keys)| !object || *keys > 0)
+    stack
+        .last()
+        .is_none_or(|(object, keys)| !object || *keys > 0)
 }
 
 /// The index just past the closing quote of the JSON string whose body starts at `from`, or `None` when it is cut.
@@ -752,7 +774,10 @@ fn damaged_rewind_rows(path: &Path, lines: &[RewindPointsLine]) -> Vec<DamagedRe
 /// `rewind_points.jsonl` after a file rewind to `from_index`: the rows of prompts `from_index` and later are dropped.
 /// Damaged rows are kept where they are: they record which prompts' saved files are missing, so dropping them would
 /// let a later rewind report a complete restore without them (P114).
-pub fn truncate_rewind_points_lines(lines: Vec<RewindPointsLine>, from_index: usize) -> Vec<RewindPointsLine> {
+pub fn truncate_rewind_points_lines(
+    lines: Vec<RewindPointsLine>,
+    from_index: usize,
+) -> Vec<RewindPointsLine> {
     lines
         .into_iter()
         .filter(|line| match line {
@@ -764,7 +789,10 @@ pub fn truncate_rewind_points_lines(lines: Vec<RewindPointsLine>, from_index: us
 
 /// `rewind_points.jsonl` after a conversation-only rewind to `target_index`: [`merge_rewind_points_from`] on the
 /// readable rows, then every damaged row, kept for the reason [`truncate_rewind_points_lines`] gives.
-pub fn merge_rewind_points_lines(lines: Vec<RewindPointsLine>, target_index: usize) -> Vec<RewindPointsLine> {
+pub fn merge_rewind_points_lines(
+    lines: Vec<RewindPointsLine>,
+    target_index: usize,
+) -> Vec<RewindPointsLine> {
     let mut points = Vec::new();
     let mut damaged = Vec::new();
     for line in lines {
@@ -1141,20 +1169,33 @@ impl FileStateTracker {
     /// `target` or a later one. A rewind that restores files must not plan from a partial set: it would report the
     /// files of the missing rows as restored when they were not (P111). A damaged row that only earlier prompts can
     /// hold stops nothing (P114).
-    pub async fn try_get_rewind_points_for(&self, target: usize) -> Result<Vec<RewindPoint>, RewindPointsUnavailable> {
+    pub async fn try_get_rewind_points_for(
+        &self,
+        target: usize,
+    ) -> Result<Vec<RewindPoint>, RewindPointsUnavailable> {
         let source = self.lazy_source.lock().await.clone();
         if let Err(error) = self.load_historical().await {
-            return Err(RewindPointsUnavailable::Unreadable { path: source, error });
+            return Err(RewindPointsUnavailable::Unreadable {
+                path: source,
+                error,
+            });
         }
         {
             let damaged = self.damaged_rows.lock().await;
-            let needed: Vec<DamagedRewindRow> = damaged.iter().filter(|row| row.needed_by(target)).cloned().collect();
+            let needed: Vec<DamagedRewindRow> = damaged
+                .iter()
+                .filter(|row| row.needed_by(target))
+                .cloned()
+                .collect();
             if !needed.is_empty() {
                 let first_working_target = damaged
                     .iter()
                     .map(|row| row.prompt.map(|prompt| prompt + 1))
                     .try_fold(0, |first, after| after.map(|after| first.max(after)));
-                return Err(RewindPointsUnavailable::Damaged { needed, first_working_target });
+                return Err(RewindPointsUnavailable::Damaged {
+                    needed,
+                    first_working_target,
+                });
             }
         }
         let points = self.rewind_points.lock().await;
@@ -1292,7 +1333,10 @@ impl FileStateTracker {
 pub enum RewindPointsUnavailable {
     /// The saved file contents could not be read at all (an I/O error). Nothing was loaded; a later attempt reads them
     /// again.
-    Unreadable { path: Option<PathBuf>, error: io::Error },
+    Unreadable {
+        path: Option<PathBuf>,
+        error: io::Error,
+    },
     /// Rows the rewind may need are damaged. Reading them again cannot help.
     Damaged {
         needed: Vec<DamagedRewindRow>,
@@ -1305,16 +1349,30 @@ impl RewindPointsUnavailable {
     /// The refusal of a file rewind to `target`. `valid_targets_below`: targets of file rewinds must lie below it (the
     /// conversation's prompt count), when known. `conversation_only_rewind`: the caller offers a conversation-only
     /// rewind, which needs no saved file contents.
-    pub fn refusal_message(&self, target: usize, valid_targets_below: Option<usize>, conversation_only_rewind: bool) -> String {
+    pub fn refusal_message(
+        &self,
+        target: usize,
+        valid_targets_below: Option<usize>,
+        conversation_only_rewind: bool,
+    ) -> String {
         match self {
             Self::Unreadable { path, error } => format!(
                 "Cannot rewind files to prompt #{target}: the saved file contents{} could not be read ({error}). \
                  Nothing was changed. Once the file can be read (check its permissions and free disk space), run the \
                  same rewind again.",
-                path.as_ref().map(|path| format!(" ({})", path.display())).unwrap_or_default()
+                path.as_ref()
+                    .map(|path| format!(" ({})", path.display()))
+                    .unwrap_or_default()
             ),
-            Self::Damaged { needed, first_working_target } => {
-                let rows = needed.iter().map(DamagedRewindRow::describe).collect::<Vec<_>>().join("; ");
+            Self::Damaged {
+                needed,
+                first_working_target,
+            } => {
+                let rows = needed
+                    .iter()
+                    .map(DamagedRewindRow::describe)
+                    .collect::<Vec<_>>()
+                    .join("; ");
                 let working = match first_working_target {
                     Some(first) if valid_targets_below.is_none_or(|below| *first < below) => {
                         format!(" A file rewind to prompt #{first} or later still works.")
@@ -1533,8 +1591,8 @@ mod tests {
     use super::ToolContext; // from stub above
     use super::*;
     use crate::file_system::MockFs;
-    use std::sync::Arc;
     use fuigo_paths::AbsPathBuf;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_rewind_point_creation() {
@@ -2262,14 +2320,22 @@ mod tests {
         }
         async fn exists(&self, path: &Path) -> Result<bool, crate::file_system::FsError> {
             if path == self.failing {
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied").into());
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "permission denied",
+                )
+                .into());
             }
             self.inner.exists(path).await
         }
         async fn read_file(&self, path: &Path) -> Result<Vec<u8>, crate::file_system::FsError> {
             self.inner.read_file(path).await
         }
-        async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), crate::file_system::FsError> {
+        async fn write_file(
+            &self,
+            path: &Path,
+            data: &[u8],
+        ) -> Result<(), crate::file_system::FsError> {
             self.inner.write_file(path, data).await
         }
         async fn delete_file(&self, path: &Path) -> Result<(), crate::file_system::FsError> {
@@ -2285,27 +2351,45 @@ mod tests {
         let root = PathBuf::from("/proj");
         let created = root.join("locked/created.txt");
         let edited = root.join("edited.txt");
-        let fs = ExistsFailsFs { inner: MockFs::new(root.clone()), failing: created.clone() };
-        fs.inner.write_file(&created, b"agent created").await.unwrap();
+        let fs = ExistsFailsFs {
+            inner: MockFs::new(root.clone()),
+            failing: created.clone(),
+        };
+        fs.inner
+            .write_file(&created, b"agent created")
+            .await
+            .unwrap();
         fs.inner.write_file(&edited, b"agent edit").await.unwrap();
         let fs = crate::file_system::AsyncFsWrapper::new(Arc::new(fs));
         let tracker = FileStateTracker::new();
-        tracker.add_before_snapshot_for_prompt(1, &created, &root, None).await;
-        tracker.add_before_snapshot_for_prompt(1, &edited, &root, Some("original".into())).await;
+        tracker
+            .add_before_snapshot_for_prompt(1, &created, &root, None)
+            .await;
+        tracker
+            .add_before_snapshot_for_prompt(1, &edited, &root, Some("original".into()))
+            .await;
 
         let response = rewind_files(&tracker, &fs, 1).await;
 
         assert!(!response.success, "{response:?}");
         assert!(
-            !response.reverted_files.iter().any(|path| path.contains("created.txt")),
+            !response
+                .reverted_files
+                .iter()
+                .any(|path| path.contains("created.txt")),
             "a file whose existence could not be checked is not reverted: {response:?}"
         );
         let error = response.error.clone().unwrap_or_default();
-        assert!(error.contains("created.txt") && error.contains("exists"), "{error}");
+        assert!(
+            error.contains("created.txt") && error.contains("exists"),
+            "{error}"
+        );
         assert_eq!(fs.read_to_string(&created).await.unwrap(), "agent created");
         let points = tracker.get_rewind_points().await;
         assert!(
-            points.iter().any(|p| p.prompt_index == 1 && p.file_snapshots.len() == 2),
+            points
+                .iter()
+                .any(|p| p.prompt_index == 1 && p.file_snapshots.len() == 2),
             "the saved contents are kept for a retry"
         );
     }
@@ -2322,13 +2406,19 @@ mod tests {
         // The deferred source cannot be read: it is a directory.
         let unreadable = tempfile::tempdir().unwrap();
         let tracker = FileStateTracker::with_lazy_source(unreadable.path().to_path_buf());
-        tracker.add_before_snapshot_for_prompt(1, &edited, &root, Some("original".into())).await;
+        tracker
+            .add_before_snapshot_for_prompt(1, &edited, &root, Some("original".into()))
+            .await;
 
         let response = rewind_files(&tracker, &fs, 1).await;
 
         assert!(!response.success, "{response:?}");
         assert!(response.reverted_files.is_empty(), "{response:?}");
-        assert_eq!(fs.read_to_string(&edited).await.unwrap(), "agent edit", "nothing was changed");
+        assert_eq!(
+            fs.read_to_string(&edited).await.unwrap(),
+            "agent edit",
+            "nothing was changed"
+        );
     }
 
     // ── P114: a damaged rewind_points.jsonl row refuses only the rewinds that need it ──
@@ -2346,7 +2436,10 @@ mod tests {
     /// terminated the partial record with a newline (`append_jsonl_line_sync`).
     fn torn_row(point: &RewindPoint) -> Vec<u8> {
         let full = serde_json::to_vec(point).unwrap();
-        let accent = full.windows(2).position(|w| w == "é".as_bytes()).expect("the point holds an é");
+        let accent = full
+            .windows(2)
+            .position(|w| w == "é".as_bytes())
+            .expect("the point holds an é");
         full[..accent + 1].to_vec()
     }
 
@@ -2363,9 +2456,14 @@ mod tests {
         let root = PathBuf::from("/proj");
         let mock = MockFs::new(root.clone());
         for (name, content) in files {
-            mock.write_file(&root.join(name), content.as_bytes()).await.unwrap();
+            mock.write_file(&root.join(name), content.as_bytes())
+                .await
+                .unwrap();
         }
-        (root, crate::file_system::AsyncFsWrapper::new(Arc::new(mock)))
+        (
+            root,
+            crate::file_system::AsyncFsWrapper::new(Arc::new(mock)),
+        )
     }
 
     /// P114 (Fable P111 #1): a torn row between readable ones. What survives of it says it held prompt 2's saved files;
@@ -2374,7 +2472,8 @@ mod tests {
     /// (retrying cannot repair it).
     #[tokio::test]
     async fn a_torn_middle_row_refuses_only_the_rewinds_that_need_it() {
-        let (root, fs) = project_fs(&[("a.rs", "a now"), ("b.rs", "b now"), ("c.rs", "c now")]).await;
+        let (root, fs) =
+            project_fs(&[("a.rs", "a now"), ("b.rs", "b now"), ("c.rs", "c now")]).await;
         let file = rewind_file_of(&[
             serde_json::to_vec(&point_with_files(1, &[("a.rs", "a before 1")])).unwrap(),
             torn_row(&point_with_files(2, &[("d.rs", "café before 2")])),
@@ -2386,37 +2485,69 @@ mod tests {
         for target in [1, 2] {
             let refused = rewind_files(&tracker, &fs, target).await;
             assert!(!refused.success, "target {target}: {refused:?}");
-            assert!(refused.reverted_files.is_empty(), "target {target}: {refused:?}");
+            assert!(
+                refused.reverted_files.is_empty(),
+                "target {target}: {refused:?}"
+            );
             let error = refused.error.clone().unwrap_or_default();
-            assert!(error.contains(&file.path().display().to_string()), "names the file: {error}");
+            assert!(
+                error.contains(&file.path().display().to_string()),
+                "names the file: {error}"
+            );
             assert!(error.contains("line 2"), "names the line: {error}");
             assert!(error.contains("prompt #2"), "names the prompt: {error}");
-            assert!(error.contains("prompt #3 or later"), "says which rewinds still work: {error}");
+            assert!(
+                error.contains("prompt #3 or later"),
+                "says which rewinds still work: {error}"
+            );
             assert!(error.contains("Nothing was changed"), "{error}");
-            assert!(!error.to_lowercase().contains("try again"), "retrying cannot help: {error}");
+            assert!(
+                !error.to_lowercase().contains("try again"),
+                "retrying cannot help: {error}"
+            );
         }
         for (name, now) in [("a.rs", "a now"), ("b.rs", "b now"), ("c.rs", "c now")] {
-            assert_eq!(fs.read_to_string(&root.join(name)).await.unwrap(), now, "a refused rewind changed {name}");
+            assert_eq!(
+                fs.read_to_string(&root.join(name)).await.unwrap(),
+                now,
+                "a refused rewind changed {name}"
+            );
         }
 
         let restored = rewind_files(&tracker, &fs, 3).await;
-        assert!(restored.success, "a rewind that does not need the damaged row works: {restored:?}");
+        assert!(
+            restored.success,
+            "a rewind that does not need the damaged row works: {restored:?}"
+        );
         assert_eq!(restored.reverted_files.len(), 2, "{restored:?}");
-        assert_eq!(fs.read_to_string(&root.join("b.rs")).await.unwrap(), "b before 3");
-        assert_eq!(fs.read_to_string(&root.join("c.rs")).await.unwrap(), "c before 4");
-        assert_eq!(fs.read_to_string(&root.join("a.rs")).await.unwrap(), "a now");
+        assert_eq!(
+            fs.read_to_string(&root.join("b.rs")).await.unwrap(),
+            "b before 3"
+        );
+        assert_eq!(
+            fs.read_to_string(&root.join("c.rs")).await.unwrap(),
+            "c before 4"
+        );
+        assert_eq!(
+            fs.read_to_string(&root.join("a.rs")).await.unwrap(),
+            "a now"
+        );
 
         // Still refused afterwards: the damaged row's files are lost for good.
         let again = rewind_files(&tracker, &fs, 1).await;
         assert!(!again.success, "{again:?}");
-        assert_eq!(fs.read_to_string(&root.join("a.rs")).await.unwrap(), "a now");
+        assert_eq!(
+            fs.read_to_string(&root.join("a.rs")).await.unwrap(),
+            "a now"
+        );
     }
 
     /// P114 (Fable P111 #1): the torn row is the newest one (the process stopped while saving the last prompt's files).
     /// Rewinds to its prompt or earlier are refused; once the resumed session has later prompts, rewinds to those work.
     #[tokio::test]
     async fn a_torn_last_row_refuses_rewinds_to_its_prompt_and_earlier() {
-        let (root, fs) = project_fs(&[("a.rs", "a now"), ("b.rs", "b now"), ("e.rs", "e now")]).await;
+        let (root, fs) =
+            project_fs(&[("a.rs", "a now"), ("b.rs", "b now"), ("e.rs", "e now")]).await;
         let file = rewind_file_of(&[
             serde_json::to_vec(&point_with_files(1, &[("a.rs", "a before 1")])).unwrap(),
             serde_json::to_vec(&point_with_files(2, &[("b.rs", "b before 2")])).unwrap(),
@@ -2428,22 +2559,39 @@ mod tests {
             let refused = rewind_files(&tracker, &fs, target).await;
             assert!(!refused.success, "target {target}: {refused:?}");
             let error = refused.error.clone().unwrap_or_default();
-            assert!(error.contains("line 3") && error.contains("prompt #3"), "{error}");
+            assert!(
+                error.contains("line 3") && error.contains("prompt #3"),
+                "{error}"
+            );
             assert!(!error.to_lowercase().contains("try again"), "{error}");
         }
-        assert_eq!(fs.read_to_string(&root.join("a.rs")).await.unwrap(), "a now");
-        assert_eq!(fs.read_to_string(&root.join("b.rs")).await.unwrap(), "b now");
+        assert_eq!(
+            fs.read_to_string(&root.join("a.rs")).await.unwrap(),
+            "a now"
+        );
+        assert_eq!(
+            fs.read_to_string(&root.join("b.rs")).await.unwrap(),
+            "b now"
+        );
 
         // The resumed session runs prompts 3 and 4; prompt 4 edits e.rs.
         tracker.begin_prompt(3).await;
         tracker.begin_prompt(4).await;
-        tracker.add_before_snapshot_for_prompt(4, &root.join("e.rs"), &root, Some("e before 4".into())).await;
+        tracker
+            .add_before_snapshot_for_prompt(4, &root.join("e.rs"), &root, Some("e before 4".into()))
+            .await;
 
         let restored = rewind_files(&tracker, &fs, 4).await;
         assert!(restored.success, "{restored:?}");
-        assert_eq!(fs.read_to_string(&root.join("e.rs")).await.unwrap(), "e before 4");
+        assert_eq!(
+            fs.read_to_string(&root.join("e.rs")).await.unwrap(),
+            "e before 4"
+        );
         let refused = rewind_files(&tracker, &fs, 3).await;
-        assert!(!refused.success, "prompt 3 is the damaged row's prompt: {refused:?}");
+        assert!(
+            !refused.success,
+            "prompt 3 is the damaged row's prompt: {refused:?}"
+        );
     }
 
     /// P114 (Astra r1 #1): the damaged row's prompt comes from the row itself, never from its neighbours. Two processes
@@ -2462,26 +2610,62 @@ mod tests {
         );
         // Astra r2 #1: a second record cut inside its own start, appended where a value or a string continues.
         let p2 = serde_json::to_vec(&point_with_files(2, &[("x.rs", "x")])).unwrap();
-        let at = |needle: &str| p2.windows(needle.len()).position(|w| w == needle.as_bytes()).unwrap() + needle.len();
+        let at = |needle: &str| {
+            p2.windows(needle.len())
+                .position(|w| w == needle.as_bytes())
+                .unwrap()
+                + needle.len()
+        };
         let after_colon = &p2[..at("\"created_at\":")];
         let in_string = &p2[..at("\"created_at\":\"20")];
         for cut in [after_colon, in_string] {
             for tail in [&b"{"[..], &b"{\"prompt_ind"[..], &b"{\"prompt_index\":"[..]] {
-                assert_eq!(damaged_row_prompt(&[cut, tail].concat()), None, "{}", String::from_utf8_lossy(&[cut, tail].concat()));
+                assert_eq!(
+                    damaged_row_prompt(&[cut, tail].concat()),
+                    None,
+                    "{}",
+                    String::from_utf8_lossy(&[cut, tail].concat())
+                );
             }
         }
         // Astra r3 #1: a second record cut right after its first key; a header cut inside its digits (M6).
-        assert_eq!(damaged_row_prompt(&[after_colon, &b"{\"prompt_index\""[..]].concat()), None);
-        assert_eq!(damaged_row_prompt(&[after_colon, &b"{\"prompt_index\"  "[..]].concat()), None);
-        assert_eq!(damaged_row_prompt(b"{\"prompt_index\":1"), None, "the index may have had more digits");
-        assert_eq!(damaged_row_prompt(&[after_colon, &b"{\"prompt_index\":7"[..]].concat()), None);
+        assert_eq!(
+            damaged_row_prompt(&[after_colon, &b"{\"prompt_index\""[..]].concat()),
+            None
+        );
+        assert_eq!(
+            damaged_row_prompt(&[after_colon, &b"{\"prompt_index\"  "[..]].concat()),
+            None
+        );
+        assert_eq!(
+            damaged_row_prompt(b"{\"prompt_index\":1"),
+            None,
+            "the index may have had more digits"
+        );
+        assert_eq!(
+            damaged_row_prompt(&[after_colon, &b"{\"prompt_index\":7"[..]].concat()),
+            None
+        );
         let whole_second = [after_colon, &full7[..full7.len() - 1]].concat();
-        assert_eq!(damaged_row_prompt(&whole_second), Some(7), "a second record whose start survived is counted");
-        assert_eq!(damaged_row_prompt(&[&b"{\"prompt_index\":1"[..], &full7[..]].concat()), None, "index cut short");
+        assert_eq!(
+            damaged_row_prompt(&whole_second),
+            Some(7),
+            "a second record whose start survived is counted"
+        );
+        assert_eq!(
+            damaged_row_prompt(&[&b"{\"prompt_index\":1"[..], &full7[..]].concat()),
+            None,
+            "index cut short"
+        );
         assert_eq!(damaged_row_prompt(b"{\"prompt_ind"), None);
         assert_eq!(damaged_row_prompt(b"garbage{not json"), None);
-        let quoted = serde_json::to_vec(&point_with_files(1, &[("q.rs", "{\"prompt_index\":99,")])).unwrap();
-        assert_eq!(damaged_row_prompt(&quoted[..quoted.len() - 3]), Some(1), "file contents cannot fake a record start");
+        let quoted =
+            serde_json::to_vec(&point_with_files(1, &[("q.rs", "{\"prompt_index\":99,")])).unwrap();
+        assert_eq!(
+            damaged_row_prompt(&quoted[..quoted.len() - 3]),
+            Some(1),
+            "file contents cannot fake a record start"
+        );
 
         let (root, fs) = project_fs(&[("x.rs", "x now"), ("y.rs", "y now")]).await;
         let file = rewind_file_of(&[
@@ -2493,16 +2677,29 @@ mod tests {
         ]);
         let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
         let refused = rewind_files(&tracker, &fs, 2).await;
-        assert!(!refused.success, "the damaged row is prompt 2's: {refused:?}");
-        assert_eq!(fs.read_to_string(&root.join("y.rs")).await.unwrap(), "y now", "nothing restored");
+        assert!(
+            !refused.success,
+            "the damaged row is prompt 2's: {refused:?}"
+        );
+        assert_eq!(
+            fs.read_to_string(&root.join("y.rs")).await.unwrap(),
+            "y now",
+            "nothing restored"
+        );
         assert!(rewind_files(&tracker, &fs, 3).await.success);
 
-        let file = rewind_file_of(&[b"{\"prompt_ind".to_vec(), serde_json::to_vec(&point_with_files(5, &[])).unwrap()]);
+        let file = rewind_file_of(&[
+            b"{\"prompt_ind".to_vec(),
+            serde_json::to_vec(&point_with_files(5, &[])).unwrap(),
+        ]);
         let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
         let refused = rewind_files(&tracker, &fs, 9).await;
         assert!(!refused.success, "{refused:?}");
         let error = refused.error.unwrap_or_default();
-        assert!(error.contains("line 1") && error.contains("no longer identifies"), "{error}");
+        assert!(
+            error.contains("line 1") && error.contains("no longer identifies"),
+            "{error}"
+        );
     }
 
     /// P114: the rewrites keep every damaged row (they record which prompts' saved files are missing).
@@ -2510,7 +2707,10 @@ mod tests {
     fn rewrites_keep_damaged_rows() {
         let torn = torn_row(&point_with_files(2, &[("d.rs", "café")]));
         let line = |idx: usize| RewindPointsLine::Point(point_with_files(idx, &[("f.rs", "v")]));
-        let damaged = || RewindPointsLine::Damaged { line: 2, raw: torn.clone() };
+        let damaged = || RewindPointsLine::Damaged {
+            line: 2,
+            raw: torn.clone(),
+        };
         let shape = |lines: &[RewindPointsLine]| -> Vec<Option<usize>> {
             lines
                 .iter()
@@ -2520,14 +2720,18 @@ mod tests {
                 })
                 .collect()
         };
-        let merged = merge_rewind_points_lines(vec![line(1), damaged(), line(3), line(4), line(5)], 5);
+        let merged =
+            merge_rewind_points_lines(vec![line(1), damaged(), line(3), line(4), line(5)], 5);
         assert_eq!(shape(&merged), vec![Some(1), Some(3), Some(4), None]);
         let merged = merge_rewind_points_lines(vec![line(1), damaged(), line(3), line(4)], 3);
         assert_eq!(shape(&merged), vec![Some(1), None]);
         let truncated = truncate_rewind_points_lines(vec![line(1), damaged(), line(3), line(4)], 2);
         assert_eq!(shape(&truncated), vec![Some(1), None]);
         let encoded = encode_rewind_points_lines(&truncated).unwrap();
-        assert!(encoded.ends_with(&[torn.as_slice(), &b"\n"[..]].concat()), "the damaged row is kept byte for byte");
+        assert!(
+            encoded.ends_with(&[torn.as_slice(), &b"\n"[..]].concat()),
+            "the damaged row is kept byte for byte"
+        );
     }
 
     /// P114: a conversation-only rewind keeps the damaged row and its prompt, so a file rewind to a later prompt of the
@@ -2544,12 +2748,20 @@ mod tests {
         tracker.merge_and_remove_from(2).await;
         tracker.begin_prompt(2).await;
         tracker.begin_prompt(3).await;
-        tracker.add_before_snapshot_for_prompt(3, &root.join("e.rs"), &root, Some("e before 3".into())).await;
+        tracker
+            .add_before_snapshot_for_prompt(3, &root.join("e.rs"), &root, Some("e before 3".into()))
+            .await;
 
         let restored = rewind_files(&tracker, &fs, 3).await;
         assert!(restored.success, "{restored:?}");
-        assert_eq!(fs.read_to_string(&root.join("e.rs")).await.unwrap(), "e before 3");
-        assert!(!rewind_files(&tracker, &fs, 2).await.success, "rewinds to prompt 2 stay refused");
+        assert_eq!(
+            fs.read_to_string(&root.join("e.rs")).await.unwrap(),
+            "e before 3"
+        );
+        assert!(
+            !rewind_files(&tracker, &fs, 2).await.success,
+            "rewinds to prompt 2 stay refused"
+        );
     }
 
     /// P132 (P114 follow-up): the lock file a READ creates is owner-only, like the one the shell's append creates.
@@ -2563,7 +2775,11 @@ mod tests {
         let lock_path = file.path().with_extension("jsonl.lock");
         let _ = std::fs::remove_file(&lock_path);
         read_rewind_points_lines(file.path()).unwrap();
-        let mode = std::fs::metadata(&lock_path).expect("the read creates the lock file").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&lock_path)
+            .expect("the read creates the lock file")
+            .permissions()
+            .mode()
+            & 0o777;
         let _ = std::fs::remove_file(&lock_path);
         assert_eq!(mode, 0o600, "reader-created lock file mode {mode:o}");
     }
@@ -2591,25 +2807,43 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let reader_path = path.clone();
         let reader = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
             let tracker = FileStateTracker::with_lazy_source(reader_path);
             let result = runtime.block_on(tracker.try_get_rewind_points_for(1));
-            tx.send(result.map(|points| points.iter().map(|p| p.prompt_index).collect::<Vec<_>>()).map_err(|e| format!("{e:?}")))
-                .unwrap();
+            tx.send(
+                result
+                    .map(|points| points.iter().map(|p| p.prompt_index).collect::<Vec<_>>())
+                    .map_err(|e| format!("{e:?}")),
+            )
+            .unwrap();
         });
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(rx.try_recv().is_err(), "the load waits while the append holds the lock");
+        assert!(
+            rx.try_recv().is_err(),
+            "the load waits while the append holds the lock"
+        );
         {
             use std::io::Write;
-            let mut writer = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut writer = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             writer.write_all(tail).unwrap();
             writer.write_all(b"\n").unwrap();
         }
         fs2::FileExt::unlock(&lock).unwrap();
-        let loaded = rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the load finishes");
+        let loaded = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the load finishes");
         reader.join().unwrap();
         let _ = std::fs::remove_file(path.with_extension("jsonl.lock"));
-        assert_eq!(loaded, Ok(vec![1, 2]), "the finished row is read, not recorded as damage");
+        assert_eq!(
+            loaded,
+            Ok(vec![1, 2]),
+            "the finished row is read, not recorded as damage"
+        );
     }
 
     /// P135 (P120 rule): the append lock a read creates is owner-only, like every other session file.
@@ -2624,7 +2858,11 @@ mod tests {
         let _held = lock_rewind_points_for_read(&path).unwrap();
         let mode = std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
         let _ = std::fs::remove_file(&lock_path);
-        assert_eq!(mode & 0o077, 0, "the lock file is accessible to others: {mode:o}");
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "the lock file is accessible to others: {mode:o}"
+        );
     }
 
     /// P114 (Astra r2 #2): a load never blocks the session's event loop on another process's append, and gives up after
@@ -2643,7 +2881,10 @@ mod tests {
             .open(path.with_extension("jsonl.lock"))
             .unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
         let tracker = FileStateTracker::with_lazy_source(path.clone());
         let started = std::time::Instant::now();
         let (loaded, ticked_at) = runtime.block_on(async {
@@ -2653,16 +2894,27 @@ mod tests {
             })
         });
         let waited = started.elapsed();
-        assert!(ticked_at < std::time::Duration::from_secs(2), "the event loop kept running: {ticked_at:?}");
-        assert!(waited >= APPEND_LOCK_WAIT, "it waited for the append: {waited:?}");
+        assert!(
+            ticked_at < std::time::Duration::from_secs(2),
+            "the event loop kept running: {ticked_at:?}"
+        );
+        assert!(
+            waited >= APPEND_LOCK_WAIT,
+            "it waited for the append: {waited:?}"
+        );
         let error = match loaded {
             Err(RewindPointsUnavailable::Unreadable { error, .. }) => error,
             other => panic!("a busy lock is a retryable read error: {other:?}"),
         };
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{error}");
         fs2::FileExt::unlock(&lock).unwrap();
-        let points = runtime.block_on(tracker.try_get_rewind_points_for(1)).expect("the source was kept for a retry");
-        assert_eq!(points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(), vec![1]);
+        let points = runtime
+            .block_on(tracker.try_get_rewind_points_for(1))
+            .expect("the source was kept for a retry");
+        assert_eq!(
+            points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),
+            vec![1]
+        );
         let _ = std::fs::remove_file(path.with_extension("jsonl.lock"));
     }
 
@@ -2687,12 +2939,21 @@ mod tests {
         );
         {
             use std::io::Write;
-            let mut writer = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut writer = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             writer.write_all(tail).unwrap();
             writer.write_all(b"\n").unwrap();
         }
-        let points = tracker.try_get_rewind_points_for(1).await.expect("the finished row is read on the retry");
-        assert_eq!(points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(), vec![1, 2]);
+        let points = tracker
+            .try_get_rewind_points_for(1)
+            .await
+            .expect("the finished row is read on the retry");
+        assert_eq!(
+            points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         let _ = std::fs::remove_dir(path.with_extension("jsonl.lock"));
     }
 }

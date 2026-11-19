@@ -59,7 +59,10 @@ impl Debug for ServiceAccountTokenSource {
 }
 
 impl ServiceAccountTokenSource {
-    pub(crate) fn new(cred: &credentials::CredentialsFile, audience: &str) -> Result<ServiceAccountTokenSource, Error> {
+    pub(crate) fn new(
+        cred: &credentials::CredentialsFile,
+        audience: &str,
+    ) -> Result<ServiceAccountTokenSource, Error> {
         Ok(ServiceAccountTokenSource {
             email: cred.client_email.unwrap_or_empty(),
             pk: cred.try_to_private_key()?,
@@ -166,7 +169,10 @@ impl OAuth2ServiceAccountTokenSource {
         self
     }
 
-    pub(crate) fn with_private_claims(mut self, claims: HashMap<String, serde_json::Value>) -> Self {
+    pub(crate) fn with_private_claims(
+        mut self,
+        claims: HashMap<String, serde_json::Value>,
+    ) -> Self {
         self.private_claims = claims;
         self
     }
@@ -223,7 +229,12 @@ impl TokenSource for OAuth2ServiceAccountTokenSource {
                     .ok_or(Error::NoTargetAudienceFound)?
                     .as_str()
                     .ok_or(Error::NoTargetAudienceFound)?;
-                let response = self.client.post(self.token_url.as_str()).form(&form).send_guarded().await?;
+                let response = self
+                    .client
+                    .post(self.token_url.as_str())
+                    .form(&form)
+                    .send_guarded()
+                    .await?;
                 Ok(Self::check_response_status(response)
                     .await?
                     .json::<InternalIdToken>()
@@ -231,7 +242,12 @@ impl TokenSource for OAuth2ServiceAccountTokenSource {
                     .to_token(audience)?)
             }
             false => {
-                let response = self.client.post(self.token_url.as_str()).form(&form).send_guarded().await?;
+                let response = self
+                    .client
+                    .post(self.token_url.as_str())
+                    .form(&form)
+                    .send_guarded()
+                    .await?;
                 Ok(Self::check_response_status(response)
                     .await?
                     .json::<InternalToken>()

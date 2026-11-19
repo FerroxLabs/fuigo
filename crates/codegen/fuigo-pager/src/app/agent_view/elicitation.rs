@@ -23,7 +23,11 @@ impl AgentView {
         if key.code == KeyCode::Esc {
             return self.handle_card_esc();
         }
-        if key.code == KeyCode::Enter && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Enter
+            && key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+        {
             // The send-now chord is not an answer; see `card_swallows_send_now`
             self.show_toast("Answer the prompt first (Enter picks the highlighted choice)");
             return InputOutcome::Changed;

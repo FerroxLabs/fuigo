@@ -1744,7 +1744,7 @@ mod tests {
         // `spawn_post_auth_settings` -> `OtelGate::resolve`, and `run_leader` /
         // `run_stdio_agent` open it at startup. One of those landing between
         // `apply_otel_config` and the assertion below failed this test in full runs
-        // (4 sightings on hetzner-dsm, then the trio2 probe run). So the body runs
+        // (4 sightings on the build host, then a probe run). So the body runs
         // in a child process of this test binary, filtered to this test alone, with
         // a fresh `FUIGO_HOME` -- which also makes the policy channel's config read
         // independent of whatever the host's home holds.
@@ -1878,7 +1878,7 @@ mod tests {
             ..oidc_session("inline-test-access", chrono::Utc::now())
         };
         let _inline =
-            fuigo_test_support::EnvGuard::set("FUIGO_AUTH", &serde_json::to_string(&auth).unwrap());
+            fuigo_test_support::EnvGuard::set("FUIGO_AUTH", serde_json::to_string(&auth).unwrap());
         let path = crate::auth::auth_json_path(&fuigo_home::fuigo_home());
         assert!(!path.exists());
         tokio::select! {

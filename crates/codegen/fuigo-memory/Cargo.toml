@@ -18,7 +18,7 @@ blake3 = { workspace = true }
 chrono = { workspace = true }
 dunce = { workspace = true }
 flate2 = { workspace = true }
-git2 = { version = "0.20", default-features = false, features = [
+git2 = { version = "0.21", default-features = false, features = [
     "vendored-libgit2",
 ] }
 libc = { workspace = true }
@@ -26,8 +26,8 @@ notify = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }
-# rusqlite 0.37 + bundled = self-contained SQLite (>= 3.50.2) with FTS5.
-rusqlite = { version = "0.37", features = ["bundled"] }
+# rusqlite 0.41 + bundled = self-contained SQLite (>= 3.50.2) with FTS5.
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde_json = { workspace = true }
 # sqlite-vec: vec0 virtual table for KNN vector search.
 sqlite-vec = "=0.1.7-alpha.2"

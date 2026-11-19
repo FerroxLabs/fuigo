@@ -7,7 +7,9 @@
 use std::path::Path;
 
 pub use fuigo_session_writer::lock::HELD_ELSEWHERE;
-pub(crate) use fuigo_session_writer::lock::{SESSION_WRITER_LOCK_FILE, SessionWriterLock, dir_open_elsewhere};
+pub(crate) use fuigo_session_writer::lock::{
+    SESSION_WRITER_LOCK_FILE, SessionWriterLock, dir_open_elsewhere,
+};
 
 /// Another process holds the session.
 #[derive(Debug)]
@@ -27,7 +29,8 @@ pub fn held_elsewhere_error() -> agent_client_protocol::Error {
 }
 
 /// What a rename (or `/rename --auto`) of a session open in another process answers: that window owns its title.
-pub const RENAME_HELD_ELSEWHERE: &str = "This session is open in another Fuigo window. Rename it there.";
+pub const RENAME_HELD_ELSEWHERE: &str =
+    "This session is open in another Fuigo window. Rename it there.";
 
 /// [`RENAME_HELD_ELSEWHERE`] as a typed `session_unavailable`, like [`held_elsewhere_error`].
 pub fn rename_held_elsewhere_error() -> agent_client_protocol::Error {
@@ -68,10 +71,12 @@ pub(crate) async fn claim_writer(
     dir: std::path::PathBuf,
 ) -> Result<fuigo_session_writer::SessionWriter, agent_client_protocol::Error> {
     let deadline = tokio::time::Instant::now() + CLAIM_WAIT;
-    fuigo_session_writer::SessionWriter::claim(id, dir, deadline).await.map_err(|error| match error {
-        fuigo_session_writer::ClaimError::StillClosing => still_closing_error(),
-        fuigo_session_writer::ClaimError::HeldElsewhere => held_elsewhere_error(),
-    })
+    fuigo_session_writer::SessionWriter::claim(id, dir, deadline)
+        .await
+        .map_err(|error| match error {
+            fuigo_session_writer::ClaimError::StillClosing => still_closing_error(),
+            fuigo_session_writer::ClaimError::HeldElsewhere => held_elsewhere_error(),
+        })
 }
 
 /// Take the writer of session `id` (folder `dir`) without waiting, for an operation that refuses an open session
@@ -85,15 +90,20 @@ pub(crate) fn try_claim_writer(
 }
 
 /// Take this process's hold on the session in `session_dir` for writing ([`fuigo_session_writer::lock::acquire`]).
-pub(crate) async fn acquire(session_dir: &Path) -> Result<Option<SessionWriterLock>, HeldElsewhere> {
-    fuigo_session_writer::lock::acquire(session_dir).await.map_err(|fuigo_session_writer::lock::HeldElsewhere| HeldElsewhere)
+pub(crate) async fn acquire(
+    session_dir: &Path,
+) -> Result<Option<SessionWriterLock>, HeldElsewhere> {
+    fuigo_session_writer::lock::acquire(session_dir)
+        .await
+        .map_err(|fuigo_session_writer::lock::HeldElsewhere| HeldElsewhere)
 }
 
 /// Whether another process has the persisted session `session_id` open for writing: a starting window's check before it
 /// opens the session, so it can refuse with [`HELD_ELSEWHERE`] instead of starting. Never creates the lock file. The
 /// agent's own open stays the authority; this is only the early answer.
 pub fn session_open_elsewhere(session_id: &str) -> bool {
-    crate::session::persistence::find_persisted_session_dir(session_id).is_some_and(|dir| dir_open_elsewhere(&dir))
+    crate::session::persistence::find_persisted_session_dir(session_id)
+        .is_some_and(|dir| dir_open_elsewhere(&dir))
 }
 
 #[cfg(test)]

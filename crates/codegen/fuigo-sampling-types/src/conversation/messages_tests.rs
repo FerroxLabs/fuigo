@@ -516,7 +516,10 @@ fn reasoning_items_survive_a_serde_round_trip_for_resume() {
     ))
     .unwrap();
     assert_eq!(req_before, req_after);
-    assert_eq!(req_after["messages"][1]["content"][1]["type"], "redacted_thinking");
+    assert_eq!(
+        req_after["messages"][1]["content"][1]["type"],
+        "redacted_thinking"
+    );
 }
 
 /// The response-completed update reports the last thinking block's signature.
@@ -570,13 +573,14 @@ fn anthropic_origin_reasoning_still_replays_to_messages() {
 
 #[test]
 fn tool_guidance_description_reaches_anthropic_messages_wire() {
-    let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
-        .with_tools(vec![ToolSpec {
-        name: "read_file".to_string(),
-        description: Some("stock text\n\nGUIDE-WIRE".to_string()),
-        parameters: serde_json::json!({"type": "object"}),
-        freeform: None,
-    }]);
+    let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_tools(vec![
+        ToolSpec {
+            name: "read_file".to_string(),
+            description: Some("stock text\n\nGUIDE-WIRE".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+            freeform: None,
+        },
+    ]);
     let wire = serde_json::to_value(build_messages_request(&req)).unwrap();
     assert_eq!(wire["tools"][0]["description"], "stock text\n\nGUIDE-WIRE");
 }

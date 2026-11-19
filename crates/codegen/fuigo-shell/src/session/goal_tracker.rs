@@ -235,7 +235,10 @@ pub(crate) fn goal_scratch_root(verifier_id: &str) -> PathBuf {
 /// A pre-existing entry is accepted only if [`verify_owned_real_dir`] passes, then re-pinned to 0700.
 /// The chmod is safe: the entry is proven ours and the sticky-bit temp parent prevents swapping it.
 /// Callers treat `Err` as "do not write classifier artifacts here".
-#[allow(clippy::disallowed_methods, reason = "goal scratch root under system temp; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "goal scratch root under system temp; not inside a session folder"
+)]
 pub(crate) fn ensure_goal_scratch_root(verifier_id: &str) -> std::io::Result<PathBuf> {
     let root = goal_scratch_root(verifier_id);
     #[cfg(unix)]
@@ -660,7 +663,10 @@ impl GoalTracker {
     /// An in-flight `Active` goal becomes `UserPaused`.
     /// Other paused variants (including [`GoalStatus::InfraPaused`]) are preserved so `pause_message` and pause cause stay aligned.
     /// Clear `current_subagent_id`.
-    #[allow(clippy::disallowed_methods, reason = "implementer scratch dir under system temp; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "implementer scratch dir under system temp; not inside a session folder"
+    )]
     pub(crate) fn from_snapshot(session_dir: PathBuf, mut snapshot: GoalOrchestration) -> Self {
         if matches!(snapshot.phase, GoalPhase::Planning | GoalPhase::Executing) {
             snapshot.phase = GoalPhase::Idle;
@@ -805,8 +811,11 @@ impl GoalTracker {
         match writer {
             Some(writer) => Ok(writer.clone()),
             #[cfg(test)]
-            None => fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), session_dir)
-                .map_err(|_busy| std::io::Error::other(crate::session::session_writer_lock::OPEN_HERE)),
+            None => fuigo_session_writer::SessionWriter::try_claim(
+                uuid::Uuid::now_v7().to_string(),
+                session_dir,
+            )
+            .map_err(|_busy| std::io::Error::other(crate::session::session_writer_lock::OPEN_HERE)),
             #[cfg(not(test))]
             None => Err(crate::session::storage::jsonl::no_writer_error(session_dir)),
         }
@@ -818,7 +827,10 @@ impl GoalTracker {
     }
 
     /// The session's writer and `path` relative to its folder, for a goal file the caller names by path.
-    pub(crate) fn writer_for(&self, path: &std::path::Path) -> std::io::Result<(fuigo_session_writer::SessionWriter, PathBuf)> {
+    pub(crate) fn writer_for(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<(fuigo_session_writer::SessionWriter, PathBuf)> {
         let writer = self.session_writer()?;
         let rel = writer.rel_of(path)?.to_path_buf();
         Ok((writer, rel))
@@ -902,7 +914,10 @@ impl GoalTracker {
     ///
     /// `baseline_commit` is the `git rev-parse HEAD` captured at the call site (or `None` if not available).
     /// It is consumed by value; callers with `&str` should `.to_string()` at the call site rather than have the helper clone.
-    #[allow(clippy::disallowed_methods, reason = "implementer scratch dir under system temp; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "implementer scratch dir under system temp; not inside a session folder"
+    )]
     pub(crate) fn create_goal(
         &mut self,
         goal_id: String,
@@ -1149,7 +1164,10 @@ impl GoalTracker {
 
     /// Best-effort scratch-root removal shared by every terminal transition.
     /// A distinct `verifier_id` per goal means this never touches a concurrent goal's dir.
-    #[allow(clippy::disallowed_methods, reason = "goal scratch root under system temp; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "goal scratch root under system temp; not inside a session folder"
+    )]
     fn remove_scratch_root(&self) {
         if let Some(o) = &self.orchestration {
             let _ = std::fs::remove_dir_all(goal_scratch_root(&o.verifier_id));
@@ -1389,7 +1407,10 @@ pub(crate) fn make_base_orchestration() -> GoalOrchestration {
 
 // Tests
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "goal_tracker_tests.rs"]
 mod tests;

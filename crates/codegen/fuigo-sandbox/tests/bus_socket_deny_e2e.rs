@@ -66,7 +66,11 @@ fn skip_if_enforcement_unavailable() -> bool {
     let require = std::env::var(REQUIRE_ENV).is_ok();
     let support = fuigo_sandbox::SandboxManager::support_info();
     if !support.is_supported {
-        assert!(!require, "enforcement required but unsupported: {}", support.details);
+        assert!(
+            !require,
+            "enforcement required but unsupported: {}",
+            support.details
+        );
         eprintln!("skipping: sandbox not supported ({})", support.details);
         return true;
     }
@@ -112,7 +116,10 @@ fn subprocess_entry() {
     }
     for socket in bus_sockets() {
         match UnixStream::connect(&socket) {
-            Ok(_) => fail(format!("{} is reachable inside the sandbox", socket.display())),
+            Ok(_) => fail(format!(
+                "{} is reachable inside the sandbox",
+                socket.display()
+            )),
             Err(e) => eprintln!("OK: {} unreachable ({e})", socket.display()),
         }
     }
@@ -121,7 +128,10 @@ fn subprocess_entry() {
 
 fn run_child(ws: &Path, home: &Path, fuigo: &Path, bus: &Path) -> (bool, String) {
     let output = Command::new(std::env::current_exe().unwrap())
-        .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", bus.display()))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", bus.display()),
+        )
         .env(SCENARIO_ENV, "1")
         .env(WORKSPACE_ENV, ws)
         .env("HOME", home)
@@ -151,7 +161,10 @@ fn p158_workspace_profile_cannot_reach_dbus_or_systemd_sockets() {
     // A session bus the environment names (never vacuous: it is always reachable outside)
     let bus = bus_dir.join("session-bus");
     let listener = std::os::unix::net::UnixListener::bind(&bus).expect("bind fake session bus");
-    assert!(UnixStream::connect(&bus).is_ok(), "the fake bus must be reachable outside");
+    assert!(
+        UnixStream::connect(&bus).is_ok(),
+        "the fake bus must be reachable outside"
+    );
     let (ok, stderr) = run_child(&ws, &home, &fuigo, &bus);
     drop(listener);
     for dir in [&home, &fuigo, &ws, &bus_dir] {

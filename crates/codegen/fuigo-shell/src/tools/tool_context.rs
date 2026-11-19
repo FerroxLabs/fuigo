@@ -288,7 +288,9 @@ impl ToolContext {
     /// The workflow child's spent output grant as the typed budget denial (Contract D.4), or `None`
     /// while it has room. The grant is the child's output-token budget; it is checked before the
     /// durable execution's own mirror of it, so it reports the same denial.
-    pub(crate) fn task_output_budget_denial(&self) -> Option<crate::acp_error::ExecutionBudgetDenial> {
+    pub(crate) fn task_output_budget_denial(
+        &self,
+    ) -> Option<crate::acp_error::ExecutionBudgetDenial> {
         let budget = self.task_output_token_budget.as_ref()?;
         if budget.remaining()? != 0 {
             return None;

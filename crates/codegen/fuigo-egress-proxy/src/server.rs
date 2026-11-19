@@ -123,7 +123,9 @@ impl PreAuth {
     /// Drops the oldest unauthenticated connection if it is older than `grace`.
     fn evict_stale(&self, grace: Duration) -> bool {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        if entries.front().is_some_and(|entry| entry.since.elapsed() >= grace)
+        if entries
+            .front()
+            .is_some_and(|entry| entry.since.elapsed() >= grace)
             && let Some(entry) = entries.pop_front()
         {
             let _ = entry.evict.send(());
@@ -240,7 +242,12 @@ async fn admit_connection<S: ProxyIo>(
             }
             state.metrics.record(ProxyOutcome::Overloaded);
             // The client may already be gone; there is nothing further to do with the failure.
-            let _ = write_error(stream, &ProxyError::Overloaded, state.options.request_timeout).await;
+            let _ = write_error(
+                stream,
+                &ProxyError::Overloaded,
+                state.options.request_timeout,
+            )
+            .await;
             None
         }
     }

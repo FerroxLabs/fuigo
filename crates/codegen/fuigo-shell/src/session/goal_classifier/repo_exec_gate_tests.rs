@@ -6,7 +6,9 @@ use std::sync::OnceLock;
 
 fn refused_root() -> &'static PathBuf {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    ROOT.get_or_init(|| std::env::temp_dir().join(format!("fuigo-t1-goal-untrusted-{}", std::process::id())))
+    ROOT.get_or_init(|| {
+        std::env::temp_dir().join(format!("fuigo-t1-goal-untrusted-{}", std::process::id()))
+    })
 }
 
 fn judge(dir: &Path) -> bool {
@@ -38,6 +40,12 @@ async fn the_goal_baseline_is_absent_in_an_untrusted_folder() {
 
     fuigo_tty_utils::install_repo_exec_judge(judge);
     let _restore = RestoreAllowAll;
-    assert!(super::capture_git_baseline(&untrusted).await.is_none(), "no git runs in the refused folder");
-    assert!(super::capture_git_baseline(trusted.path()).await.is_some(), "a trusted folder still gets its baseline");
+    assert!(
+        super::capture_git_baseline(&untrusted).await.is_none(),
+        "no git runs in the refused folder"
+    );
+    assert!(
+        super::capture_git_baseline(trusted.path()).await.is_some(),
+        "a trusted folder still gets its baseline"
+    );
 }

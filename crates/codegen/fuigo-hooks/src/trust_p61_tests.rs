@@ -41,8 +41,14 @@ fn two_processes_disabling_and_enabling_lose_no_change() {
         );
     }
     for i in 0..EACH {
-        assert!(is_hook_disabled_with_file(&format!("keep{i}"), &file), "keep{i}");
-        assert!(!is_hook_disabled_with_file(&format!("churn{i}"), &file), "churn{i}");
+        assert!(
+            is_hook_disabled_with_file(&format!("keep{i}"), &file),
+            "keep{i}"
+        );
+        assert!(
+            !is_hook_disabled_with_file(&format!("churn{i}"), &file),
+            "churn{i}"
+        );
     }
     let temps: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()

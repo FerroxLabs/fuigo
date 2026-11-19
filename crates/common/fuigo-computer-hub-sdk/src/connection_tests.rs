@@ -3329,7 +3329,11 @@ async fn p47_destination_refused_on_reconnect_opens_no_socket_and_stops() {
     tokio::time::timeout(Duration::from_secs(5), conn.await_shutdown())
         .await
         .expect("a refused reconnect must stop the connection actor on its own");
-    assert_eq!(upgrades.load(Ordering::SeqCst), 1, "a refused reconnect opened a socket");
+    assert_eq!(
+        upgrades.load(Ordering::SeqCst),
+        1,
+        "a refused reconnect opened a socket"
+    );
 }
 /// P47 (fuigo): a provider that refuses the destination on the INITIAL connect opens no socket and the connect fails
 /// with `DestinationRefused` (not retried). The listener counts every TCP accept.
@@ -3385,5 +3389,9 @@ async fn p47_destination_refused_on_initial_connect_opens_no_socket() {
         Ok(_) => panic!("a refused destination must not connect"),
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(accepts.load(Ordering::SeqCst), 0, "a refused destination was contacted");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        0,
+        "a refused destination was contacted"
+    );
 }

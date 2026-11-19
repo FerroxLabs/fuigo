@@ -226,15 +226,16 @@ impl fuigo_tool_runtime::Tool for HashlineReadTool {
                         .map_err(fuigo_tool_runtime::ToolError::invalid_arguments)?;
                     let fs = res.require::<FileSystem>()?.0.clone();
                     // P166/S12: the anchor reread is bounded like the first read.
-                    let content = match crate::implementations::fuigo_build::read_file::read_tool_source(
-                        fs.as_ref(),
-                        &fc.absolute_path,
-                    )
-                    .await
-                    {
-                        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                        Err(_) => fc.raw_output.clone(),
-                    };
+                    let content =
+                        match crate::implementations::fuigo_build::read_file::read_tool_source(
+                            fs.as_ref(),
+                            &fc.absolute_path,
+                        )
+                        .await
+                        {
+                            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                            Err(_) => fc.raw_output.clone(),
+                        };
                     let ml = res
                         .get::<TruncationCfg>()
                         .map(|t| t.0.max_lines_read())
@@ -262,7 +263,10 @@ impl fuigo_tool_runtime::Tool for HashlineReadTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,7 +377,10 @@ mod tests {
     fn tool_metadata() {
         use crate::types::tool_metadata::ToolMetadata;
         let tool = HashlineReadTool;
-        assert_eq!(fuigo_tool_runtime::Tool::id(&tool).as_str(), "hashline_read");
+        assert_eq!(
+            fuigo_tool_runtime::Tool::id(&tool).as_str(),
+            "hashline_read"
+        );
         assert_eq!(ToolMetadata::kind(&tool), ToolKind::Read);
         assert!(fuigo_tool_runtime::Tool::capabilities(&tool).is_read_only);
         assert!(matches!(
@@ -515,10 +522,13 @@ mod tests {
             format: None,
             files: None,
         };
-        let result =
-            fuigo_tool_runtime::Tool::run(&HashlineReadTool, test_ctx(resources.into_shared()), input)
-                .await
-                .unwrap();
+        let result = fuigo_tool_runtime::Tool::run(
+            &HashlineReadTool,
+            test_ctx(resources.into_shared()),
+            input,
+        )
+        .await
+        .unwrap();
         match result {
             ReadFileOutput::FileContent(fc) => assert!(fc.content.contains("fn main()")),
             other => panic!("Expected FileContent, got {other:?}"),

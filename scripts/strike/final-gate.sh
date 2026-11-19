@@ -28,6 +28,8 @@
 # abort by process group: `timeout` and cargo put their children in NEW groups, so `kill -- -<pgid>` misses them.
 # After the run, any survivor makes the run inadmissible.
 #
+# Workspace scope first runs lint-gate.sh (fmt, clippy -D warnings, lint-ratchet.sh, cargo deny); any failure fails the gate (exit 3).
+#
 # The log is judged by gate-verify.sh (A.2.1): headers == derived count (derive.py, from THE CANDIDATE), each
 # header reaching its own `test result:`, exit not 124/signal, GATE_DONE last, failing set from `failures:`.
 set -uo pipefail
@@ -165,6 +167,34 @@ if [ $TRC -ne 0 ]; then
   echo "GATE: source tree is not clean at $ACTUAL (status $TRC); refusing to run"; printf '%s\n' "$TREEOUT"
   gate_inventory "$LANE" "run=$RUNID event=refused-dirty-tree sha=$ACTUAL"; exit 3
 fi
+
+# Lint pre-steps (1.0.46): fmt, clippy -D warnings, the unwrap/expect ratchet and cargo deny. A failure fails the gate BEFORE any
+# test is built or run. Workspace scope only: a --pkg / --pty proof run is not the release gate and must stay cheap.
+if [ ${#PKGS[@]} -eq 0 ] && [ "$PTY" = 0 ]; then
+  echo "lint-gate:      running fmt + clippy -D warnings + lint-ratchet + cargo deny (log: $RUNDIR/lint.log)"
+  FUIGO_GATE_RUN=$RUNID bg "$HERE/lint-gate.sh" "$SRC" > "$RUNDIR/lint.log" 2>&1 < /dev/null; LINTRC=$?; aux_check $LINTRC
+  if [ $LINTRC -ne 0 ]; then
+    echo "GATE: lint pre-steps FAILED (exit $LINTRC); see $RUNDIR/lint.log"; grep '^== lint-gate' "$RUNDIR/lint.log" | tail -n 12
+    gate_inventory "$LANE" "run=$RUNID event=lint-failed status=$LINTRC"; exit 3
+  fi
+  echo "lint-gate:      PASS"
+else
+  echo "lint-gate:      skipped (scoped --pkg/--pty run; the release gate runs workspace scope)"
+fi
+
+# bash 3.2 for shell_state_fifo_tests (the bash < 4 dump-channel path). Built once into the lane (network allowed, like
+# the test build) unless the caller already names one; FUIGO_REQUIRE_BASH32=1 makes the test FAIL, not skip, when it is
+# missing. Public CI sets neither and keeps skipping.
+if [ -z "${FUIGO_TEST_BASH32:-}" ]; then
+  FUIGO_GATE_RUN=$RUNID bg "$HERE/bash32.sh" "$LANE/bash32" > "$RUNDIR/bash32.path" 2> "$RUNDIR/bash32.log" < /dev/null; B32RC=$?; aux_check $B32RC
+  FUIGO_TEST_BASH32=$(tail -n 1 "$RUNDIR/bash32.path" 2>/dev/null || true)
+  if [ $B32RC -ne 0 ] || [ ! -x "$FUIGO_TEST_BASH32" ]; then
+    echo "GATE: could not build bash 3.2.57 (exit $B32RC); see $RUNDIR/bash32.log. The bash < 4 FIFO test would not run, so the gate fails"
+    gate_inventory "$LANE" "run=$RUNID event=bash32-failed status=$B32RC"; exit 3
+  fi
+fi
+export FUIGO_TEST_BASH32 FUIGO_REQUIRE_BASH32=1
+echo "bash32:         $FUIGO_TEST_BASH32 (FUIGO_REQUIRE_BASH32=1)"
 
 SCOPE=(--locked --no-fail-fast)
 # --pty: the target list comes from THE CANDIDATE (like every count in this gate), is validated, and becomes three strings:

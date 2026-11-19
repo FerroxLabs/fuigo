@@ -6,7 +6,9 @@ use crate::UploadMethod;
 /// pinned in `storage_client` and in fuigo-shell's wire tests); what these tests exercise is queue behaviour.
 fn static_test_key(token: &str) -> Option<Arc<dyn AuthCredentialProvider>> {
     Some(Arc::new(fuigo_auth::StaticAuthCredentialProvider::new(
-        Box::new(crate::storage_client::StaticFuigoAuth::new(Some(token.to_owned()))),
+        Box::new(crate::storage_client::StaticFuigoAuth::new(Some(
+            token.to_owned(),
+        ))),
         Some(token.to_owned()),
         fuigo_auth::BearerDestination::Unrestricted,
     )))
@@ -1822,7 +1824,9 @@ fn p47_upload_disposition_bearer_refusal_is_terminal() {
         .context("Streaming upload failed for s/turn_0/x");
     assert_eq!(upload_disposition(&wrapped), Disposition::Terminal);
     assert_eq!(
-        upload_disposition(&anyhow::anyhow!("Upload to 'path': HTTP 401 - Unauthorized")),
+        upload_disposition(&anyhow::anyhow!(
+            "Upload to 'path': HTTP 401 - Unauthorized"
+        )),
         Disposition::AuthRefresh
     );
 }
@@ -1990,9 +1994,16 @@ async fn p47_session_upload_refusal_is_terminal_in_the_queue() {
     .await
     .expect("a refusal must not park or retry")
     .unwrap_err();
-    assert!(fuigo_auth::find_bearer_refusal(err.as_ref()).is_some(), "{err:#}");
+    assert!(
+        fuigo_auth::find_bearer_refusal(err.as_ref()).is_some(),
+        "{err:#}"
+    );
     assert_eq!(item.attempts, 1, "terminal: no retry");
-    assert_eq!(hits.load(Ordering::SeqCst), 0, "the loopback proxy was contacted");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "the loopback proxy was contacted"
+    );
 }
 
 /// Exercises the 401 abort path end-to-end via a mock axum server.
@@ -4720,7 +4731,14 @@ mod p71_gate {
             UploadRetryPolicy::default(),
         );
         let outcome = queue
-            .enqueue_bytes_blocking(CONTENT, "s/turn_0/archive.bin", "application/gzip", "archive.bin", "s", 0)
+            .enqueue_bytes_blocking(
+                CONTENT,
+                "s/turn_0/archive.bin",
+                "application/gzip",
+                "archive.bin",
+                "s",
+                0,
+            )
             .await;
         assert_eq!(outcome, EnqueueOutcome::Enqueued);
         assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
@@ -4742,10 +4760,20 @@ mod p71_gate {
             UploadRetryPolicy::default(),
         );
         queue
-            .enqueue_bytes_blocking(CONTENT, "s/turn_0/archive.bin", "application/gzip", "archive.bin", "s", 0)
+            .enqueue_bytes_blocking(
+                CONTENT,
+                "s/turn_0/archive.bin",
+                "application/gzip",
+                "archive.bin",
+                "s",
+                0,
+            )
             .await;
         assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
-        assert!(mock.received_contains(CONTENT), "FluxRouter-class proxy did not receive the bytes");
+        assert!(
+            mock.received_contains(CONTENT),
+            "FluxRouter-class proxy did not receive the bytes"
+        );
         assert_eq!(queue.stats().uploaded.load(Ordering::Relaxed), 1);
     }
 
@@ -4762,10 +4790,17 @@ mod p71_gate {
             resolver_for(third_party.proxy_base_url()),
             UploadRetryPolicy::default(),
         );
-        assert_eq!(queue.enqueue_recovered(&temp, &sidecar_path, &sidecar), EnqueueOutcome::Enqueued);
+        assert_eq!(
+            queue.enqueue_recovered(&temp, &sidecar_path, &sidecar),
+            EnqueueOutcome::Enqueued
+        );
         assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
         third_party.settle(Duration::from_millis(300)).await;
-        assert_eq!(third_party.connections(), 0, "a recovered spill reached a third-party proxy");
+        assert_eq!(
+            third_party.connections(),
+            0,
+            "a recovered spill reached a third-party proxy"
+        );
         assert_eq!(queue.stats().failed.load(Ordering::Relaxed), 1);
 
         let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
@@ -4776,7 +4811,10 @@ mod p71_gate {
             resolver_for(fluxrouter_class.proxy_base_url()),
             UploadRetryPolicy::default(),
         );
-        assert_eq!(queue.enqueue_recovered(&temp, &sidecar_path, &sidecar), EnqueueOutcome::Enqueued);
+        assert_eq!(
+            queue.enqueue_recovered(&temp, &sidecar_path, &sidecar),
+            EnqueueOutcome::Enqueued
+        );
         assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
         assert!(fluxrouter_class.received_contains(CONTENT));
     }
@@ -4805,18 +4843,33 @@ mod p71_gate {
                 0, // no disk budget: every enqueue falls back to an inline upload
             );
             let outcome = queue
-                .enqueue_bytes_blocking(CONTENT, "s/turn_0/archive.bin", "application/gzip", "archive.bin", "s", 0)
+                .enqueue_bytes_blocking(
+                    CONTENT,
+                    "s/turn_0/archive.bin",
+                    "application/gzip",
+                    "archive.bin",
+                    "s",
+                    0,
+                )
                 .await;
             assert_eq!(outcome, EnqueueOutcome::FellBackToInline);
             let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
             while resolved.load(Ordering::SeqCst) == 0 {
-                assert!(tokio::time::Instant::now() < deadline, "the inline fallback never resolved its destination");
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the inline fallback never resolved its destination"
+                );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             // It took its fallback permits before it resolved and gives them back when its upload attempt is
             // over (sent, or refused): all permits back means the detached task has finished.
-            while queue.inline_fallback_semaphore.available_permits() < INLINE_FALLBACK_TOTAL_PERMITS as usize {
-                assert!(tokio::time::Instant::now() < deadline, "the inline fallback never finished");
+            while queue.inline_fallback_semaphore.available_permits()
+                < INLINE_FALLBACK_TOTAL_PERMITS as usize
+            {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the inline fallback never finished"
+                );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
@@ -4830,14 +4883,19 @@ mod p71_gate {
 
         let third_party = RecordingEndpoint::third_party().await;
         fall_back_inline(third_party.proxy_base_url()).await;
-        assert_eq!(third_party.connections(), 0, "the inline fallback reached a third-party proxy");
+        assert_eq!(
+            third_party.connections(),
+            0,
+            "the inline fallback reached a third-party proxy"
+        );
         assert!(third_party.received().is_empty());
     }
 
     /// The queue's disposition for a withheld upload is terminal: never retried, never parked.
     #[test]
     fn withheld_is_terminal() {
-        let err = crate::destination_gate::gate_proxy_url("https://third.example/v1", "x").unwrap_err();
+        let err =
+            crate::destination_gate::gate_proxy_url("https://third.example/v1", "x").unwrap_err();
         assert!(is_withheld(&err));
         assert!(matches!(upload_disposition(&err), Disposition::Terminal));
     }

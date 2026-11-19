@@ -811,7 +811,10 @@ fn build_tools_meta_serialises_tool_names() {
         serde_json::Value::Object(v),
         serde_json::json!({"tools": ["scheduler_create", "image_gen"], "memoryEnabled": true})
     );
-    assert_eq!(build_tools_meta(&names, false)["memoryEnabled"], serde_json::json!(false));
+    assert_eq!(
+        build_tools_meta(&names, false)["memoryEnabled"],
+        serde_json::json!(false)
+    );
 }
 
 #[test]

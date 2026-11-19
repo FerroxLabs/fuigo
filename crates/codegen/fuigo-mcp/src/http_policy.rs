@@ -135,9 +135,14 @@ fn judge_token_endpoint(
         .get("issuer")
         .and_then(|v| v.as_str())
         .map_or_else(|| served_origin.clone(), str::to_string);
-    if let Err(rule) = fuigo_computer_hub_sdk::check_token_endpoint(&issuer_for_rule, &endpoint, true) {
+    if let Err(rule) =
+        fuigo_computer_hub_sdk::check_token_endpoint(&issuer_for_rule, &endpoint, true)
+    {
         let detail = if origin_label(&endpoint) != served_origin {
-            format!("which is on a different origin ({})", origin_label(&endpoint))
+            format!(
+                "which is on a different origin ({})",
+                origin_label(&endpoint)
+            )
         } else {
             format!("which the shared token endpoint rule refuses ({rule})")
         };
@@ -184,7 +189,12 @@ fn is_credential_bearing(request: &reqwest::Request) -> bool {
         let name = pair.split('=').next().unwrap_or_default();
         matches!(
             name,
-            "grant_type" | "code" | "refresh_token" | "client_secret" | "code_verifier" | "client_assertion"
+            "grant_type"
+                | "code"
+                | "refresh_token"
+                | "client_secret"
+                | "code_verifier"
+                | "client_assertion"
         )
     })
 }
@@ -196,7 +206,9 @@ tokio::task_local! {
 }
 
 /// Run `operation` and return what it produced plus the reason a token request inside it was refused, if one was.
-pub(crate) async fn capture_refusal<F: std::future::Future>(operation: F) -> (F::Output, Option<String>) {
+pub(crate) async fn capture_refusal<F: std::future::Future>(
+    operation: F,
+) -> (F::Output, Option<String>) {
     REFUSAL
         .scope(std::cell::RefCell::new(None), async {
             let output = operation.await;
@@ -214,7 +226,9 @@ tokio::task_local! {
 }
 
 /// Run `operation` and return what it produced plus the client-safe refusal Fuigo recorded inside it, if any.
-pub(crate) async fn capture_trusted_refusal<F: std::future::Future>(operation: F) -> (F::Output, Option<String>) {
+pub(crate) async fn capture_trusted_refusal<F: std::future::Future>(
+    operation: F,
+) -> (F::Output, Option<String>) {
     TRUSTED_REFUSAL
         .scope(std::cell::RefCell::new(None), async {
             let output = operation.await;
@@ -253,7 +267,10 @@ fn refusal_key(server_url: &str) -> String {
 /// The reason the last credential-bearing token request for the MCP server at `server_url` was refused, if one was
 /// and no later one succeeded.
 pub fn auth_refusal_for_url(server_url: &str) -> Option<String> {
-    REMEMBERED_REFUSALS.lock().get(&refusal_key(server_url)).cloned()
+    REMEMBERED_REFUSALS
+        .lock()
+        .get(&refusal_key(server_url))
+        .cloned()
 }
 
 fn remember_refusal(server_url: &str, message: &str) {
@@ -335,11 +352,17 @@ impl CheckedOAuthClient {
     fn refuse_endpoint_for_good(&self, key: &str, why: &str) {
         let mut bindings = self.bindings.lock();
         bindings.allowed.remove(key);
-        bindings.refused.entry(key.to_string()).or_insert_with(|| why.to_string());
+        bindings
+            .refused
+            .entry(key.to_string())
+            .or_insert_with(|| why.to_string());
     }
 
     /// Refuse to send a credential-bearing request to a token endpoint no validated metadata document named.
-    fn check_token_recipient(&self, request: &reqwest::Request) -> Result<(), OAuthHttpClientError> {
+    fn check_token_recipient(
+        &self,
+        request: &reqwest::Request,
+    ) -> Result<(), OAuthHttpClientError> {
         if !is_credential_bearing(request) {
             return Ok(());
         }
@@ -376,7 +399,8 @@ impl CheckedOAuthClient {
         };
         let mut bindings = self.bindings.lock();
         let known = bindings.allowed.contains(&key) || bindings.refused.contains_key(&key);
-        if !known && bindings.allowed.len() + bindings.refused.len() >= MAX_TRACKED_TOKEN_ENDPOINTS {
+        if !known && bindings.allowed.len() + bindings.refused.len() >= MAX_TRACKED_TOKEN_ENDPOINTS
+        {
             // Never drop a verdict silently: a full table fails closed, and refusals of known endpoints still apply.
             bindings.saturated = true;
             bindings.allowed.clear();
@@ -423,9 +447,11 @@ impl CheckedOAuthClient {
             }
             return Err(OAuthHttpClientError::from(message));
         }
-        let discovery_url = (request.method() == reqwest::Method::GET).then(|| request.url().clone());
+        let discovery_url =
+            (request.method() == reqwest::Method::GET).then(|| request.url().clone());
         // A credential-bearing request whose redirect the policy stops is a refusal the caller can show (P151).
-        let refused_redirect_key = is_credential_bearing(&request).then(|| endpoint_key(request.url()));
+        let refused_redirect_key =
+            is_credential_bearing(&request).then(|| endpoint_key(request.url()));
         if let Some(timeout) = timeout {
             *request.timeout_mut() = Some(timeout);
         }
@@ -466,7 +492,11 @@ impl CheckedOAuthClient {
             let same_origin = target
                 .as_ref()
                 .is_some_and(|target| target.origin() == response.url().origin());
-            let place = if same_origin { "another address on the same origin" } else { "another origin" };
+            let place = if same_origin {
+                "another address on the same origin"
+            } else {
+                "another origin"
+            };
             let why = format!(
                 "refused: the token endpoint answered HTTP {} redirecting the request to {place}; credentials are only sent to the token endpoint the metadata names",
                 response.status().as_u16()
@@ -796,13 +826,17 @@ mod tests {
             "http://as.example.com/token",
             "https://token.as.example.com/token",
         ] {
-            let error = judge(served, doc(Some("https://as.example.com"), token))
-                .expect_err(token);
+            let error = judge(served, doc(Some("https://as.example.com"), token)).expect_err(token);
             assert!(error.starts_with("refused:"), "{error}");
             assert!(error.contains("different origin"), "{error}");
             assert!(error.contains("https://as.example.com"), "{error}");
         }
-        for token in ["/token", "ftp://as.example.com/token", "javascript:alert(1)", ""] {
+        for token in [
+            "/token",
+            "ftp://as.example.com/token",
+            "javascript:alert(1)",
+            "",
+        ] {
             let error = judge(served, doc(None, token)).expect_err(token);
             assert!(error.contains("not an absolute http(s) URL"), "{error}");
         }
@@ -813,7 +847,10 @@ mod tests {
         let served = "https://accounts.google.com/.well-known/openid-configuration";
         judge(
             served,
-            doc(Some("https://accounts.google.com"), "https://oauth2.googleapis.com/token"),
+            doc(
+                Some("https://accounts.google.com"),
+                "https://oauth2.googleapis.com/token",
+            ),
         )
         .unwrap();
         // look-alikes stay refused
@@ -830,13 +867,19 @@ mod tests {
         // the pair is directed and exact: another issuer does not inherit it
         judge(
             "https://login.example.com/.well-known/openid-configuration",
-            doc(Some("https://login.example.com"), "https://oauth2.googleapis.com/token"),
+            doc(
+                Some("https://login.example.com"),
+                "https://oauth2.googleapis.com/token",
+            ),
         )
         .expect_err("other issuer");
         // Cognito-style split hosts remain refused, as in the shell
         judge(
             "https://cognito-idp.eu-west-1.amazonaws.com/pool/.well-known/openid-configuration",
-            doc(Some("https://cognito-idp.eu-west-1.amazonaws.com/pool"), "https://x.auth.eu-west-1.amazoncognito.com/oauth2/token"),
+            doc(
+                Some("https://cognito-idp.eu-west-1.amazonaws.com/pool"),
+                "https://x.auth.eu-west-1.amazoncognito.com/oauth2/token",
+            ),
         )
         .expect_err("cognito");
     }
@@ -844,7 +887,9 @@ mod tests {
     #[test]
     fn google_pair_admits_exchange_and_refresh() {
         let checked = client_with_no_proxy();
-        let served = reqwest::Url::parse("https://accounts.google.com/.well-known/openid-configuration").unwrap();
+        let served =
+            reqwest::Url::parse("https://accounts.google.com/.well-known/openid-configuration")
+                .unwrap();
         checked.learn_token_endpoint(
             &served,
             br#"{"issuer":"https://accounts.google.com","authorization_endpoint":"https://accounts.google.com/o/oauth2/v2/auth","token_endpoint":"https://oauth2.googleapis.com/token"}"#,
@@ -854,10 +899,16 @@ mod tests {
             "grant_type=refresh_token&refresh_token=rt",
         ] {
             checked
-                .check_token_recipient(&credential_post("https://oauth2.googleapis.com/token", body))
+                .check_token_recipient(&credential_post(
+                    "https://oauth2.googleapis.com/token",
+                    body,
+                ))
                 .unwrap();
             checked
-                .check_token_recipient(&credential_post("https://oauth2.googleapis.com.evil.example/token", body))
+                .check_token_recipient(&credential_post(
+                    "https://oauth2.googleapis.com.evil.example/token",
+                    body,
+                ))
                 .unwrap_err();
         }
     }
@@ -865,9 +916,14 @@ mod tests {
     #[test]
     fn issuer_off_the_serving_origin_is_refused() {
         let served = "https://as.example.com/.well-known/oauth-authorization-server";
-        for issuer in ["https://evil.test", "https://evil.test/", "not a url", "http://as.example.com"] {
-            let error = judge(served, doc(Some(issuer), "https://as.example.com/token"))
-                .expect_err(issuer);
+        for issuer in [
+            "https://evil.test",
+            "https://evil.test/",
+            "not a url",
+            "http://as.example.com",
+        ] {
+            let error =
+                judge(served, doc(Some(issuer), "https://as.example.com/token")).expect_err(issuer);
             assert!(error.contains("RFC 8414"), "{error}");
         }
         // a non-string issuer is treated as absent only if absent; a declared string must match
@@ -882,9 +938,19 @@ mod tests {
 
     #[test]
     fn a_document_without_a_token_endpoint_teaches_nothing() {
-        let served = reqwest::Url::parse("https://rs.example.com/.well-known/oauth-protected-resource").unwrap();
-        assert!(judge_token_endpoint(&served, &serde_json::json!({ "resource": "https://rs.example.com" })).is_none());
-        assert!(judge_token_endpoint(&served, &serde_json::json!({ "token_endpoint": 7 })).is_none());
+        let served =
+            reqwest::Url::parse("https://rs.example.com/.well-known/oauth-protected-resource")
+                .unwrap();
+        assert!(
+            judge_token_endpoint(
+                &served,
+                &serde_json::json!({ "resource": "https://rs.example.com" })
+            )
+            .is_none()
+        );
+        assert!(
+            judge_token_endpoint(&served, &serde_json::json!({ "token_endpoint": 7 })).is_none()
+        );
     }
 
     fn client_with_no_proxy() -> CheckedOAuthClient {
@@ -904,7 +970,9 @@ mod tests {
     #[test]
     fn credential_requests_need_a_validated_token_endpoint() {
         let checked = client_with_no_proxy();
-        let served = reqwest::Url::parse("https://as.example.com/.well-known/oauth-authorization-server").unwrap();
+        let served =
+            reqwest::Url::parse("https://as.example.com/.well-known/oauth-authorization-server")
+                .unwrap();
         let refresh = "grant_type=refresh_token&refresh_token=rt-secret&client_id=c";
 
         // nothing learned yet: fail closed, and say what was refused and why
@@ -912,7 +980,10 @@ mod tests {
             .check_token_recipient(&credential_post("https://as.example.com/token", refresh))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("refusing to send OAuth credentials"), "{error}");
+        assert!(
+            error.contains("refusing to send OAuth credentials"),
+            "{error}"
+        );
         assert!(error.contains("https://as.example.com/token"), "{error}");
         assert!(!error.contains("rt-secret"), "{error}");
 
@@ -931,7 +1002,10 @@ mod tests {
             ))
             .unwrap();
         checked
-            .check_token_recipient(&credential_post("https://as.example.com/token", "client_secret=s"))
+            .check_token_recipient(&credential_post(
+                "https://as.example.com/token",
+                "client_secret=s",
+            ))
             .unwrap();
 
         // a hostile document is remembered with its reason and its endpoint stays refused
@@ -944,7 +1018,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("https://evil.test/token"), "{error}");
-        assert!(error.contains("different origin (https://evil.test)"), "{error}");
+        assert!(
+            error.contains("different origin (https://evil.test)"),
+            "{error}"
+        );
         assert!(error.contains("https://as.example.com"), "{error}");
 
         // a path on the same origin that no document named is still refused
@@ -965,12 +1042,18 @@ mod tests {
             .build()
             .unwrap();
         checked.check_token_recipient(&json).unwrap();
-        let get = reqwest::Client::new().get("https://as.example.com/x").build().unwrap();
+        let get = reqwest::Client::new()
+            .get("https://as.example.com/x")
+            .build()
+            .unwrap();
         checked.check_token_recipient(&get).unwrap();
         // the gate cannot be bypassed by hiding the grant among other form fields
         assert!(
             checked
-                .check_token_recipient(&credential_post("https://evil.test/t", "a=b&refresh_token=rt"))
+                .check_token_recipient(&credential_post(
+                    "https://evil.test/t",
+                    "a=b&refresh_token=rt"
+                ))
                 .is_err()
         );
     }
@@ -980,10 +1063,12 @@ mod tests {
         use crate::rmcp::transport::auth::AuthError;
         let opaque = AuthError::TokenRefreshFailed("Request failed".to_string());
         assert!(crate::servers::mcp_refresh_failure_is_transient_unless_refused(&opaque, None));
-        assert!(!crate::servers::mcp_refresh_failure_is_transient_unless_refused(
-            &opaque,
-            Some("refusing to send OAuth credentials")
-        ));
+        assert!(
+            !crate::servers::mcp_refresh_failure_is_transient_unless_refused(
+                &opaque,
+                Some("refusing to send OAuth credentials")
+            )
+        );
     }
 
     #[test]
@@ -991,7 +1076,9 @@ mod tests {
         // Astra r1 HIGH: R's protected-resource document carries a stray token_endpoint, and a later "custom" document
         // served from R declares A as issuer and names R/token. Neither may admit R/token.
         let checked = client_with_no_proxy();
-        let resource = reqwest::Url::parse("https://r.example.com/.well-known/oauth-protected-resource").unwrap();
+        let resource =
+            reqwest::Url::parse("https://r.example.com/.well-known/oauth-protected-resource")
+                .unwrap();
         checked.learn_token_endpoint(
             &resource,
             br#"{"resource":"https://r.example.com","authorization_endpoint":"https://r.example.com/a","token_endpoint":"https://r.example.com/token"}"#,
@@ -1056,7 +1143,10 @@ mod tests {
             br#"{"issuer":"https://a.example/tenants/oauth-protected-resource-demo","authorization_endpoint":"https://a.example/authorize","token_endpoint":"https://a.example/token"}"#,
         );
         checked
-            .check_token_recipient(&credential_post("https://a.example/token", "grant_type=refresh_token&refresh_token=rt"))
+            .check_token_recipient(&credential_post(
+                "https://a.example/token",
+                "grant_type=refresh_token&refresh_token=rt",
+            ))
             .unwrap();
     }
 
@@ -1064,25 +1154,39 @@ mod tests {
     fn a_full_table_fails_closed_and_never_suppresses_a_refusal() {
         // Astra r2 HIGH: after saturation a refusal of an already admitted endpoint was dropped.
         let checked = client_with_no_proxy();
-        let served = reqwest::Url::parse("https://as.example.com/.well-known/oauth-authorization-server").unwrap();
+        let served =
+            reqwest::Url::parse("https://as.example.com/.well-known/oauth-authorization-server")
+                .unwrap();
         let named = |token: &str| {
-            format!(r#"{{"issuer":"https://as.example.com","authorization_endpoint":"https://as.example.com/a","token_endpoint":"{token}"}}"#)
+            format!(
+                r#"{{"issuer":"https://as.example.com","authorization_endpoint":"https://as.example.com/a","token_endpoint":"{token}"}}"#
+            )
         };
         checked.learn_token_endpoint(&served, named("https://as.example.com/token").as_bytes());
         for i in 0..MAX_TRACKED_TOKEN_ENDPOINTS + 4 {
-            checked.learn_token_endpoint(&served, named(&format!("https://as.example.com/t{i}")).as_bytes());
+            checked.learn_token_endpoint(
+                &served,
+                named(&format!("https://as.example.com/t{i}")).as_bytes(),
+            );
         }
         // the endpoint admitted earlier is no longer trusted once the table overflowed
         assert!(
             checked
-                .check_token_recipient(&credential_post("https://as.example.com/token", "grant_type=refresh_token&refresh_token=rt"))
+                .check_token_recipient(&credential_post(
+                    "https://as.example.com/token",
+                    "grant_type=refresh_token&refresh_token=rt"
+                ))
                 .is_err()
         );
         // and a refusal for a known endpoint is still recorded
-        let other = reqwest::Url::parse("https://evil.test/.well-known/oauth-authorization-server").unwrap();
+        let other = reqwest::Url::parse("https://evil.test/.well-known/oauth-authorization-server")
+            .unwrap();
         checked.learn_token_endpoint(&other, named("https://as.example.com/token").as_bytes());
         let error = checked
-            .check_token_recipient(&credential_post("https://as.example.com/token", "grant_type=refresh_token&refresh_token=rt"))
+            .check_token_recipient(&credential_post(
+                "https://as.example.com/token",
+                "grant_type=refresh_token&refresh_token=rt",
+            ))
             .unwrap_err()
             .to_string();
         assert!(error.contains("refus"), "{error}");
@@ -1099,7 +1203,10 @@ mod tests {
         );
         assert!(
             checked
-                .check_token_recipient(&credential_post("https://a.example/token", "grant_type=refresh_token&refresh_token=rt"))
+                .check_token_recipient(&credential_post(
+                    "https://a.example/token",
+                    "grant_type=refresh_token&refresh_token=rt"
+                ))
                 .is_err(),
             "a resource document admits nothing"
         );
@@ -1108,7 +1215,10 @@ mod tests {
             br#"{"issuer":"https://a.example","authorization_endpoint":"https://a.example/authorize","token_endpoint":"https://a.example/token"}"#,
         );
         checked
-            .check_token_recipient(&credential_post("https://a.example/token", "grant_type=refresh_token&refresh_token=rt"))
+            .check_token_recipient(&credential_post(
+                "https://a.example/token",
+                "grant_type=refresh_token&refresh_token=rt",
+            ))
             .unwrap();
     }
 
@@ -1126,7 +1236,10 @@ mod tests {
         // a form body is still judged even with a charset parameter on the content type
         let form = reqwest::Client::new()
             .post("https://evil.test/token")
-            .header("content-type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .header(
+                "content-type",
+                "application/x-www-form-urlencoded; charset=UTF-8",
+            )
             .body("grant_type=refresh_token&refresh_token=rt")
             .build()
             .unwrap();
@@ -1193,10 +1306,19 @@ mod tests {
         .await;
         let error = outcome.unwrap_err().to_string();
         task.abort();
-        assert!(error.contains("refusing to send OAuth credentials"), "{error}");
+        assert!(
+            error.contains("refusing to send OAuth credentials"),
+            "{error}"
+        );
         let refusal = refusal.expect("the refusal reaches the caller past rmcp's opaque error");
-        assert_eq!(explain_token_error(&"Request failed", Some(&refusal)), refusal);
-        assert_eq!(explain_token_error(&"Request failed", None), "Request failed");
+        assert_eq!(
+            explain_token_error(&"Request failed", Some(&refusal)),
+            refusal
+        );
+        assert_eq!(
+            explain_token_error(&"Request failed", None),
+            "Request failed"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -1317,7 +1439,13 @@ mod tests {
                     "/token-redir",
                     post(move || {
                         let location = location.clone();
-                        async move { (StatusCode::TEMPORARY_REDIRECT, [("location", location)], "redirect") }
+                        async move {
+                            (
+                                StatusCode::TEMPORARY_REDIRECT,
+                                [("location", location)],
+                                "redirect",
+                            )
+                        }
                     }),
                 ),
             )
@@ -1326,7 +1454,10 @@ mod tests {
         });
         let checked = CheckedOAuthClient::new().unwrap();
         // Metadata from the source's own origin names the redirecting endpoint, so the recipient check admits it.
-        let served = reqwest::Url::parse(&format!("{source_base}/.well-known/oauth-authorization-server")).unwrap();
+        let served = reqwest::Url::parse(&format!(
+            "{source_base}/.well-known/oauth-authorization-server"
+        ))
+        .unwrap();
         checked.learn_token_endpoint(
             &served,
             format!(r#"{{"issuer":"{source_base}","authorization_endpoint":"{source_base}/authorize","token_endpoint":"{source_base}/token-redir"}}"#)
@@ -1335,7 +1466,10 @@ mod tests {
         let request = checked
             .follow
             .post(format!("{source_base}/token-redir"))
-            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
             .body("grant_type=refresh_token&refresh_token=p151-SYNRT")
             .build()
             .unwrap();
@@ -1357,7 +1491,10 @@ mod tests {
         let stop_request = checked_stop
             .stop
             .post(format!("{source_base}/token-redir"))
-            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
             .body("grant_type=authorization_code&code=p151-SYNCODE")
             .build()
             .unwrap();
@@ -1367,22 +1504,38 @@ mod tests {
             Some(Duration::from_secs(5)),
         ))
         .await;
-        assert!(stop_result.is_err(), "a redirected token request is a failure, not a response to parse");
-        let stop_refusal = stop_refusal.expect("the stopped redirect must be recorded as a refusal");
-        assert!(stop_refusal.contains("redirect") && stop_refusal.contains("another origin"), "{stop_refusal}");
+        assert!(
+            stop_result.is_err(),
+            "a redirected token request is a failure, not a response to parse"
+        );
+        let stop_refusal =
+            stop_refusal.expect("the stopped redirect must be recorded as a refusal");
+        assert!(
+            stop_refusal.contains("redirect") && stop_refusal.contains("another origin"),
+            "{stop_refusal}"
+        );
         assert!(!stop_refusal.contains("p151-SYNCODE"), "{stop_refusal}");
         source_task.abort();
         destination_task.abort();
         assert!(result.is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing may reach the other origin");
-        let refusal = refusal.expect("the redirect refusal must be recorded for the caller to show");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "nothing may reach the other origin"
+        );
+        let refusal =
+            refusal.expect("the redirect refusal must be recorded for the caller to show");
         assert!(refusal.contains("redirect"), "{refusal}");
         assert!(refusal.contains("another origin"), "{refusal}");
-        assert!(!refusal.contains("p151-SYNRT"), "the refusal must not carry the credential: {refusal}");
+        assert!(
+            !refusal.contains("p151-SYNRT"),
+            "the refusal must not carry the credential: {refusal}"
+        );
     }
 
     /// A same-origin redirecting token endpoint with a stop-policy client, counting the POSTs that reach it.
-    async fn redirecting_token_endpoint() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    async fn redirecting_token_endpoint() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)
+    {
         let posts = Arc::new(AtomicUsize::new(0));
         let sink = posts.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1398,7 +1551,11 @@ mod tests {
                         let location = location.clone();
                         async move {
                             sink.fetch_add(1, Ordering::SeqCst);
-                            (StatusCode::TEMPORARY_REDIRECT, [("location", location)], "redirect")
+                            (
+                                StatusCode::TEMPORARY_REDIRECT,
+                                [("location", location)],
+                                "redirect",
+                            )
                         }
                     }),
                 ),
@@ -1410,7 +1567,8 @@ mod tests {
     }
 
     fn admit_token_endpoint(checked: &CheckedOAuthClient, base: &str, path: &str) {
-        let served = reqwest::Url::parse(&format!("{base}/.well-known/oauth-authorization-server")).unwrap();
+        let served =
+            reqwest::Url::parse(&format!("{base}/.well-known/oauth-authorization-server")).unwrap();
         checked.learn_token_endpoint(
             &served,
             format!(r#"{{"issuer":"{base}","authorization_endpoint":"{base}/authorize","token_endpoint":"{base}{path}"}}"#)
@@ -1431,8 +1589,13 @@ mod tests {
             let request = checked
                 .stop
                 .post(format!("{base}/token-redir"))
-                .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(format!("grant_type=refresh_token&refresh_token=p193-RT-{attempt}"))
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(format!(
+                    "grant_type=refresh_token&refresh_token=p193-RT-{attempt}"
+                ))
                 .build()
                 .unwrap();
             let (result, refusal) = capture_refusal(checked.execute_request(
@@ -1445,10 +1608,17 @@ mod tests {
             reasons.push(refusal.expect("every attempt carries its reason"));
         }
         task.abort();
-        assert_eq!(posts.load(Ordering::SeqCst), 1, "only the first attempt may reach the endpoint");
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            1,
+            "only the first attempt may reach the endpoint"
+        );
         for reason in &reasons {
             assert!(reason.contains("redirect"), "{reason}");
-            assert!(!reason.contains("p193-RT"), "the reason must not carry the credential: {reason}");
+            assert!(
+                !reason.contains("p193-RT"),
+                "the reason must not carry the credential: {reason}"
+            );
         }
     }
 
@@ -1464,7 +1634,9 @@ mod tests {
                 ok_listener,
                 Router::new().route(
                     "/token",
-                    post(|| async { axum::Json(serde_json::json!({"access_token": "t", "token_type": "Bearer"})) }),
+                    post(|| async {
+                        axum::Json(serde_json::json!({"access_token": "t", "token_type": "Bearer"}))
+                    }),
                 ),
             )
             .await
@@ -1479,18 +1651,30 @@ mod tests {
         let request = checked
             .stop
             .post(format!("{base}/token-redir"))
-            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
             .body("grant_type=refresh_token&refresh_token=p193-RT")
             .build()
             .unwrap();
         let result = checked
-            .execute_request(request, OAuthHttpRedirectPolicy::Stop, Some(Duration::from_secs(5)))
+            .execute_request(
+                request,
+                OAuthHttpRedirectPolicy::Stop,
+                Some(Duration::from_secs(5)),
+            )
             .await;
         assert!(result.is_err());
-        let remembered = auth_refusal_for_url(&refused_url).expect("the refusal is remembered for the server");
+        let remembered =
+            auth_refusal_for_url(&refused_url).expect("the refusal is remembered for the server");
         assert!(remembered.contains("redirect"), "{remembered}");
         assert!(!remembered.contains("p193-RT"), "{remembered}");
-        assert_eq!(auth_refusal_for_url(&ok_url), None, "another server is unaffected");
+        assert_eq!(
+            auth_refusal_for_url(&ok_url),
+            None,
+            "another server is unaffected"
+        );
 
         // A later credential-bearing request that succeeds clears what was remembered for that server.
         let healthy = CheckedOAuthClient::for_resource(&ok_url).unwrap();
@@ -1499,16 +1683,27 @@ mod tests {
         let request = healthy
             .stop
             .post(format!("{ok_base}/token"))
-            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
             .body("grant_type=refresh_token&refresh_token=p193-RT2")
             .build()
             .unwrap();
         healthy
-            .execute_request(request, OAuthHttpRedirectPolicy::Stop, Some(Duration::from_secs(5)))
+            .execute_request(
+                request,
+                OAuthHttpRedirectPolicy::Stop,
+                Some(Duration::from_secs(5)),
+            )
             .await
             .expect("the healthy endpoint answers");
         task.abort();
         ok_task.abort();
-        assert_eq!(auth_refusal_for_url(&ok_url), None, "a success clears the remembered refusal");
+        assert_eq!(
+            auth_refusal_for_url(&ok_url),
+            None,
+            "a success clears the remembered refusal"
+        );
     }
 }

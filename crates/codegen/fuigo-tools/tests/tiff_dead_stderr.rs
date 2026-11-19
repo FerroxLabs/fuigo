@@ -38,7 +38,10 @@ enum Stderr {
     Full,
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn run_child(mode: Stderr) -> std::process::Output {
     let mut command = Command::new(std::env::current_exe().expect("test binary"));
     command
@@ -174,7 +177,10 @@ fn tiff_and_usvg_resolve_to_the_print_free_vendored_copies() {
     }
     // web_fetch's converter: the vendored copy has its quadratic loops made linear.
     let (total, non_local) = lock_entries(&lock, "htmd");
-    assert!(total >= 1, "htmd is no longer in Cargo.lock; drop its vendored copy");
+    assert!(
+        total >= 1,
+        "htmd is no longer in Cargo.lock; drop its vendored copy"
+    );
     assert!(
         non_local.is_empty(),
         "htmd {non_local:?} resolves to a registry/git source, bypassing third_party/htmd-*: \

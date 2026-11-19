@@ -22,16 +22,20 @@ pub(crate) fn listed_form_needs_approval(words: &[String]) -> bool {
         "hostname" => !hostname_only_prints(args),
         "wc" | "du" => options(args).any(|w| long_option_is(w, "--files0-from", 1)),
         "sort" => sort_needs_approval(args),
-        "diff" => options(args).any(|w| long_option_is(w, "--from-file", 1) || long_option_is(w, "--to-file", 2)),
+        "diff" => options(args)
+            .any(|w| long_option_is(w, "--from-file", 1) || long_option_is(w, "--to-file", 2)),
         "file" => file_needs_approval(args),
         "tree" => tree_needs_approval(args),
         "strings" => args.iter().any(|w| w.starts_with('@')),
-        "jq" => args.iter().any(|w| matches!(w.as_str(), "--rawfile" | "--slurpfile" | "--argfile")),
+        "jq" => args
+            .iter()
+            .any(|w| matches!(w.as_str(), "--rawfile" | "--slurpfile" | "--argfile")),
         // Interactive process viewers take keys from stdin (kill, renice, show a process environment); procps
         // `top -b` and macOS `top -l N` only print.
         "htop" => true,
         "top" => !args.iter().any(|w| {
-            w.strip_prefix('-').is_some_and(|cluster| !cluster.starts_with('-') && cluster.contains('b'))
+            w.strip_prefix('-')
+                .is_some_and(|cluster| !cluster.starts_with('-') && cluster.contains('b'))
                 || w.starts_with("-l")
         }),
         "kubectl" => kubectl_needs_approval(args),
@@ -82,9 +86,12 @@ fn date_only_prints(args: &[String]) -> bool {
             continue;
         }
         if let Some(long) = word.strip_prefix("--") {
-            let (name, attached) = long.split_once('=').map_or((long, false), |(name, _)| (name, true));
+            let (name, attached) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
             match name {
-                "utc" | "universal" | "rfc-2822" | "rfc-email" | "iso-8601" | "rfc-3339" | "debug" | "help" | "version" => {}
+                "utc" | "universal" | "rfc-2822" | "rfc-email" | "iso-8601" | "rfc-3339"
+                | "debug" | "help" | "version" => {}
                 "date" | "reference" => i += usize::from(!attached),
                 _ => return false,
             }
@@ -112,15 +119,27 @@ fn date_only_prints(args: &[String]) -> bool {
 /// `-F`/`--file` (sets it from a file) or `-b`/`--boot`.
 fn hostname_only_prints(args: &[String]) -> bool {
     const LONG: &[&str] = &[
-        "--alias", "--all-fqdns", "--domain", "--fqdn", "--long", "--ip-address", "--all-ip-addresses", "--short", "--yp",
-        "--nis", "--version", "--help", "--verbose",
+        "--alias",
+        "--all-fqdns",
+        "--domain",
+        "--fqdn",
+        "--long",
+        "--ip-address",
+        "--all-ip-addresses",
+        "--short",
+        "--yp",
+        "--nis",
+        "--version",
+        "--help",
+        "--verbose",
     ];
     args.iter().all(|word| {
         if word.starts_with("--") {
             return LONG.contains(&word.as_str());
         }
-        word.strip_prefix('-')
-            .is_some_and(|cluster| !cluster.is_empty() && cluster.chars().all(|c| "aAdfiIsyVhv".contains(c)))
+        word.strip_prefix('-').is_some_and(|cluster| {
+            !cluster.is_empty() && cluster.chars().all(|c| "aAdfiIsyVhv".contains(c))
+        })
     })
 }
 
@@ -190,7 +209,14 @@ fn kubectl_needs_approval(args: &[String]) -> bool {
             || long_option_is(word, "--log-dir", 5)
             || long_option_is(word, "--profile-output", 9)
             || long_option_is(word, "--template", 3)
-            || ["template-file", "templatefile", "jsonpath-file", "custom-columns-file"].iter().any(|form| word.contains(form))
+            || [
+                "template-file",
+                "templatefile",
+                "jsonpath-file",
+                "custom-columns-file",
+            ]
+            .iter()
+            .any(|form| word.contains(form))
     })
 }
 
@@ -201,17 +227,83 @@ fn kubectl_needs_approval(args: &[String]) -> bool {
 /// build can run a `[build] rustc`/`rustc-wrapper` of it; that is not judged here but by the bash request's
 /// configuration scan ([`repository_tool_config_runs`], u35 g13/g14), which asks for it.
 const CARGO_ROUTINE_SUBCOMMANDS: &[&str] = &[
-    "build", "b", "check", "c", "test", "t", "bench", "run", "r", "clippy", "fmt", "doc", "d", "tree", "metadata", "fetch",
-    "update", "clean", "fix", "new", "init", "add", "remove", "rm", "generate-lockfile", "locate-project", "pkgid",
-    "read-manifest", "verify-project", "version", "help", "search", "info", "vendor", "package", "nextest",
+    "build",
+    "b",
+    "check",
+    "c",
+    "test",
+    "t",
+    "bench",
+    "run",
+    "r",
+    "clippy",
+    "fmt",
+    "doc",
+    "d",
+    "tree",
+    "metadata",
+    "fetch",
+    "update",
+    "clean",
+    "fix",
+    "new",
+    "init",
+    "add",
+    "remove",
+    "rm",
+    "generate-lockfile",
+    "locate-project",
+    "pkgid",
+    "read-manifest",
+    "verify-project",
+    "version",
+    "help",
+    "search",
+    "info",
+    "vendor",
+    "package",
+    "nextest",
 ];
 
 /// cargo options whose value is the next word when not attached with `=`.
 const CARGO_VALUED: &[&str] = &[
-    "--color", "--config", "-Z", "-C", "--directory", "--explain", "--manifest-path", "--target-dir", "--artifact-dir", "--out-dir",
-    "--lockfile-path", "-p", "--package", "--exclude", "--target", "--features", "-F", "-j", "--jobs", "--bin", "--example",
-    "--test", "--bench", "--profile", "--message-format", "--registry", "--index", "--vers", "--git",
-    "--branch", "--tag", "--rev", "--path", "--name", "--edition", "--vcs", "--rename",
+    "--color",
+    "--config",
+    "-Z",
+    "-C",
+    "--directory",
+    "--explain",
+    "--manifest-path",
+    "--target-dir",
+    "--artifact-dir",
+    "--out-dir",
+    "--lockfile-path",
+    "-p",
+    "--package",
+    "--exclude",
+    "--target",
+    "--features",
+    "-F",
+    "-j",
+    "--jobs",
+    "--bin",
+    "--example",
+    "--test",
+    "--bench",
+    "--profile",
+    "--message-format",
+    "--registry",
+    "--index",
+    "--vers",
+    "--git",
+    "--branch",
+    "--tag",
+    "--rev",
+    "--path",
+    "--name",
+    "--edition",
+    "--vcs",
+    "--rename",
 ];
 
 /// A routine cargo invocation: a listed subcommand, no output or manifest path outside the project, no other
@@ -239,9 +331,14 @@ fn cargo_needs_approval(args: &[String]) -> bool {
             }
             if matches!(
                 name,
-                "--target-dir" | "--artifact-dir" | "--out-dir" | "--manifest-path" | "--lockfile-path" | "-C" | "--directory"
-            )
-                && value_at(args, at, attached).is_none_or(leaves_project)
+                "--target-dir"
+                    | "--artifact-dir"
+                    | "--out-dir"
+                    | "--manifest-path"
+                    | "--lockfile-path"
+                    | "-C"
+                    | "--directory"
+            ) && value_at(args, at, attached).is_none_or(leaves_project)
             {
                 return true;
             }
@@ -276,12 +373,24 @@ fn rustc_needs_approval(args: &[String]) -> bool {
             return true;
         }
         let setting = if let Some(rest) = word.strip_prefix("--codegen") {
-            rest.strip_prefix('=').or_else(|| rest.is_empty().then(|| args.get(i).map_or("", String::as_str)))
+            rest.strip_prefix('=').or_else(|| {
+                rest.is_empty()
+                    .then(|| args.get(i).map_or("", String::as_str))
+            })
         } else {
-            word.strip_prefix("-C").map(|rest| if rest.is_empty() { args.get(i).map_or("", String::as_str) } else { rest })
+            word.strip_prefix("-C").map(|rest| {
+                if rest.is_empty() {
+                    args.get(i).map_or("", String::as_str)
+                } else {
+                    rest
+                }
+            })
         };
         if setting.is_some_and(|s| {
-            matches!(s.split('=').next().unwrap_or(s), "incremental" | "profile-generate" | "profile-use")
+            matches!(
+                s.split('=').next().unwrap_or(s),
+                "incremental" | "profile-generate" | "profile-use"
+            )
         }) {
             return true;
         }
@@ -296,11 +405,25 @@ fn rustc_needs_approval(args: &[String]) -> bool {
 fn pytest_needs_approval(args: &[String]) -> bool {
     args.iter().any(|word| {
         if let Some(long) = word.strip_prefix("--") {
-            let (name, value) = long.split_once('=').map_or((long, ""), |(name, value)| (name, value));
+            let (name, value) = long
+                .split_once('=')
+                .map_or((long, ""), |(name, value)| (name, value));
             return matches!(
                 name,
-                "junitxml" | "junit-xml" | "basetemp" | "log-file" | "debug" | "report-log" | "resultlog" | "result-log"
-                    | "html" | "config-file" | "rootdir" | "confcutdir" | "pastebin" | "inifile"
+                "junitxml"
+                    | "junit-xml"
+                    | "basetemp"
+                    | "log-file"
+                    | "debug"
+                    | "report-log"
+                    | "resultlog"
+                    | "result-log"
+                    | "html"
+                    | "config-file"
+                    | "rootdir"
+                    | "confcutdir"
+                    | "pastebin"
+                    | "inifile"
             ) || (name == "cov-report" && value.contains(':'));
         }
         let Some(cluster) = word.strip_prefix('-') else {
@@ -322,7 +445,10 @@ fn pytest_needs_approval(args: &[String]) -> bool {
 /// `-p` and shell-replacing variables are an exec-surface floor.
 fn make_needs_approval(args: &[String]) -> bool {
     make_args(args).iter().any(|arg| match arg {
-        MakeArg::Option { name: "directory" | "file" | "makefile" | "include-dir", value } => value.is_none_or(leaves_project),
+        MakeArg::Option {
+            name: "directory" | "file" | "makefile" | "include-dir",
+            value,
+        } => value.is_none_or(leaves_project),
         MakeArg::Assign { value, .. } => value.contains(['/', '\\', '~']),
         MakeArg::Unknown => true,
         _ => false,
@@ -337,9 +463,28 @@ fn make_needs_approval(args: &[String]) -> bool {
 /// `--`.
 fn cmake_is_routine(args: &[String]) -> bool {
     const FLAGS: &[&str] = &[
-        "--fresh", "--version", "-h", "--help", "-N", "-L", "-LA", "-LH", "-LAH", "--debug-output", "--debug-find",
-        "--trace", "--trace-expand", "--warn-uninitialized", "--no-warn-unused-cli", "--check-system-vars",
-        "--compile-no-warning-as-error", "--list-presets", "--clean-first", "-v", "--verbose", "--log-context",
+        "--fresh",
+        "--version",
+        "-h",
+        "--help",
+        "-N",
+        "-L",
+        "-LA",
+        "-LH",
+        "-LAH",
+        "--debug-output",
+        "--debug-find",
+        "--trace",
+        "--trace-expand",
+        "--warn-uninitialized",
+        "--no-warn-unused-cli",
+        "--check-system-vars",
+        "--compile-no-warning-as-error",
+        "--list-presets",
+        "--clean-first",
+        "-v",
+        "--verbose",
+        "--log-context",
     ];
     let mut build = false;
     let mut i = 0;
@@ -353,16 +498,21 @@ fn cmake_is_routine(args: &[String]) -> bool {
             continue;
         }
         if let Some(long) = word.strip_prefix("--") {
-            let (name, attached) = long.split_once('=').map_or((long, None), |(name, value)| (name, Some(value)));
+            let (name, attached) = long
+                .split_once('=')
+                .map_or((long, None), |(name, value)| (name, Some(value)));
             match name {
                 "build" => {
                     build = true;
                     i += 1;
                 }
-                "preset" | "log-level" | "loglevel" | "trace-source" | "list-presets" | "parallel" => {
+                "preset" | "log-level" | "loglevel" | "trace-source" | "list-presets"
+                | "parallel" => {
                     i += usize::from(attached.is_none() && name == "preset");
                 }
-                "target" | "config" | "resolve-package-references" if build => i += usize::from(attached.is_none()),
+                "target" | "config" | "resolve-package-references" if build => {
+                    i += usize::from(attached.is_none())
+                }
                 _ => return false,
             }
             continue;
@@ -389,7 +539,11 @@ fn cmake_is_routine(args: &[String]) -> bool {
             }
             't' if build => i += usize::from(attached.is_none()),
             'j' if build => {
-                if attached.is_none() && args.get(i).is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())) {
+                if attached.is_none()
+                    && args
+                        .get(i)
+                        .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+                {
                     i += 1;
                 }
             }
@@ -405,8 +559,17 @@ fn cmake_is_routine(args: &[String]) -> bool {
 /// program are an exec-surface floor.
 fn go_needs_approval(args: &[String]) -> bool {
     const WRITE_FLAGS: &[&str] = &[
-        "coverprofile", "cpuprofile", "memprofile", "blockprofile", "mutexprofile", "trace", "outputdir", "overlay",
-        "pkgdir", "modfile", "fuzzcachedir",
+        "coverprofile",
+        "cpuprofile",
+        "memprofile",
+        "blockprofile",
+        "mutexprofile",
+        "trace",
+        "outputdir",
+        "overlay",
+        "pkgdir",
+        "modfile",
+        "fuzzcachedir",
     ];
     let mut subcommand: Option<&str> = None;
     let mut i = 0;
@@ -420,7 +583,9 @@ fn go_needs_approval(args: &[String]) -> bool {
             }
             match (subcommand, name) {
                 (Some("env"), "w" | "u") => return true,
-                (Some("clean"), "cache" | "modcache" | "testcache" | "fuzzcache" | "i") => return true,
+                (Some("clean"), "cache" | "modcache" | "testcache" | "fuzzcache" | "i") => {
+                    return true;
+                }
                 (None, "C") if !flag.contains('=') => i += 1,
                 _ => {}
             }
@@ -441,16 +606,60 @@ fn go_needs_approval(args: &[String]) -> bool {
 /// experimental, and a copt/linkopt naming a path or another linker (`-B`, `-fuse-ld`).
 fn bazel_needs_approval(args: &[String]) -> bool {
     const COMMANDS: &[&str] = &[
-        "build", "test", "query", "cquery", "aquery", "info", "version", "help", "run", "coverage", "fetch", "mod", "clean",
-        "shutdown", "sync", "print_action",
+        "build",
+        "test",
+        "query",
+        "cquery",
+        "aquery",
+        "info",
+        "version",
+        "help",
+        "run",
+        "coverage",
+        "fetch",
+        "mod",
+        "clean",
+        "shutdown",
+        "sync",
+        "print_action",
     ];
     const RISKY_PREFIXES: &[&str] = &[
-        "crosstool_top", "host_crosstool_top", "extra_toolchains", "extra_execution_platforms", "platforms",
-        "host_platform", "override_", "registry", "action_env", "host_action_env", "repo_env", "test_env",
-        "disk_cache", "repository_cache", "remote_", "bes_", "experimental_", "build_event_", "execution_log",
-        "profile", "explain", "java_", "host_java", "tool_java", "javabase", "host_javabase", "jvmopt", "host_jvmopt",
-        "script_path", "output_base", "output_user_root", "install_base", "distdir", "google_credentials",
-        "grpc_log", "memory_profile",
+        "crosstool_top",
+        "host_crosstool_top",
+        "extra_toolchains",
+        "extra_execution_platforms",
+        "platforms",
+        "host_platform",
+        "override_",
+        "registry",
+        "action_env",
+        "host_action_env",
+        "repo_env",
+        "test_env",
+        "disk_cache",
+        "repository_cache",
+        "remote_",
+        "bes_",
+        "experimental_",
+        "build_event_",
+        "execution_log",
+        "profile",
+        "explain",
+        "java_",
+        "host_java",
+        "tool_java",
+        "javabase",
+        "host_javabase",
+        "jvmopt",
+        "host_jvmopt",
+        "script_path",
+        "output_base",
+        "output_user_root",
+        "install_base",
+        "distdir",
+        "google_credentials",
+        "grpc_log",
+        "memory_profile",
     ];
     let mut command: Option<&str> = None;
     let mut i = 0;
@@ -478,13 +687,29 @@ fn bazel_needs_approval(args: &[String]) -> bool {
         if command.is_none() {
             return true;
         }
-        let (name, value) = long.split_once('=').map_or((long, ""), |(name, value)| (name, value));
-        let name = name.strip_prefix("no").filter(|rest| !rest.is_empty()).unwrap_or(name);
+        let (name, value) = long
+            .split_once('=')
+            .map_or((long, ""), |(name, value)| (name, value));
+        let name = name
+            .strip_prefix("no")
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(name);
         if RISKY_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
             return true;
         }
-        if matches!(name, "copt" | "cxxopt" | "conlyopt" | "linkopt" | "host_copt" | "host_cxxopt" | "host_linkopt")
-            && (value.is_empty() || value.contains(['/', '\\']) || value.contains("-B") || value.contains("fuse-ld"))
+        if matches!(
+            name,
+            "copt"
+                | "cxxopt"
+                | "conlyopt"
+                | "linkopt"
+                | "host_copt"
+                | "host_cxxopt"
+                | "host_linkopt"
+        ) && (value.is_empty()
+            || value.contains(['/', '\\'])
+            || value.contains("-B")
+            || value.contains("fuse-ld"))
         {
             return true;
         }
@@ -511,7 +736,9 @@ fn just_needs_approval(args: &[String]) -> bool {
             return false;
         }
         if let Some(long) = word.strip_prefix("--") {
-            let (name, attached) = long.split_once('=').map_or((long, None), |(name, value)| (name, Some(value)));
+            let (name, attached) = long
+                .split_once('=')
+                .map_or((long, None), |(name, value)| (name, Some(value)));
             match name {
                 "dotenv-filename" | "dotenv-path" | "tempdir" | "init" | "set" => return true,
                 "justfile" | "working-directory" => {
@@ -557,7 +784,9 @@ fn just_needs_approval(args: &[String]) -> bool {
 fn npm_needs_approval(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some("config" | "c" | "link" | "ln" | "unlink") => return true,
-        Some("store") if !matches!(args.get(1).map(String::as_str), Some("path" | "status")) => return true,
+        Some("store") if !matches!(args.get(1).map(String::as_str), Some("path" | "status")) => {
+            return true;
+        }
         Some("version") if args[1..].iter().any(|w| !w.starts_with('-')) => return true,
         _ => {}
     }
@@ -567,13 +796,56 @@ fn npm_needs_approval(args: &[String]) -> bool {
 /// u35 g5b: the npm/pnpm/yarn options an approved form may carry, spelled exactly. Each changes only how the
 /// project's own dependencies are recorded or installed, or how output looks.
 const NPM_EXACT_OPTIONS: &[&str] = &[
-    "--save", "-S", "--save-dev", "-D", "--save-exact", "-E", "--save-optional", "-O", "--save-peer", "--save-prod",
-    "-P", "--no-save", "--dev", "--production", "--prod", "--frozen-lockfile", "--no-frozen-lockfile", "--immutable",
-    "--prefer-offline", "--offline", "--no-audit", "--no-fund", "--no-package-lock", "--legacy-peer-deps",
-    "--strict-peer-deps", "--ignore-scripts", "--if-present", "--no-optional", "--silent", "-s", "--quiet", "--json",
-    "--long", "--parseable", "--all", "--verbose", "--version", "-v", "--help", "-h", "--recursive", "-r",
-    "--workspaces", "--include-workspace-root", "--color", "--no-color", "--foreground-scripts", "--dry-run",
-    "--non-interactive", "--check-files",
+    "--save",
+    "-S",
+    "--save-dev",
+    "-D",
+    "--save-exact",
+    "-E",
+    "--save-optional",
+    "-O",
+    "--save-peer",
+    "--save-prod",
+    "-P",
+    "--no-save",
+    "--dev",
+    "--production",
+    "--prod",
+    "--frozen-lockfile",
+    "--no-frozen-lockfile",
+    "--immutable",
+    "--prefer-offline",
+    "--offline",
+    "--no-audit",
+    "--no-fund",
+    "--no-package-lock",
+    "--legacy-peer-deps",
+    "--strict-peer-deps",
+    "--ignore-scripts",
+    "--if-present",
+    "--no-optional",
+    "--silent",
+    "-s",
+    "--quiet",
+    "--json",
+    "--long",
+    "--parseable",
+    "--all",
+    "--verbose",
+    "--version",
+    "-v",
+    "--help",
+    "-h",
+    "--recursive",
+    "-r",
+    "--workspaces",
+    "--include-workspace-root",
+    "--color",
+    "--no-color",
+    "--foreground-scripts",
+    "--dry-run",
+    "--non-interactive",
+    "--check-files",
 ];
 
 fn npm_option_is_listed(word: &str) -> bool {
@@ -584,7 +856,10 @@ fn npm_option_is_listed(word: &str) -> bool {
         Some(("--omit", value)) => matches!(value, "dev" | "optional" | "peer"),
         Some(("--include", value)) => matches!(value, "dev" | "optional" | "peer" | "prod"),
         Some(("--loglevel", value)) => {
-            matches!(value, "silent" | "error" | "warn" | "notice" | "http" | "info" | "verbose" | "silly")
+            matches!(
+                value,
+                "silent" | "error" | "warn" | "notice" | "http" | "info" | "verbose" | "silly"
+            )
         }
         Some(("--depth", value)) => !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()),
         _ => false,
@@ -596,28 +871,53 @@ fn npm_option_is_listed(word: &str) -> bool {
 /// (`-o`/`--output-file`, `--out-dir`), another config file or index, and `--directory`/`--project` or a `venv`/
 /// `init` path outside the project.
 fn uv_needs_approval(args: &[String]) -> bool {
-    match (args.first().map(String::as_str), args.get(1).map(String::as_str)) {
+    match (
+        args.first().map(String::as_str),
+        args.get(1).map(String::as_str),
+    ) {
         (Some("self"), _) | (Some("cache"), Some("clean" | "prune")) => return true,
         _ => {}
     }
     let subcommand = args.first().map(String::as_str);
     // `uv run [OPTIONS] COMMAND ...`: the launched command's own options are judged as that command.
     let own = if subcommand == Some("run") {
-        args.iter().skip(1).position(|w| !w.starts_with('-')).map_or(args.len(), |at| at + 1)
+        args.iter()
+            .skip(1)
+            .position(|w| !w.starts_with('-'))
+            .map_or(args.len(), |at| at + 1)
     } else {
         args.len()
     };
     let options: Vec<&String> = options(&args[..own]).collect();
     options.iter().enumerate().any(|(at, word)| {
-        let (name, attached) = word.split_once('=').map_or((word.as_str(), None), |(name, value)| (name, Some(value)));
+        let (name, attached) = word
+            .split_once('=')
+            .map_or((word.as_str(), None), |(name, value)| (name, Some(value)));
         match name {
-            "--system" | "--break-system-packages" | "--target" | "--prefix" | "-o" | "--output-file" | "--out-dir"
-            | "--config-file" | "--index-url" | "-i" | "--extra-index-url" | "--index" | "--default-index"
-            | "--find-links" | "-f" => true,
+            "--system"
+            | "--break-system-packages"
+            | "--target"
+            | "--prefix"
+            | "-o"
+            | "--output-file"
+            | "--out-dir"
+            | "--config-file"
+            | "--index-url"
+            | "-i"
+            | "--extra-index-url"
+            | "--index"
+            | "--default-index"
+            | "--find-links"
+            | "-f" => true,
             "--directory" | "--project" => attached
                 .or_else(|| options.get(at + 1).map(|w| w.as_str()))
                 .is_none_or(leaves_project),
-            _ => at > 0 && matches!(subcommand, Some("venv" | "init")) && !word.starts_with('-') && leaves_project(word),
+            _ => {
+                at > 0
+                    && matches!(subcommand, Some("venv" | "init"))
+                    && !word.starts_with('-')
+                    && leaves_project(word)
+            }
         }
     })
 }
@@ -625,7 +925,11 @@ fn uv_needs_approval(args: &[String]) -> bool {
 /// rustup `self` (updates or uninstalls rustup itself) and `toolchain link` (a directory whose binaries later builds
 /// run). `rustup doc` opening a browser is an exec-surface floor.
 fn rustup_needs_approval(args: &[String]) -> bool {
-    let words: Vec<&str> = args.iter().map(String::as_str).filter(|w| !w.starts_with('-') && !w.starts_with('+')).collect();
+    let words: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|w| !w.starts_with('-') && !w.starts_with('+'))
+        .collect();
     matches!(words.as_slice(), ["self", ..] | ["toolchain", "link", ..])
 }
 
@@ -643,7 +947,9 @@ pub(crate) enum ToolSegment {
 }
 
 /// u35 g14: the programs whose project configuration the scan reads.
-const CONFIG_TOOLS: &[&str] = &["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg", "cargo", "bazel", "bazelisk"];
+const CONFIG_TOOLS: &[&str] = &[
+    "npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg", "cargo", "bazel", "bazelisk",
+];
 
 /// u35 g14: the program name of `word` (basename, lowercased, `.exe` stripped) when it is one whose project
 /// configuration the scan reads.
@@ -667,7 +973,9 @@ pub(crate) fn is_config_tool(word: &str) -> bool {
 /// `cd "$X"`, `env -C`) is a hit for a command the scan judges. A plain text scan, not a parser, so it fails closed: a
 /// file that is there but cannot be read counts, and so does a Cargo config line it cannot classify.
 pub(crate) fn repository_tool_config_runs(segments: &[ToolSegment], dir: &std::path::Path) -> bool {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from);
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
     tool_config_runs_with_home(segments, dir, home.as_deref())
 }
 
@@ -680,10 +988,14 @@ pub(crate) fn tool_config_runs_with_home(
     let mut cwds = Some(vec![dir.to_path_buf()]);
     for segment in segments {
         let hit = match segment {
-            ToolSegment::Command { words, moved } => command_config_runs(words, *moved, &mut cwds, home),
+            ToolSegment::Command { words, moved } => {
+                command_config_runs(words, *moved, &mut cwds, home)
+            }
             ToolSegment::Nested(commands) => {
                 let mut nested = cwds.clone();
-                commands.iter().any(|words| command_config_runs(words, false, &mut nested, home))
+                commands
+                    .iter()
+                    .any(|words| command_config_runs(words, false, &mut nested, home))
             }
         };
         if hit {
@@ -707,8 +1019,10 @@ fn command_config_runs(
     let name = crate::permission::exec_surface::program_name(head);
     if matches!(name.as_str(), "cd" | "pushd") {
         *cwds = cwds.take().and_then(|mut dirs| {
-            let next: Option<Vec<std::path::PathBuf>> =
-                dirs.iter().map(|dir| crate::permission::exec_risk::apply_literal_chdir(dir, words)).collect();
+            let next: Option<Vec<std::path::PathBuf>> = dirs
+                .iter()
+                .map(|dir| crate::permission::exec_risk::apply_literal_chdir(dir, words))
+                .collect();
             next.map(|next| {
                 dirs.extend(next);
                 dirs
@@ -727,18 +1041,26 @@ fn command_config_runs(
         return true;
     };
     dirs.iter().any(|dir| match tool_run_dir(&name, args, dir) {
-        Some(run) => dirs_below_home(&run, home).iter().any(|d| tool_config_in(&name, args, d)),
+        Some(run) => dirs_below_home(&run, home)
+            .iter()
+            .any(|d| tool_config_in(&name, args, d)),
         None => true,
     })
 }
 
 /// The folders `dir` and above it up to, not including, the home folder (compared as written and resolved, so a
 /// symlinked home or a Git Bash spelling of it still ends the walk).
-fn dirs_below_home<'a>(dir: &'a std::path::Path, home: Option<&std::path::Path>) -> Vec<&'a std::path::Path> {
+fn dirs_below_home<'a>(
+    dir: &'a std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Vec<&'a std::path::Path> {
     let home_real = home.and_then(|home| dunce::canonicalize(home).ok());
     dir.ancestors()
         .take_while(|d| {
-            home != Some(*d) && home_real.as_ref().is_none_or(|real| dunce::canonicalize(d).ok().as_ref() != Some(real))
+            home != Some(*d)
+                && home_real
+                    .as_ref()
+                    .is_none_or(|real| dunce::canonicalize(d).ok().as_ref() != Some(real))
         })
         .collect()
 }
@@ -746,25 +1068,80 @@ fn dirs_below_home<'a>(dir: &'a std::path::Path, home: Option<&std::path::Path>)
 /// cargo subcommands that build or run the project's code (owner decision 2: no configuration scan). Every other
 /// one, an alias or external one included, is scanned.
 const CARGO_BUILDING: &[&str] = &[
-    "build", "b", "check", "c", "test", "t", "bench", "run", "r", "clippy", "doc", "d", "fix", "nextest", "package",
-    "install", "publish", "rustc", "rustdoc", "miri",
+    "build", "b", "check", "c", "test", "t", "bench", "run", "r", "clippy", "doc", "d", "fix",
+    "nextest", "package", "install", "publish", "rustc", "rustdoc", "miri",
 ];
 
 /// bazel commands that build or run the project's code (owner decision 2: no configuration scan).
-const BAZEL_BUILDING: &[&str] = &["build", "test", "run", "coverage", "fetch", "sync", "mobile-install", "vendor"];
+const BAZEL_BUILDING: &[&str] = &[
+    "build",
+    "test",
+    "run",
+    "coverage",
+    "fetch",
+    "sync",
+    "mobile-install",
+    "vendor",
+];
 
 /// npm family subcommands that print or query and run no script of the project: the configuration scan applies to
 /// these only (an install, a run, a test or a build runs the project's scripts: owner decision 2).
 const NPM_QUERY_SUBCOMMANDS: &[&str] = &[
-    "ls", "list", "ll", "la", "outdated", "why", "explain", "view", "info", "show", "v", "version", "audit", "config",
-    "c", "get", "set", "prefix", "root", "bin", "search", "s", "se", "find", "help", "help-search", "doctor", "fund",
-    "query", "owner", "whoami", "ping", "dist-tag", "completion", "licenses", "store", "cache", "npm",
+    "ls",
+    "list",
+    "ll",
+    "la",
+    "outdated",
+    "why",
+    "explain",
+    "view",
+    "info",
+    "show",
+    "v",
+    "version",
+    "audit",
+    "config",
+    "c",
+    "get",
+    "set",
+    "prefix",
+    "root",
+    "bin",
+    "search",
+    "s",
+    "se",
+    "find",
+    "help",
+    "help-search",
+    "doctor",
+    "fund",
+    "query",
+    "owner",
+    "whoami",
+    "ping",
+    "dist-tag",
+    "completion",
+    "licenses",
+    "store",
+    "cache",
+    "npm",
 ];
 
 /// npm family options whose value is the next word when not attached with `=`.
 const NPM_VALUED: &[&str] = &[
-    "-C", "--prefix", "--dir", "--cwd", "--userconfig", "--globalconfig", "--workspace", "-w", "--filter", "-F",
-    "--loglevel", "--registry", "--cache",
+    "-C",
+    "--prefix",
+    "--dir",
+    "--cwd",
+    "--userconfig",
+    "--globalconfig",
+    "--workspace",
+    "-w",
+    "--filter",
+    "-F",
+    "--loglevel",
+    "--registry",
+    "--cache",
 ];
 
 /// Owner decision 2: whether the configuration scan judges this invocation of `tool` (one that does not already run
@@ -773,7 +1150,10 @@ fn tool_scan_applies(tool: &str, args: &[String]) -> bool {
     match tool {
         "cargo" => cargo_subcommand(args).is_none_or(|sub| !CARGO_BUILDING.contains(&sub)),
         "bazel" | "bazelisk" => {
-            let command = args.iter().take_while(|w| *w != "--").find(|w| !w.starts_with('-'));
+            let command = args
+                .iter()
+                .take_while(|w| *w != "--")
+                .find(|w| !w.starts_with('-'));
             command.is_none_or(|command| !BAZEL_BUILDING.contains(&command.as_str()))
         }
         _ => {
@@ -789,13 +1169,16 @@ fn tool_scan_applies(tool: &str, args: &[String]) -> bool {
                 let name = word.split('=').next().unwrap_or(word);
                 if NPM_VALUED.contains(&name) || npm_prefix_option(name) {
                     i += usize::from(!word.contains('='));
-                } else if !NPM_EXACT_OPTIONS.contains(&word.as_str()) && !npm_option_is_listed(word) {
+                } else if !NPM_EXACT_OPTIONS.contains(&word.as_str()) && !npm_option_is_listed(word)
+                {
                     return true;
                 }
             }
             // No subcommand: `yarn` alone installs; npm, pnpm and a `--version`/`--help` print.
             !matches!(tool, "yarn" | "yarnpkg")
-                || args.iter().any(|w| matches!(w.as_str(), "-v" | "--version" | "-h" | "--help"))
+                || args
+                    .iter()
+                    .any(|w| matches!(w.as_str(), "-v" | "--version" | "-h" | "--help"))
         }
     }
 }
@@ -807,7 +1190,11 @@ fn npm_prefix_option(name: &str) -> bool {
 
 /// The folder `tool` reads its configuration from when the shell is in `cwd`: moved by `cargo -C`/`--directory`, npm
 /// `--prefix`/`-C`, pnpm `--dir`/`-C`, yarn `--cwd`. `None`: a move to a folder that cannot be pinned.
-pub(crate) fn tool_run_dir(tool: &str, args: &[String], cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+pub(crate) fn tool_run_dir(
+    tool: &str,
+    args: &[String],
+    cwd: &std::path::Path,
+) -> Option<std::path::PathBuf> {
     let mut dir = cwd.to_path_buf();
     let mut i = 0;
     while let Some(word) = args.get(i) {
@@ -854,13 +1241,24 @@ fn tool_config_in(tool: &str, args: &[String], dir: &std::path::Path) -> bool {
 fn config_file_matches(path: &std::path::Path, hit: impl Fn(&str) -> bool) -> bool {
     match std::fs::read(path) {
         Ok(bytes) => hit(&String::from_utf8_lossy(&bytes)),
-        Err(e) => !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory),
+        Err(e) => !matches!(
+            e.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ),
     }
 }
 
 /// `.npmrc` keys that name a program npm (or yarn classic, which reads `.npmrc` too) runs.
 const NPMRC_PROGRAM_KEYS: &[&str] = &[
-    "onload-script", "script-shell", "node-options", "node-gyp", "git", "editor", "browser", "viewer", "shell",
+    "onload-script",
+    "script-shell",
+    "node-options",
+    "node-gyp",
+    "git",
+    "editor",
+    "browser",
+    "viewer",
+    "shell",
     "init-module",
 ];
 
@@ -872,8 +1270,14 @@ fn npmrc_runs(dir: &std::path::Path) -> bool {
             let Some((key, _)) = line.split_once('=') else {
                 return false;
             };
-            let key = key.trim().trim_matches(['"', '\'']).trim_start_matches('-').to_ascii_lowercase().replace('_', "-");
-            !key.starts_with([';', '#']) && (key.contains('$') || NPMRC_PROGRAM_KEYS.contains(&key.as_str()))
+            let key = key
+                .trim()
+                .trim_matches(['"', '\''])
+                .trim_start_matches('-')
+                .to_ascii_lowercase()
+                .replace('_', "-");
+            !key.starts_with([';', '#'])
+                && (key.contains('$') || NPMRC_PROGRAM_KEYS.contains(&key.as_str()))
         })
     })
 }
@@ -885,14 +1289,19 @@ fn yarnrc_runs(dir: &std::path::Path) -> bool {
     let key_starts = |line: &str, keys: &[&str]| {
         let line = line.trim();
         let key = line.trim_start_matches(['"', '\'']);
-        keys.iter().any(|k| key.starts_with(k)) || (line.starts_with('"') && line.split(':').next().unwrap_or("").contains('\\'))
+        keys.iter().any(|k| key.starts_with(k))
+            || (line.starts_with('"') && line.split(':').next().unwrap_or("").contains('\\'))
     };
     config_file_matches(&dir.join(".yarnrc.yml"), |text| {
         text.lines().any(|line| {
             let trimmed = line.trim_start();
-            trimmed.starts_with(['{', '?', '!', '&', '*']) || trimmed.starts_with("<<") || key_starts(line, &["yarnPath", "plugins"])
+            trimmed.starts_with(['{', '?', '!', '&', '*'])
+                || trimmed.starts_with("<<")
+                || key_starts(line, &["yarnPath", "plugins"])
         })
-    }) || config_file_matches(&dir.join(".yarnrc"), |text| text.lines().any(|line| key_starts(line, &["yarn-path"])))
+    }) || config_file_matches(&dir.join(".yarnrc"), |text| {
+        text.lines().any(|line| key_starts(line, &["yarn-path"]))
+    })
 }
 
 /// The cargo subcommand of `args` (after `+toolchain` and global options).
@@ -925,7 +1334,11 @@ fn cargo_subcommand(args: &[String]) -> Option<&str> {
 /// file), an `[env]` entry, a credential provider, or an `include`. Read line by line with TOML's key rules; a header
 /// or key line the scan cannot classify (an escape, a multi-line string) counts (fail closed).
 fn cargo_config_runs(dir: &std::path::Path, sub: Option<&str>) -> bool {
-    ["config.toml", "config"].iter().any(|file| config_file_matches(&dir.join(".cargo").join(file), |text| cargo_config_text_runs(text, sub)))
+    ["config.toml", "config"].iter().any(|file| {
+        config_file_matches(&dir.join(".cargo").join(file), |text| {
+            cargo_config_text_runs(text, sub)
+        })
+    })
 }
 
 pub(crate) fn cargo_config_text_runs(text: &str, sub: Option<&str>) -> bool {
@@ -944,12 +1357,20 @@ pub(crate) fn cargo_config_text_runs(text: &str, sub: Option<&str>) -> bool {
             continue;
         }
         if let Some(header) = line.strip_prefix('[') {
-            let (array, header) = header.strip_prefix('[').map_or((false, header), |rest| (true, rest));
+            let (array, header) = header
+                .strip_prefix('[')
+                .map_or((false, header), |rest| (true, rest));
             let Some((key, rest)) = toml_key(header) else {
                 return true;
             };
-            let rest = if array { rest.strip_prefix("]]") } else { rest.strip_prefix(']') };
-            if rest.is_none_or(|rest| !(rest.trim().is_empty() || rest.trim_start().starts_with('#'))) {
+            let rest = if array {
+                rest.strip_prefix("]]")
+            } else {
+                rest.strip_prefix(']')
+            };
+            if rest
+                .is_none_or(|rest| !(rest.trim().is_empty() || rest.trim_start().starts_with('#')))
+            {
                 return true;
             }
             table = key;
@@ -976,9 +1397,17 @@ fn cargo_key_runs(path: &[&str], value: &str, sub: Option<&str>) -> bool {
         ["alias"] | ["build"] | ["env", ..] | ["include"] => true,
         ["alias", name, ..] => Some(*name) == sub,
         ["build", key, ..] => {
-            matches!(*key, "rustc" | "rustc-wrapper" | "rustc-workspace-wrapper" | "rustdoc") && !toml_bare_program(value)
+            matches!(
+                *key,
+                "rustc" | "rustc-wrapper" | "rustc-workspace-wrapper" | "rustdoc"
+            ) && !toml_bare_program(value)
         }
-        _ => path.iter().any(|segment| matches!(*segment, "credential-provider" | "global-credential-providers")),
+        _ => path.iter().any(|segment| {
+            matches!(
+                *segment,
+                "credential-provider" | "global-credential-providers"
+            )
+        }),
     }
 }
 
@@ -994,7 +1423,9 @@ fn toml_bare_program(value: &str) -> bool {
     };
     let rest = rest.trim();
     !name.is_empty()
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
         && (rest.is_empty() || rest.starts_with('#'))
 }
 
@@ -1014,7 +1445,9 @@ fn toml_key(text: &str) -> Option<(Vec<String>, &str)> {
             let end = quoted.find('\'')?;
             (quoted[..end].to_owned(), &quoted[end + 1..])
         } else {
-            let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))).unwrap_or(rest.len());
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-')))
+                .unwrap_or(rest.len());
             if end == 0 {
                 return None;
             }
@@ -1070,8 +1503,14 @@ fn bazel_config_runs(dir: &std::path::Path) -> bool {
             match command {
                 "startup" | "import" | "try-import" => true,
                 _ => {
-                    let command = if matches!(command, "common" | "always") { "build" } else { command };
-                    let argv: Vec<String> = std::iter::once(command.to_owned()).chain(words.map(str::to_owned)).collect();
+                    let command = if matches!(command, "common" | "always") {
+                        "build"
+                    } else {
+                        command
+                    };
+                    let argv: Vec<String> = std::iter::once(command.to_owned())
+                        .chain(words.map(str::to_owned))
+                        .collect();
                     bazel_needs_approval(&argv)
                 }
             }
@@ -1081,7 +1520,10 @@ fn bazel_config_runs(dir: &std::path::Path) -> bool {
     // u35 g14 (Grok r13 Low): a `tools/bazel` that cannot be checked counts (fail closed), as an unreadable file does.
     let wrapper = match std::fs::metadata(dir.join("tools").join("bazel")) {
         Ok(meta) => meta.is_file(),
-        Err(e) => !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory),
+        Err(e) => !matches!(
+            e.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ),
     };
     config_file_matches(&dir.join(".bazelrc"), bazelrc_runs)
         || wrapper
@@ -1094,10 +1536,17 @@ mod u35_g14_tests {
     use super::*;
 
     fn cmd(text: &str) -> ToolSegment {
-        ToolSegment::Command { words: text.split_whitespace().map(str::to_owned).collect(), moved: false }
+        ToolSegment::Command {
+            words: text.split_whitespace().map(str::to_owned).collect(),
+            moved: false,
+        }
     }
 
-    fn runs(segments: &[ToolSegment], dir: &std::path::Path, home: Option<&std::path::Path>) -> bool {
+    fn runs(
+        segments: &[ToolSegment],
+        dir: &std::path::Path,
+        home: Option<&std::path::Path>,
+    ) -> bool {
         tool_config_runs_with_home(segments, dir, home)
     }
 
@@ -1161,31 +1610,67 @@ mod u35_g14_tests {
             vec![cmd("pnpm --dir sub ls")],
             vec![cmd("yarn --cwd sub info")],
             vec![cmd("cd \"$X\""), cmd("npm ls")],
-            vec![ToolSegment::Command { words: vec!["npm".into(), "ls".into()], moved: true }],
-            vec![ToolSegment::Nested(vec![vec!["cd".into(), "sub".into()], vec!["yarn".into(), "info".into()]])],
+            vec![ToolSegment::Command {
+                words: vec!["npm".into(), "ls".into()],
+                moved: true,
+            }],
+            vec![ToolSegment::Nested(vec![
+                vec!["cd".into(), "sub".into()],
+                vec!["yarn".into(), "info".into()],
+            ])],
         ] {
             assert!(runs(&script, &project, Some(home.path())), "{script:?}");
         }
         // Owner decision 2: a build or install follows the model; yarn reads .yarnrc.yml, npm does not.
-        for script in [vec![cmd("cd sub"), cmd("yarn build")], vec![cmd("cd sub"), cmd("npm install")]] {
+        for script in [
+            vec![cmd("cd sub"), cmd("yarn build")],
+            vec![cmd("cd sub"), cmd("npm install")],
+        ] {
             assert!(!runs(&script, &project, Some(home.path())), "{script:?}");
         }
         std::fs::remove_file(sub.join(".npmrc")).unwrap();
-        assert!(!runs(&[cmd("cd sub"), cmd("npm ls")], &project, Some(home.path())));
-        assert!(runs(&[cmd("cd sub"), cmd("yarn ls")], &project, Some(home.path())));
+        assert!(!runs(
+            &[cmd("cd sub"), cmd("npm ls")],
+            &project,
+            Some(home.path())
+        ));
+        assert!(runs(
+            &[cmd("cd sub"), cmd("yarn ls")],
+            &project,
+            Some(home.path())
+        ));
         // cargo -C / --directory; a building subcommand follows the model.
         std::fs::create_dir_all(sub.join(".cargo")).unwrap();
-        std::fs::write(sub.join(".cargo/config.toml"), "[build]\nrustc = \"../pwn\"\n").unwrap();
-        for script in [cmd("cargo -C sub metadata"), cmd("cargo --directory=sub tree"), cmd("cargo --directory sub fetch")] {
-            assert!(runs(std::slice::from_ref(&script), &project, Some(home.path())), "{script:?}");
+        std::fs::write(
+            sub.join(".cargo/config.toml"),
+            "[build]\nrustc = \"../pwn\"\n",
+        )
+        .unwrap();
+        for script in [
+            cmd("cargo -C sub metadata"),
+            cmd("cargo --directory=sub tree"),
+            cmd("cargo --directory sub fetch"),
+        ] {
+            assert!(
+                runs(std::slice::from_ref(&script), &project, Some(home.path())),
+                "{script:?}"
+            );
         }
-        assert!(!runs(&[cmd("cargo -C sub build")], &project, Some(home.path())));
+        assert!(!runs(
+            &[cmd("cargo -C sub build")],
+            &project,
+            Some(home.path())
+        ));
     }
 
     #[test]
     fn u35_g14_yarnrc_keys_are_line_leading() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".yarnrc.yml"), "# plugins are not used\nnodeLinker: node-modules # yarnPath\n").unwrap();
+        std::fs::write(
+            dir.path().join(".yarnrc.yml"),
+            "# plugins are not used\nnodeLinker: node-modules # yarnPath\n",
+        )
+        .unwrap();
         assert!(!yarnrc_runs(dir.path()));
         std::fs::write(dir.path().join(".yarnrc.yml"), "\"yarnPath\": ./x.cjs\n").unwrap();
         assert!(yarnrc_runs(dir.path()));
@@ -1198,9 +1683,18 @@ mod u35_g14_tests {
         use crate::permission::exec_surface::{split_script_text, text_may_load_config_file};
         assert_eq!(
             split_script_text(&["sh".into(), "-c".into(), "cd sub && npm ls".into()]),
-            vec![vec!["sh".to_owned()], vec!["-c".to_owned()], vec!["cd".to_owned(), "sub".to_owned()], vec!["npm".to_owned(), "ls".to_owned()]],
+            vec![
+                vec!["sh".to_owned()],
+                vec!["-c".to_owned()],
+                vec!["cd".to_owned(), "sub".to_owned()],
+                vec!["npm".to_owned(), "ls".to_owned()]
+            ],
         );
-        for text in ["x; time kubectl --kubeconfig=./k get pods", "(cargo --config c.toml build", "npm --userc=./x ls |"] {
+        for text in [
+            "x; time kubectl --kubeconfig=./k get pods",
+            "(cargo --config c.toml build",
+            "npm --userc=./x ls |",
+        ] {
             assert!(text_may_load_config_file(text), "{text}");
         }
         assert!(!text_may_load_config_file("(kubectl get pods; npm ls"));
@@ -1223,7 +1717,11 @@ mod u35_g14_tests {
     fn u35_g14_unreadable_configuration_counts() {
         use std::os::unix::fs::PermissionsExt;
         // Root reads any file, so the case cannot be built there.
-        if std::process::Command::new("id").arg("-u").output().is_ok_and(|o| o.stdout.starts_with(b"0")) {
+        if std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .is_ok_and(|o| o.stdout.starts_with(b"0"))
+        {
             return;
         }
         let dir = tempfile::tempdir().unwrap();

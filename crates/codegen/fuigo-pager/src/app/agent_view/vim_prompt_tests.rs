@@ -161,7 +161,11 @@ fn normal_mode_commands_edit_the_prompt() {
     type_keys(&mut a, "u");
     assert_eq!(a.prompt.text(), "foo bar baz");
     let _ = press(&mut a, KeyCode::Char('r'), KeyModifiers::CONTROL);
-    assert_eq!(a.prompt.text(), "bar baz", "Ctrl+R redoes instead of reaching the action registry");
+    assert_eq!(
+        a.prompt.text(),
+        "bar baz",
+        "Ctrl+R redoes instead of reaching the action registry"
+    );
     type_keys(&mut a, "ihi <");
     let _ = esc(&mut a);
     assert_eq!(a.prompt.text(), "hi <bar baz");

@@ -1750,7 +1750,10 @@ pub(super) mod paste_key_tests {
         assert!(row.contains("[Copy as TSV]"), "row = {row:?}");
         let hits = &agent.inline_media_hits.mermaid_buttons;
         assert_eq!(hits.len(), 2);
-        assert!(hits.iter().all(|(_, kind, _)| *kind == AffordanceKind::CopyText));
+        assert!(
+            hits.iter()
+                .all(|(_, kind, _)| *kind == AffordanceKind::CopyText)
+        );
         assert_eq!(hits[0].0.x, cols[0]);
         assert_eq!(hits[1].0.x, cols[1]);
         let texts = &agent.inline_media_hits.mermaid_sources;
@@ -1759,13 +1762,18 @@ pub(super) mod paste_key_tests {
         let out = agent.handle_inline_media_click(cols[1], 0);
         assert!(matches!(out, Some(InputOutcome::Changed)));
         assert!(agent.toast.is_some(), "the click reports the copy");
-        assert!(!agent.mermaid_needs_tick(), "a copy row dispatches no render");
+        assert!(
+            !agent.mermaid_needs_tick(),
+            "a copy row dispatches no render"
+        );
     }
     /// A code block's `[Copy]` click must land while a dirty queued-prompt edit holds focus in the prompt, and must not close the edit.
     #[test]
     fn copy_click_works_while_a_queued_prompt_edit_is_dirty() {
         let _theme = crate::theme::cache::pin_theme();
-        use crate::scrollback::blocks::mermaid_content::{CopyButton, CopyRow, copy_row_button_cols};
+        use crate::scrollback::blocks::mermaid_content::{
+            CopyButton, CopyRow, copy_row_button_cols,
+        };
         use crate::scrollback::render::DiagramAffordancePlacement;
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::buffer::Buffer;
@@ -2259,7 +2267,10 @@ pub(super) mod paste_key_tests {
             agent.build_inline_media_escapes(&placement).is_none(),
             "a file at the cache limit must not be loaded"
         );
-        assert!(agent.inline_media_load_failed.contains_key(&path), "negative-cached");
+        assert!(
+            agent.inline_media_load_failed.contains_key(&path),
+            "negative-cached"
+        );
         assert!(!agent.inline_media_cache.contains_key(&path));
         assert!(
             agent.build_inline_media_escapes(&placement).is_none(),

@@ -17,7 +17,10 @@ impl CheckedDir {
     pub(crate) fn create_or_open(_home: &std::path::Path) -> Result<CheckedDir, Disabled> {
         Err(Disabled::UnsupportedPlatform)
     }
-    pub(crate) fn create_under(_base: &std::path::Path, _levels: &[&str]) -> Result<CheckedDir, Disabled> {
+    pub(crate) fn create_under(
+        _base: &std::path::Path,
+        _levels: &[&str],
+    ) -> Result<CheckedDir, Disabled> {
         Err(Disabled::UnsupportedPlatform)
     }
 }
@@ -106,7 +109,11 @@ mod imp {
         Io(i32),
     }
 
-    fn openat_dir(dirfd: RawFd, name: &std::ffi::OsStr, extra: libc::c_int) -> Result<OwnedFd, DirErr> {
+    fn openat_dir(
+        dirfd: RawFd,
+        name: &std::ffi::OsStr,
+        extra: libc::c_int,
+    ) -> Result<OwnedFd, DirErr> {
         use std::os::unix::ffi::OsStrExt;
         let c = CString::new(name.as_bytes()).map_err(|_| DirErr::NotDir)?;
         // SAFETY: valid NUL-terminated name; flags are plain open flags.
@@ -122,7 +129,12 @@ mod imp {
                 let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
                 // SAFETY: valid name and out pointer.
                 let r = unsafe {
-                    libc::fstatat(dirfd, c.as_ptr(), st.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW)
+                    libc::fstatat(
+                        dirfd,
+                        c.as_ptr(),
+                        st.as_mut_ptr(),
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
                 };
                 if r == 0 {
                     // SAFETY: fstatat succeeded.
@@ -138,7 +150,8 @@ mod imp {
     }
 
     fn writable_by_others(mode: u32) -> bool {
-        mode & (libc::S_IWGRP as u32 | libc::S_IWOTH as u32) != 0 && mode & libc::S_ISVTX as u32 == 0
+        mode & (libc::S_IWGRP as u32 | libc::S_IWOTH as u32) != 0
+            && mode & libc::S_ISVTX as u32 == 0
     }
 
     fn check_ancestor(fd: &OwnedFd) -> Result<(), Disabled> {
@@ -180,7 +193,10 @@ mod imp {
         })?;
         // SAFETY: constant NUL-terminated path.
         let root = unsafe {
-            libc::open(c"/".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            libc::open(
+                c"/".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
         };
         if root < 0 {
             return Err(Disabled::Io(errno()));
@@ -189,7 +205,9 @@ mod imp {
         let mut cur = unsafe { OwnedFd::from_raw_fd(root) };
         check_ancestor(&cur)?;
         for comp in canon.components() {
-            let Component::Normal(name) = comp else { continue };
+            let Component::Normal(name) = comp else {
+                continue;
+            };
             cur = openat_dir(cur.as_raw_fd(), name, SEARCH_ONLY).map_err(|e| match e {
                 DirErr::Missing => Disabled::AncestorMissing,
                 DirErr::Symlink => Disabled::AncestorSymlink,
@@ -228,7 +246,11 @@ mod imp {
     }
 
     /// `mkdirat` (0700) when missing, then a no-follow open and the owner and mode checks over the fd.
-    fn create_or_open_level(parent: &OwnedFd, name: &str, is_peers: bool) -> Result<OwnedFd, Disabled> {
+    fn create_or_open_level(
+        parent: &OwnedFd,
+        name: &str,
+        is_peers: bool,
+    ) -> Result<OwnedFd, Disabled> {
         if name.is_empty() || name == "." || name == ".." || name.contains('/') {
             return Err(Disabled::InvalidName);
         }
@@ -240,7 +262,12 @@ mod imp {
         } else if errno() != libc::EEXIST {
             return Err(Disabled::Io(errno()));
         }
-        let fd = openat_dir(parent.as_raw_fd(), std::ffi::OsStr::new(name), libc::O_RDONLY).map_err(|e| match (e, is_peers) {
+        let fd = openat_dir(
+            parent.as_raw_fd(),
+            std::ffi::OsStr::new(name),
+            libc::O_RDONLY,
+        )
+        .map_err(|e| match (e, is_peers) {
             (DirErr::Missing, true) => Disabled::PeersMissing,
             (DirErr::Symlink, true) => Disabled::PeersSymlink,
             (DirErr::NotDir, true) => Disabled::PeersNotDirectory,

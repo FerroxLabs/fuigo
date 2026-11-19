@@ -587,7 +587,9 @@ impl TextArea {
             return;
         }
         let line_start = text[..replaced.start].rfind('\n').map_or(0, |i| i + 1);
-        let line_end = text[new_end..].find('\n').map_or(text.len(), |i| new_end + i);
+        let line_end = text[new_end..]
+            .find('\n')
+            .map_or(text.len(), |i| new_end + i);
         let old_line_end = line_end + replaced.len() - inserted_len;
         let first = cache.lines.partition_point(|r| r.start < line_start);
         let last = cache.lines.partition_point(|r| r.start <= old_line_end);

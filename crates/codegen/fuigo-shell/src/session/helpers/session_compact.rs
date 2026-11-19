@@ -1,9 +1,9 @@
 use std::path::{Component, Path};
 
 use crate::sampling::{
-    ApiBackend, ChatCompletionRequest, ChatRequestMessage,
-    ConversationRequest, ConversationToolChoice, HostedTool, SamplingError, ToolChoice,
-    ToolSpec, chat_tool_definition, conversation_to_chat_messages,
+    ApiBackend, ChatCompletionRequest, ChatRequestMessage, ConversationRequest,
+    ConversationToolChoice, HostedTool, SamplingError, ToolChoice, ToolSpec, chat_tool_definition,
+    conversation_to_chat_messages,
 };
 use agent_client_protocol as acp;
 use async_openai::types::responses::ResponseStreamEvent;
@@ -250,7 +250,8 @@ async fn is_real_dir_chain(sessions_root: &Path, assets_dir: &Path) -> bool {
 fn classify_sampling_error(err: SamplingError) -> CompactFailure {
     let mut acp_err = crate::acp_error::compaction(format!("{COMPACT_FAILED_PREFIX}{err}"));
     if let Some(data) = acp_err.data.as_mut() {
-        data["upstream"] = serde_json::json!(fuigo_sampler::SamplingErrorInfo::from(&err).upstream());
+        data["upstream"] =
+            serde_json::json!(fuigo_sampler::SamplingErrorInfo::from(&err).upstream());
     }
     // A boundary STOP/PAUSE also vetoes the size ladder, before any retry decision.
     if err.is_terminal_refusal() {
@@ -652,12 +653,7 @@ pub(crate) async fn generate_session_compact(
             // `tool_choice` is set only when tools are present; Chat Completions rejects it otherwise
             if !tools.is_empty() {
                 message = message
-                    .with_tools(
-                        tools
-                            .into_iter()
-                            .map(chat_tool_definition)
-                            .collect(),
-                    )
+                    .with_tools(tools.into_iter().map(chat_tool_definition).collect())
                     .with_tool_choice(wire_tool_choice);
             }
 
@@ -1031,7 +1027,10 @@ mod reasoning_compaction_regression_tests;
 #[path = "session_compact_reasoning_effort_tests.rs"]
 mod reasoning_effort_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "session_compact_retain_session_asset_files_tests.rs"]
 mod retain_session_asset_files_tests;
@@ -1061,7 +1060,8 @@ mod p70b_tests {
     fn a_cut_credential_respelled_by_the_normalizer_is_still_scrubbed_at_the_sink() {
         const CRED: &str = "inference-api-p119abcdefgh12345";
         fuigo_telemetry::sent_credentials::record(CRED);
-        let detail = normalize_compact_detail("upstream said: bad key inference-api-p119abc\u{2026}");
+        let detail =
+            normalize_compact_detail("upstream said: bad key inference-api-p119abc\u{2026}");
         assert!(detail.contains("inference backend-p119abc"), "{detail}");
         assert_eq!(
             fuigo_telemetry::sent_credentials::scrub(&detail),

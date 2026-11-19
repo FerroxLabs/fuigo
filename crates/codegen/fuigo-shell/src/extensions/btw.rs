@@ -69,13 +69,20 @@ impl InFlight {
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
     }
 }
 
 /// Cancel the side question registered under `id`; false when none is in flight (already answered, or never started).
 fn cancel_in_flight(id: &str) -> bool {
-    let cancel = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
+    let cancel = IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        .cloned();
     match cancel {
         Some(cancel) => {
             // `notify_one` stores a permit, so a cancel that lands before the waiter polls is not lost
@@ -200,9 +207,15 @@ mod tests {
     #[test]
     fn cancel_in_flight_wakes_the_registered_request_once() {
         let flight = InFlight::register("test-cancel-wakes".into());
-        assert!(!cancel_in_flight("test-cancel-unknown"), "an unknown id cancels nothing");
+        assert!(
+            !cancel_in_flight("test-cancel-unknown"),
+            "an unknown id cancels nothing"
+        );
         assert!(cancel_in_flight("test-cancel-wakes"));
-        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
         rt.block_on(async {
             // The permit stored by the cancel completes the wait even though it was sent first
             tokio::time::timeout(std::time::Duration::from_secs(5), flight.cancel.notified())
@@ -210,7 +223,10 @@ mod tests {
                 .expect("cancel must wake the waiter");
         });
         drop(flight);
-        assert!(!cancel_in_flight("test-cancel-wakes"), "dropping unregisters the id");
+        assert!(
+            !cancel_in_flight("test-cancel-wakes"),
+            "dropping unregisters the id"
+        );
     }
 
     /// A /btw whose side call was cancelled answers JSON-RPC request-cancelled with `error_kind: cancelled`, never an auth error.
@@ -262,6 +278,9 @@ mod tests {
             serde_json::to_value(&acp_err).unwrap(),
             serde_json::to_value(denial.to_acp_error()).unwrap()
         );
-        assert_eq!(ExecutionBudgetDenial::from_acp_error(&acp_err), Some(denial));
+        assert_eq!(
+            ExecutionBudgetDenial::from_acp_error(&acp_err),
+            Some(denial)
+        );
     }
 }

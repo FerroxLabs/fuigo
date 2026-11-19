@@ -66,17 +66,26 @@ fn assert_control_socket_protected(
     })
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(all(test, unix))]
 #[path = "real_wiring_tests.rs"]
 mod real_wiring_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(all(test, unix))]
 #[path = "network_tests.rs"]
 mod network_tests;
@@ -325,7 +334,10 @@ fn file_stamp(path: &Path) -> FileStamp {
 /// Create the folder's own session directory when it is missing, and say why it is not safe when
 /// it is not: a real directory (never a link, which is not followed), owned by this user and
 /// closed to everyone else. `None` when it is safe.
-#[allow(clippy::disallowed_methods, reason = "cwd-bucket directory, never a session folder (design F5 5.4.3)")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "cwd-bucket directory, never a session folder (design F5 5.4.3)"
+)]
 fn session_dir_gap(fuigo_home: &Path, workspace_root: &Path) -> Option<String> {
     let cwd = workspace_root.to_string_lossy();
     let dir = fuigo_config::sessions_cwd_dir_in(fuigo_home, &cwd);
@@ -339,7 +351,9 @@ fn session_dir_gap(fuigo_home: &Path, workspace_root: &Path) -> Option<String> {
     // `ensure_sessions_cwd_dir_in` is not asked (it refuses by design): a missing one is not a gap, an existing one
     // gets only the link, owner and mode checks below (review r2).
     if fuigo_config::session_persistence_disabled() {
-        if std::fs::symlink_metadata(&dir).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+        if std::fs::symlink_metadata(&dir)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
             return None;
         }
     } else if let Err(error) = fuigo_config::ensure_sessions_cwd_dir_in(fuigo_home, &cwd) {
@@ -774,7 +788,12 @@ impl WorkspaceSandbox {
                 .iter()
                 .map(|root| fuigo_sandbox::command::canonical_path(root)),
         );
-        roots.extend(engaged.tmp_dirs.iter().map(|root| root.real().to_path_buf()));
+        roots.extend(
+            engaged
+                .tmp_dirs
+                .iter()
+                .map(|root| root.real().to_path_buf()),
+        );
         roots.sort();
         roots.dedup();
         roots

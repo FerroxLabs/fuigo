@@ -22,8 +22,24 @@ pub(crate) use build_tools::{MakeArg, make_args};
 /// Programs whose job is to run another command given as arguments (or read from stdin), which the classifier never
 /// sees as its own segment.
 const EXEC_VEHICLES: &[&str] = &[
-    "xargs", "parallel", "sudo", "sudoedit", "doas", "run0", "pkexec", "su", "flock", "watch", "setsid", "nohup",
-    "nsenter", "unshare", "chroot", "systemd-run", "firejail", "bwrap",
+    "xargs",
+    "parallel",
+    "sudo",
+    "sudoedit",
+    "doas",
+    "run0",
+    "pkexec",
+    "su",
+    "flock",
+    "watch",
+    "setsid",
+    "nohup",
+    "nsenter",
+    "unshare",
+    "chroot",
+    "systemd-run",
+    "firejail",
+    "bwrap",
 ];
 
 /// Whether `head` names an [`EXEC_VEHICLES`] program (basename, case-insensitive).
@@ -86,7 +102,8 @@ pub(crate) fn segment_has_exec_surface(words: &[String]) -> bool {
         "export" | "declare" | "typeset" | "readonly" | "local" => {
             args.iter().all(|w| w.starts_with('-'))
                 || args.iter().take_while(|w| *w != "--").any(|w| {
-                    w.strip_prefix('-').is_some_and(|cluster| !cluster.starts_with('-') && cluster.contains('p'))
+                    w.strip_prefix('-')
+                        .is_some_and(|cluster| !cluster.starts_with('-') && cluster.contains('p'))
                 })
         }
         "jq" | "gojq" | "jaq" => jq_reads_environment(args),
@@ -132,20 +149,26 @@ pub(crate) fn segment_loads_config_file(words: &[String]) -> bool {
     match program_name(head).as_str() {
         "grep" => search_shadows::ugrep_loads_config(args),
         "cargo" => options.any(|word| word == "--config" || word.starts_with("--config=")),
-        "bazel" | "bazelisk" => {
-            options.any(|word| word.strip_prefix("--").is_some_and(|long| long.split('=').next() == Some("bazelrc")))
-        }
+        "bazel" | "bazelisk" => options.any(|word| {
+            word.strip_prefix("--")
+                .is_some_and(|long| long.split('=').next() == Some("bazelrc"))
+        }),
         "wget" | "wget2" => options.any(|word| long_option_is(word, "--config", 1)),
         // `-F` alone or in a short cluster (ssh scans every word, as `ssh_runs_local_program` does).
-        "ssh" | "scp" | "sftp" => args
-            .iter()
-            .any(|word| word.strip_prefix('-').is_some_and(|cluster| !cluster.starts_with('-') && cluster.contains('F'))),
+        "ssh" | "scp" | "sftp" => args.iter().any(|word| {
+            word.strip_prefix('-')
+                .is_some_and(|cluster| !cluster.starts_with('-') && cluster.contains('F'))
+        }),
         "rustc" | "clippy" | "clippy-driver" => args.iter().any(|word| word.starts_with('@')),
-        "kubectl" | "helm" => {
-            options.any(|word| crate::permission::exec_risk::long_option_abbreviates(word, "--kubeconfig"))
+        "kubectl" | "helm" => options.any(|word| {
+            crate::permission::exec_risk::long_option_abbreviates(word, "--kubeconfig")
+        }),
+        "docker" | "podman" => {
+            options.any(|word| word == "--config" || word.starts_with("--config="))
         }
-        "docker" | "podman" => options.any(|word| word == "--config" || word.starts_with("--config=")),
-        "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "yarnpkg" => options.any(|word| npm_selects_config_file(word)),
+        "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "yarnpkg" => {
+            options.any(|word| npm_selects_config_file(word))
+        }
         "node" | "nodejs" => options.any(|word| {
             let name = word.split('=').next().unwrap_or(word);
             name == "--env-file" || name == "--env-file-if-exists"
@@ -216,8 +239,20 @@ pub(crate) fn changes_shell_parsing(words: &[String]) -> bool {
     /// `set` letters and `-o` names that do not change expansion, parsing or command lookup.
     const SAFE_SET_LETTERS: &str = "euxvETbmhaCn";
     const SAFE_SET_NAMES: &[&str] = &[
-        "errexit", "nounset", "pipefail", "xtrace", "verbose", "errtrace", "functrace", "notify", "monitor", "hashall",
-        "allexport", "ignoreeof", "noclobber", "nolog",
+        "errexit",
+        "nounset",
+        "pipefail",
+        "xtrace",
+        "verbose",
+        "errtrace",
+        "functrace",
+        "notify",
+        "monitor",
+        "hashall",
+        "allexport",
+        "ignoreeof",
+        "noclobber",
+        "nolog",
     ];
     let Some(head) = words.first() else {
         return false;
@@ -228,7 +263,8 @@ pub(crate) fn changes_shell_parsing(words: &[String]) -> bool {
             let mut i = 0;
             while let Some(word) = args.get(i) {
                 i += 1;
-                if word == "--" || word == "-" || !(word.starts_with('-') || word.starts_with('+')) {
+                if word == "--" || word == "-" || !(word.starts_with('-') || word.starts_with('+'))
+                {
                     break;
                 }
                 let cluster = &word[1..];
@@ -288,13 +324,17 @@ pub(crate) fn names_environ_file(word: &str) -> bool {
     // A last component of wildcards only (`dir/*`) is caught below only when what precedes it can be a process
     // directory; on its own it names nothing in particular.
     if value.contains('/')
-        && parts.last().is_some_and(|last| !is_wildcard_only(last) && component_may_be(last, "environ"))
+        && parts
+            .last()
+            .is_some_and(|last| !is_wildcard_only(last) && component_may_be(last, "environ"))
     {
         return true;
     }
     parts.windows(2).any(|pair| {
         component_may_be(pair[0], "proc")
-            && (["self", "thread-self"].iter().any(|dir| component_may_be(pair[1], dir))
+            && (["self", "thread-self"]
+                .iter()
+                .any(|dir| component_may_be(pair[1], dir))
                 || (has_glob_char(pair[1]) && pair[0] == "proc")
                 || component_may_be_pid(pair[1]))
     })
@@ -306,7 +346,10 @@ fn has_glob_char(text: &str) -> bool {
 
 /// A component made of glob characters only (`*`, `????`, `[a-z]`).
 fn is_wildcard_only(component: &str) -> bool {
-    has_glob_char(component) && component.chars().all(|c| matches!(c, '*' | '?' | '[' | ']'))
+    has_glob_char(component)
+        && component
+            .chars()
+            .all(|c| matches!(c, '*' | '?' | '[' | ']'))
 }
 
 /// Whether one path component equals `name` or, holding a glob character, could match it (`*`, `?` and a bracket
@@ -412,7 +455,8 @@ fn glob_may_match(pattern: &[char], name: &[char]) -> bool {
 /// `tclsh`/`wish`), by basename with an optional version suffix.
 fn is_interpreter(name: &str) -> bool {
     const STEMS: &[&str] = &[
-        "python", "pypy", "perl", "ruby", "irb", "node", "nodejs", "deno", "bun", "php", "lua", "luajit", "tclsh", "wish",
+        "python", "pypy", "perl", "ruby", "irb", "node", "nodejs", "deno", "bun", "php", "lua",
+        "luajit", "tclsh", "wish",
     ];
     STEMS.iter().any(|stem| {
         name.strip_prefix(stem)
@@ -439,7 +483,15 @@ fn interpreter_query(name: &str, args: &[String]) -> bool {
     match only.as_str() {
         "--version" | "--help" => true,
         "-V" => stem("python") || stem("perl") || stem("deno"),
-        "-v" => stem("node") || stem("perl") || stem("ruby") || stem("irb") || stem("lua") || stem("php") || stem("bun"),
+        "-v" => {
+            stem("node")
+                || stem("perl")
+                || stem("ruby")
+                || stem("irb")
+                || stem("lua")
+                || stem("php")
+                || stem("bun")
+        }
         _ => false,
     }
 }
@@ -451,7 +503,8 @@ fn interpreter_query(name: &str, args: &[String]) -> bool {
 fn interpreter_runs_code(name: &str, args: &[String]) -> bool {
     // u35 r3: a script operand (or any argument) naming stdin or a descriptor is a program from a pipe.
     !interpreter_query(name, args)
-        && (args.iter().any(|word| names_stdin_stream(word)) || interpreters::runs_hidden_code(name, args))
+        && (args.iter().any(|word| names_stdin_stream(word))
+            || interpreters::runs_hidden_code(name, args))
 }
 
 /// Whether `words` (canonical wrappers peeled) run an interpreter for anything but a lone version or help query. Such
@@ -489,7 +542,10 @@ fn format_has_percent_n(format: &str) -> bool {
             i = j + 1;
             continue;
         }
-        while chars.get(j).is_some_and(|c| c.is_ascii_digit() || "-+ #0'*.$hlLqjzt".contains(*c)) {
+        while chars
+            .get(j)
+            .is_some_and(|c| c.is_ascii_digit() || "-+ #0'*.$hlLqjzt".contains(*c))
+        {
             j += 1;
         }
         if chars.get(j) == Some(&'n') {
@@ -505,9 +561,12 @@ fn format_has_percent_n(format: &str) -> bool {
 fn wget_runs_program(args: &[String]) -> bool {
     args.iter().take_while(|w| *w != "--").any(|word| {
         if word.starts_with("--") {
-            return ["--use-askpass", "--execute", "--config"].iter().any(|option| long_option_is(word, option, 1));
+            return ["--use-askpass", "--execute", "--config"]
+                .iter()
+                .any(|option| long_option_is(word, option, 1));
         }
-        word.strip_prefix('-').is_some_and(|cluster| cluster.contains('e'))
+        word.strip_prefix('-')
+            .is_some_and(|cluster| cluster.contains('e'))
     })
 }
 
@@ -587,7 +646,10 @@ fn rsync_runs_program(args: &[String]) -> bool {
             break;
         }
         if word.starts_with("--") {
-            if ["--rsh", "--rsync-path", "--remote-option"].iter().any(|option| long_option_is(word, option, 1)) {
+            if ["--rsh", "--rsync-path", "--remote-option"]
+                .iter()
+                .any(|option| long_option_is(word, option, 1))
+            {
                 return true;
             }
             continue;
@@ -624,13 +686,24 @@ pub(crate) fn long_option_is(word: &str, option: &str, min: usize) -> bool {
 /// or not.
 fn ssh_runs_local_program(name: &str, args: &[String]) -> bool {
     let command_option = |value: &str| {
-        let key = value.trim_start().split(['=', ' ', '\t']).next().unwrap_or(value).to_ascii_lowercase();
+        let key = value
+            .trim_start()
+            .split(['=', ' ', '\t'])
+            .next()
+            .unwrap_or(value)
+            .to_ascii_lowercase();
         key.ends_with("command")
-            || matches!(key.as_str(), "pkcs11provider" | "securitykeyprovider" | "include" | "match")
+            || matches!(
+                key.as_str(),
+                "pkcs11provider" | "securitykeyprovider" | "include" | "match"
+            )
     };
     // Options whose value is the rest of the cluster or the next word.
     let takes_value: &[char] = if name == "ssh" {
-        &['B', 'b', 'c', 'D', 'E', 'e', 'i', 'J', 'L', 'l', 'm', 'O', 'o', 'P', 'p', 'Q', 'R', 'W', 'w']
+        &[
+            'B', 'b', 'c', 'D', 'E', 'e', 'i', 'J', 'L', 'l', 'm', 'O', 'o', 'P', 'p', 'Q', 'R',
+            'W', 'w',
+        ]
     } else {
         &['o', 'c', 'D', 'i', 'J', 'l', 'P', 'X']
     };
@@ -646,7 +719,10 @@ fn ssh_runs_local_program(name: &str, args: &[String]) -> bool {
         }
         // ssh also parses options after the destination, so every word is scanned (a remote command's own option
         // cluster can over-ask, never under-ask).
-        let Some(cluster) = word.strip_prefix('-').filter(|c| !c.is_empty() && !c.starts_with('-')) else {
+        let Some(cluster) = word
+            .strip_prefix('-')
+            .filter(|c| !c.is_empty() && !c.starts_with('-'))
+        else {
             continue;
         };
         for (at, option) in cluster.char_indices() {
@@ -707,7 +783,10 @@ fn tar_runs_program(args: &[String]) -> bool {
             continue;
         }
         let dashless_first = i == 1 && !word.starts_with('-');
-        let Some(cluster) = word.strip_prefix('-').or(dashless_first.then_some(word.as_str())) else {
+        let Some(cluster) = word
+            .strip_prefix('-')
+            .or(dashless_first.then_some(word.as_str()))
+        else {
             continue;
         };
         for option in cluster.chars() {
@@ -756,7 +835,8 @@ fn man_runs_program(args: &[String]) -> bool {
 /// short-option cluster such as `-nf`, u35 r3 Astra r2 H10) or pulled in by `import`/`include` is not visible.
 fn jq_reads_environment(args: &[String]) -> bool {
     args.iter().any(|word| {
-        word.strip_prefix('-').is_some_and(|cluster| !cluster.starts_with('-') && cluster.contains('f'))
+        word.strip_prefix('-')
+            .is_some_and(|cluster| !cluster.starts_with('-') && cluster.contains('f'))
             || long_option_is(word, "--from-file", 1)
             || word.contains("$ENV")
             || word_has_identifier(word, "env")
@@ -780,7 +860,9 @@ fn word_has_identifier(text: &str, ident: &str) -> bool {
 fn kubectl_reads_secrets(args: &[String]) -> bool {
     // u35 g3 (Astra r3): `get`/`describe` with `-f`/`--filename` or `-k`/`--kustomize` take the resource kind from a
     // file the command does not show, which can name a Secret.
-    let reads_resources = args.iter().any(|word| matches!(word.as_str(), "get" | "describe"));
+    let reads_resources = args
+        .iter()
+        .any(|word| matches!(word.as_str(), "get" | "describe"));
     if reads_resources && args.iter().any(|word| kubectl_selects_from_file(word)) {
         return true;
     }
@@ -820,7 +902,11 @@ fn kubectl_selects_from_file(word: &str) -> bool {
 fn go_runs_program(args: &[String]) -> bool {
     if args.iter().any(|w| {
         let name = w.trim_start_matches('-');
-        w.starts_with('-') && matches!(name.split_once('=').map_or(name, |(n, _)| n), "exec" | "toolexec" | "vettool")
+        w.starts_with('-')
+            && matches!(
+                name.split_once('=').map_or(name, |(n, _)| n),
+                "exec" | "toolexec" | "vettool"
+            )
     }) {
         return true;
     }
@@ -836,7 +922,9 @@ fn go_runs_program(args: &[String]) -> bool {
         };
         match name {
             "gccgoflags" => return true,
-            "ldflags" if value.is_some_and(|v| v.contains("extld") || is_unresolved(v)) => return true,
+            "ldflags" if value.is_some_and(|v| v.contains("extld") || is_unresolved(v)) => {
+                return true;
+            }
             _ => {}
         }
     }
@@ -853,9 +941,14 @@ fn go_runs_program(args: &[String]) -> bool {
         }
         // u35 g3: `go bug` and `go doc -http` open a browser.
         if word == "doc" {
-            return args[i..].iter().any(|w| w.trim_start_matches('-').split('=').next() == Some("http"));
+            return args[i..]
+                .iter()
+                .any(|w| w.trim_start_matches('-').split('=').next() == Some("http"));
         }
-        return matches!(word.as_str(), "run" | "install" | "generate" | "tool" | "bug");
+        return matches!(
+            word.as_str(),
+            "run" | "install" | "generate" | "tool" | "bug"
+        );
     }
     false
 }
@@ -972,10 +1065,19 @@ mod tests {
 
     #[test]
     fn exec_surface_scp_transport_program() {
-        for cmd in ["scp -S ./payload f host:", "scp -rS./payload f host:", "scp -o ProxyCommand=id f host:", "scp -F cfg f host:"] {
+        for cmd in [
+            "scp -S ./payload f host:",
+            "scp -rS./payload f host:",
+            "scp -o ProxyCommand=id f host:",
+            "scp -F cfg f host:",
+        ] {
             assert!(hit(cmd), "{cmd}");
         }
-        for cmd in ["scp f host:/dst", "scp -P 2222 -r src host:", "scp -i key.pem -o Port=22 f host:"] {
+        for cmd in [
+            "scp f host:/dst",
+            "scp -P 2222 -r src host:",
+            "scp -i key.pem -o Port=22 f host:",
+        ] {
             assert!(!hit(cmd), "{cmd}");
         }
     }
@@ -1007,10 +1109,21 @@ mod tests {
 
     #[test]
     fn exec_surface_man_pager_and_browser() {
-        for cmd in ["man -P ./payload ls", "man -P./payload ls", "man --pager=./payload ls", "man -H ls", "man --html=firefox ls"] {
+        for cmd in [
+            "man -P ./payload ls",
+            "man -P./payload ls",
+            "man --pager=./payload ls",
+            "man -H ls",
+            "man --html=firefox ls",
+        ] {
             assert!(hit(cmd), "{cmd}");
         }
-        for cmd in ["man ls", "man -k printf", "man -s 3 printf", "man 5 crontab"] {
+        for cmd in [
+            "man ls",
+            "man -k printf",
+            "man -s 3 printf",
+            "man 5 crontab",
+        ] {
             assert!(!hit(cmd), "{cmd}");
         }
     }
@@ -1066,7 +1179,11 @@ mod tests {
         ] {
             assert!(hit(cmd), "{cmd}");
         }
-        for cmd in ["kubectl get pods -n kube-system -o wide", "kubectl logs secret-rotator-0", "kubectl get configmaps"] {
+        for cmd in [
+            "kubectl get pods -n kube-system -o wide",
+            "kubectl logs secret-rotator-0",
+            "kubectl get configmaps",
+        ] {
             assert!(!hit(cmd), "{cmd}");
         }
     }
@@ -1089,7 +1206,12 @@ mod tests {
         ] {
             assert!(hit(cmd), "{cmd}");
         }
-        for cmd in ["ssh host", "ssh -p 2222 host uptime", "ssh -i key.pem -o Port=22 host", "ssh -J jump host"] {
+        for cmd in [
+            "ssh host",
+            "ssh -p 2222 host uptime",
+            "ssh -i key.pem -o Port=22 host",
+            "ssh -J jump host",
+        ] {
             assert!(!hit(cmd), "{cmd}");
         }
     }
@@ -1115,7 +1237,14 @@ mod tests {
         ] {
             assert!(hit(cmd), "{cmd}");
         }
-        for cmd in ["printf %s\\n a", "printf 100%% x", "cat /proc/cpuinfo", "rg environ src", "go vet ./...", "wget -q -O out https://example.test"] {
+        for cmd in [
+            "printf %s\\n a",
+            "printf 100%% x",
+            "cat /proc/cpuinfo",
+            "rg environ src",
+            "go vet ./...",
+            "wget -q -O out https://example.test",
+        ] {
             assert!(!hit(cmd), "{cmd}");
         }
     }

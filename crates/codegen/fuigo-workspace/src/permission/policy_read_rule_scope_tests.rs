@@ -40,15 +40,52 @@ macro_rules! tool_input_variants {
 }
 
 tool_input_variants!(
-    ReadFile, SearchReplace, Bash, Grep, ListDir, TodoWrite, Skill, MCPTool, TaskOutput, WaitTasks, KillTask, Task,
-    WebSearch, ImageGen, ImageEdit, ImageToVideo, ReferenceToVideo, WebFetch, Write, ApplyPatch, HashlineEdit,
-    CodexListDir, CodexGrepFiles, CodexReadFile, MemorySearch, MemoryGet, SearchTool, UseTool, EnterPlanMode,
-    ExitPlanMode, AskUserQuestion, SendSubagentMessage, Lsp, Monitor, SchedulerCreate, SchedulerDelete, SchedulerList,
-    UpdateGoal, Workflow, Peer, Dynamic,
+    ReadFile,
+    SearchReplace,
+    Bash,
+    Grep,
+    ListDir,
+    TodoWrite,
+    Skill,
+    MCPTool,
+    TaskOutput,
+    WaitTasks,
+    KillTask,
+    Task,
+    WebSearch,
+    ImageGen,
+    ImageEdit,
+    ImageToVideo,
+    ReferenceToVideo,
+    WebFetch,
+    Write,
+    ApplyPatch,
+    HashlineEdit,
+    CodexListDir,
+    CodexGrepFiles,
+    CodexReadFile,
+    MemorySearch,
+    MemoryGet,
+    SearchTool,
+    UseTool,
+    EnterPlanMode,
+    ExitPlanMode,
+    AskUserQuestion,
+    SendSubagentMessage,
+    Lsp,
+    Monitor,
+    SchedulerCreate,
+    SchedulerDelete,
+    SchedulerList,
+    UpdateGoal,
+    Workflow,
+    Peer,
+    Dynamic,
 );
 
 fn wire(label: &str, value: serde_json::Value) -> ToolInput {
-    serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{label} fixture must parse: {e}: {value}"))
+    serde_json::from_value(value.clone())
+        .unwrap_or_else(|e| panic!("{label} fixture must parse: {e}: {value}"))
 }
 
 /// One or more fixtures per `ToolInput` variant, labelled and with the coverage a `Read` rule must give it.
@@ -121,7 +158,11 @@ fn fixtures() -> Vec<(&'static str, Expect, ToolInput)> {
     .into_iter()
     .map(|(label, expect, value)| (label, expect, wire(label, value)))
     .collect();
-    out.push(("peer list_agents", FileRead, ToolInput::Peer(PeerToolInput::ListAgents(ListAgentsInput { page: None }))));
+    out.push((
+        "peer list_agents",
+        FileRead,
+        ToolInput::Peer(PeerToolInput::ListAgents(ListAgentsInput { page: None })),
+    ));
     out.push((
         "peer refuse",
         Bookkeeping,
@@ -174,9 +215,18 @@ fn fixture(label: &str) -> AccessKind {
 /// Every `ToolInput` variant has at least one fixture, so the classification test below sees all of them.
 #[test]
 fn every_tool_input_variant_has_a_read_coverage_fixture() {
-    let covered: BTreeSet<&str> = fixtures().iter().map(|(_, _, input)| variant_name(input)).collect();
-    let missing: Vec<&&str> = ALL_VARIANTS.iter().filter(|v| !covered.contains(**v)).collect();
-    assert!(missing.is_empty(), "ToolInput variants with no Read-coverage fixture: {missing:?}");
+    let covered: BTreeSet<&str> = fixtures()
+        .iter()
+        .map(|(_, _, input)| variant_name(input))
+        .collect();
+    let missing: Vec<&&str> = ALL_VARIANTS
+        .iter()
+        .filter(|v| !covered.contains(**v))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "ToolInput variants with no Read-coverage fixture: {missing:?}"
+    );
 }
 
 /// Fail closed: every file-reading tool is reached by a bare `Read` deny and ask (and `Read(*)`), exactly as before;
@@ -194,7 +244,10 @@ fn read_rules_reach_every_file_read_and_no_bookkeeping() {
                 );
                 for spelling in ["Read", "Read(*)"] {
                     assert!(
-                        matches!(read_rule(spelling, RuleAction::Deny).evaluate(&access), Some(Decision::Reject(_))),
+                        matches!(
+                            read_rule(spelling, RuleAction::Deny).evaluate(&access),
+                            Some(Decision::Reject(_))
+                        ),
                         "deny {spelling} must reach {label}"
                     );
                     assert_eq!(
@@ -205,7 +258,10 @@ fn read_rules_reach_every_file_read_and_no_bookkeeping() {
                 }
             }
             Expect::Bookkeeping => {
-                assert!(matches!(access, AccessKind::Session), "{label} must be bookkeeping, got {access:?}");
+                assert!(
+                    matches!(access, AccessKind::Session),
+                    "{label} must be bookkeeping, got {access:?}"
+                );
                 for spelling in ["Read", "Read(*)", "Read(**)"] {
                     for action in [RuleAction::Deny, RuleAction::Ask] {
                         assert_eq!(
@@ -216,13 +272,23 @@ fn read_rules_reach_every_file_read_and_no_bookkeeping() {
                     }
                 }
                 assert!(
-                    matches!(any_rule(RuleAction::Deny).evaluate(&access), Some(Decision::Reject(_))),
+                    matches!(
+                        any_rule(RuleAction::Deny).evaluate(&access),
+                        Some(Decision::Reject(_))
+                    ),
                     "an `any` deny must still reach {label}"
                 );
-                assert_eq!(any_rule(RuleAction::Ask).evaluate(&access), Some(Decision::Ask), "any ask: {label}");
+                assert_eq!(
+                    any_rule(RuleAction::Ask).evaluate(&access),
+                    Some(Decision::Ask),
+                    "any ask: {label}"
+                );
             }
             Expect::Other => assert!(
-                !matches!(access, AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::Session),
+                !matches!(
+                    access,
+                    AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::Session
+                ),
                 "{label} must not be classified as a read or bookkeeping, got {access:?}"
             ),
         }
@@ -235,15 +301,26 @@ fn bare_read_ask_and_deny_cover_file_reads_not_bookkeeping() {
     for action in [RuleAction::Ask, RuleAction::Deny] {
         let rule = read_rule("Read", action);
         for label in ["read_file", "list_dir", "grep", "lsp"] {
-            assert!(rule.evaluate(&fixture(label)).is_some(), "{action:?} Read must reach {label}");
+            assert!(
+                rule.evaluate(&fixture(label)).is_some(),
+                "{action:?} Read must reach {label}"
+            );
         }
         for label in ["todo_write", "ask_user_question", "scheduler_list"] {
-            assert_eq!(rule.evaluate(&fixture(label)), None, "{action:?} Read must not reach {label}");
+            assert_eq!(
+                rule.evaluate(&fixture(label)),
+                None,
+                "{action:?} Read must not reach {label}"
+            );
         }
     }
     let any = any_rule(RuleAction::Ask);
     for label in ["todo_write", "ask_user_question", "scheduler_list"] {
-        assert_eq!(any.evaluate(&fixture(label)), Some(Decision::Ask), "an `any` ask must reach {label}");
+        assert_eq!(
+            any.evaluate(&fixture(label)),
+            Some(Decision::Ask),
+            "an `any` ask must reach {label}"
+        );
     }
 }
 
@@ -252,12 +329,23 @@ fn bare_read_ask_and_deny_cover_file_reads_not_bookkeeping() {
 #[test]
 fn path_scoped_read_rules_keep_path_behaviour() {
     let all = read_rule("Read(**)", RuleAction::Deny);
-    assert!(matches!(all.evaluate(&fixture("read_file")), Some(Decision::Reject(_))));
-    assert!(matches!(all.evaluate(&fixture("grep")), Some(Decision::Reject(_))));
+    assert!(matches!(
+        all.evaluate(&fixture("read_file")),
+        Some(Decision::Reject(_))
+    ));
+    assert!(matches!(
+        all.evaluate(&fixture("grep")),
+        Some(Decision::Reject(_))
+    ));
     assert_eq!(all.evaluate(&fixture("lsp workspace")), None);
     assert_eq!(all.evaluate(&fixture("todo_write")), None);
     let ssh = read_rule("Read(**/.ssh/**)", RuleAction::Ask);
-    assert_eq!(ssh.evaluate(&AccessKind::Read(Some("/home/u/.ssh/id_ed25519".to_owned()))), Some(Decision::Ask));
+    assert_eq!(
+        ssh.evaluate(&AccessKind::Read(Some(
+            "/home/u/.ssh/id_ed25519".to_owned()
+        ))),
+        Some(Decision::Ask)
+    );
     assert_eq!(ssh.evaluate(&fixture("read_file")), None);
     assert_eq!(ssh.evaluate(&fixture("todo_write")), None);
 }

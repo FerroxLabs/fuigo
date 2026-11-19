@@ -139,21 +139,23 @@ pub fn parse_provider_error(bytes: &[u8]) -> Option<ProviderError> {
 
 /// [`parse_provider_error`] over a string slice.
 pub fn parse_provider_error_str(text: &str) -> Option<ProviderError> {
-    parse_provider_error_depth(text,0)
+    parse_provider_error_depth(text, 0)
 }
-fn parse_provider_error_depth(text:&str,depth:usize)->Option<ProviderError>{
-    if depth==8 {return None;}
+fn parse_provider_error_depth(text: &str, depth: usize) -> Option<ProviderError> {
+    if depth == 8 {
+        return None;
+    }
     let text = text.trim();
     if text.is_empty() || text.starts_with('<') {
         return None;
     }
-    let value=crate::selective_error::from_provider_str(text)?;
+    let value = crate::selective_error::from_provider_str(text)?;
     let parsed = walk(&value)?;
-    Some(unwrap_double_encoding(parsed,depth))
+    Some(unwrap_double_encoding(parsed, depth))
 }
 
-fn unwrap_double_encoding(outer: ProviderError,depth:usize) -> ProviderError {
-    let Some(inner) = parse_provider_error_depth(&outer.message,depth+1) else {
+fn unwrap_double_encoding(outer: ProviderError, depth: usize) -> ProviderError {
+    let Some(inner) = parse_provider_error_depth(&outer.message, depth + 1) else {
         return outer;
     };
     if inner.message == outer.message {

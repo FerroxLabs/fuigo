@@ -215,7 +215,11 @@ impl RelayOrigin {
 
 impl std::fmt::Display for RelayOrigin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (scheme, default_port) = if self.secure { ("https", 443) } else { ("http", 80) };
+        let (scheme, default_port) = if self.secure {
+            ("https", 443)
+        } else {
+            ("http", 80)
+        };
         write!(f, "{scheme}://{}", self.host)?;
         if self.port != default_port {
             write!(f, ":{}", self.port)?;
@@ -326,7 +330,10 @@ fn load_opt_ins() -> Vec<OptIn> {
 
 /// `[relay] trusted_origins` of the user config layer: an array of strings (a single string is accepted too).
 fn user_config_opt_ins(user: &toml::Value) -> Vec<OptIn> {
-    let Some(value) = user.get("relay").and_then(|relay| relay.get("trusted_origins")) else {
+    let Some(value) = user
+        .get("relay")
+        .and_then(|relay| relay.get("trusted_origins"))
+    else {
         return Vec::new();
     };
     let spellings: Vec<String> = match value {
@@ -360,7 +367,11 @@ fn user_config_opt_ins(user: &toml::Value) -> Vec<OptIn> {
 
 fn user_config_display() -> String {
     fuigo_config::user_fuigo_home()
-        .map(|home| home.join(fuigo_config::USER_CONFIG_FILENAME).display().to_string())
+        .map(|home| {
+            home.join(fuigo_config::USER_CONFIG_FILENAME)
+                .display()
+                .to_string()
+        })
         .unwrap_or_else(|| "~/.fuigo/config.toml".to_owned())
 }
 
@@ -415,34 +426,68 @@ mod tests {
     fn ipv6_idn_and_userinfo_origins() {
         let opted_in = |relay: &str, entry: &str| decide(relay, &[opt_in(entry)]).is_ok();
         assert!(opted_in("wss://[::1]:9443/ws", "https://[::1]:9443"));
-        assert!(opted_in("wss://[0:0:0:0:0:0:0:1]:9443/ws", "https://[::1]:9443"));
+        assert!(opted_in(
+            "wss://[0:0:0:0:0:0:0:1]:9443/ws",
+            "https://[::1]:9443"
+        ));
         assert!(!opted_in("wss://[::1]:9443/ws", "https://[::2]:9443"));
         assert!(!opted_in("wss://[::1]:9443/ws", "https://[::1]"));
         // The URL parser punycodes an internationalised host, so both spellings name one origin, and a lookalike
         // in another script is another origin.
-        assert!(opted_in("wss://bücher.example/ws", "https://xn--bcher-kva.example"));
-        assert!(opted_in("wss://xn--bcher-kva.example/ws", "https://BÜCHER.example"));
-        assert!(!opted_in("wss://bucher.example/ws", "https://bücher.example"));
+        assert!(opted_in(
+            "wss://bücher.example/ws",
+            "https://xn--bcher-kva.example"
+        ));
+        assert!(opted_in(
+            "wss://xn--bcher-kva.example/ws",
+            "https://BÜCHER.example"
+        ));
+        assert!(!opted_in(
+            "wss://bucher.example/ws",
+            "https://bücher.example"
+        ));
         // Userinfo is not part of an origin, on either side.
-        assert!(opted_in("wss://user:secret@relay.example/ws", "https://relay.example"));
-        assert!(opted_in("wss://relay.example/ws", "https://someone@relay.example"));
-        assert!(!opted_in("wss://relay.example@evil.example/ws", "https://relay.example"));
+        assert!(opted_in(
+            "wss://user:secret@relay.example/ws",
+            "https://relay.example"
+        ));
+        assert!(opted_in(
+            "wss://relay.example/ws",
+            "https://someone@relay.example"
+        ));
+        assert!(!opted_in(
+            "wss://relay.example@evil.example/ws",
+            "https://relay.example"
+        ));
         // A relay URL's userinfo is never echoed into the refusal.
-        let refused = decide("wss://user:secret@relay.example/ws", &[]).unwrap_err().to_string();
-        assert!(!refused.contains("secret") && !refused.contains("user:"), "{refused}");
+        let refused = decide("wss://user:secret@relay.example/ws", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !refused.contains("secret") && !refused.contains("user:"),
+            "{refused}"
+        );
     }
 
     #[test]
     fn no_relay_configured_is_not_a_refusal() {
         // The default install: no relay URL, nothing to bridge (P47 refuses an empty URL before any socket).
         for blank in ["", "  "] {
-            assert_eq!(relay_bridge_gate(blank), Ok(RelayBridgeTrust::NoRelayConfigured));
+            assert_eq!(
+                relay_bridge_gate(blank),
+                Ok(RelayBridgeTrust::NoRelayConfigured)
+            );
         }
     }
 
     #[test]
     fn a_relay_url_without_a_ws_origin_is_refused_whatever_the_opt_ins() {
-        for url in ["relay.example", "https://relay.example", "file:///tmp/x", "wss://"] {
+        for url in [
+            "relay.example",
+            "https://relay.example",
+            "file:///tmp/x",
+            "wss://",
+        ] {
             let refused = decide(url, &[opt_in("https://relay.example")]).expect_err(url);
             assert_eq!(refused.origin(), None, "{url}");
         }
@@ -461,7 +506,10 @@ mod tests {
         ] {
             assert!(text.contains(needle), "missing {needle:?} in {text}");
         }
-        assert!(!text.contains("/ws"), "the refusal names the origin, not the URL: {text}");
+        assert!(
+            !text.contains("/ws"),
+            "the refusal names the origin, not the URL: {text}"
+        );
     }
 
     #[test]
@@ -478,7 +526,10 @@ mod tests {
             "[relay]\nenabled = true\ntrusted_origins = [\"https://a.example\", 7, \"wss://b.example\"]\n",
         )
         .unwrap();
-        let got: Vec<String> = user_config_opt_ins(&user).into_iter().map(|o| o.spelling).collect();
+        let got: Vec<String> = user_config_opt_ins(&user)
+            .into_iter()
+            .map(|o| o.spelling)
+            .collect();
         assert_eq!(got, ["https://a.example", "wss://b.example"]);
         let single: toml::Value =
             toml::from_str("[relay]\ntrusted_origins = \"https://a.example\"\n").unwrap();
@@ -491,7 +542,8 @@ mod tests {
     /// P125: syncing a session decides like bridging, but the refusal says what is at stake for a sync.
     #[test]
     fn a_sync_refusal_names_the_relay_the_transcript_and_how_to_trust_it() {
-        let refused = decide_for(RelayPurpose::Sync, "wss://relay.example:9443/ws", &[]).unwrap_err();
+        let refused =
+            decide_for(RelayPurpose::Sync, "wss://relay.example:9443/ws", &[]).unwrap_err();
         assert_eq!(refused.purpose(), RelayPurpose::Sync);
         let text = refused.to_string();
         for needle in [
@@ -503,11 +555,26 @@ mod tests {
         ] {
             assert!(text.contains(needle), "missing {needle:?} in {text}");
         }
-        assert!(!text.contains("drive the agent"), "a sync refusal is not the bridge text: {text}");
-        let bridge = decide("wss://relay.example:9443/ws", &[]).unwrap_err().to_string();
-        assert!(bridge.contains("drive the agent") && !bridge.contains("transcript"), "{bridge}");
+        assert!(
+            !text.contains("drive the agent"),
+            "a sync refusal is not the bridge text: {text}"
+        );
+        let bridge = decide("wss://relay.example:9443/ws", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            bridge.contains("drive the agent") && !bridge.contains("transcript"),
+            "{bridge}"
+        );
         // An opt-in for the origin lifts it, exactly as for a bridge.
-        assert!(decide_for(RelayPurpose::Sync, "wss://relay.example:9443/ws", &[opt_in("https://relay.example:9443")]).is_ok());
+        assert!(
+            decide_for(
+                RelayPurpose::Sync,
+                "wss://relay.example:9443/ws",
+                &[opt_in("https://relay.example:9443")]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -531,7 +598,9 @@ mod tests {
         assert_eq!(line["method"], format!("_{RELAY_REFUSED_METHOD}"));
         assert_eq!(line["params"]["origin"], "https://relay.example");
         assert!(line.get("id").is_none(), "a notification has no id");
-        let no_origin = decide("relay.example", &[]).unwrap_err().notice_params(None);
+        let no_origin = decide("relay.example", &[])
+            .unwrap_err()
+            .notice_params(None);
         assert!(no_origin["origin"].is_null() && no_origin.get("sessionId").is_none());
     }
 

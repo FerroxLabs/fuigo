@@ -52,7 +52,9 @@ struct Tracer {
 
 impl Tracer {
     fn at(marks: PathBuf) -> Self {
-        let acks = marks.parent().map_or_else(|| PathBuf::from("f5-acks"), |parent| parent.join("f5-acks"));
+        let acks = marks
+            .parent()
+            .map_or_else(|| PathBuf::from("f5-acks"), |parent| parent.join("f5-acks"));
         Self { marks, acks }
     }
 }
@@ -91,11 +93,18 @@ pub fn enabled() -> bool {
     TRACER.is_some()
 }
 
-#[allow(clippy::disallowed_methods, reason = "B-F5 attribution marks (design F5 9.4): zero-byte files under FUIGO_F5_TRACE_DIR, off by default; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "B-F5 attribution marks (design F5 9.4): zero-byte files under FUIGO_F5_TRACE_DIR, off by default; not inside a session folder"
+)]
 fn mark(tracer: &Tracer, name: &str) {
     // A mark that cannot be made shows up as a missing mark, which fails the run; nothing else to do here.
     let _ = std::fs::create_dir_all(&tracer.marks);
-    let _ = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(tracer.marks.join(name));
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(tracer.marks.join(name));
 }
 
 /// FNV-1a 64 of the path's bytes, 16 hex digits.
@@ -142,12 +151,20 @@ pub(crate) fn op<T>(generation: u64, paths: &[&Path], op: impl FnOnce() -> T) ->
     let in_flight = InFlight(&hashes);
     let before: Vec<_> = paths.iter().map(|p| stamp(p)).collect();
     #[cfg(test)]
-    crate::seams::pass(&format!("trace-b:{}", hashes.first().map_or("", String::as_str)));
+    crate::seams::pass(&format!(
+        "trace-b:{}",
+        hashes.first().map_or("", String::as_str)
+    ));
     #[cfg(f5_trace_control)]
     control::pause(&tracer, generation, seq, paths, &hashes);
     let after: Vec<_> = paths.iter().map(|p| stamp(p)).collect();
     let overlapped = overlapped(&hashes, &started);
-    if before.iter().zip(&after).zip(&overlapped).any(|((b, a), shared)| b != a && !shared) {
+    if before
+        .iter()
+        .zip(&after)
+        .zip(&overlapped)
+        .any(|((b, a), shared)| b != a && !shared)
+    {
         mark(&tracer, &format!("x.{generation}.{seq}"));
     }
     let result = op();
@@ -163,7 +180,9 @@ type Overlaps = std::collections::HashMap<String, (u64, u64)>;
 static OVERLAPS: LazyLock<std::sync::Mutex<Overlaps>> = LazyLock::new(Default::default);
 
 fn overlaps() -> std::sync::MutexGuard<'static, Overlaps> {
-    OVERLAPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    OVERLAPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// This syscall starts on `hashes`: count it, and return each path's start count and whether another was in flight.
@@ -187,7 +206,11 @@ fn overlapped(hashes: &[String], started: &[(u64, bool)]) -> Vec<bool> {
     hashes
         .iter()
         .zip(started)
-        .map(|(hash, &(count, busy))| busy || map.get(hash).is_some_and(|&(now, live)| now != count || live > 1))
+        .map(|(hash, &(count, busy))| {
+            busy || map
+                .get(hash)
+                .is_some_and(|&(now, live)| now != count || live > 1)
+        })
         .collect()
 }
 
@@ -218,14 +241,26 @@ mod control {
 
     const ARM_ENV: &str = "FUIGO_F5_PAUSE_ARM";
 
-    static PAUSE: LazyLock<Option<std::ffi::OsString>> = LazyLock::new(|| std::env::var_os(PAUSE_ENV));
+    static PAUSE: LazyLock<Option<std::ffi::OsString>> =
+        LazyLock::new(|| std::env::var_os(PAUSE_ENV));
     static ARM: LazyLock<Option<std::ffi::OsString>> = LazyLock::new(|| std::env::var_os(ARM_ENV));
     static FIRED: AtomicBool = AtomicBool::new(false);
 
-    pub(super) fn pause(tracer: &super::Tracer, generation: u64, seq: u64, paths: &[&Path], hashes: &[String]) {
+    pub(super) fn pause(
+        tracer: &super::Tracer,
+        generation: u64,
+        seq: u64,
+        paths: &[&Path],
+        hashes: &[String],
+    ) {
         let Some(name) = PAUSE.as_deref() else { return };
-        let Some(index) = paths.iter().position(|p| p.file_name() == Some(name)) else { return };
-        if ARM.as_deref().is_some_and(|arm| !tracer.acks.join(arm).exists()) {
+        let Some(index) = paths.iter().position(|p| p.file_name() == Some(name)) else {
+            return;
+        };
+        if ARM
+            .as_deref()
+            .is_some_and(|arm| !tracer.acks.join(arm).exists())
+        {
             return;
         }
         if FIRED.swap(true, Ordering::SeqCst) {
@@ -260,7 +295,9 @@ pub(crate) fn dir_created(generation: u64, dir: &Path) {
 /// The `rb` marks of a sanctioned summary section that awaits (the liveness mark's lock wait, §5.6), made now; the
 /// matching `re` marks are made when the guard drops. With marks off this is an empty guard.
 pub fn sanctioned_rmw_guard(paths: &[&Path]) -> RmwMarks {
-    let Some(tracer) = tracer() else { return RmwMarks(None) };
+    let Some(tracer) = tracer() else {
+        return RmwMarks(None);
+    };
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let hashes: Vec<String> = paths.iter().map(|p| path_hash(p)).collect();
     for hash in &hashes {

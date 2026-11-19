@@ -125,7 +125,9 @@ pub async fn try_resolve_unicode_filename(path: &Path) -> Option<UnicodePathMatc
 /// write to a file that check never saw.
 pub async fn try_resolve_unicode_filename_for_edit(path: &Path) -> Option<UnicodePathMatch> {
     let found = try_resolve_unicode_filename(path).await?;
-    let meta = tokio::fs::symlink_metadata(&found.resolved_path).await.ok()?;
+    let meta = tokio::fs::symlink_metadata(&found.resolved_path)
+        .await
+        .ok()?;
     meta.file_type().is_file().then_some(found)
 }
 
@@ -204,7 +206,10 @@ async fn try_resolve_unicode_filename_inner(path: &Path) -> Option<UnicodePathMa
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,12 +230,22 @@ mod tests {
         let protected = dir.path().join("protected.toml");
         tokio::fs::write(&protected, b"x").await.unwrap();
         std::os::unix::fs::symlink(&protected, dir.path().join("notes\u{202F}1.md")).unwrap();
-        tokio::fs::write(dir.path().join("plain\u{202F}2.md"), b"y").await.unwrap();
+        tokio::fs::write(dir.path().join("plain\u{202F}2.md"), b"y")
+            .await
+            .unwrap();
         let typed_link = dir.path().join("notes 1.md");
         assert!(try_resolve_unicode_filename(&typed_link).await.is_some());
-        assert!(try_resolve_unicode_filename_for_edit(&typed_link).await.is_none());
+        assert!(
+            try_resolve_unicode_filename_for_edit(&typed_link)
+                .await
+                .is_none()
+        );
         let typed_plain = dir.path().join("plain 2.md");
-        assert!(try_resolve_unicode_filename_for_edit(&typed_plain).await.is_some());
+        assert!(
+            try_resolve_unicode_filename_for_edit(&typed_plain)
+                .await
+                .is_some()
+        );
     }
 
     #[tokio::test]

@@ -6,7 +6,8 @@ use crate::session::storage::{SessionUpdate, StorageAdapter};
 
 /// A writer for `dir` under a fresh id (F5-C4: appends go through one).
 fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
-    fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim")
+    fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+        .expect("claim")
 }
 
 fn info() -> Info {
@@ -69,24 +70,64 @@ async fn compaction_checkpoint_round_trip_and_directory_failure() {
         original_head_withheld: false,
         reread_file_paths: vec![],
     };
-    adapter.write_compaction_checkpoint(&info(), &checkpoint).await.unwrap();
-    let loaded = adapter.read_compaction_checkpoint(&info(), "compaction_checkpoints/resolved-prefix.json").await.unwrap();
-    assert_eq!(serde_json::to_value(loaded).unwrap(), serde_json::to_value(&checkpoint).unwrap());
+    adapter
+        .write_compaction_checkpoint(&info(), &checkpoint)
+        .await
+        .unwrap();
+    let loaded = adapter
+        .read_compaction_checkpoint(&info(), "compaction_checkpoints/resolved-prefix.json")
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(loaded).unwrap(),
+        serde_json::to_value(&checkpoint).unwrap()
+    );
     let blocked = tempfile::tempdir().unwrap();
-    std::fs::write(blocked.path().join("compaction_checkpoints"), "not a directory").unwrap();
+    std::fs::write(
+        blocked.path().join("compaction_checkpoints"),
+        "not a directory",
+    )
+    .unwrap();
     let adapter = JsonlStorageAdapter::with_explicit_session_dir(blocked.path().to_path_buf());
-    assert!(adapter.write_compaction_checkpoint(&info(), &checkpoint).await.is_err());
+    assert!(
+        adapter
+            .write_compaction_checkpoint(&info(), &checkpoint)
+            .await
+            .is_err()
+    );
     assert!(!blocked.path().join("updates.jsonl").exists());
     let sync_fault = tempfile::tempdir().unwrap();
     let adapter = JsonlStorageAdapter::with_explicit_session_dir(sync_fault.path().to_path_buf())
         .with_file_sync_probe(|| Err(std::io::Error::other("injected checkpoint file sync fault")));
-    assert!(adapter.write_compaction_checkpoint(&info(), &checkpoint).await.is_err());
-    assert!(!sync_fault.path().join("compaction_checkpoints/resolved-prefix.json").exists());
+    assert!(
+        adapter
+            .write_compaction_checkpoint(&info(), &checkpoint)
+            .await
+            .is_err()
+    );
+    assert!(
+        !sync_fault
+            .path()
+            .join("compaction_checkpoints/resolved-prefix.json")
+            .exists()
+    );
     let dir_fault = tempfile::tempdir().unwrap();
     let adapter = JsonlStorageAdapter::with_explicit_session_dir(dir_fault.path().to_path_buf())
-        .with_parent_sync_probe(|| Err(std::io::Error::other("injected first-directory sync fault")));
-    assert!(adapter.write_compaction_checkpoint(&info(), &checkpoint).await.is_err());
-    assert!(!dir_fault.path().join("compaction_checkpoints/resolved-prefix.json").exists());
+        .with_parent_sync_probe(|| {
+            Err(std::io::Error::other("injected first-directory sync fault"))
+        });
+    assert!(
+        adapter
+            .write_compaction_checkpoint(&info(), &checkpoint)
+            .await
+            .is_err()
+    );
+    assert!(
+        !dir_fault
+            .path()
+            .join("compaction_checkpoints/resolved-prefix.json")
+            .exists()
+    );
 }
 
 fn update(info: &Info, text: String) -> SessionUpdate {
@@ -555,7 +596,9 @@ fn darwin_fullfsync_seam_reports_invalid_descriptor() {
 #[cfg(target_os = "macos")]
 #[test]
 fn darwin_durable_sync_is_one_full_flush_per_descriptor() {
-    use super::super::{FULLFSYNC_CALLS, sync_dir_durable, sync_file_durable, write_bytes_atomic_fixture};
+    use super::super::{
+        FULLFSYNC_CALLS, sync_dir_durable, sync_file_durable, write_bytes_atomic_fixture,
+    };
     let flushes = || FULLFSYNC_CALLS.with(std::cell::Cell::get);
     let dir = tempfile::tempdir().unwrap();
     let file = std::fs::File::create(dir.path().join("probe")).unwrap();
@@ -570,7 +613,11 @@ fn darwin_durable_sync_is_one_full_flush_per_descriptor() {
 
     let start = flushes();
     write_bytes_atomic_fixture(&dir.path().join("atomic.json"), b"{}").unwrap();
-    assert_eq!(flushes() - start, 2, "an atomic write is one flush for the file and one for its parent");
+    assert_eq!(
+        flushes() - start,
+        2,
+        "an atomic write is one flush for the file and one for its parent"
+    );
 }
 
 /// F5-C8 (design F5 §6.1, F5-C4): once close releases the persistence adapter's writer, every later write is refused
@@ -580,14 +627,35 @@ async fn c8_a_released_adapter_refuses_every_write_and_never_writes_by_path() {
     let dir = tempfile::tempdir().unwrap();
     let session = dir.path().join("released");
     let info = info();
-    let adapter = JsonlStorageAdapter::with_explicit_session_dir(session.clone()).with_writer(test_writer(&session));
-    adapter.init_session(&info, default_model_id()).await.expect("the held writer creates the session");
-    adapter.append_update(&info, &update(&info, "held".into())).await.expect("the held writer writes");
+    let adapter = JsonlStorageAdapter::with_explicit_session_dir(session.clone())
+        .with_writer(test_writer(&session));
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .expect("the held writer creates the session");
+    adapter
+        .append_update(&info, &update(&info, "held".into()))
+        .await
+        .expect("the held writer writes");
     let updates = session.join("updates.jsonl");
     let before = std::fs::read(&updates).unwrap();
     adapter.release_writer_slot();
-    let error = adapter.append_update(&info, &update(&info, "late".into())).await.expect_err("released: refused");
-    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied, "{error}");
-    assert!(adapter.session_writer(&info).is_err(), "a released adapter hands out no writer");
-    assert_eq!(std::fs::read(&updates).unwrap(), before, "a released adapter wrote by path");
+    let error = adapter
+        .append_update(&info, &update(&info, "late".into()))
+        .await
+        .expect_err("released: refused");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{error}"
+    );
+    assert!(
+        adapter.session_writer(&info).is_err(),
+        "a released adapter hands out no writer"
+    );
+    assert_eq!(
+        std::fs::read(&updates).unwrap(),
+        before,
+        "a released adapter wrote by path"
+    );
 }

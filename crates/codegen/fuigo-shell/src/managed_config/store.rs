@@ -26,8 +26,13 @@ pub const MANAGED_ARTIFACT_FILES: [&str; 4] = [
 /// The original stays in place until the sync's own atomic replace or removal (Astra r1 #2: a failed refresh never
 /// leaves the slot empty). Runs under the managed-config lock. Returns the files it could not back up, with the error:
 /// the caller leaves those alone.
-#[allow(clippy::disallowed_methods, reason = "managed config under FUIGO_HOME; not inside a session folder")]
-pub(super) fn back_up_unsynced_policy_files(home: &std::path::Path) -> Vec<(&'static str, std::io::Error)> {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "managed config under FUIGO_HOME; not inside a session folder"
+)]
+pub(super) fn back_up_unsynced_policy_files(
+    home: &std::path::Path,
+) -> Vec<(&'static str, std::io::Error)> {
     let mut failed = Vec::new();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -75,7 +80,10 @@ pub(super) fn back_up_unsynced_policy_files(home: &std::path::Path) -> Vec<(&'st
     failed
 }
 
-#[allow(clippy::disallowed_methods, reason = "managed config under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "managed config under FUIGO_HOME; not inside a session folder"
+)]
 pub(super) fn remove_managed_config_files(home: &std::path::Path) {
     let kept = back_up_unsynced_policy_files(home);
     let mut artifacts_removed = kept.is_empty();
@@ -143,7 +151,10 @@ fn clear_squatting_dir(path: &std::path::Path) {
 }
 
 /// Removes files and squatting directories. `Ok(true)` = removed; `Ok(false)` = absent.
-#[allow(clippy::disallowed_methods, reason = "managed config under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "managed config under FUIGO_HOME; not inside a session folder"
+)]
 fn remove_managed_path(path: &std::path::Path) -> std::io::Result<bool> {
     let is_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
     let result = if is_dir {
@@ -270,7 +281,10 @@ fn lock_is_contended(e: &std::io::Error) -> bool {
     e.kind() == contended.kind() && e.raw_os_error() == contended.raw_os_error()
 }
 
-#[allow(clippy::disallowed_methods, reason = "managed config under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "managed config under FUIGO_HOME; not inside a session folder"
+)]
 fn open_managed_config_lock(home: &std::path::Path) -> std::io::Result<std::fs::File> {
     let path = home.join("managed_config.lock");
     let file = fuigo_config::owner_only_file_options(
@@ -395,7 +409,10 @@ pub(super) fn apply_managed_config(
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "managed config under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "managed config under FUIGO_HOME; not inside a session folder"
+)]
 pub(super) fn apply_fetched(
     body: &ManagedConfigResponse,
     source: ManagedConfigSource,
@@ -436,7 +453,10 @@ pub(super) fn apply_fetched(
 }
 
 /// The half of [`apply_fetched`] that runs while it holds the managed-config lock for `home`.
-#[allow(clippy::disallowed_methods, reason = "managed config under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "managed config under FUIGO_HOME; not inside a session folder"
+)]
 pub(super) fn apply_under_lock(
     home: &std::path::Path,
     body: &ManagedConfigResponse,
@@ -468,7 +488,8 @@ pub(super) fn apply_under_lock(
     }
     // Delta review D2-04: a pre-upgrade marker's floor is bound to the sidecar on disk until it is written down; do
     // that before this apply replaces or evicts the sidecar, so a first apply that switches identity keeps it.
-    fuigo_config::persist_legacy_revision_floor_at(&home);
+    // If the floor cannot be written the apply stops here with the policy untouched (delta review D3-04).
+    fuigo_config::persist_legacy_revision_floor_at(&home)?;
     let identity_changed = crate::config::managed_config_identity_changed_at(
         &home,
         new_principal,
@@ -549,7 +570,10 @@ struct StagedRefresh {
     parked_at: u64,
 }
 
-#[allow(clippy::disallowed_methods, reason = "managed config under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "managed config under FUIGO_HOME; not inside a session folder"
+)]
 fn stage_refresh(
     home: &std::path::Path,
     body: &ManagedConfigResponse,
@@ -576,7 +600,10 @@ fn stage_refresh(
 }
 
 /// Bounded local I/O, re-verified through [`apply_fetched`]; an unverifying build deletes it unread.
-#[allow(clippy::disallowed_methods, reason = "managed config under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "managed config under FUIGO_HOME; not inside a session folder"
+)]
 pub(super) fn apply_staged_managed_config() {
     let home = crate::util::fuigo_home::fuigo_home();
     let path = staged_refresh_path(&home);

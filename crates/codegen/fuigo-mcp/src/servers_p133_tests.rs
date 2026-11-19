@@ -9,11 +9,17 @@ const KEY: &str = "p133-header-FAKE-0001";
 fn a_session_id_cannot_complete_a_key_reference_in_a_header() {
     // `${${session_id}}` holds no reference; with the id `FUIGO_API_KEY` the substitution would spell `${FUIGO_API_KEY}`.
     let headers = http_headers_for_server(
-        vec![acp::HttpHeader::new("Authorization", "Bearer ${${session_id}}")],
+        vec![acp::HttpHeader::new(
+            "Authorization",
+            "Bearer ${${session_id}}",
+        )],
         Some("FUIGO_API_KEY"),
         Some(KEY),
     );
-    assert!(!headers[0].1.contains(KEY), "the saved key was bound to a reference the session id completed: {headers:?}");
+    assert!(
+        !headers[0].1.contains(KEY),
+        "the saved key was bound to a reference the session id completed: {headers:?}"
+    );
 }
 
 #[test]
@@ -35,11 +41,30 @@ fn a_configured_reference_is_still_bound_and_the_session_id_still_substituted() 
 /// all the default is sent, as in 1.0.20.
 #[test]
 fn a_defaulted_reference_in_a_header_sends_the_saved_key() {
-    assert!(std::env::var_os("FUIGO_API_KEY").is_none(), "this test needs FUIGO_API_KEY unexported");
+    assert!(
+        std::env::var_os("FUIGO_API_KEY").is_none(),
+        "this test needs FUIGO_API_KEY unexported"
+    );
     let loaded = fuigo_config::expand_env_vars_in_string("Bearer ${FUIGO_API_KEY:-dflt}");
-    assert_eq!(fuigo_config::expand_env_vars_in_string(&loaded), loaded, "a second load pass changed it");
-    let with_key = http_headers_for_server(vec![acp::HttpHeader::new("Authorization", &loaded)], None, Some(KEY));
-    assert_eq!(with_key[0].1, format!("Bearer {KEY}"), "loaded as {loaded:?}");
-    let without = http_headers_for_server(vec![acp::HttpHeader::new("Authorization", &loaded)], None, None);
+    assert_eq!(
+        fuigo_config::expand_env_vars_in_string(&loaded),
+        loaded,
+        "a second load pass changed it"
+    );
+    let with_key = http_headers_for_server(
+        vec![acp::HttpHeader::new("Authorization", &loaded)],
+        None,
+        Some(KEY),
+    );
+    assert_eq!(
+        with_key[0].1,
+        format!("Bearer {KEY}"),
+        "loaded as {loaded:?}"
+    );
+    let without = http_headers_for_server(
+        vec![acp::HttpHeader::new("Authorization", &loaded)],
+        None,
+        None,
+    );
     assert_eq!(without[0].1, "Bearer dflt");
 }

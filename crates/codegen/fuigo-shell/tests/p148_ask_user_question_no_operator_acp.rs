@@ -23,7 +23,8 @@ use fuigo_test_support::sse::{
 use fuigo_test_support::{InferenceEndpoint, InferenceRequestMatcher, ScriptedResponse};
 use serde_json::{Value, json};
 
-const NO_OPERATOR: &str = "No user is available to answer questions in this non-interactive session.";
+const NO_OPERATOR: &str =
+    "No user is available to answer questions in this non-interactive session.";
 
 /// The embedder: silent for the questions of `silent_sessions`, method-not-found for every other one.
 #[derive(Clone, Default)]
@@ -38,7 +39,9 @@ impl acp::Client for Embedder {
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        Ok(acp::RequestPermissionResponse::new(acp_harness::allow_once(&args)))
+        Ok(acp::RequestPermissionResponse::new(
+            acp_harness::allow_once(&args),
+        ))
     }
     async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
         Ok(())
@@ -90,8 +93,11 @@ async fn session_asking(conn: &acp::ClientSideConnection, cwd: &std::path::Path)
     tokio::time::timeout(
         acp_harness::RPC_TIMEOUT,
         conn.new_session(
-            acp::NewSessionRequest::new(cwd.to_path_buf())
-                .meta(json!({ "modelId": "test-model", "askUserQuestion": true }).as_object().cloned()),
+            acp::NewSessionRequest::new(cwd.to_path_buf()).meta(
+                json!({ "modelId": "test-model", "askUserQuestion": true })
+                    .as_object()
+                    .cloned(),
+            ),
         ),
     )
     .await
@@ -133,7 +139,10 @@ fn a_non_interactive_embedder_that_is_silent_or_missing_gets_the_no_operator_rep
 
         // Silent embedder.
         let silent = session_asking(&conn, &cwd).await;
-        embedder.silent_sessions.borrow_mut().push(silent.0.to_string());
+        embedder
+            .silent_sessions
+            .borrow_mut()
+            .push(silent.0.to_string());
         let steps = [
             mock.expect_response("silent-ask", fg(), ask_call("call_silent")),
             mock.expect_response("silent-done", fg(), text("silent done")),
@@ -212,7 +221,10 @@ fn a_non_interactive_embedder_that_is_silent_or_missing_gets_the_no_operator_rep
         .await
         .expect("session/load timed out")
         .expect("session/load failed");
-        embedder.silent_sessions.borrow_mut().push(attached.0.to_string());
+        embedder
+            .silent_sessions
+            .borrow_mut()
+            .push(attached.0.to_string());
         let steps = [
             mock.expect_response("attached-ask", fg(), ask_call("call_attached")),
             mock.expect_response("attached-done", fg(), text("attached done")),

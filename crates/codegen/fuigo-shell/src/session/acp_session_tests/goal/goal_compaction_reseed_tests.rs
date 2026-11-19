@@ -1,12 +1,12 @@
 use super::support::*;
 use super::*;
 use crate::session::helpers::compaction_context::{CompactionInputs, CompactionStateContext};
-use std::sync::Arc as StdArc;
-use tempfile::TempDir;
 use fuigo_chat_state::compaction_utils::{
     CompactedHistoryInput, build_compacted_history, wrap_user_query,
 };
 use fuigo_sampling_types::{ConversationItem, SyntheticReason};
+use std::sync::Arc as StdArc;
+use tempfile::TempDir;
 
 const DEVICE_TEST_OBJECTIVE: &str = "ssh to root@example.test and test that a genbw meter profile does NOT produce aggregate meter data on dnp3 or modbus";
 const STALE_CODE_REVIEW: &str = "please review the PR for config-json-go";
@@ -77,7 +77,10 @@ async fn compaction_goal_section_is_continuation_not_create_style_rules() {
         .await;
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn summarizer_user_context_pins_objective() {
     let local = tokio::task::LocalSet::new();
@@ -86,9 +89,17 @@ async fn summarizer_user_context_pins_objective() {
             let (actor, tmp) = make_goal_actor().await;
             start_device_test_goal(&actor);
             let plan = tmp.path().join("plan.md");
-            std::fs::write(&plan, "- [x] connect to the device\n- [ ] run the genbw profile check\n")
-                .unwrap();
-            actor.goal_tracker.lock().snapshot_mut().expect("goal").plan_file = Some(plan);
+            std::fs::write(
+                &plan,
+                "- [x] connect to the device\n- [ ] run the genbw profile check\n",
+            )
+            .unwrap();
+            actor
+                .goal_tracker
+                .lock()
+                .snapshot_mut()
+                .expect("goal")
+                .plan_file = Some(plan);
 
             let ctx = actor
                 .goal_compaction_user_context()
@@ -96,7 +107,8 @@ async fn summarizer_user_context_pins_objective() {
             assert!(ctx.contains(DEVICE_TEST_OBJECTIVE), "{ctx}");
             assert!(ctx.contains("Do not restart this goal"), "{ctx}");
             assert!(
-                ctx.contains("Next step: run the genbw profile check") && !ctx.contains("connect to the device"),
+                ctx.contains("Next step: run the genbw profile check")
+                    && !ctx.contains("connect to the device"),
                 "the summarizer is told the plan's next unchecked step:\n{ctx}"
             );
         })
@@ -345,7 +357,10 @@ async fn compact_reseed_skips_turn_end_drain_and_round_count() {
         .await;
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn make_goal_actor() -> (StdArc<SessionActor>, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let (gateway_tx, _gateway_rx) =
@@ -454,7 +469,10 @@ async fn spawn_summary_server() -> (String, StdArc<std::sync::Mutex<Vec<String>>
 /// The compaction run itself, not its parts: an active goal reaches the summarizer request (beside the user's own
 /// `/compact` focus), the compacted `<user_query>`, the post-compact system reminder, and the history's last cue.
 /// Each stage is wired separately in `run_compact_inner`, so a part tested alone does not prove the run uses it.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn a_compaction_run_carries_the_active_goal_through_every_stage() {
     if fuigo_test_support::env::rerun_in_own_process() {

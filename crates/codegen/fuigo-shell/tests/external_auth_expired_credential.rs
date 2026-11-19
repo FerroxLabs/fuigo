@@ -116,7 +116,10 @@ impl acp::Client for QuietClient {
 }
 
 /// Written under the legacy scope key, which `lookup_auth` falls back to for any configured scope.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn seed_credential(fuigo_home: &Path, expires_at: chrono::DateTime<chrono::Utc>) {
     let auth = json!({
         "https://accounts.x.ai/sign-in": {
@@ -138,7 +141,10 @@ fn seed_credential(fuigo_home: &Path, expires_at: chrono::DateTime<chrono::Utc>)
 
 /// A provider that can only sign the user in interactively.
 /// It prints its SSO link to stderr and exits non-zero, like a real device-code helper with no human at the keyboard.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn write_interactive_only_provider(fuigo_home: &Path) -> String {
     use std::os::unix::fs::PermissionsExt;
 
@@ -255,7 +261,10 @@ fn ambient_mint_endpoints() -> Vec<String> {
         .collect()
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn expired_external_credential_routes_to_the_provider_login_flow() {
     fuigo_extra_ca::ensure_default_crypto_provider();
@@ -452,7 +461,10 @@ mod session_front {
 
     /// Start the front for `backend_url` and set the process proxy/CA variables. Must run before any HTTP
     /// client is built. Returns the configured-origin URL and the CA dir (keep it alive).
-    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+    )]
     pub(super) async fn start(backend_url: &str) -> (String, tempfile::TempDir) {
         use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
         let ca_key = KeyPair::generate().unwrap();
@@ -514,7 +526,11 @@ mod session_front {
                         }
                         head.push(byte[0]);
                     }
-                    let line = String::from_utf8_lossy(&head).lines().next().unwrap_or("").to_string();
+                    let line = String::from_utf8_lossy(&head)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
                     if !(line.starts_with(&format!("CONNECT {HOST}:443"))) {
                         let _ = socket
                             .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -528,12 +544,19 @@ mod session_front {
                     {
                         return;
                     }
-                    let Ok(mut tls) = acceptor.accept(socket).await else { return };
-                    let Ok(mut upstream) = tokio::net::TcpStream::connect(backend).await else { return };
+                    let Ok(mut tls) = acceptor.accept(socket).await else {
+                        return;
+                    };
+                    let Ok(mut upstream) = tokio::net::TcpStream::connect(backend).await else {
+                        return;
+                    };
                     let _ = tokio::io::copy_bidirectional(&mut tls, &mut upstream).await;
                 });
             }
         });
-        (format!("https://{HOST}{}", parsed.path().trim_end_matches('/')), ca_dir)
+        (
+            format!("https://{HOST}{}", parsed.path().trim_end_matches('/')),
+            ca_dir,
+        )
     }
 }

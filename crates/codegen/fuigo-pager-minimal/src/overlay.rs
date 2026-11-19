@@ -438,9 +438,7 @@ pub fn modal_height(modal: Modal, agent: &mut AgentView, screen_h: u16, content_
             .permission_queue
             .front()
             .map(|p| {
-                fuigo_pager::views::permission_view::permission_view_height(
-                    p, screen_h, content_w,
-                )
+                fuigo_pager::views::permission_view::permission_view_height(p, screen_h, content_w)
             })
             .unwrap_or(0),
         Modal::Question => {
@@ -460,10 +458,8 @@ pub fn modal_height(modal: Modal, agent: &mut AgentView, screen_h: u16, content_
             };
             minimal_api::question_view_mut(agent)
                 .map(|qv| {
-                    fuigo_pager::views::question_view::question_view_height(
-                        qv, screen_h, content_w,
-                    )
-                    .saturating_add(editor_extra)
+                    fuigo_pager::views::question_view::question_view_height(qv, screen_h, content_w)
+                        .saturating_add(editor_extra)
                 })
                 .unwrap_or(0)
         }

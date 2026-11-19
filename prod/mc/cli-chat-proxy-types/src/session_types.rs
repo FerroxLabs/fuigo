@@ -142,14 +142,21 @@ mod p70a_redacted_debug {
     #[test]
     fn download_session_response_debug_redacts_the_download_url() {
         let response = DownloadSessionResponse {
-            download_url: "https://storage.p70.invalid/o?X-Goog-Signature=p70ds-FAKE-3e4f5a6b".into(),
+            download_url: "https://storage.p70.invalid/o?X-Goog-Signature=p70ds-FAKE-3e4f5a6b"
+                .into(),
             expires_in_seconds: 60,
             file: "p70.jsonl".into(),
             turn: 1,
         };
         for out in [format!("{response:?}"), format!("{response:#?}")] {
-            assert!(out.contains("<redacted>") && out.contains("p70.jsonl"), "control: {out}");
-            assert!(!out.contains("p70ds-FAKE") && !out.contains("storage.p70.invalid"), "Debug holds the URL: {out}");
+            assert!(
+                out.contains("<redacted>") && out.contains("p70.jsonl"),
+                "control: {out}"
+            );
+            assert!(
+                !out.contains("p70ds-FAKE") && !out.contains("storage.p70.invalid"),
+                "Debug holds the URL: {out}"
+            );
         }
     }
 }

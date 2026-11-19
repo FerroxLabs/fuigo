@@ -121,7 +121,9 @@ impl fuigo_tool_runtime::Tool for MonitorTool {
             .run_background(crate::computer::types::TerminalRunRequest {
                 request_cwd: None,
                 approved_without_grant: crate::sandbox_launch::ApprovedWithoutGrant::of(
-                    ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>().as_deref(),
+                    ctx.extensions
+                        .get::<crate::sandbox_launch::ApprovedWithoutGrant>()
+                        .as_deref(),
                 ),
                 command: input.command.clone(),
                 working_directory: cwd.clone(),

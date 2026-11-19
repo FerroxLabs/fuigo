@@ -95,11 +95,16 @@ pub(crate) struct RouteMeta {
 
 /// The ranked routes in a model's `meta`. Empty for a model the agent did not rank.
 pub(crate) fn routes_of(info: &acp::ModelInfo) -> Vec<RouteMeta> {
-    let Some(list) = info.meta.as_ref().and_then(|m| m.get("routes")).and_then(|v| v.as_array())
+    let Some(list) = info
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("routes"))
+        .and_then(|v| v.as_array())
     else {
         return Vec::new();
     };
-    let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+    let text =
+        |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
     list.iter()
         .filter_map(|r| {
             Some(RouteMeta {
@@ -116,12 +121,20 @@ pub(crate) fn routes_of(info: &acp::ModelInfo) -> Vec<RouteMeta> {
 
 /// The primary entry's key when this entry is an alternate route to the same model.
 pub(crate) fn alt_route_of(info: &acp::ModelInfo) -> Option<String> {
-    info.meta.as_ref()?.get("altRouteOf")?.as_str().map(str::to_owned)
+    info.meta
+        .as_ref()?
+        .get("altRouteOf")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// What to connect before this model can be used (`meta.connect`), when no route is ready.
 pub(crate) fn connect_hint(info: &acp::ModelInfo) -> Option<String> {
-    info.meta.as_ref()?.get("connect")?.as_str().map(str::to_owned)
+    info.meta
+        .as_ref()?
+        .get("connect")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// A model that some route reaches now: what the welcome "Pick a model:" list shows.
@@ -174,13 +187,20 @@ impl ModelState {
         if let Some(label) = route_label_of(info) {
             return Some(label);
         }
-        let outside = info.meta.as_ref().is_some_and(|m| m.contains_key(OUTSIDE_CATALOG_META_KEY));
+        let outside = info
+            .meta
+            .as_ref()
+            .is_some_and(|m| m.contains_key(OUTSIDE_CATALOG_META_KEY));
         (!outside).then(|| FLUX_ROUTE_LABEL.to_owned())
     }
 
     /// The entry of `name` (a display name or id) that uses the route typed as `word` (`flux`, `grok`, ...).
     /// `Err` lists the route words the model has, so the error can say what is available.
-    pub(crate) fn resolve_route(&self, name: &str, word: &str) -> Result<acp::ModelId, Vec<String>> {
+    pub(crate) fn resolve_route(
+        &self,
+        name: &str,
+        word: &str,
+    ) -> Result<acp::ModelId, Vec<String>> {
         let Some(primary) = self.resolve_by_name_or_id(name) else {
             return Err(Vec::new());
         };
@@ -191,7 +211,11 @@ impl ModelState {
             .and_then(alt_route_of)
             .map(acp::ModelId::new)
             .unwrap_or(primary);
-        let routes = self.available.get(&primary).map(routes_of).unwrap_or_default();
+        let routes = self
+            .available
+            .get(&primary)
+            .map(routes_of)
+            .unwrap_or_default();
         let word = word.trim().to_ascii_lowercase();
         match routes.iter().find(|r| r.word == word) {
             Some(r) => Ok(acp::ModelId::new(r.key.clone())),
@@ -234,7 +258,9 @@ impl ModelState {
     /// One line for the welcome screen when Fuigo started on a route other than Flux Router: the model,
     /// the route, and how to change it. Nothing is routed silently.
     pub fn route_note(&self) -> Option<String> {
-        let route = self.current_route_label().filter(|r| r != FLUX_ROUTE_LABEL)?;
+        let route = self
+            .current_route_label()
+            .filter(|r| r != FLUX_ROUTE_LABEL)?;
         let name = self.current_model_name()?;
         Some(format!("Using {name} \u{b7} {route}. /model changes it."))
     }
@@ -833,9 +859,10 @@ mod tests {
         );
         let id = acp::ModelId::new(Arc::from(id));
         let mut state = ModelState::default();
-        state
-            .available
-            .insert(id.clone(), acp::ModelInfo::new(id.clone(), "Grok 4.7").meta(Some(meta)));
+        state.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Grok 4.7").meta(Some(meta)),
+        );
         state.current = Some(id);
         state
     }
@@ -844,13 +871,21 @@ mod tests {
     fn the_current_route_comes_from_the_models_meta() {
         let state = with_route("xai/grok-4.7", "Grok subscription");
         assert_eq!(state.current_model_name().as_deref(), Some("Grok 4.7"));
-        assert_eq!(state.current_route_label().as_deref(), Some("Grok subscription"));
+        assert_eq!(
+            state.current_route_label().as_deref(),
+            Some("Grok subscription")
+        );
     }
 
     #[test]
     fn the_route_note_names_model_and_route_unless_the_route_is_flux() {
-        let note = with_route("xai/grok-4.7", "Grok subscription").route_note().expect("a note");
-        assert_eq!(note, "Using Grok 4.7 \u{b7} Grok subscription. /model changes it.");
+        let note = with_route("xai/grok-4.7", "Grok subscription")
+            .route_note()
+            .expect("a note");
+        assert_eq!(
+            note,
+            "Using Grok 4.7 \u{b7} Grok subscription. /model changes it."
+        );
         assert_eq!(with_route("grok-4.7", "Flux Router").route_note(), None);
         assert_eq!(ModelState::default().route_note(), None);
     }
@@ -862,10 +897,16 @@ mod tests {
     fn a_listed_model_with_no_route_is_on_flux_router() {
         let mut state = ModelState::default();
         let id = acp::ModelId::new(Arc::from("m"));
-        state.available.insert(id.clone(), acp::ModelInfo::new(id.clone(), "M"));
+        state
+            .available
+            .insert(id.clone(), acp::ModelInfo::new(id.clone(), "M"));
         state.current = Some(id);
         assert_eq!(state.current_route_label().as_deref(), Some("Flux Router"));
-        assert_eq!(state.route_note(), None, "Flux Router is the default: no note");
+        assert_eq!(
+            state.route_note(),
+            None,
+            "Flux Router is the default: no note"
+        );
         state.current = Some(acp::ModelId::new(Arc::from("not-listed")));
         assert_eq!(state.current_route_label(), None);
     }

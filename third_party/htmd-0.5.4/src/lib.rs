@@ -156,7 +156,12 @@ impl HtmlToMarkdown {
             if nodes > max_nodes || depth > max_depth {
                 return true;
             }
-            stack.extend(node.children.borrow().iter().map(|child| (Rc::clone(child), depth + 1)));
+            stack.extend(
+                node.children
+                    .borrow()
+                    .iter()
+                    .map(|child| (Rc::clone(child), depth + 1)),
+            );
         }
         false
     }
@@ -246,7 +251,9 @@ mod fuigo_tree_bound_tests {
     #[test]
     fn tree_exceeds_counts_depth_and_nodes() {
         let converter = HtmlToMarkdown::new();
-        let tree = converter.html_to_tree(&format!("{}x{}", "<div>".repeat(30), "</div>".repeat(30))).unwrap();
+        let tree = converter
+            .html_to_tree(&format!("{}x{}", "<div>".repeat(30), "</div>".repeat(30)))
+            .unwrap();
         // html, body and 30 divs, then the text node.
         assert!(!HtmlToMarkdown::tree_exceeds(&tree, 40, 1000));
         assert!(HtmlToMarkdown::tree_exceeds(&tree, 20, 1000));

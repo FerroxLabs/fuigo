@@ -75,8 +75,11 @@ fn run(args: &[&str], ws_url_env: Option<&str>) -> (Option<i32>, String) {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let stderr = text_rx.recv_timeout(Duration::from_secs(10)).unwrap_or_default();
-    let status = status.unwrap_or_else(|| panic!("fuigo {args:?} did not exit within 60s; stderr:\n{stderr}"));
+    let stderr = text_rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_default();
+    let status = status
+        .unwrap_or_else(|| panic!("fuigo {args:?} did not exit within 60s; stderr:\n{stderr}"));
     (status.code(), stderr)
 }
 
@@ -89,13 +92,19 @@ fn assert_refused(args: &[&str], ws_url_env: Option<&str>) {
         "[relay]",
         "FUIGO_TRUSTED_RELAY_ORIGINS=https://relay.invalid",
     ] {
-        assert!(stderr.contains(needle), "fuigo {args:?}: missing {needle:?} in stderr:\n{stderr}");
+        assert!(
+            stderr.contains(needle),
+            "fuigo {args:?}: missing {needle:?} in stderr:\n{stderr}"
+        );
     }
 }
 
 #[test]
 fn headless_through_a_leader_refuses_a_relay_without_an_opt_in() {
-    assert_refused(&["--no-auto-update", "agent", "--leader", "headless"], Some(RELAY_URL));
+    assert_refused(
+        &["--no-auto-update", "agent", "--leader", "headless"],
+        Some(RELAY_URL),
+    );
 }
 
 /// The relay named with `--fuigo-ws-url` is the one checked (and the one the leader is reached for), not the
@@ -103,12 +112,22 @@ fn headless_through_a_leader_refuses_a_relay_without_an_opt_in() {
 #[test]
 fn headless_through_a_leader_checks_the_relay_named_on_the_command_line() {
     assert_refused(
-        &["--no-auto-update", "agent", "--leader", "headless", "--fuigo-ws-url", RELAY_URL],
+        &[
+            "--no-auto-update",
+            "agent",
+            "--leader",
+            "headless",
+            "--fuigo-ws-url",
+            RELAY_URL,
+        ],
         None,
     );
 }
 
 #[test]
 fn headless_without_a_leader_refuses_a_relay_without_an_opt_in() {
-    assert_refused(&["--no-auto-update", "agent", "--no-leader", "headless"], Some(RELAY_URL));
+    assert_refused(
+        &["--no-auto-update", "agent", "--no-leader", "headless"],
+        Some(RELAY_URL),
+    );
 }

@@ -1379,7 +1379,10 @@ async fn a_deny_row_whose_child_became_a_symlink_still_denies_at_load() {
     let live = store.live();
     assert!(
         live.iter().any(|g| g.decision == GrantDecision::Deny
-            && g.subject == GrantSubject::FsWriteRoot { root: child.clone() }),
+            && g.subject
+                == GrantSubject::FsWriteRoot {
+                    root: child.clone()
+                }),
         "the deny spelling is kept: {live:?}"
     );
     assert!(

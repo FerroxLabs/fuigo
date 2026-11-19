@@ -219,8 +219,13 @@ pub(crate) async fn dispatch(
         "subscription auth must be reattached after loading config",
     ))?;
     let bearer = if let Some(remaining) = crate::request_accounting::remaining_time()? {
-        tokio::time::timeout(remaining, resolver.resolve()).await.map_err(|_|
-            SamplingError::InvalidConfiguration("execution deadline exhausted during subscription authentication"))??
+        tokio::time::timeout(remaining, resolver.resolve())
+            .await
+            .map_err(|_| {
+                SamplingError::InvalidConfiguration(
+                    "execution deadline exhausted during subscription authentication",
+                )
+            })??
     } else {
         resolver.resolve().await?
     };
@@ -253,7 +258,7 @@ pub(crate) async fn dispatch(
     // The resolver awaits above may have outlasted a park: re-check right before the send.
     if let Some(gate) = gate {
         gate.wait_open().await;
-            gate.check_open()?;
+        gate.check_open()?;
     }
     admitted.disarm();
     crate::request_accounting::dispatched();
@@ -263,11 +268,15 @@ pub(crate) async fn dispatch(
     match classify(response, flux_routed).await {
         Err(mut error) => {
             error.assert_boundary_classified();
-            if gate.is_some_and(|g|g.on_refusal(&error)) && !error.is_terminal_refusal()
-                && let SamplingError::Api {should_retry,..}=&mut error { *should_retry=Some(false); }
+            if gate.is_some_and(|g| g.on_refusal(&error))
+                && !error.is_terminal_refusal()
+                && let SamplingError::Api { should_retry, .. } = &mut error
+            {
+                *should_retry = Some(false);
+            }
             Err(error)
-        },
-        ok=>ok,
+        }
+        ok => ok,
     }
 }
 /// Bytes of a non-2xx subscription error body read before the rest is discarded.
@@ -305,8 +314,8 @@ async fn classify(mut response: Response, flux_routed: bool) -> Result<Response>
         return Ok(response);
     }
     // Read the headers before the body: `chunk()` borrows the response mutably.
-    let mut upstream_headers=crate::client::upstream_headers(response.headers());
-    upstream_headers.flux_routed=flux_routed;
+    let mut upstream_headers = crate::client::upstream_headers(response.headers());
+    upstream_headers.flux_routed = flux_routed;
     let retry_after_secs = crate::client::extract_retry_after(status, response.headers());
     let should_retry = crate::client::extract_should_retry(response.headers());
     let model_metadata = crate::client::extract_model_metadata(response.headers());
@@ -323,7 +332,7 @@ async fn classify(mut response: Response, flux_routed: bool) -> Result<Response>
         error_code: fuigo_sampling_types::parse_error_code(&body),
         upstream_state: fuigo_sampling_types::error::parse_error_state(&body),
         upstream_type: fuigo_sampling_types::error::parse_error_type(&body),
-        upstream_details: upstream_headers.with_body(status.as_u16(),&body),
+        upstream_details: upstream_headers.with_body(status.as_u16(), &body),
     })
 }
 

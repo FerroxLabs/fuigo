@@ -80,7 +80,10 @@ impl std::fmt::Debug for Config {
             .field("harness", harness)
             .field("skills", skills)
             .field("compat", compat)
-            .field("management_api_key", &management_api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "management_api_key",
+                &management_api_key.as_ref().map(|_| "<redacted>"),
+            )
             .field("permission", permission)
             .field("diagnostics", diagnostics)
             .field("session", session)
@@ -328,7 +331,9 @@ pub(crate) fn load_mcp_servers_with_provenance(
 
 /// Resolve setup, expand strings and convert each merged definition, with whether it is trusted (not marked
 /// `untrusted_source`).
-fn materialize_merged_mcp_configs(servers: IndexMap<String, McpServerConfig>) -> Vec<(acp::McpServer, bool)> {
+fn materialize_merged_mcp_configs(
+    servers: IndexMap<String, McpServerConfig>,
+) -> Vec<(acp::McpServer, bool)> {
     let preferences = load_mcp_preferences().file();
     let sub = &crate::config::expand_env_vars_in_string;
     servers
@@ -344,7 +349,9 @@ fn materialize_merged_mcp_configs(servers: IndexMap<String, McpServerConfig>) ->
             };
             config.expand_strings(sub);
             let trusted = !config.untrusted_source;
-            config.to_acp_mcp_server(name).map(|server| (server, trusted))
+            config
+                .to_acp_mcp_server(name)
+                .map(|server| (server, trusted))
         })
         .collect()
 }
@@ -459,13 +466,23 @@ pub(crate) fn toml_mcp_server_origins(
         .unwrap_or_else(|_| TomlValue::Table(toml::map::Map::new()));
     let user_config = fuigo_tools::util::fuigo_home::fuigo_home().join("config.toml");
     for name in parse_mcp_servers_from_toml(&global_config).into_keys() {
-        origins.insert(name, ConfigSource::ConfigToml { path: user_config.clone() });
+        origins.insert(
+            name,
+            ConfigSource::ConfigToml {
+                path: user_config.clone(),
+            },
+        );
     }
     // `find_project_configs` is repo-root-first, so a nearer file overwrites.
     for config_path in crate::config::find_project_configs(cwd) {
         if let Ok(root) = fuigo_config::load_project_config_file(&config_path) {
             for name in parse_mcp_servers_from_toml(&root).into_keys() {
-                origins.insert(name, ConfigSource::ConfigToml { path: config_path.clone() });
+                origins.insert(
+                    name,
+                    ConfigSource::ConfigToml {
+                        path: config_path.clone(),
+                    },
+                );
             }
         }
     }
@@ -745,7 +762,6 @@ pub(crate) fn collect_mcp_setup_configs(
 
 pub const MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY: &str = "__managed_gateway_connectors";
 
-
 /// The current table in `current` (the bytes of `path` an edit was handed),
 /// for a writer that will replace the whole file.
 ///
@@ -838,7 +854,13 @@ pub async fn save_mcp_server_enabled_in(
         let preferences = load_mcp_preferences().file();
         load_all_mcp_configs(cwd)
             .get(server_name)
-            .and_then(|config| campaign_stdio_fingerprint(&setup_resolved_for_approval(server_name, config, &preferences)))
+            .and_then(|config| {
+                campaign_stdio_fingerprint(&setup_resolved_for_approval(
+                    server_name,
+                    config,
+                    &preferences,
+                ))
+            })
     } else {
         None
     };
@@ -1428,7 +1450,10 @@ pub(crate) fn enforce_bearer_file_provenance(
     if config.bearer_token_file().is_none() || config.untrusted_source {
         return;
     }
-    let owned = user_servers.get_or_insert_with(user_layer_bearer_servers).get(name).is_some_and(|user| user == raw);
+    let owned = user_servers
+        .get_or_insert_with(user_layer_bearer_servers)
+        .get(name)
+        .is_some_and(|user| user == raw);
     if !owned {
         config.drop_bearer_token_file_changed(name);
     }
@@ -1455,7 +1480,8 @@ pub use fuigo_workspace::project_config::{
 /// inside: the git root of `cwd`, or `cwd` outside a repository, pinned (resolved once) when the load starts. `None`
 /// when that folder cannot be resolved: nothing project-scoped loads.
 pub(crate) fn project_mcp_root(cwd: &std::path::Path) -> Option<fuigo_dirs::contained::PinnedRoot> {
-    let root = fuigo_workspace::session::git::find_git_root_from_path(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let root = fuigo_workspace::session::git::find_git_root_from_path(cwd)
+        .unwrap_or_else(|_| cwd.to_path_buf());
     fuigo_dirs::contained::PinnedRoot::pin(&root).ok()
 }
 
@@ -1468,7 +1494,11 @@ pub(crate) fn load_mcp_json_file(
     if !path.is_file() {
         return vec![];
     }
-    let Some(value) = read_mcp_json_in(path, root, fuigo_config::key_naming::source_may_name_saved_key(path)) else {
+    let Some(value) = read_mcp_json_in(
+        path,
+        root,
+        fuigo_config::key_naming::source_may_name_saved_key(path),
+    ) else {
         return vec![];
     };
     let label = path.display().to_string();
@@ -1643,7 +1673,10 @@ pub(crate) fn load_claude_json_mcp_servers_as_configs_unfiltered(
 /// Used by the `/import-claude` scanner, which stores the two in different scopes (audit S7-F11).
 pub(crate) fn load_claude_json_mcp_servers_split_unfiltered(
     cwd: &std::path::Path,
-) -> (IndexMap<String, McpServerConfig>, IndexMap<String, McpServerConfig>) {
+) -> (
+    IndexMap<String, McpServerConfig>,
+    IndexMap<String, McpServerConfig>,
+) {
     let Some(home) = fuigo_dirs::home_dir() else {
         return (IndexMap::new(), IndexMap::new());
     };
@@ -1653,7 +1686,10 @@ pub(crate) fn load_claude_json_mcp_servers_split_unfiltered(
 fn split_claude_json_mcp_servers_from(
     claude_json_path: &std::path::Path,
     cwd: &std::path::Path,
-) -> (IndexMap<String, McpServerConfig>, IndexMap<String, McpServerConfig>) {
+) -> (
+    IndexMap<String, McpServerConfig>,
+    IndexMap<String, McpServerConfig>,
+) {
     let Ok(content) = std::fs::read_to_string(claude_json_path) else {
         return (IndexMap::new(), IndexMap::new());
     };
@@ -1917,12 +1953,18 @@ fn claude_json_mcp_from_value(value: &serde_json::Value) -> ClaudeJsonMcp {
 
 /// Returns `None` on I/O or top-level parse errors (logged); individual bad `mcpServers` entries are skipped, not fatal.
 pub(crate) fn read_mcp_json(path: &std::path::Path) -> Option<McpConfig> {
-    read_mcp_json_as(path, fuigo_config::key_naming::source_may_name_saved_key(path))
+    read_mcp_json_as(
+        path,
+        fuigo_config::key_naming::source_may_name_saved_key(path),
+    )
 }
 
 /// [`read_mcp_json`] with the tier decided by the caller: a plugin's MCP file may not name the saved key wherever the
 /// plugin sits on disk (`--plugin-dir` under `$FUIGO_HOME`, say).
-pub(crate) fn read_mcp_json_as(path: &std::path::Path, may_name_saved_key: bool) -> Option<McpConfig> {
+pub(crate) fn read_mcp_json_as(
+    path: &std::path::Path,
+    may_name_saved_key: bool,
+) -> Option<McpConfig> {
     read_mcp_json_in(path, None, may_name_saved_key)
 }
 
@@ -1957,7 +1999,8 @@ pub(crate) fn read_mcp_json_in(
         .ok()?;
     // P118 (backlog row P103): a project `.mcp.json` or a plugin's file may not name the saved API key.
     if !may_name_saved_key {
-        let refused = fuigo_config::key_naming::refuse_json_source(&mut value, &path.display().to_string());
+        let refused =
+            fuigo_config::key_naming::refuse_json_source(&mut value, &path.display().to_string());
         fuigo_config::key_naming::report_refusals(&refused);
     }
     Some(mcp_config_from_json_value(&value))
@@ -2022,7 +2065,9 @@ pub fn disabled_mcp_server_names(cwd: &std::path::Path) -> std::collections::Has
     let preferences = load_mcp_preferences().file();
     let mut disabled: std::collections::HashSet<String> = load_all_mcp_configs(cwd)
         .into_iter()
-        .filter(|(name, cfg)| !cfg.enabled || !campaign_server_approved(name, cfg, &approvals, &preferences))
+        .filter(|(name, cfg)| {
+            !cfg.enabled || !campaign_server_approved(name, cfg, &approvals, &preferences)
+        })
         .map(|(name, _)| name)
         .collect();
 
@@ -2058,7 +2103,10 @@ pub(crate) fn campaign_stdio_fingerprint(config: &McpServerConfig) -> Option<Str
     if !config.campaign_source {
         return None;
     }
-    let McpServerTransportConfig::Stdio { command, args, cwd, .. } = &config.transport else {
+    let McpServerTransportConfig::Stdio {
+        command, args, cwd, ..
+    } = &config.transport
+    else {
         return None;
     };
     let mut hasher = sha2::Sha256::new();
@@ -2086,7 +2134,11 @@ pub(crate) fn campaign_stdio_fingerprint(config: &McpServerConfig) -> Option<Str
 /// choice (`command = "{{program}}"` names a program only once resolved). Approval is recorded, checked and shown
 /// against this, so a campaign that changes only a setup mapping needs approval again. A definition whose setup does
 /// not resolve does not start, and is judged as written.
-fn setup_resolved_for_approval(name: &str, config: &McpServerConfig, preferences: &McpPreferencesFile) -> McpServerConfig {
+fn setup_resolved_for_approval(
+    name: &str,
+    config: &McpServerConfig,
+    preferences: &McpPreferencesFile,
+) -> McpServerConfig {
     match config.resolve_setup(preferences.servers.get(name)) {
         McpSetupResolution::Resolved(resolved) => *resolved,
         McpSetupResolution::Required(_) | McpSetupResolution::Invalid(_) => config.clone(),
@@ -2098,21 +2150,41 @@ fn setup_resolved_for_approval(name: &str, config: &McpServerConfig, preferences
 pub(crate) fn campaign_approval_notice(server_name: &str, cwd: &std::path::Path) -> Option<String> {
     let preferences = load_mcp_preferences().file();
     let config = load_all_mcp_configs(cwd).shift_remove(server_name)?;
-    if campaign_server_approved(server_name, &config, &user_campaign_mcp_approvals(), &preferences) {
+    if campaign_server_approved(
+        server_name,
+        &config,
+        &user_campaign_mcp_approvals(),
+        &preferences,
+    ) {
         return None;
     }
     let config = setup_resolved_for_approval(server_name, &config, &preferences);
-    let McpServerTransportConfig::Stdio { command, args, cwd: dir, .. } = &config.transport else {
+    let McpServerTransportConfig::Stdio {
+        command,
+        args,
+        cwd: dir,
+        ..
+    } = &config.transport
+    else {
         return None;
     };
     // Fable delta-2 Low 4: every part is the campaign's own text, so it is cleaned and capped like the other campaign
     // notices; a control sequence or a very long argument cannot hide the program name.
     let tidy = fuigo_config::config_override::tidy_note_text;
-    let program = std::iter::once(command).chain(args).map(String::as_str).collect::<Vec<_>>().join(" ");
+    let program = std::iter::once(command)
+        .chain(args)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
     let program = tidy(&program, 240);
-    let folder = dir.as_deref().map(|d| format!(" in {}", tidy(d, 120))).unwrap_or_default();
+    let folder = dir
+        .as_deref()
+        .map(|d| format!(" in {}", tidy(d, 120)))
+        .unwrap_or_default();
     let name = tidy(server_name, 64);
-    Some(format!("Approved campaign MCP server `{name}` to run: {program}{folder}. Turn it off to withdraw the approval."))
+    Some(format!(
+        "Approved campaign MCP server `{name}` to run: {program}{folder}. Turn it off to withdraw the approval."
+    ))
 }
 
 /// The [`CAMPAIGN_MCP_APPROVALS_KEY`] table of the user's own config.toml (empty when absent or unreadable).
@@ -2120,7 +2192,11 @@ fn user_campaign_mcp_approvals() -> TomlMap<String, TomlValue> {
     std::fs::read_to_string(config_path())
         .ok()
         .and_then(|text| toml::from_str::<TomlValue>(&text).ok())
-        .and_then(|root| root.get(CAMPAIGN_MCP_APPROVALS_KEY).and_then(TomlValue::as_table).cloned())
+        .and_then(|root| {
+            root.get(CAMPAIGN_MCP_APPROVALS_KEY)
+                .and_then(TomlValue::as_table)
+                .cloned()
+        })
         .unwrap_or_default()
 }
 
@@ -2137,7 +2213,11 @@ fn campaign_server_approved(
 }
 
 /// Record (`Some`) or withdraw (`None`) the user's approval of campaign server `server_name` in the user table.
-fn set_campaign_mcp_approval(table: &mut TomlMap<String, TomlValue>, server_name: &str, approval: Option<String>) {
+fn set_campaign_mcp_approval(
+    table: &mut TomlMap<String, TomlValue>,
+    server_name: &str,
+    approval: Option<String>,
+) {
     match approval {
         Some(fingerprint) => {
             let entry = table
@@ -2151,7 +2231,10 @@ fn set_campaign_mcp_approval(table: &mut TomlMap<String, TomlValue>, server_name
             }
         }
         None => {
-            if let Some(approvals) = table.get_mut(CAMPAIGN_MCP_APPROVALS_KEY).and_then(TomlValue::as_table_mut) {
+            if let Some(approvals) = table
+                .get_mut(CAMPAIGN_MCP_APPROVALS_KEY)
+                .and_then(TomlValue::as_table_mut)
+            {
                 approvals.remove(server_name);
                 if approvals.is_empty() {
                     table.remove(CAMPAIGN_MCP_APPROVALS_KEY);
@@ -2378,7 +2461,10 @@ pub(crate) fn session_registry_local_override(root: Option<&TomlValue>) -> Optio
     session_registry_local_override_sourced(root).map(|(v, _)| v)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3282,7 +3368,10 @@ enabled = false
     }
 
     /// Nested project configs both sticky-disable the same server; enable unstick must rewrite cwd-nearest only (not the shadowed ancestor).
-    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+    )]
     #[tokio::test]
     async fn enable_unstick_only_touches_nearest_project_definition() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3411,15 +3500,33 @@ enabled = false
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".cursor")).unwrap();
         git2::Repository::init(&repo).unwrap();
-        std::os::unix::fs::symlink(base.join("outside").join("mcp.json"), repo.join(".mcp.json")).unwrap();
-        std::os::unix::fs::symlink(base.join("outside").join("mcp.json"), repo.join(".cursor").join("mcp.json")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside").join("mcp.json"),
+            repo.join(".mcp.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside").join("mcp.json"),
+            repo.join(".cursor").join("mcp.json"),
+        )
+        .unwrap();
 
         let loaded = load_mcp_json_servers_as_configs_unfiltered(&repo);
-        assert!(!loaded.contains_key("m4-outside"), "linked-out .mcp.json loaded");
+        assert!(
+            !loaded.contains_key("m4-outside"),
+            "linked-out .mcp.json loaded"
+        );
         let cursor = load_cursor_mcp_servers_as_configs(&repo, &CompatConfig::default());
-        assert!(!cursor.contains_key("m4-outside"), "linked-out .cursor/mcp.json loaded");
+        assert!(
+            !cursor.contains_key("m4-outside"),
+            "linked-out .cursor/mcp.json loaded"
+        );
 
-        std::fs::write(repo.join("shared.json"), r#"{"mcpServers":{"m4-inside":{"command":"x"}}}"#).unwrap();
+        std::fs::write(
+            repo.join("shared.json"),
+            r#"{"mcpServers":{"m4-inside":{"command":"x"}}}"#,
+        )
+        .unwrap();
         std::fs::remove_file(repo.join(".mcp.json")).unwrap();
         std::os::unix::fs::symlink(repo.join("shared.json"), repo.join(".mcp.json")).unwrap();
         assert!(load_mcp_json_servers_as_configs_unfiltered(&repo).contains_key("m4-inside"));
@@ -3448,26 +3555,52 @@ enabled = false
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".cursor")).unwrap();
         git2::Repository::init(&repo).unwrap();
-        std::os::unix::fs::symlink(base.join("outside").join("mcp.json"), repo.join(".mcp.json")).unwrap();
-        std::os::unix::fs::symlink(base.join("outside").join("mcp.json"), repo.join(".cursor").join("mcp.json")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside").join("mcp.json"),
+            repo.join(".mcp.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside").join("mcp.json"),
+            repo.join(".cursor").join("mcp.json"),
+        )
+        .unwrap();
 
         assert!(!names(load_mcp_json_servers(&repo)).contains(&"m5-outside".to_string()));
-        assert!(!names(load_cursor_mcp_servers(&repo, &CompatConfig::default())).contains(&"m5-outside".to_string()));
+        assert!(
+            !names(load_cursor_mcp_servers(&repo, &CompatConfig::default()))
+                .contains(&"m5-outside".to_string())
+        );
         assert!(!mcp_json_server_origins(&repo).contains_key("m5-outside"));
-        assert!(!crate::agent::folder_trust::project_scoped_mcp_names(&repo).contains("m5-outside"));
+        assert!(
+            !crate::agent::folder_trust::project_scoped_mcp_names(&repo).contains("m5-outside")
+        );
 
-        std::fs::write(repo.join("shared.json"), r#"{"mcpServers":{"m5-inside":{"command":"x"}}}"#).unwrap();
-        for link in [repo.join(".mcp.json"), repo.join(".cursor").join("mcp.json")] {
+        std::fs::write(
+            repo.join("shared.json"),
+            r#"{"mcpServers":{"m5-inside":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        for link in [
+            repo.join(".mcp.json"),
+            repo.join(".cursor").join("mcp.json"),
+        ] {
             std::fs::remove_file(&link).unwrap();
             std::os::unix::fs::symlink(repo.join("shared.json"), &link).unwrap();
         }
         assert!(names(load_mcp_json_servers(&repo)).contains(&"m5-inside".to_string()));
-        assert!(names(load_cursor_mcp_servers(&repo, &CompatConfig::default())).contains(&"m5-inside".to_string()));
+        assert!(
+            names(load_cursor_mcp_servers(&repo, &CompatConfig::default()))
+                .contains(&"m5-inside".to_string())
+        );
         assert!(mcp_json_server_origins(&repo).contains_key("m5-inside"));
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "mcp_write_tests.rs"]
 mod write_tests;
@@ -3480,7 +3613,10 @@ mod p113_tests;
 #[path = "mcp_c34_tests.rs"]
 mod c34_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "mcp_p118_tests.rs"]
 mod p118_tests;
@@ -3489,12 +3625,18 @@ mod p118_tests;
 #[path = "mcp_campaign_literal_tests.rs"]
 mod campaign_literal_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures write config.toml in a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures write config.toml in a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "mcp_campaign_approval_tests.rs"]
 mod campaign_approval_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "mcp_bearer_file_tests.rs"]
 mod bearer_file_tests;

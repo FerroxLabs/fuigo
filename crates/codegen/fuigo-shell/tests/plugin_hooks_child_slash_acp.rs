@@ -105,7 +105,11 @@ fn user_texts(body: &serde_json::Value) -> Vec<String> {
         match &m["content"] {
             serde_json::Value::String(t) => out.push(t.clone()),
             serde_json::Value::Array(parts) => {
-                out.extend(parts.iter().filter_map(|p| p["text"].as_str().map(str::to_string)));
+                out.extend(
+                    parts
+                        .iter()
+                        .filter_map(|p| p["text"].as_str().map(str::to_string)),
+                );
             }
             _ => {}
         }
@@ -113,7 +117,10 @@ fn user_texts(body: &serde_json::Value) -> Vec<String> {
     out
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_subagents_task_text_cannot_run_hook_commands() {
     run_agent_test(|cwd, mock| async move {
@@ -214,7 +221,10 @@ fn a_subagents_task_text_cannot_run_hook_commands() {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        assert!(persisted, "the second child's model reply never reached a transcript");
+        assert!(
+            persisted,
+            "the second child's model reply never reached a transcript"
+        );
         let replies = reload_replies(&sessions);
         assert!(
             replies.is_empty(),

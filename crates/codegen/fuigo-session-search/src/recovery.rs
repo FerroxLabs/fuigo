@@ -150,7 +150,10 @@ pub(crate) fn heal_unusable(
 
     let lock_path = with_suffix(&effective, ".lock");
     let _lock_file = match fuigo_config::owner_only_file_options(
-        std::fs::OpenOptions::new().create(true).truncate(false).write(true),
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true),
     )
     .open(&lock_path)
     {
@@ -256,10 +259,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("session_search.sqlite");
         std::fs::write(&db, b"looks-like-a-db").unwrap();
-        let lock = with_suffix(&JournalMode::for_db_path(&db).effective_db_path(&db), ".lock");
+        let lock = with_suffix(
+            &JournalMode::for_db_path(&db).effective_db_path(&db),
+            ".lock",
+        );
         std::fs::write(&lock, b"").unwrap();
         std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
-        heal_unusable(&db, &rusqlite::Error::QueryReturnedNoRows, |_| Ok(true), |_| Ok(()));
+        heal_unusable(
+            &db,
+            &rusqlite::Error::QueryReturnedNoRows,
+            |_| Ok(true),
+            |_| Ok(()),
+        );
         let mode = std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{} must be owner-only", lock.display());
     }

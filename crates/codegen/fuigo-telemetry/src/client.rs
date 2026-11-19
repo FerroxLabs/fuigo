@@ -75,7 +75,9 @@ fn mixpanel_distinct_id(user_id: &str) -> String {
 /// was hashed into one valid-looking pseudonym shared by every such user at the same Mixpanel
 /// project, merging them into a single "user". The machine id keeps them apart.
 fn mixpanel_key_source<'a>(user_id: Option<&'a str>, agent_id: &'a str) -> &'a str {
-    user_id.filter(|id| !id.trim().is_empty()).unwrap_or(agent_id)
+    user_id
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or(agent_id)
 }
 
 /// Remove the identity-bearing properties before anything goes to Mixpanel (P54). Decided by the
@@ -708,7 +710,10 @@ mod tests {
         let track = mixpanel_track_props(metadata, &client, agent_id, &ctx, 1, "ins".into());
         let (profile_id, profile) = mixpanel_profile(&client, agent_id);
 
-        let distinct = track["distinct_id"].as_str().expect("distinct_id").to_owned();
+        let distinct = track["distinct_id"]
+            .as_str()
+            .expect("distinct_id")
+            .to_owned();
         assert_eq!(distinct, profile_id, "a profile must still join its events");
         assert_eq!(
             distinct,
@@ -719,7 +724,10 @@ mod tests {
             assert!(!wire.contains(secret), "Mixpanel received {secret}: {wire}");
         }
         for key in MIXPANEL_WITHHELD_KEYS {
-            assert!(!track.contains_key(key) && !profile.contains_key(key), "{key}");
+            assert!(
+                !track.contains_key(key) && !profile.contains_key(key),
+                "{key}"
+            );
         }
         // Non-identity analytics still flow.
         assert_eq!(track["session_id"], json!("sess-1"));
@@ -745,10 +753,15 @@ mod tests {
     fn an_empty_account_id_is_not_a_mixpanel_key() {
         let agent_id = "a9e1c0de-0000-4000-8000-000000000042";
         let empty_key = fuigo_extra_ca::fluxrouter::destination_pseudonym(MIXPANEL_API_ORIGIN, "");
-        let machine_key = fuigo_extra_ca::fluxrouter::destination_pseudonym(MIXPANEL_API_ORIGIN, agent_id);
+        let machine_key =
+            fuigo_extra_ca::fluxrouter::destination_pseudonym(MIXPANEL_API_ORIGIN, agent_id);
         assert_ne!(empty_key, machine_key);
         for empty in ["", "  ", "\t"] {
-            assert_eq!(mixpanel_key_source(Some(empty), agent_id), agent_id, "{empty:?}");
+            assert_eq!(
+                mixpanel_key_source(Some(empty), agent_id),
+                agent_id,
+                "{empty:?}"
+            );
             let mut client = identity_client();
             client.user_id = Some(empty.into());
             let (profile_id, _) = mixpanel_profile(&client, agent_id);
@@ -760,12 +773,24 @@ mod tests {
                 timestamp: "t".into(),
             };
             // Through the production event path: the selector runs inside `mixpanel_track_props`.
-            let track = mixpanel_track_props(Metadata::new(), &client, agent_id, &ctx, 1, "ins".into());
-            assert_eq!(track["distinct_id"], json!(machine_key), "event for user_id {empty:?}");
-            assert_eq!(track["distinct_id"], json!(profile_id), "event and profile diverge for {empty:?}");
+            let track =
+                mixpanel_track_props(Metadata::new(), &client, agent_id, &ctx, 1, "ins".into());
+            assert_eq!(
+                track["distinct_id"],
+                json!(machine_key),
+                "event for user_id {empty:?}"
+            );
+            assert_eq!(
+                track["distinct_id"],
+                json!(profile_id),
+                "event and profile diverge for {empty:?}"
+            );
         }
         // A real account id and a missing one are unchanged.
-        assert_eq!(mixpanel_key_source(Some("acct-7f3e"), agent_id), "acct-7f3e");
+        assert_eq!(
+            mixpanel_key_source(Some("acct-7f3e"), agent_id),
+            "acct-7f3e"
+        );
         assert_eq!(mixpanel_key_source(None, agent_id), agent_id);
     }
 

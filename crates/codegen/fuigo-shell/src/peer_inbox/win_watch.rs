@@ -27,7 +27,11 @@ const PUMP_PARALLEL: usize = 8;
 /// The locator rows (display data only) from the home's locator file; an unreadable or rejected file gives none.
 pub(crate) async fn rows(home_dir: &Arc<CheckedDir>) -> Vec<HostRow> {
     let dir = home_dir.clone();
-    let bytes = tokio::task::spawn_blocking(move || read_locator(&dir, LOCATOR_NAME)).await.ok().and_then(Result::ok).flatten();
+    let bytes = tokio::task::spawn_blocking(move || read_locator(&dir, LOCATOR_NAME))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
     decode_rows(bytes.as_deref())
 }
 
@@ -38,7 +42,11 @@ pub(crate) struct PipeProber {
 
 impl Prober for PipeProber {
     async fn probe(&self, host: &HostId) -> Probe {
-        if !rows(&self.home_dir).await.iter().any(|r| &r.host_id == host) {
+        if !rows(&self.home_dir)
+            .await
+            .iter()
+            .any(|r| &r.host_id == host)
+        {
             return Probe::Gone { row_present: false };
         }
         let one = super::win_inbox::try_hello(&self.own, host);
@@ -53,14 +61,19 @@ impl Prober for PipeProber {
 async fn deliver(dir: &Arc<PeerDirectory>, home_dir: &Arc<CheckedDir>, out: &Outbound) {
     let own = dir.host_id().clone();
     let target = HostId::of(&out.to);
-    let Ok(id) = BoundedId::new(&out.message_id) else { return };
+    let Ok(id) = BoundedId::new(&out.message_id) else {
+        return;
+    };
     if target == own {
         dir.route_notice(&id, out.kind, Some(&own));
         return;
     }
     for attempt in 0..2 {
         if rows(home_dir).await.iter().any(|r| r.host_id == target) {
-            let op = Op::Notice { message_id: id.clone(), kind: out.kind };
+            let op = Op::Notice {
+                message_id: id.clone(),
+                kind: out.kind,
+            };
             let call = win_pipe::dial(&own, &target, op);
             if let Ok(Ok(Reply::Notice {})) = tokio::time::timeout(NOTICE_ATTEMPT, call).await {
                 return;
@@ -88,7 +101,9 @@ pub(crate) async fn pump(
             None => rx.recv().await,
         };
         let Some(out) = next else { break };
-        let Ok(permit) = gate.clone().acquire_owned().await else { break };
+        let Ok(permit) = gate.clone().acquire_owned().await else {
+            break;
+        };
         let (dir, home_dir) = (dir.clone(), home_dir.clone());
         tasks.spawn(async move {
             deliver(&dir, &home_dir, &out).await;

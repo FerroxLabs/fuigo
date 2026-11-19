@@ -1202,12 +1202,18 @@ fn a_holder_moving_up_its_inode_stripe(ahead: AheadOnTheStripe) {
         AheadOnTheStripe::Processes => {
             let first = xq::register(&stripe).unwrap();
             let second = xq::register(&stripe).unwrap();
-            (Box::new(move || drop(first)), Box::new(move || drop(second)))
+            (
+                Box::new(move || drop(first)),
+                Box::new(move || drop(second)),
+            )
         }
         AheadOnTheStripe::ThreadThenProcess => {
             let first = lock_at_within(&stripe, long).unwrap();
             let second = xq::register(&stripe).unwrap();
-            (Box::new(move || drop(first)), Box::new(move || drop(second)))
+            (
+                Box::new(move || drop(first)),
+                Box::new(move || drop(second)),
+            )
         }
         AheadOnTheStripe::OutsideTheQueue => {
             use fs2::FileExt as _;
@@ -1241,7 +1247,10 @@ fn a_holder_moving_up_its_inode_stripe(ahead: AheadOnTheStripe) {
     let name_lock = name_lock_path_in(&locks, &identity::identity(&x).unwrap().name);
     let deadline = Instant::now() + Duration::from_secs(20);
     while turn::outstanding(&turn::key_for(&name_lock)) == 0 {
-        assert!(Instant::now() < deadline, "the holder never took the name lock");
+        assert!(
+            Instant::now() < deadline,
+            "the holder never took the name lock"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(holder_got.try_recv().is_err(), "the holder got through");
@@ -1258,7 +1267,10 @@ fn a_holder_moving_up_its_inode_stripe(ahead: AheadOnTheStripe) {
         })
     };
     while !has_a_ticket() {
-        assert!(Instant::now() < deadline, "the holder never queued for the name lock");
+        assert!(
+            Instant::now() < deadline,
+            "the holder never queued for the name lock"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
     // The holder's ticket is the only one there now; what production does
@@ -1453,7 +1465,11 @@ fn only_a_dead_test_process_s_lock_directory_is_swept() {
             if !dir.exists() {
                 break;
             }
-            assert!(Instant::now() < deadline, "{} was never swept", dir.display());
+            assert!(
+                Instant::now() < deadline,
+                "{} was never swept",
+                dir.display()
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     };
@@ -1463,7 +1479,10 @@ fn only_a_dead_test_process_s_lock_directory_is_swept() {
     for _ in 0..20 {
         test_locks::sweep(temp.path());
     }
-    assert!(live.exists(), "the live owner's directory stays, however often it is asked");
+    assert!(
+        live.exists(),
+        "the live owner's directory stays, however often it is asked"
+    );
     drop(live_marker);
     sweep_until_gone(&live);
     assert!(unmarked.exists() && starting.exists() && stranger.exists());
@@ -1614,7 +1633,11 @@ mod windows_spellings {
         let deep = dir.join("Sub").join("Deep").join("Agent.toml");
         assert_one_file(&deep, &verbatim(&deep));
         assert_excludes(&deep, &verbatim(&deep));
-        assert_eq!(names_in(&dir), Vec::<String>::new(), "locking creates nothing");
+        assert_eq!(
+            names_in(&dir),
+            Vec::<String>::new(),
+            "locking creates nothing"
+        );
         std::fs::write(&agent, "0\n").unwrap();
         assert_one_file(&agent, &verbatim(&agent));
         assert_excludes(&verbatim(&agent), &agent);
@@ -1707,7 +1730,11 @@ mod windows_spellings {
             );
             return;
         };
-        eprintln!("P79_SHORT_NAMES_RAN: {} is {}", long.display(), short.display());
+        eprintln!(
+            "P79_SHORT_NAMES_RAN: {} is {}",
+            long.display(),
+            short.display()
+        );
         // The short DIRECTORY name resolves away: one name, one lock.
         assert_one_file(&long, &short.parent().unwrap().join(long_name));
         // The short FILE name is not equated by name (the module docs), but
@@ -1718,7 +1745,11 @@ mod windows_spellings {
         assert_excludes(&long, &short_file);
         assert_excludes(&short, &long);
         append_through(&short_file, "short\n").unwrap();
-        assert_eq!(names_in(&long_dir), [long_name], "the long name is the file's name");
+        assert_eq!(
+            names_in(&long_dir),
+            [long_name],
+            "the long name is the file's name"
+        );
         append_through(&long, "long\n").unwrap();
         append_through(&short, "all-short\n").unwrap();
         // The write-through writer (prompt history, settings) too.
@@ -1765,12 +1796,18 @@ mod windows_spellings {
         std::fs::write(&file, "0\n").unwrap();
         // Everyone is denied "list folder" on it; files in it can still be
         // opened, created and replaced.
-        assert!(icacls(&closed, &["/deny", "*S-1-1-0:(RD)"]), "icacls /deny failed");
+        assert!(
+            icacls(&closed, &["/deny", "*S-1-1-0:(RD)"]),
+            "icacls /deny failed"
+        );
         let listing = std::fs::read_dir(&closed).map(|_| ());
         let own = append_through(&file, "own\n");
         let other = append_through(&closed.join("STATE.TOML"), "other\n");
         let contents = std::fs::read_to_string(&file);
-        assert!(icacls(&closed, &["/remove:d", "*S-1-1-0"]), "icacls /remove:d failed");
+        assert!(
+            icacls(&closed, &["/remove:d", "*S-1-1-0"]),
+            "icacls /remove:d failed"
+        );
         if listing.is_ok() {
             // An account with the backup privilege enabled (an elevated
             // session) lists what it is denied, as root does on unix.
@@ -1805,13 +1842,16 @@ mod windows_spellings {
         std::fs::write(&a, "a").unwrap();
         std::fs::write(&b, "b").unwrap();
         let exact = |name: &str| verbatim(&dir).join(name);
-        let entry = |asked: &str, entry: &str| {
-            identity::entry_if_same_file(&exact(asked), &exact(entry))
-        };
+        let entry =
+            |asked: &str, entry: &str| identity::entry_if_same_file(&exact(asked), &exact(entry));
         assert_eq!(entry("a.toml", "A.TOML").unwrap(), Some(exact("A.TOML")));
         assert!(entry("a.toml", "b.toml").is_err(), "another file");
         assert!(entry("a.toml", "missing.toml").is_err(), "no such entry");
-        assert_eq!(entry("missing.toml", "a.toml").unwrap(), None, "nothing to replace");
+        assert_eq!(
+            entry("missing.toml", "a.toml").unwrap(),
+            None,
+            "nothing to replace"
+        );
         // And the whole question, for the spelling the entry has and for
         // another one (the answer is in the exact form).
         assert_eq!(identity::entry_as_on_disk(&a).unwrap(), None);
@@ -1819,7 +1859,10 @@ mod windows_spellings {
             identity::entry_as_on_disk(&dir.join("A.TOML")).unwrap(),
             Some(exact("a.toml"))
         );
-        assert_eq!(identity::entry_as_on_disk(&dir.join("none.toml")).unwrap(), None);
+        assert_eq!(
+            identity::entry_as_on_disk(&dir.join("none.toml")).unwrap(),
+            None
+        );
     }
 
     /// A long name only the exact form can spell (a trailing dot), beside
@@ -1847,7 +1890,10 @@ mod windows_spellings {
             std::fs::remove_file(&dotted).unwrap();
             return;
         };
-        eprintln!("P79_SHORT_DOTTED_RAN: {dotted_name} is {}", short.to_string_lossy());
+        eprintln!(
+            "P79_SHORT_DOTTED_RAN: {dotted_name} is {}",
+            short.to_string_lossy()
+        );
         let through = dir.join(&short);
         assert_eq!(inode_of(&through), inode_of(&dotted));
         assert_ne!(inode_of(&through), inode_of(&namesake));
@@ -1939,7 +1985,10 @@ mod windows_spellings {
         append_through(&dotted, "dotted\n").unwrap();
         append_through(&plain, "plain again\n").unwrap();
         append_through(&dotted, "dotted again\n").unwrap();
-        assert_eq!(std::fs::read_to_string(&plain).unwrap(), "plain\nplain again\n");
+        assert_eq!(
+            std::fs::read_to_string(&plain).unwrap(),
+            "plain\nplain again\n"
+        );
         assert_eq!(
             std::fs::read_to_string(&dotted).unwrap(),
             "dotted\ndotted again\n"

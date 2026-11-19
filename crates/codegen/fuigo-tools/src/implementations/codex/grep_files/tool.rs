@@ -174,16 +174,24 @@ async fn run_rg_search_filtered(
             format!("failed to launch rg: {err}. Ensure ripgrep is installed and on PATH.")
         })?;
 
-    let mut stream = crate::util::rg_json::RgJsonStream::new(crate::util::rg_json::RgJsonMode::Files, results);
+    let mut stream =
+        crate::util::rg_json::RgJsonStream::new(crate::util::rg_json::RgJsonMode::Files, results);
     let _ = stream.feed(&output.stdout);
     let files = parse_found(stream.take_found(), limit);
     match output.status.code() {
         Some(0 | 1) => Ok(files),
         // ripgrep's OWN pattern or flag error names no file: passed through as without rules
         Some(code)
-            if crate::util::rg_json::is_own_error(code, output.stdout.is_empty(), &output.stderr) =>
+            if crate::util::rg_json::is_own_error(
+                code,
+                output.stdout.is_empty(),
+                &output.stderr,
+            ) =>
         {
-            Err(format!("rg failed: {}", String::from_utf8_lossy(&output.stderr)))
+            Err(format!(
+                "rg failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
         }
         // any other stderr names files and is never shown when read rules exist
         _ if !files.is_empty() => Ok(files),
@@ -328,7 +336,12 @@ impl fuigo_tool_runtime::Tool for CodexGrepFilesTool {
 
         // P198: ripgrep reads an explicit file despite an exclude, so a denied search path is refused before it runs.
         if input.path.as_deref().is_some_and(|p| !p.is_empty())
-            && crate::util::read_deny::explicit_search_path_denied(&cwd, &deny_read_globs, &search_path).await
+            && crate::util::read_deny::explicit_search_path_denied(
+                &cwd,
+                &deny_read_globs,
+                &search_path,
+            )
+            .await
         {
             return Ok(CodexGrepFilesOutput::Error(format!(
                 "{} is excluded by a read rule and cannot be searched.",
@@ -363,7 +376,10 @@ impl fuigo_tool_runtime::Tool for CodexGrepFilesTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
 
@@ -373,8 +389,12 @@ mod tests {
         use crate::util::rg_json::{RgJsonMode, RgJsonStream};
         use crate::util::rg_json_tests as fake;
         let f = fake::fx();
-        for (lines, expect) in [(fake::interleaved_allowed(), 2usize), (fake::interleaved_with_denied(), 1usize)] {
-            let results = crate::util::read_deny::ResultFilter::new(&f.cwd, &["secrets/**".to_string()]);
+        for (lines, expect) in [
+            (fake::interleaved_allowed(), 2usize),
+            (fake::interleaved_with_denied(), 1usize),
+        ] {
+            let results =
+                crate::util::read_deny::ResultFilter::new(&f.cwd, &["secrets/**".to_string()]);
             let mut stream = RgJsonStream::new(RgJsonMode::Files, results);
             let _ = stream.feed((lines.join("\n") + "\n").as_bytes());
             let mut files = parse_found(stream.take_found(), 100);
@@ -699,9 +719,12 @@ mod tests {
         }
     }
 
-
     /// What the codex `grep_files` tool prints (match list, no-match text or error) for `FAKE`.
-    async fn grep_files_text(cwd: std::path::PathBuf, path: Option<String>, deny: Option<Vec<String>>) -> String {
+    async fn grep_files_text(
+        cwd: std::path::PathBuf,
+        path: Option<String>,
+        deny: Option<Vec<String>>,
+    ) -> String {
         let mut resources = Resources::new();
         resources.insert(Cwd(cwd));
         if let Some(deny) = deny {
@@ -709,8 +732,16 @@ mod tests {
         }
         let mut ctx = fuigo_tool_runtime::ToolCallContext::default();
         ctx.extensions.insert(resources.into_shared());
-        let input = CodexGrepFilesInput { pattern: "FAKE".to_string(), include: None, path, limit: 100 };
-        match fuigo_tool_runtime::Tool::run(&CodexGrepFilesTool, ctx, input).await.unwrap() {
+        let input = CodexGrepFilesInput {
+            pattern: "FAKE".to_string(),
+            include: None,
+            path,
+            limit: 100,
+        };
+        match fuigo_tool_runtime::Tool::run(&CodexGrepFilesTool, ctx, input)
+            .await
+            .unwrap()
+        {
             CodexGrepFilesOutput::Matches { content, .. } => content,
             CodexGrepFilesOutput::NoMatches(m) | CodexGrepFilesOutput::Error(m) => m,
         }
@@ -794,10 +825,15 @@ mod tests {
     async fn a_denied_explicit_file_gets_the_refusal_not_a_path() {
         assert!(rg_available(), "ripgrep is required for this test");
         let t = crate::util::read_deny::fixture::tree();
-        let direct = t.proj.join("secrets/key_material.txt").to_string_lossy().into_owned();
+        let direct = t
+            .proj
+            .join("secrets/key_material.txt")
+            .to_string_lossy()
+            .into_owned();
         let deny = vec!["secrets/**".to_string()];
         for path in ["secrets/key_material.txt", direct.as_str(), "keylink"] {
-            let out = grep_files_text(t.proj.clone(), Some(path.to_string()), Some(deny.clone())).await;
+            let out =
+                grep_files_text(t.proj.clone(), Some(path.to_string()), Some(deny.clone())).await;
             assert!(out.contains("excluded by a read rule"), "{path}: {out}");
         }
     }

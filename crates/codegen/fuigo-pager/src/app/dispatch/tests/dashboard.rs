@@ -459,18 +459,39 @@ fn resolve_location_input_expands_and_joins() {
 #[test]
 fn resolve_location_input_accepts_quoted_and_escaped_paths() {
     let cwd = PathBuf::from("/work/dir");
-    assert_eq!(resolve_location_input("\"/abs/my dir\"", &cwd), Some(PathBuf::from("/abs/my dir")));
-    assert_eq!(resolve_location_input("'/abs/my dir'", &cwd), Some(PathBuf::from("/abs/my dir")));
-    assert_eq!(resolve_location_input("  \"sub dir/x\"  ", &cwd), Some(PathBuf::from("/work/dir/sub dir/x")));
+    assert_eq!(
+        resolve_location_input("\"/abs/my dir\"", &cwd),
+        Some(PathBuf::from("/abs/my dir"))
+    );
+    assert_eq!(
+        resolve_location_input("'/abs/my dir'", &cwd),
+        Some(PathBuf::from("/abs/my dir"))
+    );
+    assert_eq!(
+        resolve_location_input("  \"sub dir/x\"  ", &cwd),
+        Some(PathBuf::from("/work/dir/sub dir/x"))
+    );
     let home = fuigo_dirs::home_dir().expect("home dir");
-    assert_eq!(resolve_location_input("\"~/my dir\"", &cwd), Some(home.join("my dir")));
+    assert_eq!(
+        resolve_location_input("\"~/my dir\"", &cwd),
+        Some(home.join("my dir"))
+    );
     #[cfg(unix)]
     {
-        assert_eq!(resolve_location_input("/abs/my\\ dir", &cwd), Some(PathBuf::from("/abs/my dir")));
-        assert_eq!(resolve_location_input("~/a\\ b/c\\(1\\)", &cwd), Some(home.join("a b").join("c(1)")));
+        assert_eq!(
+            resolve_location_input("/abs/my\\ dir", &cwd),
+            Some(PathBuf::from("/abs/my dir"))
+        );
+        assert_eq!(
+            resolve_location_input("~/a\\ b/c\\(1\\)", &cwd),
+            Some(home.join("a b").join("c(1)"))
+        );
     }
     // Quotes that do not wrap the whole text are part of the name.
-    assert_eq!(resolve_location_input("/abs/it's", &cwd), Some(PathBuf::from("/abs/it's")));
+    assert_eq!(
+        resolve_location_input("/abs/it's", &cwd),
+        Some(PathBuf::from("/abs/it's"))
+    );
     assert_eq!(resolve_location_input("\"\"", &cwd), None);
 }
 #[test]
@@ -1045,7 +1066,9 @@ fn dashboard_image_dispatch_cancel_rewind_resends_attachment() {
         agent.session.session_id = Some(acp::SessionId::new("dashboard-image"));
         agent.session.state = AgentState::Idle;
         assert!(matches!(
-            maybe_drain_queue(agent, &mut app.pending_image_notices).effects.as_slice(),
+            maybe_drain_queue(agent, &mut app.pending_image_notices)
+                .effects
+                .as_slice(),
             [Effect::SendPromptBlocks { .. }]
         ));
     }

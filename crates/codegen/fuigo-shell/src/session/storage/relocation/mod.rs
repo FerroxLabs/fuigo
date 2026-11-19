@@ -200,7 +200,10 @@ fn load_candidates(sessions_root: &Path) -> Result<(SessionCandidates, SessionCa
     Ok((all, persisted))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -250,7 +253,8 @@ mod tests {
         let view = as_unprivileged(|| RelocationView::load_for_sessions_root(&root));
         set_mode(&root.join("locked-cwd"), 0o755);
 
-        let view = view.expect("a folder that cannot be read must be skipped, not fail the whole listing");
+        let view =
+            view.expect("a folder that cannot be read must be skipped, not fail the whole listing");
         assert_eq!(
             view.session_dirs(None).unwrap(),
             vec![root.join("readable-cwd").join("session-a")],
@@ -266,6 +270,9 @@ mod tests {
         set_mode(&root, 0o000);
         let view = as_unprivileged(|| RelocationView::load_for_sessions_root(&root));
         set_mode(&root, 0o755);
-        assert!(view.is_err(), "nothing can be listed from an unreadable root");
+        assert!(
+            view.is_err(),
+            "nothing can be listed from an unreadable root"
+        );
     }
 }

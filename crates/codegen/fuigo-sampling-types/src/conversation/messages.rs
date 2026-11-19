@@ -363,7 +363,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
 /// Every item a non-streaming Messages response carries: one sibling `Reasoning` per thinking / redacted_thinking
 /// block in wire order, then the `Assistant` item.
 /// Replaying a history that kept only the `Assistant` would lose the reasoning (or fail signature checks).
-pub fn messages_response_to_items(resp: crate::messages::MessagesResponse) -> Vec<ConversationItem> {
+pub fn messages_response_to_items(
+    resp: crate::messages::MessagesResponse,
+) -> Vec<ConversationItem> {
     use crate::messages::ContentBlock;
 
     let mut content = String::new();

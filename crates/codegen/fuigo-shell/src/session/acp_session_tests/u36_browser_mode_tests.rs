@@ -19,8 +19,12 @@ fn browsing_head(stored: &str) -> String {
 fn strings_containing(value: &serde_json::Value, needle: &str, out: &mut Vec<String>) {
     match value {
         serde_json::Value::String(s) if s.contains(needle) => out.push(s.clone()),
-        serde_json::Value::Array(items) => items.iter().for_each(|v| strings_containing(v, needle, out)),
-        serde_json::Value::Object(map) => map.values().for_each(|v| strings_containing(v, needle, out)),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .for_each(|v| strings_containing(v, needle, out)),
+        serde_json::Value::Object(map) => map
+            .values()
+            .for_each(|v| strings_containing(v, needle, out)),
         _ => {}
     }
 }
@@ -32,7 +36,11 @@ fn last_request_head(server: &MockInferenceServer, stored_prefix: &str) -> Strin
     let body = bodies.last().expect("a request was sent");
     let mut found = Vec::new();
     strings_containing(body, stored_prefix, &mut found);
-    assert_eq!(found.len(), 1, "exactly one wire string carries the head: {found:?}");
+    assert_eq!(
+        found.len(),
+        1,
+        "exactly one wire string carries the head: {found:?}"
+    );
     found.remove(0)
 }
 
@@ -67,27 +75,46 @@ fn authority(actor: &SessionActor) -> Authority {
         llm_classifier: p.has_llm_side_query(),
         edit_grant: p.session_edit_grant(),
         peer_influenced: p.is_peer_influenced(),
-        trusted: crate::agent::folder_trust::project_scope_allowed(actor.tool_context.cwd.as_path()),
-        yolo_lock: fuigo_workspace::permission::resolution::yolo_disabled_by_policy().map(str::to_owned),
+        trusted: crate::agent::folder_trust::project_scope_allowed(
+            actor.tool_context.cwd.as_path(),
+        ),
+        yolo_lock: fuigo_workspace::permission::resolution::yolo_disabled_by_policy()
+            .map(str::to_owned),
         agent_type: actor.active_agent_type.lock().clone(),
     }
 }
 
 #[track_caller]
 fn assert_authority(actor: &SessionActor, before: &Authority) {
-    assert_eq!(&authority(actor), before, "browser mode moved an approval or the agent");
+    assert_eq!(
+        &authority(actor),
+        before,
+        "browser mode moved an approval or the agent"
+    );
 }
 
 async fn wire_rig(head: &str) -> (MockInferenceServer, Arc<SessionActor>) {
-    let server = MockInferenceServer::start().await.expect("mock inference server");
-    let (actor, _h, _c, _p) =
-        actor_with_sampler(&server, Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) })).await;
-    actor.chat_state_handle.replace_conversation(vec![ConversationItem::system(head)]);
+    let server = MockInferenceServer::start()
+        .await
+        .expect("mock inference server");
+    let (actor, _h, _c, _p) = actor_with_sampler(
+        &server,
+        Arc::new(RecordingTerminal {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }),
+    )
+    .await;
+    actor
+        .chat_state_handle
+        .replace_conversation(vec![ConversationItem::system(head)]);
     (server, actor)
 }
 
 async fn turn(server: &MockInferenceServer, actor: &Arc<SessionActor>, text: &str) {
-    server.enqueue_response("/v1/responses", ScriptedResponse::sse(responses_api_script_exact("ok", "test")));
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(responses_api_script_exact("ok", "test")),
+    );
     let result = run_parent_turn(actor, task_request(text, Vec::new())).await;
     assert!(result.is_ok(), "{result:?}");
 }
@@ -102,17 +129,41 @@ async fn round_trip_three_exits_restores_the_head_on_the_wire() {
                 let (server, actor) = wire_rig(HEAD).await;
                 let before = authority(&actor);
                 turn(&server, &actor, "before").await;
-                assert_eq!(last_request_head(&server, HEAD), HEAD, "{exit}: never-browser head");
-                actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
-                assert_eq!(stored_head(&actor).await, HEAD, "{exit}: browser mode stores nothing");
+                assert_eq!(
+                    last_request_head(&server, HEAD),
+                    HEAD,
+                    "{exit}: never-browser head"
+                );
+                actor
+                    .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                    .await;
+                assert_eq!(
+                    stored_head(&actor).await,
+                    HEAD,
+                    "{exit}: browser mode stores nothing"
+                );
                 turn(&server, &actor, "browse").await;
-                assert_eq!(last_request_head(&server, HEAD), browsing_head(HEAD), "{exit}: overlay while browsing");
+                assert_eq!(
+                    last_request_head(&server, HEAD),
+                    browsing_head(HEAD),
+                    "{exit}: overlay while browsing"
+                );
                 assert_authority(&actor, &before);
-                actor.handle_session_mode(acp::SessionModeId::new(exit)).await;
+                actor
+                    .handle_session_mode(acp::SessionModeId::new(exit))
+                    .await;
                 assert!(!actor.browser_mode_on(), "{exit} clears the bit");
                 turn(&server, &actor, "after").await;
-                assert_eq!(last_request_head(&server, HEAD), HEAD, "{exit}: head restored byte-for-byte");
-                assert_eq!(stored_head(&actor).await, HEAD, "{exit}: stored head unchanged");
+                assert_eq!(
+                    last_request_head(&server, HEAD),
+                    HEAD,
+                    "{exit}: head restored byte-for-byte"
+                );
+                assert_eq!(
+                    stored_head(&actor).await,
+                    HEAD,
+                    "{exit}: stored head unchanged"
+                );
                 assert_authority(&actor, &before);
             }
         })
@@ -131,15 +182,25 @@ async fn memory_tail_stays_and_the_overlay_follows_it() {
             );
             let head = format!("{HEAD}\n\n{block}");
             let (server, actor) = wire_rig(&head).await;
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             turn(&server, &actor, "browse").await;
             let wire = last_request_head(&server, HEAD);
-            assert!(wire.starts_with(&head), "stored head (with its memory block) leads the request head");
+            assert!(
+                wire.starts_with(&head),
+                "stored head (with its memory block) leads the request head"
+            );
             assert_eq!(wire, browsing_head(&stored_head(&actor).await));
-            actor.handle_session_mode(acp::SessionModeId::new("default")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("default"))
+                .await;
             turn(&server, &actor, "after").await;
             let wire = last_request_head(&server, HEAD);
-            assert!(!wire.contains(OVERLAY_MARK), "no overlay after leaving: {wire}");
+            assert!(
+                !wire.contains(OVERLAY_MARK),
+                "no overlay after leaving: {wire}"
+            );
             assert_eq!(wire, stored_head(&actor).await);
         })
         .await;
@@ -153,13 +214,24 @@ async fn head_rewrite_while_browsing_keeps_browser_mode() {
         .run_until(async {
             let (server, actor) = wire_rig(HEAD).await;
             let agent_type = actor.active_agent_type.lock().clone();
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             let replaced = "U36-SYS-HEAD replaced by the client.";
-            actor.handle_replace_system_prompt(replaced.to_string()).await;
+            actor
+                .handle_replace_system_prompt(replaced.to_string())
+                .await;
             assert!(actor.browser_mode_on());
-            assert_eq!(stored_head(&actor).await, replaced, "the stored head is what the rewrite wrote");
+            assert_eq!(
+                stored_head(&actor).await,
+                replaced,
+                "the stored head is what the rewrite wrote"
+            );
             turn(&server, &actor, "browse").await;
-            assert_eq!(last_request_head(&server, "U36-SYS-HEAD"), browsing_head(replaced));
+            assert_eq!(
+                last_request_head(&server, "U36-SYS-HEAD"),
+                browsing_head(replaced)
+            );
             assert_eq!(*actor.active_agent_type.lock(), agent_type);
         })
         .await;
@@ -173,11 +245,17 @@ async fn side_call_requests_follow_the_mode() {
             let (_server, actor) = wire_rig(HEAD).await;
             let mut items = vec![ConversationItem::system(HEAD), ConversationItem::user("q")];
             actor.apply_effective_head(&mut items);
-            let ConversationItem::System(sys) = &items[0] else { panic!("head") };
+            let ConversationItem::System(sys) = &items[0] else {
+                panic!("head")
+            };
             assert_eq!(sys.content.as_ref(), HEAD);
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             actor.apply_effective_head(&mut items);
-            let ConversationItem::System(sys) = &items[0] else { panic!("head") };
+            let ConversationItem::System(sys) = &items[0] else {
+                panic!("head")
+            };
             assert_eq!(sys.content.as_ref(), browsing_head(HEAD));
         })
         .await;
@@ -193,8 +271,11 @@ async fn actor_with_events() -> (
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     drain_persistence(persistence_rx);
-    let (actor, events) = create_test_actor_ex(1_000, 200_000, 85, gateway_tx, persistence_tx).await;
-    actor.chat_state_handle.replace_conversation(vec![ConversationItem::system(HEAD)]);
+    let (actor, events) =
+        create_test_actor_ex(1_000, 200_000, 85, gateway_tx, persistence_tx).await;
+    actor
+        .chat_state_handle
+        .replace_conversation(vec![ConversationItem::system(HEAD)]);
     (Arc::new(actor), events, gateway_rx)
 }
 
@@ -222,8 +303,12 @@ async fn each_exit_reports_its_own_mode() {
                 let (actor, mut events, _gw) = actor_with_events().await;
                 let before = authority(&actor);
                 let _ = mode_updates(&mut events);
-                actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
-                actor.handle_session_mode(acp::SessionModeId::new(exit)).await;
+                actor
+                    .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                    .await;
+                actor
+                    .handle_session_mode(acp::SessionModeId::new(exit))
+                    .await;
                 assert_eq!(mode_updates(&mut events), ["browser_use", exit], "{exit}");
                 assert_eq!(stored_head(&actor).await, HEAD, "{exit}");
                 assert!(!actor.browser_mode_on(), "{exit}");
@@ -242,10 +327,15 @@ async fn plan_coexistence() {
         .run_until(async {
             // `_meta.mode: plan` then `default` while browsing.
             let (actor, mut events, _gw) = actor_with_events().await;
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             actor.reconcile_plan_mode_with_prompt(PromptMode::Plan);
             actor.reconcile_plan_mode_with_prompt(PromptMode::Agent);
-            assert_eq!(mode_updates(&mut events), ["browser_use", "plan", "browser_use"]);
+            assert_eq!(
+                mode_updates(&mut events),
+                ["browser_use", "plan", "browser_use"]
+            );
             assert!(actor.browser_mode_on());
             // A `_meta.mode` re-declare (browser maps to Agent) keeps the bit and emits nothing.
             actor.reconcile_plan_mode_with_prompt(PromptMode::Agent);
@@ -253,7 +343,9 @@ async fn plan_coexistence() {
             assert!(actor.browser_mode_on());
 
             // Picking Plan leaves browser mode: the plan exit lands on `default`.
-            actor.handle_session_mode(acp::SessionModeId::new("plan")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("plan"))
+                .await;
             assert!(!actor.browser_mode_on());
             actor.reconcile_plan_mode_with_prompt(PromptMode::Agent);
             assert_eq!(mode_updates(&mut events), ["plan", "default"]);
@@ -261,9 +353,14 @@ async fn plan_coexistence() {
             // Plan by tool (prompt-entered here), then `set_mode browser_use`: one update, `browser_use`.
             activate_plan_mode(&actor);
             let _ = mode_updates(&mut events);
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             assert_eq!(mode_updates(&mut events), ["browser_use"]);
-            assert_eq!(actor.plan_mode.lock().state(), crate::session::plan_mode::PlanModeState::Inactive);
+            assert_eq!(
+                actor.plan_mode.lock().state(),
+                crate::session::plan_mode::PlanModeState::Inactive
+            );
         })
         .await;
 }
@@ -274,7 +371,9 @@ async fn approved_plan_exit_returns_to_browser_mode() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (actor, mut events, _gw) = actor_with_events().await;
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             activate_plan_mode(&actor);
             let _ = mode_updates(&mut events);
             actor.leave_plan_mode_to_default();
@@ -319,8 +418,10 @@ fn snapshot_restore_starts_normal() {
     let dir = tempfile::tempdir().unwrap();
     let mut tracker = crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
     tracker.set_browser_use(true);
-    let restored =
-        crate::session::plan_mode::PlanModeTracker::from_snapshot(dir.path().to_path_buf(), tracker.snapshot());
+    let restored = crate::session::plan_mode::PlanModeTracker::from_snapshot(
+        dir.path().to_path_buf(),
+        tracker.snapshot(),
+    );
     assert!(!restored.browser_use());
 }
 
@@ -346,7 +447,11 @@ async fn browser_body_is_the_1_0_35_render() {
 }
 
 fn legacy_conversation(head: &str) -> Vec<ConversationItem> {
-    vec![ConversationItem::system(head), ConversationItem::user("hi"), ConversationItem::user("again")]
+    vec![
+        ConversationItem::system(head),
+        ConversationItem::user("hi"),
+        ConversationItem::user("again"),
+    ]
 }
 
 fn head_of(conversation: &[ConversationItem]) -> &str {
@@ -407,7 +512,10 @@ async fn run_load_repair(
 
 /// Test 7: every 1.0.35 browser head is replaced by the canonical head (the restored override when there is one) at
 /// load; a second load makes no further change; negatives stay byte-identical.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn legacy_heads_are_repaired_at_load() {
@@ -426,18 +534,34 @@ async fn legacy_heads_are_repaired_at_load() {
                 assert_eq!(conversation.len(), 3, "only the head changes");
                 let again = format!("{conversation:?}");
                 run_load_repair(&actor, &mut conversation, HEAD).await;
-                assert_eq!(format!("{conversation:?}"), again, "a second load changes nothing more");
+                assert_eq!(
+                    format!("{conversation:?}"),
+                    again,
+                    "a second load changes nothing more"
+                );
             }
             for head in negative_heads() {
                 let mut conversation = legacy_conversation(&head);
                 run_load_repair(&actor, &mut conversation, HEAD).await;
-                assert_eq!(head_of(&conversation), head, "negative stays byte-identical");
+                assert_eq!(
+                    head_of(&conversation),
+                    head,
+                    "negative stays byte-identical"
+                );
             }
             // Override variant: the restored client override is the canonical head.
             let dir = crate::session::persistence::session_dir(&actor.session_info);
             std::fs::create_dir_all(&dir).unwrap();
-            let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim");
-            crate::session::acp_session::save_system_prompt_override(&actor.session_info, Some(&writer), "U36 client override");
+            let writer = fuigo_session_writer::SessionWriter::try_claim(
+                uuid::Uuid::now_v7().to_string(),
+                dir,
+            )
+            .expect("claim");
+            crate::session::acp_session::save_system_prompt_override(
+                &actor.session_info,
+                Some(&writer),
+                "U36 client override",
+            );
             let mut conversation = legacy_conversation(browser_body());
             run_load_repair(&actor, &mut conversation, HEAD).await;
             assert_eq!(head_of(&conversation), "U36 client override");
@@ -465,21 +589,31 @@ async fn a_browser_use_profile_head_is_left_alone() {
         .await;
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn repo_with_agent(stem: &str, body: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     git2::Repository::init(tmp.path()).unwrap();
     let agents = tmp.path().join(".fuigo").join("agents");
     std::fs::create_dir_all(&agents).unwrap();
     let path = agents.join(format!("{stem}.md"));
-    std::fs::write(&path, format!("---\nname: {stem}\ndescription: u36 fixture\npromptMode: full\n---\n{body}\n")).unwrap();
+    std::fs::write(
+        &path,
+        format!("---\nname: {stem}\ndescription: u36 fixture\npromptMode: full\n---\n{body}\n"),
+    )
+    .unwrap();
     fuigo_agent::AgentDefinition::from_file(&path).expect("fixture must parse");
     tmp
 }
 
 /// Guard: a trusted cwd `default.md` / `ask.md` whose Full-mode body renders to `B` blocks the repair (that is how a
 /// never-browser session holds a `B` head); the same file in an untrusted cwd does not.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn a_trusted_mode_file_rendering_to_the_body_blocks_the_repair() {
@@ -498,7 +632,8 @@ async fn a_trusted_mode_file_rendering_to_the_body_blocks_the_repair() {
                     crate::agent::folder_trust::record_for_test(repo.path(), trusted);
                     let (actor, _events, _gw) = actor_with_events().await;
                     let mut actor = Arc::try_unwrap(actor).ok().expect("sole owner");
-                    actor.tool_context.cwd = fuigo_paths::AbsPathBuf::new(repo.path().to_path_buf()).unwrap();
+                    actor.tool_context.cwd =
+                        fuigo_paths::AbsPathBuf::new(repo.path().to_path_buf()).unwrap();
                     let mut conversation = legacy_conversation(browser_body());
                     run_load_repair(&actor, &mut conversation, HEAD).await;
                     let want = if trusted { browser_body() } else { HEAD };
@@ -518,12 +653,16 @@ async fn cross_compaction_rewind_repairs_a_legacy_checkpoint_head() {
             let (actor, _events, _gw) = actor_with_events().await;
             for head in legacy_heads() {
                 let mut conversation = legacy_conversation(&head);
-                actor.repair_legacy_browser_checkpoint_head(&mut conversation, HEAD).await;
+                actor
+                    .repair_legacy_browser_checkpoint_head(&mut conversation, HEAD)
+                    .await;
                 assert_eq!(head_of(&conversation), HEAD, "{head:?}");
             }
             for head in negative_heads() {
                 let mut conversation = legacy_conversation(&head);
-                actor.repair_legacy_browser_checkpoint_head(&mut conversation, "live").await;
+                actor
+                    .repair_legacy_browser_checkpoint_head(&mut conversation, "live")
+                    .await;
                 assert_eq!(head_of(&conversation), head);
             }
         })
@@ -534,7 +673,10 @@ async fn cross_compaction_rewind_repairs_a_legacy_checkpoint_head() {
 /// whose canonical head is the browsing body (client override `B`). The checkpoint holds `B` + an older memory block, the
 /// live head `B` + a newer one. The checkpoint head is the session's own, so it is installed as is; the live head is
 /// only ever the replacement. Control: the same checkpoint in a session whose canonical head is `HEAD` gets the live head.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn cross_compaction_rewind_keeps_a_browser_canonical_checkpoint_head() {
     tokio::task::LocalSet::new()
@@ -615,35 +757,56 @@ async fn a_btw_retry_after_leaving_browser_mode_carries_no_overlay() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (server, actor) = wire_rig(HEAD).await;
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             let before = server.request_bodies().len();
             server.enqueue_response(
                 "/v1/responses",
                 ScriptedResponse::json(502, serde_json::json!({ "error": "bad gateway" })),
             );
-            server.enqueue_response("/v1/responses", ScriptedResponse::sse(responses_api_script_exact("side answer", "test")));
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(responses_api_script_exact("side answer", "test")),
+            );
             let leave = async {
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                while server.request_bodies().len() <= before && tokio::time::Instant::now() < deadline {
+                while server.request_bodies().len() <= before
+                    && tokio::time::Instant::now() < deadline
+                {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 // The first attempt is out (and failed); the backoff is at least 500 ms.
-                actor.handle_session_mode(acp::SessionModeId::new("default")).await;
+                actor
+                    .handle_session_mode(acp::SessionModeId::new("default"))
+                    .await;
             };
-            let (answer, ()) = tokio::join!(actor.handle_side_question("what now?", Vec::new()), leave);
+            let (answer, ()) =
+                tokio::join!(actor.handle_side_question("what now?", Vec::new()), leave);
             assert_eq!(answer.expect("the retry answers"), "side answer");
             let heads: Vec<String> = server.request_bodies()[before..]
                 .iter()
                 .map(|body| {
                     let mut found = Vec::new();
                     strings_containing(body, HEAD, &mut found);
-                    assert_eq!(found.len(), 1, "one wire string carries the head: {found:?}");
+                    assert_eq!(
+                        found.len(),
+                        1,
+                        "one wire string carries the head: {found:?}"
+                    );
                     found.remove(0)
                 })
                 .collect();
             assert_eq!(heads.len(), 2, "one failed attempt, one retry");
-            assert_eq!(heads[0], browsing_head(HEAD), "the first attempt was sent while browsing");
-            assert_eq!(heads[1], HEAD, "the retry carries the session's own head, no overlay");
+            assert_eq!(
+                heads[0],
+                browsing_head(HEAD),
+                "the first attempt was sent while browsing"
+            );
+            assert_eq!(
+                heads[1], HEAD,
+                "the retry carries the session's own head, no overlay"
+            );
         })
         .await;
 }
@@ -655,18 +818,33 @@ async fn human_rules_survive_browse_and_leave() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let mut head = HEAD.to_owned();
-            crate::session::human_rules::append_human_rules(&mut head, "U36-RULE: always cite the file.");
+            crate::session::human_rules::append_human_rules(
+                &mut head,
+                "U36-RULE: always cite the file.",
+            );
             assert!(head.contains("<human_rules>"));
             let (server, actor) = wire_rig(&head).await;
             let before = authority(&actor);
             turn(&server, &actor, "before").await;
             assert_eq!(last_request_head(&server, HEAD), head);
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             turn(&server, &actor, "browse").await;
-            assert_eq!(last_request_head(&server, HEAD), browsing_head(&head), "rules stay ahead of the overlay");
-            actor.handle_session_mode(acp::SessionModeId::new("default")).await;
+            assert_eq!(
+                last_request_head(&server, HEAD),
+                browsing_head(&head),
+                "rules stay ahead of the overlay"
+            );
+            actor
+                .handle_session_mode(acp::SessionModeId::new("default"))
+                .await;
             turn(&server, &actor, "after").await;
-            assert_eq!(last_request_head(&server, HEAD), head, "rules and head restored byte for byte");
+            assert_eq!(
+                last_request_head(&server, HEAD),
+                head,
+                "rules and head restored byte for byte"
+            );
             assert_eq!(stored_head(&actor).await, head);
             assert_authority(&actor, &before);
         })

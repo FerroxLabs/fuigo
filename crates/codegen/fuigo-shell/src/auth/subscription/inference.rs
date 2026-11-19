@@ -99,7 +99,10 @@ impl SubscriptionResolver for Resolver {
                 .await
                 .map_err(|e| sampling_error(self.provider, e))?;
             Ok(SubscriptionBearer::new(
-                access.bearer().map_err(|_| auth_error(self.provider))?.to_owned(),
+                access
+                    .bearer()
+                    .map_err(|_| auth_error(self.provider))?
+                    .to_owned(),
                 access.account,
                 access.expires_at,
             ))
@@ -306,7 +309,10 @@ pub(crate) fn from_models(
         .values()
         .filter(|entry| entry.info.model == model && entry.info.base_url == endpoint)
         .collect();
-    let mut provider = matches.iter().find_map(|entry| subscription_ref(entry))?.clone();
+    let mut provider = matches
+        .iter()
+        .find_map(|entry| subscription_ref(entry))?
+        .clone();
     // Ambiguous only when the matching entries would send this request differently: an
     // unbound twin, or a different provider table (subscription, account or anything else).
     // Aliases bound by identical tables (P192 endpoint bindings among them) agree.
@@ -318,7 +324,6 @@ pub(crate) fn from_models(
     }
     Some(provider)
 }
-
 
 /// Only an unchanged model/recipient inherits a parent's subscription capability.
 pub(crate) fn inherit(
@@ -480,7 +485,10 @@ mod denial_tests {
             };
             assert!(text.contains(name), "{text}");
             assert!(text.contains("/model"), "{text}");
-            assert!(text.contains("does not fall back to an API key or Flux Router"), "{text}");
+            assert!(
+                text.contains("does not fall back to an API key or Flux Router"),
+                "{text}"
+            );
             assert!(!text.to_lowercase().contains("grok build"), "{text}");
         }
     }
@@ -502,8 +510,14 @@ mod denial_tests {
             let got = format!("{:?}", sampling_error(SubscriptionProvider::Xai, error));
             let want = format!("{:?}", auth_error(SubscriptionProvider::Xai));
             assert_eq!(got, want);
-            assert!(got.contains("Grok subscription") && got.contains("/model"), "{got}");
-            assert!(!got.contains("TLS"), "a credential failure must not be reported as a TLS fault: {got}");
+            assert!(
+                got.contains("Grok subscription") && got.contains("/model"),
+                "{got}"
+            );
+            assert!(
+                !got.contains("TLS"),
+                "a credential failure must not be reported as a TLS fault: {got}"
+            );
         }
     }
 }

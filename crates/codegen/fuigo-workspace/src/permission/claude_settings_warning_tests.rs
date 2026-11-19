@@ -30,12 +30,16 @@ fn invalid_json_warns_once_naming_the_file_and_the_reason() {
 
 #[test]
 fn a_bad_rule_warns_with_the_rule_and_the_reason_and_good_rules_stay_quiet() {
-    let dir = project(r#"{"permissions":{"deny":["Bash(rm"],"allow":["Read(src/**)","NotebookEdit"]}}"#);
+    let dir =
+        project(r#"{"permissions":{"deny":["Bash(rm"],"allow":["Read(src/**)","NotebookEdit"]}}"#);
     let w = mine(&dir, true);
     assert_eq!(w.len(), 1, "one warning per file: {w:?}");
     assert!(w[0].contains("Bash(rm"), "{w:?}");
     assert!(w[0].contains("NotebookEdit"), "{w:?}");
-    assert!(!w[0].contains("Read(src/**)"), "a rule that loaded is not reported: {w:?}");
+    assert!(
+        !w[0].contains("Read(src/**)"),
+        "a rule that loaded is not reported: {w:?}"
+    );
     assert!(w[0].contains("2 permission rules"), "{w:?}");
 }
 

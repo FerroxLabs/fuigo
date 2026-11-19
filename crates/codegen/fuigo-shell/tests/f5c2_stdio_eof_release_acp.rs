@@ -7,7 +7,9 @@
 
 use std::time::{Duration, Instant};
 
-use fuigo_test_support::{AgentSpawnSpec, MockInferenceServer, MockModelEntry, RawStdioClient, TestSandbox};
+use fuigo_test_support::{
+    AgentSpawnSpec, MockInferenceServer, MockModelEntry, RawStdioClient, TestSandbox,
+};
 use serde_json::{Value, json};
 
 const RPC: Duration = Duration::from_secs(30);
@@ -22,7 +24,9 @@ fn refuse(_: &Value) -> Option<Value> {
 
 async fn call(client: &mut RawStdioClient, n: &mut u32, method: &str, params: Value) -> Value {
     *n += 1;
-    client.request(&format!("f5c2-{n}"), method, params, RPC, refuse).await
+    client
+        .request(&format!("f5c2-{n}"), method, params, RPC, refuse)
+        .await
 }
 
 async fn handshake(client: &mut RawStdioClient, n: &mut u32) {
@@ -34,7 +38,13 @@ async fn handshake(client: &mut RawStdioClient, n: &mut u32) {
     )
     .await;
     assert!(init.get("result").is_some(), "initialize failed: {init}");
-    let auth = call(client, n, "authenticate", json!({ "methodId": "fuigo.api_key" })).await;
+    let auth = call(
+        client,
+        n,
+        "authenticate",
+        json!({ "methodId": "fuigo.api_key" }),
+    )
+    .await;
     assert_eq!(auth.get("result"), Some(&json!({})), "authenticate: {auth}");
 }
 
@@ -46,7 +56,11 @@ async fn prompt_ok(client: &mut RawStdioClient, n: &mut u32, sid: &str) {
         json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "hello" }] }),
     )
     .await;
-    assert_eq!(r["result"]["stopReason"].as_str(), Some("end_turn"), "prompt: {r}");
+    assert_eq!(
+        r["result"]["stopReason"].as_str(),
+        Some("end_turn"),
+        "prompt: {r}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -57,18 +71,33 @@ async fn f5c2_stdio_eof_exit_releases_the_writer_for_the_next_process() {
     server.set_response("done");
     let sandbox = TestSandbox::new();
     let workspace = sandbox.workspace().to_path_buf();
-    let spec = AgentSpawnSpec { agent_args: AGENT_ARGS, ..AgentSpawnSpec::default() };
+    let spec = AgentSpawnSpec {
+        agent_args: AGENT_ARGS,
+        ..AgentSpawnSpec::default()
+    };
 
     let mut first = RawStdioClient::spawn_with_spec(&server, &workspace, sandbox, &spec).await;
     let mut n = 0;
     handshake(&mut first, &mut n).await;
-    let new = call(&mut first, &mut n, "session/new", json!({ "cwd": workspace, "mcpServers": [] })).await;
-    let sid = new["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("session/new: {new}")).to_owned();
+    let new = call(
+        &mut first,
+        &mut n,
+        "session/new",
+        json!({ "cwd": workspace, "mcpServers": [] }),
+    )
+    .await;
+    let sid = new["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("session/new: {new}"))
+        .to_owned();
     prompt_ok(&mut first, &mut n, &sid).await;
 
     // The client quits: stdin EOF, nothing else. The process must end by itself.
     let started = Instant::now();
-    let status = first.close_stdin_and_wait(EXIT_BUDGET).await.expect("wait for exit");
+    let status = first
+        .close_stdin_and_wait(EXIT_BUDGET)
+        .await
+        .expect("wait for exit");
     let exited_in = started.elapsed();
     assert!(
         status.is_some(),

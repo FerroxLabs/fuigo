@@ -1,0 +1,19 @@
+# Gate subset: 12 tasks from the 2026-10-13 benchmark (hardbench runs-1026, 24 tasks x 3 engines x 2 repeats).
+# Chosen from per-task results, not by taste: every task here passed 6/6 across fuigo, claude and grok (2/2 each), so a
+# drop is a regression signal, not noise. Always-fail tasks (fr-served-model-output-clamp, mu-codex-shutdown-settlement)
+# and tasks where any engine flaked are excluded; they carry no signal at N=2.
+# Coverage: bugfix 6, feature 2, orchestration 2, trap 2; python 4 + typescript 8; three dependency trees; fuigo wall time
+# 72 to 581 s (shell, multi-file edit, search, long-ish runs). Known gap: the 10-13 set has no continuity/compaction task,
+# so long-context behaviour is not gated here; that needs a stable continuity baseline first.
+fa-webhook-fail-closed
+flux-router-streamed-usage-billing
+fr-anthropic-orphan-tool-pairs
+fr-failed-request-prepaid-debit
+fr-model-registry-snapshot-watchdog
+mu-connector-account-aliases
+mu-webhook-delivery-recovery
+mu-package-version-comparison
+tw-orchestration-account-delete-key-revoke
+tw-orchestration-app-scheduled-cancel-at
+tw-trap-app-autorecharge-stored-card
+tw-trap-mu-leadership-delegation-capability

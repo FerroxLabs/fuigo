@@ -38,7 +38,9 @@ impl ModelSource for OaiModelSource {
                     .or_else(|_| {
                         auth.filter(|a| {
                             !crate::auth::session_delivery::is_session_credential(a)
-                                || crate::auth::session_delivery::session_may_reach(&self.endpoint.url)
+                                || crate::auth::session_delivery::session_may_reach(
+                                    &self.endpoint.url,
+                                )
                         })
                         .map(|a| a.key.clone())
                         .ok_or(std::env::VarError::NotPresent)
@@ -177,7 +179,9 @@ mod tests {
         };
         let client = fuigo_extra_ca::build_blocking_reqwest_client(|builder| builder).unwrap();
         let url = "https://api.fluxrouter.ai/v1/models";
-        let request = super::apply_session_headers(client.get(url), &auth, url).build().unwrap();
+        let request = super::apply_session_headers(client.get(url), &auth, url)
+            .build()
+            .unwrap();
         assert_eq!(request.headers()["x-userid"], "acct-1");
         assert_eq!(request.headers()["x-email"], "a@b.example");
         assert!(request.headers().contains_key("x-fuigo-client-version"));
@@ -186,7 +190,9 @@ mod tests {
             "http://127.0.0.1:8080/v1/models",
             "http://api.fluxrouter.ai/v1/models",
         ] {
-            let request = super::apply_session_headers(client.get(url), &auth, url).build().unwrap();
+            let request = super::apply_session_headers(client.get(url), &auth, url)
+                .build()
+                .unwrap();
             for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
                 assert!(!request.headers().contains_key(name), "{url} got {name}");
             }

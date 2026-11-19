@@ -19,6 +19,10 @@ use std::time::Duration;
 
 /// What an ACP client receives, in order.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "SamplingError inlines the upstream classification; boxing it touches every construction site and is a separate refactor"
+)]
 enum Wire {
     /// `agent_message_chunk` text.
     Text(String),
@@ -27,9 +31,15 @@ enum Wire {
     /// `_fuigo/session_notification` `retry_state`.
     Retry(RetryState),
     /// `tool_call` (P201): a row the client now shows, with its status.
-    ToolCall { id: String, status: acp::ToolCallStatus },
+    ToolCall {
+        id: String,
+        status: acp::ToolCallStatus,
+    },
     /// `tool_call_update` (P201) carrying a status.
-    ToolUpdate { id: String, status: acp::ToolCallStatus },
+    ToolUpdate {
+        id: String,
+        status: acp::ToolCallStatus,
+    },
 }
 
 type Captured = Arc<std::sync::Mutex<Vec<Wire>>>;
@@ -131,14 +141,9 @@ async fn run(
     Vec<Wire>,
     Arc<SessionActor>,
 ) {
-    let (actor, captured) = actor_under_test_with_event_pump(
-        server,
-        SessionKind::Main,
-        retry_policy,
-        true,
-        capture,
-    )
-    .await;
+    let (actor, captured) =
+        actor_under_test_with_event_pump(server, SessionKind::Main, retry_policy, true, capture)
+            .await;
     let outcome = tokio::time::timeout(
         Duration::from_secs(900),
         actor.process_conversation_turn_with_recovery(
@@ -210,8 +215,16 @@ fn p188_sampler_resend_after_output_tells_the_client_to_discard_it() {
 
             let (outcome, wire, actor) = run(&server, policy).await;
 
-            assert!(outcome.is_ok(), "the third attempt completes the turn: {:?}", outcome.as_ref().err());
-            assert_eq!(texts(&wire), "A1A2A3", "every attempt's text did reach the client: {wire:?}");
+            assert!(
+                outcome.is_ok(),
+                "the third attempt completes the turn: {:?}",
+                outcome.as_ref().err()
+            );
+            assert_eq!(
+                texts(&wire),
+                "A1A2A3",
+                "every attempt's text did reach the client: {wire:?}"
+            );
             assert_eq!(
                 visible_reply(&wire),
                 "A3",
@@ -230,13 +243,18 @@ fn p188_sampler_resend_after_output_tells_the_client_to_discard_it() {
             );
             // Stock clients get the void said in words on the standard-rail mirror
             assert!(
-                wire.iter().any(|w| matches!(w, Wire::Thought { text, mirror: true }
+                wire.iter()
+                    .any(|w| matches!(w, Wire::Thought { text, mirror: true }
                     if text.contains("discarding the partial reply above"))),
                 "the mirror says the partial reply is discarded: {wire:?}"
             );
             // Fuigo's own history always kept only the accepted attempt
             assert_eq!(
-                actor.chat_state_handle.get_trailing_assistant_report().await.as_deref(),
+                actor
+                    .chat_state_handle
+                    .get_trailing_assistant_report()
+                    .await
+                    .as_deref(),
                 Some("A3")
             );
         })
@@ -260,7 +278,11 @@ fn p188_turn_loop_resend_after_output_tells_the_client_to_discard_it() {
 
             let (outcome, wire, _actor) = run(&server, policy).await;
 
-            assert!(outcome.is_ok(), "the shell's resend completes the turn: {:?}", outcome.as_ref().err());
+            assert!(
+                outcome.is_ok(),
+                "the shell's resend completes the turn: {:?}",
+                outcome.as_ref().err()
+            );
             assert_eq!(visible_reply(&wire), "A3", "{wire:?}");
             assert_eq!(discards(&wire).len(), 1, "{wire:?}");
         })
@@ -289,7 +311,8 @@ fn p188_resend_before_any_output_carries_no_discard() {
 
             assert!(outcome.is_ok(), "{:?}", outcome.as_ref().err());
             assert!(
-                wire.iter().any(|w| matches!(w, Wire::Retry(RetryState::Retrying { .. }))),
+                wire.iter()
+                    .any(|w| matches!(w, Wire::Retry(RetryState::Retrying { .. }))),
                 "the stream that died before output is still retried: {wire:?}"
             );
             assert!(discards(&wire).is_empty(), "nothing to discard: {wire:?}");
@@ -336,13 +359,21 @@ fn p188_empty_completed_output_uses_output_item_done_without_a_retry() {
             let (outcome, wire, actor) = run(&server, policy).await;
 
             assert!(outcome.is_ok(), "{:?}", outcome.as_ref().err());
-            assert_eq!(server.request_count_for("/v1/responses"), 1, "no resend: {wire:?}");
+            assert_eq!(
+                server.request_count_for("/v1/responses"),
+                1,
+                "no resend: {wire:?}"
+            );
             assert!(
                 !wire.iter().any(|w| matches!(w, Wire::Retry(_))),
                 "no retry at all: {wire:?}"
             );
             assert_eq!(
-                actor.chat_state_handle.get_trailing_assistant_report().await.as_deref(),
+                actor
+                    .chat_state_handle
+                    .get_trailing_assistant_report()
+                    .await
+                    .as_deref(),
                 Some("Hello there")
             );
         })
@@ -410,7 +441,9 @@ fn with_hosted(text: &str, hosted: Vec<SseEvent>, die: bool) -> ScriptedResponse
 }
 
 fn tool_ix(wire: &[Wire], want: &Wire) -> usize {
-    wire.iter().position(|w| w == want).unwrap_or_else(|| panic!("{want:?} missing in {wire:?}"))
+    wire.iter()
+        .position(|w| w == want)
+        .unwrap_or_else(|| panic!("{want:?} missing in {wire:?}"))
 }
 
 fn count(wire: &[Wire], want: &Wire) -> usize {
@@ -437,11 +470,17 @@ fn spinning(wire: &[Wire]) -> Vec<String> {
 }
 
 fn call(id: &str, status: acp::ToolCallStatus) -> Wire {
-    Wire::ToolCall { id: id.into(), status }
+    Wire::ToolCall {
+        id: id.into(),
+        status,
+    }
 }
 
 fn update(id: &str, status: acp::ToolCallStatus) -> Wire {
-    Wire::ToolUpdate { id: id.into(), status }
+    Wire::ToolUpdate {
+        id: id.into(),
+        status,
+    }
 }
 
 async fn run_two_attempts(first: ScriptedResponse, second: ScriptedResponse) -> Vec<Wire> {
@@ -455,7 +494,11 @@ async fn run_two_attempts(first: ScriptedResponse, second: ScriptedResponse) -> 
         ..Default::default()
     };
     let (outcome, wire, _actor) = run(&server, policy).await;
-    assert!(outcome.is_ok(), "the second attempt completes the turn: {:?}", outcome.as_ref().err());
+    assert!(
+        outcome.is_ok(),
+        "the second attempt completes the turn: {:?}",
+        outcome.as_ref().err()
+    );
     wire
 }
 
@@ -467,7 +510,11 @@ async fn hosted_row_only_case(kind: Hosted) {
     )
     .await;
     let d = discards(&wire);
-    assert_eq!(d.len(), 1, "exactly one retry notice with discardEmitted: {wire:?}");
+    assert_eq!(
+        d.len(),
+        1,
+        "exactly one retry notice with discardEmitted: {wire:?}"
+    );
     let row = tool_ix(&wire, &call("h1", acp::ToolCallStatus::InProgress));
     let closed = tool_ix(&wire, &update("h1", acp::ToolCallStatus::Failed));
     let second = tool_ix(&wire, &call("h2", acp::ToolCallStatus::InProgress));
@@ -475,9 +522,16 @@ async fn hosted_row_only_case(kind: Hosted) {
         row < d[0] && d[0] < closed && closed < second,
         "order: hosted row, the discard notice, the row's terminal update, then the resend's rows: {wire:?}"
     );
-    assert_eq!(count(&wire, &update("h1", acp::ToolCallStatus::Failed)), 1, "closed once: {wire:?}");
+    assert_eq!(
+        count(&wire, &update("h1", acp::ToolCallStatus::Failed)),
+        1,
+        "closed once: {wire:?}"
+    );
     assert_eq!(texts(&wire), "A2", "the answer is shown once: {wire:?}");
-    assert!(spinning(&wire).is_empty(), "no row is left spinning: {wire:?}");
+    assert!(
+        spinning(&wire).is_empty(),
+        "no row is left spinning: {wire:?}"
+    );
 }
 
 #[test]
@@ -508,13 +562,21 @@ fn p201_hosted_row_and_text_in_a_failed_attempt_get_one_notice_and_all_rows_clos
             let d = discards(&wire);
             assert_eq!(d.len(), 1, "one notice for the failed attempt: {wire:?}");
             assert_eq!(
-                wire.iter().filter(|w| matches!(w, Wire::Retry(RetryState::Retrying { .. }))).count(),
+                wire.iter()
+                    .filter(|w| matches!(w, Wire::Retry(RetryState::Retrying { .. })))
+                    .count(),
                 1,
                 "never told twice: {wire:?}"
             );
             let closed = tool_ix(&wire, &update("h1", acp::ToolCallStatus::Failed));
-            assert!(d[0] < closed, "the row is closed right after the notice that voids its attempt: {wire:?}");
-            assert!(index_of_text(&wire, "A1") < d[0] && d[0] < index_of_text(&wire, "A2"), "{wire:?}");
+            assert!(
+                d[0] < closed,
+                "the row is closed right after the notice that voids its attempt: {wire:?}"
+            );
+            assert!(
+                index_of_text(&wire, "A1") < d[0] && d[0] < index_of_text(&wire, "A2"),
+                "{wire:?}"
+            );
             assert_eq!(visible_reply(&wire), "A2", "{wire:?}");
             assert!(spinning(&wire).is_empty(), "{wire:?}");
         })
@@ -527,10 +589,19 @@ fn p201_a_failed_attempt_with_no_event_sends_no_discard_and_closes_nothing() {
     on_session_stack(|| {
         run_paused(|| async {
             let wire = run_two_attempts(with_hosted("", vec![], true), complete("A2")).await;
-            assert!(wire.iter().any(|w| matches!(w, Wire::Retry(RetryState::Retrying { .. }))), "{wire:?}");
-            assert!(discards(&wire).is_empty(), "nothing was shown, nothing to discard: {wire:?}");
             assert!(
-                !wire.iter().any(|w| matches!(w, Wire::ToolCall { .. } | Wire::ToolUpdate { .. })),
+                wire.iter()
+                    .any(|w| matches!(w, Wire::Retry(RetryState::Retrying { .. }))),
+                "{wire:?}"
+            );
+            assert!(
+                discards(&wire).is_empty(),
+                "nothing was shown, nothing to discard: {wire:?}"
+            );
+            assert!(
+                !wire
+                    .iter()
+                    .any(|w| matches!(w, Wire::ToolCall { .. } | Wire::ToolUpdate { .. })),
                 "no tool rows at all: {wire:?}"
             );
             assert_eq!(texts(&wire), "A2");
@@ -549,13 +620,24 @@ fn p201_a_hosted_row_that_completed_in_the_failed_attempt_is_not_closed_again() 
             )
             .await;
             let d = discards(&wire);
-            assert_eq!(d.len(), 1, "the finished row is still on screen, so the notice discards: {wire:?}");
+            assert_eq!(
+                d.len(),
+                1,
+                "the finished row is still on screen, so the notice discards: {wire:?}"
+            );
             let terminal = wire
                 .iter()
                 .filter(|w| matches!(w, Wire::ToolUpdate { id, .. } if id == "h1"))
                 .count();
-            assert_eq!(terminal, 1, "exactly the run's own terminal update, none added: {wire:?}");
-            assert_eq!(count(&wire, &update("h1", acp::ToolCallStatus::Failed)), 0, "{wire:?}");
+            assert_eq!(
+                terminal, 1,
+                "exactly the run's own terminal update, none added: {wire:?}"
+            );
+            assert_eq!(
+                count(&wire, &update("h1", acp::ToolCallStatus::Failed)),
+                0,
+                "{wire:?}"
+            );
             assert!(spinning(&wire).is_empty(), "{wire:?}");
         })
     });

@@ -247,7 +247,8 @@ mod forward_compat_tests {
     #[test]
     fn open_preserves_an_unmodelled_variant() {
         let raw = r#"{"type":"holographic_delta","payload":{"n":1},"extra":"kept"}"#;
-        let open: Open<Frame> = serde_json::from_str(raw).expect("unmodelled tag must be tolerated");
+        let open: Open<Frame> =
+            serde_json::from_str(raw).expect("unmodelled tag must be tolerated");
         assert_eq!(open.unknown_tag(), Some("holographic_delta"));
         assert_eq!(open.known(), None);
         assert_eq!(

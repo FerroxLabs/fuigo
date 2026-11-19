@@ -21,7 +21,11 @@ pub(crate) const OVERLAY_OPEN: &str = "\n\n<!-- session-mode: browser_use -->\n"
 /// The browsing instructions: the body of the built-in `browser-use` agent definition.
 pub(crate) fn browser_body() -> &'static str {
     static BODY: OnceLock<String> = OnceLock::new();
-    BODY.get_or_init(|| AgentDefinition::browser_use().prompt_body.unwrap_or_default())
+    BODY.get_or_init(|| {
+        AgentDefinition::browser_use()
+            .prompt_body
+            .unwrap_or_default()
+    })
 }
 
 /// The head a request carries: the stored head, plus the browsing overlay while browser mode is on.
@@ -51,7 +55,10 @@ pub(crate) fn apply_browser_overlay(items: &mut Vec<ConversationItem>, browser: 
             }
         }
         _ => {
-            items.insert(0, ConversationItem::system(effective_system_head("", true).into_owned()));
+            items.insert(
+                0,
+                ConversationItem::system(effective_system_head("", true).into_owned()),
+            );
         }
     }
 }
@@ -127,7 +134,9 @@ mod tests {
     #[test]
     fn unset_head_is_borrowed() {
         let stored = "normal head";
-        assert!(matches!(effective_system_head(stored, false), Cow::Borrowed(s) if std::ptr::eq(s, stored)));
+        assert!(
+            matches!(effective_system_head(stored, false), Cow::Borrowed(s) if std::ptr::eq(s, stored))
+        );
     }
 
     #[test]
@@ -142,7 +151,11 @@ mod tests {
         apply_browser_overlay(&mut items, true);
         match &items[0] {
             ConversationItem::System(sys) => {
-                assert_eq!(sys.content.as_ref(), effective_system_head("", true).as_ref(), "inserted unchanged")
+                assert_eq!(
+                    sys.content.as_ref(),
+                    effective_system_head("", true).as_ref(),
+                    "inserted unchanged"
+                )
             }
             _ => panic!("no System head"),
         }
@@ -162,7 +175,12 @@ mod tests {
     fn legacy_shapes_match() {
         let b = browser_body();
         let blk = block(nonce(), "remember this");
-        for head in [b.to_owned(), format!("{b}\n\n"), format!("{b}\n\n{blk}"), format!("{b}\n")] {
+        for head in [
+            b.to_owned(),
+            format!("{b}\n\n"),
+            format!("{b}\n\n{blk}"),
+            format!("{b}\n"),
+        ] {
             assert!(is_legacy_browser_head(&head), "{head:?}");
         }
     }

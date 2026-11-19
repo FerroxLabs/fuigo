@@ -606,13 +606,14 @@ fn upgrade_then_fold_through_conversation_to_chat_messages() {
 
 #[test]
 fn tool_guidance_description_reaches_chat_completions_wire() {
-    let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
-        .with_tools(vec![ToolSpec {
-        name: "read_file".to_string(),
-        description: Some("stock text\n\nGUIDE-WIRE".to_string()),
-        parameters: serde_json::json!({"type": "object"}),
-        freeform: None,
-    }]);
+    let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_tools(vec![
+        ToolSpec {
+            name: "read_file".to_string(),
+            description: Some("stock text\n\nGUIDE-WIRE".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+            freeform: None,
+        },
+    ]);
     let chat_req: ChatCompletionRequest = req.into();
     let wire = serde_json::to_value(&chat_req).unwrap();
     assert_eq!(
@@ -651,12 +652,21 @@ fn mcp_tool_schema_gaps_are_filled_on_chat_completions_only() {
     // Before this pass the chat request carried `gappy` verbatim for the MCP tool, which strict validators reject.
     let mcp = &tools[0].function.parameters;
     assert_eq!(mcp["type"], "object");
-    assert_eq!(mcp["properties"]["opts"], serde_json::json!({"type": "object", "properties": {}}));
-    assert_eq!(mcp["properties"]["ids"], serde_json::json!({"type": "array", "items": {}}));
+    assert_eq!(
+        mcp["properties"]["opts"],
+        serde_json::json!({"type": "object", "properties": {}})
+    );
+    assert_eq!(
+        mcp["properties"]["ids"],
+        serde_json::json!({"type": "array", "items": {}})
+    );
     // Nothing is resolved or rewritten.
     assert_eq!(mcp["properties"]["target"], gappy["properties"]["target"]);
     assert_eq!(mcp["properties"]["note"], gappy["properties"]["note"]);
-    assert_eq!(mcp["$defs"]["Target"], serde_json::json!({"type": "object", "properties": {}}));
+    assert_eq!(
+        mcp["$defs"]["Target"],
+        serde_json::json!({"type": "object", "properties": {}})
+    );
     // Built-in tools are passed through byte-identical.
     assert_eq!(tools[1].function.parameters, gappy);
 

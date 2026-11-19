@@ -4,6 +4,8 @@ pub(crate) mod checkout;
 pub(crate) mod dirs;
 pub(crate) mod discovery;
 pub(crate) mod index;
+#[cfg(test)]
+mod judged_tests;
 pub(crate) mod operand;
 pub(crate) mod probe;
 pub(crate) mod reason;
@@ -12,8 +14,6 @@ pub(crate) mod safety;
 pub(crate) mod space;
 pub(crate) mod status;
 pub(crate) mod worktree;
-#[cfg(test)]
-mod judged_tests;
 
 pub(crate) use checkout::checkout_ref;
 pub(crate) use checkout::{git_clean_fd, git_reset_hard_command};

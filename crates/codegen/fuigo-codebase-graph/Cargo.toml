@@ -35,7 +35,7 @@ num_cpus = { workspace = true }
 # Directory walking with gitignore support
 ignore = { workspace = true }
 # Git repository access
-git2 = { version = "0.20", default-features = false }
+git2 = { version = "0.21", default-features = false }
 # Fast allocators for multi-threaded workloads
 mimalloc = "0.1"
 # Fast hash for better HashMap performance

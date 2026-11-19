@@ -879,7 +879,10 @@ mod tests {
             ui.follow_up_behavior()
         );
         assert_eq!(SIMPLE_MODE_DEFAULT, ui.simple_mode.unwrap_or(true));
-        assert_eq!(ANIMATIONS_DEFAULT, ui.animations.unwrap_or(ANIMATIONS_DEFAULT));
+        assert_eq!(
+            ANIMATIONS_DEFAULT,
+            ui.animations.unwrap_or(ANIMATIONS_DEFAULT)
+        );
         assert_eq!(VIM_MODE_DEFAULT, ui.vim_mode.unwrap_or(false));
         assert_eq!(
             SHOW_THINKING_BLOCKS_DEFAULT,

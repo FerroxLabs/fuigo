@@ -10,12 +10,22 @@ mod support;
 
 use serde_json::Value;
 
-const DEFERRED_MEDIA: [&str; 4] = ["image_gen", "image_edit", "image_to_video", "reference_to_video"];
+const DEFERRED_MEDIA: [&str; 4] = [
+    "image_gen",
+    "image_edit",
+    "image_to_video",
+    "reference_to_video",
+];
 
 fn tool_names(body: &Value) -> Vec<String> {
     body["tools"]
         .as_array()
-        .map(|tools| tools.iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect())
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -38,18 +48,35 @@ fn adaptive_presentation_keeps_native_child_spawn_reachable() {
         std::env::set_var("FUIGO_API_BASE_URL", server.url());
     }
     let outcome = support::run_burst(&server, 1, "none", env.deadline);
-    assert_eq!(outcome.rows.len(), 1, "one real native child must be observed");
-    assert_eq!(outcome.failures, 0, "native child did not complete under adaptive presentation");
+    assert_eq!(
+        outcome.rows.len(),
+        1,
+        "one real native child must be observed"
+    );
+    assert_eq!(
+        outcome.failures, 0,
+        "native child did not complete under adaptive presentation"
+    );
 
     let bodies: Vec<Value> = server
         .requests()
         .iter()
         .filter(|r| r.path == "/v1/chat/completions")
-        .filter_map(|r| r.body.as_ref().and_then(|b| serde_json::from_str(&b.to_string()).ok()))
+        .filter_map(|r| {
+            r.body
+                .as_ref()
+                .and_then(|b| serde_json::from_str(&b.to_string()).ok())
+        })
         .collect();
-    assert!(bodies.len() >= 2, "expected parent and child inference requests, saw {}", bodies.len());
     assert!(
-        bodies.iter().any(|b| tool_names(b).iter().any(|n| n == "spawn_subagent")),
+        bodies.len() >= 2,
+        "expected parent and child inference requests, saw {}",
+        bodies.len()
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|b| tool_names(b).iter().any(|n| n == "spawn_subagent")),
         "adaptive presentation hid native child spawn from the parent"
     );
     for body in &bodies {

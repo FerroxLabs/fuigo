@@ -764,7 +764,8 @@ async fn prepare_grep(
         .await
     {
         return Ok(GrepStep::Early(GrepSearchOutput {
-            stdout: format!("Error: {path} is ignored by .gitignore and cannot be searched.").into_bytes(),
+            stdout: format!("Error: {path} is ignored by .gitignore and cannot be searched.")
+                .into_bytes(),
             stderr: Vec::new(),
             exit_code: 2,
             match_count: 0,
@@ -786,7 +787,8 @@ async fn prepare_grep(
             || physical.is_some_and(|p| filter.denies(&p, is_dir))
         {
             return Ok(GrepStep::Early(GrepSearchOutput {
-                stdout: format!("Error: {path} is excluded by a read rule and cannot be searched.").into_bytes(),
+                stdout: format!("Error: {path} is excluded by a read rule and cannot be searched.")
+                    .into_bytes(),
                 stderr: Vec::new(),
                 exit_code: 2,
                 match_count: 0,
@@ -879,11 +881,14 @@ async fn prepare_grep(
             cmd.arg("--glob").arg(format!("!{deny}"));
         }
     }
-    let null_mode = (result_filter.is_active() && !workdir.is_file()).then_some(match output_mode {
-        OutputMode::FilesWithMatches => crate::util::rg_json::RgJsonMode::Files,
-        OutputMode::Count => crate::util::rg_json::RgJsonMode::CountNull,
-        OutputMode::Content => crate::util::rg_json::RgJsonMode::Heading { context: with_context },
-    });
+    let null_mode =
+        (result_filter.is_active() && !workdir.is_file()).then_some(match output_mode {
+            OutputMode::FilesWithMatches => crate::util::rg_json::RgJsonMode::Files,
+            OutputMode::Count => crate::util::rg_json::RgJsonMode::CountNull,
+            OutputMode::Content => crate::util::rg_json::RgJsonMode::Heading {
+                context: with_context,
+            },
+        });
     if null_mode == Some(crate::util::rg_json::RgJsonMode::CountNull) {
         // Count: ripgrep's own `-c`, with NUL after the path; only names and counts are printed, so only names are judged.
         cmd.arg("--null");
@@ -1033,7 +1038,10 @@ impl tokio::io::AsyncRead for RgStdout {
 
 /// Forward ripgrep's `--null` output through `stream` (P198 round 3). The returned reader ends when ripgrep's output ends;
 /// if the reader is dropped (the head limit was reached) the forwarder stops and drops ripgrep's pipe.
-fn filtered_stdout(mut pipe: ChildStdout, mut stream: crate::util::rg_json::RgJsonStream) -> RgStdout {
+fn filtered_stdout(
+    mut pipe: ChildStdout,
+    mut stream: crate::util::rg_json::RgJsonStream,
+) -> RgStdout {
     use tokio::io::AsyncWriteExt;
     let (mut tx, rx) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
@@ -1360,7 +1368,8 @@ fn finalize_grep_filtered(
     // P198 round 4: with read rules ripgrep's stderr names files and is NEVER shown; some allowed results may exist.
     let partial_failure = config.filtered && exit_code == 2 && !stdout.is_empty();
     // Part G: ripgrep's OWN pattern error names no file and is shown as without rules; any other stderr may name one.
-    let own_error = config.filtered && crate::util::rg_json::is_own_error(exit_code, stdout.is_empty(), &stderr_buf);
+    let own_error = config.filtered
+        && crate::util::rg_json::is_own_error(exit_code, stdout.is_empty(), &stderr_buf);
     let filtered = config.filtered && !own_error;
     let stderr_buf = if filtered { Vec::new() } else { stderr_buf };
     let stderr = if filtered {
@@ -1478,7 +1487,11 @@ fn finalize_grep_filtered(
             "<workspace_result workspace_path=\"{}\">\n{}{}\n</workspace_result>",
             config.cwd_display,
             formatted_output,
-            if partial_failure { "\nsearch failed for some paths" } else { "" }
+            if partial_failure {
+                "\nsearch failed for some paths"
+            } else {
+                ""
+            }
         )
         .into_bytes(),
         stderr: stderr_buf,
@@ -1841,7 +1854,10 @@ mod test_rg {
 // Tests
 // ───────────────────────────────────────────────────────────────────────────
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
 
@@ -1861,10 +1877,15 @@ mod tests {
                 cwd_display: "cwd".to_string(),
                 filtered: true,
             };
-            String::from_utf8_lossy(&finalize_grep(body, false, Vec::new(), 0, &config).stdout).into_owned()
+            String::from_utf8_lossy(&finalize_grep(body, false, Vec::new(), 0, &config).stdout)
+                .into_owned()
         };
         let both = fake::interleaved_allowed();
-        let content = fin(OutputMode::Content, RgJsonMode::Heading { context: true }, &both);
+        let content = fin(
+            OutputMode::Content,
+            RgJsonMode::Heading { context: true },
+            &both,
+        );
         for needle in ["1:A1", "2:A2", "5:B5", "6-B6ctx"] {
             assert_eq!(content.matches(needle).count(), 1, "{content}");
         }
@@ -1872,7 +1893,10 @@ mod tests {
         assert_eq!(files.matches("src/a.rs").count(), 1, "{files}");
         assert_eq!(files.matches("src/b.rs").count(), 1, "{files}");
         let counts = fin(OutputMode::Count, RgJsonMode::Count, &both);
-        assert!(counts.contains("src/a.rs:2") && counts.contains("src/b.rs:1"), "{counts}");
+        assert!(
+            counts.contains("src/a.rs:2") && counts.contains("src/b.rs:1"),
+            "{counts}"
+        );
         let mixed = fake::interleaved_with_denied();
         for (mode, rj) in [
             (OutputMode::Content, RgJsonMode::Heading { context: true }),
@@ -2106,19 +2130,32 @@ mod tests {
         let single_in_list: GrepSearchInput =
             serde_json::from_value(serde_json::json!({"pattern": ["only"]})).unwrap();
         assert_eq!(single_in_list.pattern, "only");
-        assert!(serde_json::from_value::<GrepSearchInput>(serde_json::json!({"pattern": []})).is_err());
-        let schema = serde_json::to_value(schemars::schema_for!(GrepSearchInput)).unwrap();
-        assert_eq!(schema["properties"]["pattern"]["type"], "string", "schema stays a string");
         assert!(
-            schema["properties"]["pattern"]["description"].as_str().unwrap().contains("alternation"),
+            serde_json::from_value::<GrepSearchInput>(serde_json::json!({"pattern": []})).is_err()
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(GrepSearchInput)).unwrap();
+        assert_eq!(
+            schema["properties"]["pattern"]["type"], "string",
+            "schema stays a string"
+        );
+        assert!(
+            schema["properties"]["pattern"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("alternation"),
             "schema documents alternation"
         );
     }
 
     #[test]
     fn description_mentions_context_lines_and_alternation() {
-        let d = <GrepTool as crate::types::tool_metadata::ToolMetadata>::description_template(&GrepTool);
-        assert!(d.contains("alternation") && d.contains("matching lines") && d.contains("-A/-B"), "{d}");
+        let d = <GrepTool as crate::types::tool_metadata::ToolMetadata>::description_template(
+            &GrepTool,
+        );
+        assert!(
+            d.contains("alternation") && d.contains("matching lines") && d.contains("-A/-B"),
+            "{d}"
+        );
     }
 
     #[test]
@@ -3006,7 +3043,8 @@ mod tests {
 
         let tool = GrepTool;
         let mut stream =
-            fuigo_tool_runtime::Tool::execute(&tool, test_ctx(resources.into_shared()), input).await;
+            fuigo_tool_runtime::Tool::execute(&tool, test_ctx(resources.into_shared()), input)
+                .await;
 
         let mut deltas = String::new();
         let mut terminal: Option<Result<GrepSearchOutput, fuigo_tool_runtime::ToolError>> = None;
@@ -3089,13 +3127,17 @@ mod tests {
         builder.add_line(None, "secret/").unwrap();
         let mut resources = Resources::new();
         resources.insert(Cwd(repo.path().to_path_buf()));
-        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        resources.insert(crate::types::resources::GitignoreFilter::new(
+            builder.build().unwrap(),
+            canonical,
+        ));
         resources.insert(crate::types::resources::RespectGitignore(true));
         let mut input = make_grep_input("SECRET");
         input.path = Some("secret".to_string());
-        let output = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let output =
+            fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(!stdout.contains("TOP SECRET"), "{stdout}");
         assert!(stdout.contains("ignored by .gitignore"), "{stdout}");
@@ -3116,25 +3158,44 @@ mod tests {
             let mut input = make_grep_input("FAKE");
             input.path = Some(path.to_string());
             async move {
-                let out = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input)
-                    .await
-                    .unwrap();
+                let out = fuigo_tool_runtime::Tool::run(
+                    &GrepTool,
+                    test_ctx(resources.into_shared()),
+                    input,
+                )
+                .await
+                .unwrap();
                 String::from_utf8_lossy(&out.stdout).into_owned()
             }
         };
         let out = run(".env", &["**/.env"]).await;
-        assert!(!out.contains("FAKE_SECRET"), "explicit denied file must not be searched: {out}");
+        assert!(
+            !out.contains("FAKE_SECRET"),
+            "explicit denied file must not be searched: {out}"
+        );
         let out = run(&tmp.path().join(".env").to_string_lossy(), &["**/.env"]).await;
         assert!(!out.contains("FAKE_SECRET"), "absolute spelling too: {out}");
         // Control: the explicit file is read when nothing denies it; an allowed explicit file is searched.
         assert!(run(".env", &[]).await.contains("FAKE_SECRET"));
-        assert!(run("README.md", &["**/.env"]).await.contains("FAKE in readme"));
+        assert!(
+            run("README.md", &["**/.env"])
+                .await
+                .contains("FAKE in readme")
+        );
     }
 
     /// Everything the fuigo-build grep prints for `FAKE` in all three output modes.
-    async fn grep_all_modes(cwd: std::path::PathBuf, path: Option<String>, deny: Option<Vec<String>>) -> String {
+    async fn grep_all_modes(
+        cwd: std::path::PathBuf,
+        path: Option<String>,
+        deny: Option<Vec<String>>,
+    ) -> String {
         let mut all = String::new();
-        for mode in [OutputMode::Content, OutputMode::FilesWithMatches, OutputMode::Count] {
+        for mode in [
+            OutputMode::Content,
+            OutputMode::FilesWithMatches,
+            OutputMode::Count,
+        ] {
             let mut resources = Resources::new();
             resources.insert(Cwd(cwd.clone()));
             if let Some(deny) = &deny {
@@ -3143,9 +3204,10 @@ mod tests {
             let mut input = make_grep_input("FAKE");
             input.path = path.clone();
             input.output_mode = Some(mode);
-            let out = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input)
-                .await
-                .unwrap();
+            let out =
+                fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input)
+                    .await
+                    .unwrap();
             all.push_str(&String::from_utf8_lossy(&out.stdout));
             all.push('\n');
         }
@@ -3193,7 +3255,13 @@ mod tests {
                 let mut input = make_grep_input("FAKE");
                 input.context = context;
                 input.multiline = multiline;
-                let out = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input).await.unwrap();
+                let out = fuigo_tool_runtime::Tool::run(
+                    &GrepTool,
+                    test_ctx(resources.into_shared()),
+                    input,
+                )
+                .await
+                .unwrap();
                 outs.push(String::from_utf8_lossy(&out.stdout).into_owned());
             }
             assert!(outs[0].contains("FAKE"), "{}", outs[0]);
@@ -3223,7 +3291,10 @@ mod tests {
         let t = crate::util::read_deny::fixture::tree();
         for path in [None, Some("secrets".to_string())] {
             let none = grep_all_modes(t.proj.clone(), path.clone(), None).await;
-            assert!(none.contains("FAKE_SECRET") || none.contains("key_material.txt"), "{none}");
+            assert!(
+                none.contains("FAKE_SECRET") || none.contains("key_material.txt"),
+                "{none}"
+            );
             let empty = grep_all_modes(t.proj.clone(), path, Some(Vec::new())).await;
             // Same bytes up to ripgrep's parallel line order.
             assert_eq!(
@@ -3254,11 +3325,20 @@ mod tests {
         resources.insert(DenyReadGlobs(vec!["secrets/**".to_string()]));
         let mut input = make_grep_input("FAKE");
         input.output_mode = Some(OutputMode::Count);
-        let out = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input).await.unwrap();
+        let out =
+            fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(!text.contains("key_material.txt"), "{text}");
-        assert!(text.contains("public.txt") && text.contains("notes.txt"), "{text}");
-        assert!(!text.contains("keylink") || !text.contains("secrets/key"), "{text}");
+        assert!(
+            text.contains("public.txt") && text.contains("notes.txt"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("keylink") || !text.contains("secrets/key"),
+            "{text}"
+        );
     }
 
     fn partial_card_config() -> GrepFormatConfig {
@@ -3281,7 +3361,10 @@ mod tests {
             &partial_card_config(),
         );
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(text.contains("1:needle one") && text.contains("2:needle two"), "{text}");
+        assert!(
+            text.contains("1:needle one") && text.contains("2:needle two"),
+            "{text}"
+        );
         assert!(text.contains("timed out after 20 seconds"), "{text}");
         assert!(text.contains("the matches above are partial"), "{text}");
         assert_eq!(out.exit_code, -1);
@@ -3319,7 +3402,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TempDir::new().unwrap();
         let fake_rg = tmp.path().join("fake-rg.sh");
-        fs::write(&fake_rg, "#!/bin/sh\nprintf 'src/a.rs\\n1:needle found\\n'\nexec sleep 30\n").unwrap();
+        fs::write(
+            &fake_rg,
+            "#!/bin/sh\nprintf 'src/a.rs\\n1:needle found\\n'\nexec sleep 30\n",
+        )
+        .unwrap();
         fs::set_permissions(&fake_rg, fs::Permissions::from_mode(0o755)).unwrap();
         test_rg::set(Some(fake_rg));
         let mut resources = Resources::new();
@@ -3333,7 +3420,10 @@ mod tests {
         .await
         .unwrap();
         test_rg::set(None);
-        assert!(started.elapsed() < Duration::from_secs(20), "the deadline must end the call");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the deadline must end the call"
+        );
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(text.contains("1:needle found"), "{text}");
         assert!(text.contains("the matches above are partial"), "{text}");

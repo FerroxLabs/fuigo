@@ -8,7 +8,9 @@ use super::checkout::{git_command_judged, git_reset_hard_command};
 
 fn refused_root() -> &'static PathBuf {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    ROOT.get_or_init(|| std::env::temp_dir().join(format!("fuigo-t1-fw-untrusted-{}", std::process::id())))
+    ROOT.get_or_init(|| {
+        std::env::temp_dir().join(format!("fuigo-t1-fw-untrusted-{}", std::process::id()))
+    })
 }
 
 fn judge(dir: &Path) -> bool {
@@ -54,11 +56,17 @@ fn a_refused_source_is_not_retried_in_the_run_dir() {
     let trusted = tempfile::tempdir().unwrap();
     std::fs::write(
         trusted.path().join(".git"),
-        format!("gitdir: {}\n", source.join(".git").join("worktrees").join("wt").display()),
+        format!(
+            "gitdir: {}\n",
+            source.join(".git").join("worktrees").join("wt").display()
+        ),
     )
     .unwrap();
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     fuigo_tty_utils::install_repo_exec_judge(judge);
     let _restore = RestoreAllowAll;
-    assert!(git_command_judged(trusted.path()).is_err(), "the source decides; no retry in the run dir");
+    assert!(
+        git_command_judged(trusted.path()).is_err(),
+        "the source decides; no retry in the run dir"
+    );
 }

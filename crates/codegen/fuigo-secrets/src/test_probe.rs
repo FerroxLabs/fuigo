@@ -49,7 +49,10 @@ pub fn in_parent(test_name: &str, extra: &[&str]) -> bool {
         String::from_utf8_lossy(&output.stderr)
     )
     .replace("fake-p120-", "[redacted]-");
-    assert!(output.status.success(), "isolated P120 probe failed: {diagnostics}");
+    assert!(
+        output.status.success(),
+        "isolated P120 probe failed: {diagnostics}"
+    );
     assert!(
         diagnostics.contains("test result: ok. 1 passed"),
         "the P120 child must run exactly one test: {diagnostics}"
@@ -85,22 +88,32 @@ pub fn assert_clean(dump: &str, extra: &[&str]) {
     assert!(
         dump.lines().any(|line| line == "P120_BENIGN=kept"),
         "control: the child did not inherit the ordinary environment, so the probe proves nothing:\n{}",
-        dump.lines().map(|l| l.split('=').next().unwrap_or("")).collect::<Vec<_>>().join(" ")
+        dump.lines()
+            .map(|l| l.split('=').next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join(" ")
     );
     let leaked: Vec<&str> = SECRETS
         .iter()
         .chain(extra)
         .copied()
-        .filter(|name| dump.lines().any(|line| line.starts_with(&format!("{name}="))))
+        .filter(|name| {
+            dump.lines()
+                .any(|line| line.starts_with(&format!("{name}=")))
+        })
         .collect();
-    assert!(leaked.is_empty(), "the child inherited Fuigo's secrets: {leaked:?}");
+    assert!(
+        leaked.is_empty(),
+        "the child inherited Fuigo's secrets: {leaked:?}"
+    );
 }
 
 /// Assert `dump` still holds `name` (a credential name a config registered, which is the USER's own and must reach
 /// the user's own tools: P120 follow-up). Names only are reported.
 pub fn assert_kept(dump: &str, name: &str) {
     assert!(
-        dump.lines().any(|line| line.starts_with(&format!("{name}="))),
+        dump.lines()
+            .any(|line| line.starts_with(&format!("{name}="))),
         "the child lost the user's own credential variable {name}, which no Fuigo secret filter may remove"
     );
 }

@@ -36,7 +36,8 @@ pub(crate) fn code_block_label(info: &str) -> String {
             .then(|| unquote(value.trim_end_matches('}')))
             .filter(|v| !v.is_empty())
     };
-    let looks_like_path = |word: &str| !word.contains('=') && (word.contains('.') || word.contains('/'));
+    let looks_like_path =
+        |word: &str| !word.contains('=') && (word.contains('.') || word.contains('/'));
 
     let file = std::iter::once(first)
         .chain(rest.iter().copied())
@@ -48,7 +49,12 @@ pub(crate) fn code_block_label(info: &str) -> String {
                 .filter(|path| looks_like_path(path))
                 .map(str::to_string)
         })
-        .or_else(|| rest.iter().copied().find(|w| looks_like_path(w)).map(unquote));
+        .or_else(|| {
+            rest.iter()
+                .copied()
+                .find(|w| looks_like_path(w))
+                .map(unquote)
+        });
 
     let lang = first
         .split(':')
@@ -133,7 +139,10 @@ fn code_block_copyable(span: &CodeBlockSpan) -> bool {
 
 /// Number of copy rows the given blocks produce (what [`copy_row_specs`] would return, without building the text).
 pub(crate) fn copy_row_count(code_blocks: &[CodeBlockSpan], tables: &[TableCopyMeta]) -> usize {
-    code_blocks.iter().filter(|b| code_block_copyable(b)).count()
+    code_blocks
+        .iter()
+        .filter(|b| code_block_copyable(b))
+        .count()
         + tables
             .iter()
             .filter(|t| t.line_count > 0 && table_grid(t).is_some())
@@ -240,16 +249,16 @@ mod tests {
         assert_eq!(code_block_label("{.js}"), "js");
         assert_eq!(code_block_label("title=x.rs"), "x.rs");
         let long = "a".repeat(80);
-        assert_eq!(code_block_label(&format!("rust {long}.rs")).chars().count(), MAX_LABEL_CHARS);
+        assert_eq!(
+            code_block_label(&format!("rust {long}.rs")).chars().count(),
+            MAX_LABEL_CHARS
+        );
     }
 
     #[test]
     fn table_exports_markdown_and_tsv() {
         let t = table(2, &["name", "note", "a|b", "x\ty", "c", "two\nlines"]);
-        assert_eq!(
-            table_tsv(&t).unwrap(),
-            "name\tnote\na|b\tx y\nc\ttwo lines"
-        );
+        assert_eq!(table_tsv(&t).unwrap(), "name\tnote\na|b\tx y\nc\ttwo lines");
         assert_eq!(
             table_markdown(&t).unwrap(),
             "| name | note |\n| --- | --- |\n| a\\|b | x\ty |\n| c | two lines |"
@@ -288,7 +297,12 @@ mod tests {
         assert_eq!(specs[0].1.buttons[0].text, "fn main() {\n\tlet x = 1;\n}\n");
         assert!(specs[0].1.label.ends_with(" rust"));
         assert_eq!(specs[1].0, 4..9);
-        let labels: Vec<&str> = specs[1].1.buttons.iter().map(|b| b.label.as_str()).collect();
+        let labels: Vec<&str> = specs[1]
+            .1
+            .buttons
+            .iter()
+            .map(|b| b.label.as_str())
+            .collect();
         assert_eq!(labels, ["[Copy as Markdown]", "[Copy as TSV]"]);
     }
 }

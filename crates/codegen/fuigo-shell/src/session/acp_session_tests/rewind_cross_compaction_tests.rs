@@ -56,7 +56,11 @@ fn write_compacted_session_fixture(session_dir: &std::path::Path, ckpt_id: &str)
 }
 
 /// [`write_compacted_session_fixture`] with `head` as the checkpoint's System item.
-pub(crate) fn write_compacted_session_fixture_with_head(session_dir: &std::path::Path, ckpt_id: &str, head: &str) {
+pub(crate) fn write_compacted_session_fixture_with_head(
+    session_dir: &std::path::Path,
+    ckpt_id: &str,
+    head: &str,
+) {
     std::fs::create_dir_all(session_dir.join("compaction_checkpoints")).unwrap();
 
     let ckpt_file = CompactionCheckpointFile {
@@ -545,7 +549,12 @@ async fn run_failed_replay_scenario() {
     std::fs::write(root.join("created.txt"), "created by prompt 6").unwrap();
     let tracker = &actor.file_state_tracker;
     tracker
-        .add_before_snapshot_for_prompt(6, &root.join("edited.txt"), root, Some("before prompt 6".into()))
+        .add_before_snapshot_for_prompt(
+            6,
+            &root.join("edited.txt"),
+            root,
+            Some("before prompt 6".into()),
+        )
         .await;
     tracker
         .add_before_snapshot_for_prompt(6, &root.join("created.txt"), root, None)
@@ -567,7 +576,10 @@ async fn run_failed_replay_scenario() {
     let truncated = drained_truncate_requests(&persistence_rx);
     let _ = std::fs::remove_dir_all(&session_dir);
 
-    assert!(!resp.success, "the rewind cannot rebuild the conversation: {resp:?}");
+    assert!(
+        !resp.success,
+        "the rewind cannot rebuild the conversation: {resp:?}"
+    );
     assert_eq!(
         resp.error.as_deref(),
         Some(
@@ -582,15 +594,26 @@ async fn run_failed_replay_scenario() {
         Some("after prompt 6"),
         "no file may be restored by a rewind that failed"
     );
-    assert!(created_exists, "no file may be deleted by a rewind that failed");
+    assert!(
+        created_exists,
+        "no file may be deleted by a rewind that failed"
+    );
     assert!(resp.reverted_files.is_empty(), "{resp:?}");
     assert_eq!(prompt_index, 7, "the conversation is not rewound");
     assert!(
-        points.iter().any(|p| p.prompt_index == 6 && p.file_snapshots.len() == 2),
+        points
+            .iter()
+            .any(|p| p.prompt_index == 6 && p.file_snapshots.len() == 2),
         "the rewind snapshots are kept: {:?}",
-        points.iter().map(|p| (p.prompt_index, p.file_snapshots.len())).collect::<Vec<_>>()
+        points
+            .iter()
+            .map(|p| (p.prompt_index, p.file_snapshots.len()))
+            .collect::<Vec<_>>()
     );
-    assert!(truncated.is_empty(), "no snapshot truncation was requested: {truncated:?}");
+    assert!(
+        truncated.is_empty(),
+        "no snapshot truncation was requested: {truncated:?}"
+    );
 }
 
 /// P111: the same "rewind all" across a compaction with its checkpoint intact still reverts the files and rebuilds the
@@ -598,7 +621,9 @@ async fn run_failed_replay_scenario() {
 #[tokio::test(flavor = "current_thread")]
 async fn cross_compaction_rewind_all_reverts_files_and_conversation() {
     let local = tokio::task::LocalSet::new();
-    local.run_until(run_cross_compaction_rewind_all_scenario()).await;
+    local
+        .run_until(run_cross_compaction_rewind_all_scenario())
+        .await;
 }
 
 async fn run_cross_compaction_rewind_all_scenario() {
@@ -615,7 +640,12 @@ async fn run_cross_compaction_rewind_all_scenario() {
     std::fs::write(root.join("created.txt"), "created by prompt 6").unwrap();
     let tracker = &actor.file_state_tracker;
     tracker
-        .add_before_snapshot_for_prompt(6, &root.join("edited.txt"), root, Some("before prompt 6".into()))
+        .add_before_snapshot_for_prompt(
+            6,
+            &root.join("edited.txt"),
+            root,
+            Some("before prompt 6".into()),
+        )
         .await;
     tracker
         .add_before_snapshot_for_prompt(6, &root.join("created.txt"), root, None)
@@ -642,7 +672,9 @@ async fn run_cross_compaction_rewind_all_scenario() {
 
     assert!(resp.success, "{resp:?}");
     assert_eq!(
-        std::fs::read_to_string(root.join("edited.txt")).ok().as_deref(),
+        std::fs::read_to_string(root.join("edited.txt"))
+            .ok()
+            .as_deref(),
         Some("before prompt 6")
     );
     assert!(!root.join("created.txt").exists());
@@ -652,12 +684,20 @@ async fn run_cross_compaction_rewind_all_scenario() {
 }
 
 /// Prompt 6 edited `edited.txt` and created `created.txt`; the tracker holds their before-snapshots.
-async fn record_prompt_6_edits(actor: &crate::session::acp_session::SessionActor, root: &std::path::Path) {
+async fn record_prompt_6_edits(
+    actor: &crate::session::acp_session::SessionActor,
+    root: &std::path::Path,
+) {
     std::fs::write(root.join("edited.txt"), "after prompt 6").unwrap();
     std::fs::write(root.join("created.txt"), "created by prompt 6").unwrap();
     let tracker = &actor.file_state_tracker;
     tracker
-        .add_before_snapshot_for_prompt(6, &root.join("edited.txt"), root, Some("before prompt 6".into()))
+        .add_before_snapshot_for_prompt(
+            6,
+            &root.join("edited.txt"),
+            root,
+            Some("before prompt 6".into()),
+        )
         .await;
     tracker
         .add_before_snapshot_for_prompt(6, &root.join("created.txt"), root, None)
@@ -670,7 +710,9 @@ async fn record_prompt_6_edits(actor: &crate::session::acp_session::SessionActor
 #[tokio::test(flavor = "current_thread")]
 async fn pre_compaction_rewind_succeeds_when_the_checkpoint_is_gone() {
     let local = tokio::task::LocalSet::new();
-    local.run_until(run_pre_compaction_checkpoint_gone_scenario()).await;
+    local
+        .run_until(run_pre_compaction_checkpoint_gone_scenario())
+        .await;
 }
 
 async fn run_pre_compaction_checkpoint_gone_scenario() {
@@ -686,16 +728,31 @@ async fn run_pre_compaction_checkpoint_gone_scenario() {
     record_prompt_6_edits(&actor, root).await;
 
     let resp = actor
-        .handle_rewind(RewindRequest { target_prompt_index: 3, force: true, mode: RewindMode::All })
+        .handle_rewind(RewindRequest {
+            target_prompt_index: 3,
+            force: true,
+            mode: RewindMode::All,
+        })
         .await
         .expect("handle_rewind ok");
 
-    let texts: Vec<String> = actor.chat_state_handle.get_conversation().await.iter().map(|c| c.text_content()).collect();
+    let texts: Vec<String> = actor
+        .chat_state_handle
+        .get_conversation()
+        .await
+        .iter()
+        .map(|c| c.text_content())
+        .collect();
     let truncated = drained_truncate_requests(&persistence_rx);
     let _ = std::fs::remove_dir_all(&session_dir);
 
     assert!(resp.success, "{resp:?}");
-    assert_eq!(std::fs::read_to_string(root.join("edited.txt")).ok().as_deref(), Some("before prompt 6"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("edited.txt"))
+            .ok()
+            .as_deref(),
+        Some("before prompt 6")
+    );
     assert!(!root.join("created.txt").exists());
     assert_eq!(texts, vec!["SYS", "UI1", "P0", "P1", "P2"]);
     assert_eq!(actor.chat_state_handle.get_prompt_index().await, 3);
@@ -733,25 +790,46 @@ async fn run_older_checkpoint_gone_scenario() {
     ];
     let mut content = Vec::new();
     for u in &updates {
-        content.extend(serde_json::to_vec(&SessionUpdateEnvelope::from_update(u).unwrap()).unwrap());
+        content
+            .extend(serde_json::to_vec(&SessionUpdateEnvelope::from_update(u).unwrap()).unwrap());
         content.push(b'\n');
     }
     std::fs::write(session_dir.join("updates.jsonl"), content).unwrap();
-    assert!(!session_dir.join("compaction_checkpoints/ckptold.json").exists(), "fixture: the older one is gone");
+    assert!(
+        !session_dir
+            .join("compaction_checkpoints/ckptold.json")
+            .exists(),
+        "fixture: the older one is gone"
+    );
     restore_compacted_live_state(&actor).await;
     record_prompt_6_edits(&actor, root).await;
 
     let resp = actor
-        .handle_rewind(RewindRequest { target_prompt_index: 6, force: true, mode: RewindMode::All })
+        .handle_rewind(RewindRequest {
+            target_prompt_index: 6,
+            force: true,
+            mode: RewindMode::All,
+        })
         .await
         .expect("handle_rewind ok");
 
-    let texts: Vec<String> = actor.chat_state_handle.get_conversation().await.iter().map(|c| c.text_content()).collect();
+    let texts: Vec<String> = actor
+        .chat_state_handle
+        .get_conversation()
+        .await
+        .iter()
+        .map(|c| c.text_content())
+        .collect();
     let truncated = drained_truncate_requests(&persistence_rx);
     let _ = std::fs::remove_dir_all(&session_dir);
 
     assert!(resp.success, "{resp:?}");
-    assert_eq!(std::fs::read_to_string(root.join("edited.txt")).ok().as_deref(), Some("before prompt 6"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("edited.txt"))
+            .ok()
+            .as_deref(),
+        Some("before prompt 6")
+    );
     assert!(!root.join("created.txt").exists());
     assert_eq!(texts, vec!["SYS", "SUMMARY", "P5", "R5"]);
     assert_eq!(actor.chat_state_handle.get_prompt_index().await, 6);
@@ -797,10 +875,20 @@ async fn run_partial_file_revert_scenario() {
     std::fs::write(root.join("edited.txt"), "agent edit").unwrap();
     let tracker = &actor.file_state_tracker;
     tracker
-        .add_before_snapshot_for_prompt(1, &root.join("edited.txt"), root, Some("original edited".into()))
+        .add_before_snapshot_for_prompt(
+            1,
+            &root.join("edited.txt"),
+            root,
+            Some("original edited".into()),
+        )
         .await;
     tracker
-        .add_before_snapshot_for_prompt(1, &root.join("blocked/kept.txt"), root, Some("original kept".into()))
+        .add_before_snapshot_for_prompt(
+            1,
+            &root.join("blocked/kept.txt"),
+            root,
+            Some("original kept".into()),
+        )
         .await;
     tracker
         .add_before_snapshot_for_prompt(1, &root.join("created"), root, None)
@@ -814,7 +902,10 @@ async fn run_partial_file_revert_scenario() {
         force: true,
         mode: RewindMode::All,
     };
-    let resp = actor.handle_rewind(request()).await.expect("handle_rewind ok");
+    let resp = actor
+        .handle_rewind(request())
+        .await
+        .expect("handle_rewind ok");
 
     let error = resp.error.clone().unwrap_or_default();
     assert!(!resp.success, "a partial revert is not a success: {resp:?}");
@@ -829,10 +920,15 @@ async fn run_partial_file_revert_scenario() {
     );
     assert!(resp.reverted_files[0].ends_with("edited.txt"), "{resp:?}");
     assert_eq!(
-        std::fs::read_to_string(root.join("edited.txt")).ok().as_deref(),
+        std::fs::read_to_string(root.join("edited.txt"))
+            .ok()
+            .as_deref(),
         Some("original edited")
     );
-    assert!(root.join("created/inner").is_dir(), "the failed deletion changed nothing");
+    assert!(
+        root.join("created/inner").is_dir(),
+        "the failed deletion changed nothing"
+    );
     assert_eq!(
         actor.chat_state_handle.get_prompt_index().await,
         2,
@@ -840,21 +936,34 @@ async fn run_partial_file_revert_scenario() {
     );
     let points = tracker.get_rewind_points().await;
     assert!(
-        points.iter().any(|p| p.prompt_index == 1 && p.file_snapshots.len() == 3),
+        points
+            .iter()
+            .any(|p| p.prompt_index == 1 && p.file_snapshots.len() == 3),
         "the saved contents are kept for a retry: {:?}",
-        points.iter().map(|p| (p.prompt_index, p.file_snapshots.len())).collect::<Vec<_>>()
+        points
+            .iter()
+            .map(|p| (p.prompt_index, p.file_snapshots.len()))
+            .collect::<Vec<_>>()
     );
     let truncated = drained_truncate_requests(&persistence_rx);
-    assert!(truncated.is_empty(), "rewind_points.jsonl is not truncated: {truncated:?}");
+    assert!(
+        truncated.is_empty(),
+        "rewind_points.jsonl is not truncated: {truncated:?}"
+    );
 
     // The cause is fixed; the same rewind now completes from the kept snapshots.
     std::fs::remove_file(root.join("blocked")).unwrap();
     std::fs::remove_dir_all(root.join("created")).unwrap();
     std::fs::write(root.join("created"), "agent created").unwrap();
-    let retry = actor.handle_rewind(request()).await.expect("handle_rewind ok");
+    let retry = actor
+        .handle_rewind(request())
+        .await
+        .expect("handle_rewind ok");
     assert!(retry.success, "{retry:?}");
     assert_eq!(
-        std::fs::read_to_string(root.join("blocked/kept.txt")).ok().as_deref(),
+        std::fs::read_to_string(root.join("blocked/kept.txt"))
+            .ok()
+            .as_deref(),
         Some("original kept"),
         "the file that failed before is restored from its kept snapshot"
     );
@@ -881,7 +990,9 @@ async fn run_unreadable_snapshots_scenario() {
     // The deferred source cannot be read: it is a directory.
     let unreadable = tempfile::tempdir().unwrap();
     actor.file_state_tracker = std::sync::Arc::new(
-        fuigo_workspace::session::file_state::FileStateTracker::with_lazy_source(unreadable.path().to_path_buf()),
+        fuigo_workspace::session::file_state::FileStateTracker::with_lazy_source(
+            unreadable.path().to_path_buf(),
+        ),
     );
 
     let mut snap = actor
@@ -919,11 +1030,15 @@ async fn run_unreadable_snapshots_scenario() {
 
     assert!(!resp.success, "{resp:?}");
     assert!(
-        resp.error.as_deref().is_some_and(|e| e.contains("saved file contents")),
+        resp.error
+            .as_deref()
+            .is_some_and(|e| e.contains("saved file contents")),
         "the response says why: {resp:?}"
     );
     assert_eq!(
-        std::fs::read_to_string(root.join("edited.txt")).ok().as_deref(),
+        std::fs::read_to_string(root.join("edited.txt"))
+            .ok()
+            .as_deref(),
         Some("agent edit"),
         "no file is restored from a partial plan"
     );
@@ -956,7 +1071,10 @@ async fn run_malformed_snapshot_row_scenario() {
     let rewind_points = saved.path().join("rewind_points.jsonl");
     std::fs::write(
         &rewind_points,
-        format!("{}\n{{\"prompt_index\": 1, \"file_snapshots\": [torn\n", serde_json::to_string(&point).unwrap()),
+        format!(
+            "{}\n{{\"prompt_index\": 1, \"file_snapshots\": [torn\n",
+            serde_json::to_string(&point).unwrap()
+        ),
     )
     .unwrap();
     actor.file_state_tracker = std::sync::Arc::new(
@@ -986,20 +1104,30 @@ async fn run_malformed_snapshot_row_scenario() {
         force: true,
         mode: RewindMode::All,
     };
-    let first = actor.handle_rewind(request()).await.expect("handle_rewind ok");
+    let first = actor
+        .handle_rewind(request())
+        .await
+        .expect("handle_rewind ok");
     // A lenient load (as a cancel or a conversation-only rewind makes) now consumes the deferred source.
     let _ = actor.file_state_tracker.max_prompt_index().await;
-    let second = actor.handle_rewind(request()).await.expect("handle_rewind ok");
+    let second = actor
+        .handle_rewind(request())
+        .await
+        .expect("handle_rewind ok");
 
     for (label, resp) in [("strict load", &first), ("after a lenient load", &second)] {
         assert!(!resp.success, "{label}: {resp:?}");
         assert!(
-            resp.error.as_deref().is_some_and(|e| e.contains("saved file contents")),
+            resp.error
+                .as_deref()
+                .is_some_and(|e| e.contains("saved file contents")),
             "{label}: the response says why: {resp:?}"
         );
     }
     assert_eq!(
-        std::fs::read_to_string(root.join("edited.txt")).ok().as_deref(),
+        std::fs::read_to_string(root.join("edited.txt"))
+            .ok()
+            .as_deref(),
         Some("agent edit"),
         "no file is restored from a partial set"
     );
@@ -1015,7 +1143,9 @@ async fn run_malformed_snapshot_row_scenario() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_rewind_whose_history_replacement_fails_reports_it_and_keeps_snapshots() {
     let local = tokio::task::LocalSet::new();
-    local.run_until(run_rewind_replacement_failure_scenario()).await;
+    local
+        .run_until(run_rewind_replacement_failure_scenario())
+        .await;
 }
 
 async fn run_rewind_replacement_failure_scenario() {
@@ -1026,10 +1156,13 @@ async fn run_rewind_replacement_failure_scenario() {
     let root = project.path();
     // Everything the session sends to persistence passes through here (to record truncations) to the real actor.
     let (forward_tx, mut forward_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-    let (mut actor, _gateway_rx) = actor_on_real_fs(root, forward_tx.clone(), "p111-r5-rewind-persist").await;
+    let (mut actor, _gateway_rx) =
+        actor_on_real_fs(root, forward_tx.clone(), "p111-r5-rewind-persist").await;
     let info = actor.session_info.clone();
     let session_dir = crate::session::persistence::session_dir(&info);
-    let storage = crate::session::storage::JsonlStorageAdapter::with_explicit_session_dir(session_dir.clone());
+    let storage = crate::session::storage::JsonlStorageAdapter::with_explicit_session_dir(
+        session_dir.clone(),
+    );
     storage
         .init_session(&info, crate::session::persistence::default_model_id())
         .await
@@ -1059,7 +1192,10 @@ async fn run_rewind_replacement_failure_scenario() {
             if let Some(from_index) = super::support::truncation_of(&message) {
                 seen.borrow_mut().push(from_index);
             }
-            if matches!(message, PersistenceMsg::EndRewindPointsAndAck { put_back: true, .. }) {
+            if matches!(
+                message,
+                PersistenceMsg::EndRewindPointsAndAck { put_back: true, .. }
+            ) {
                 restored.set(restored.get() + 1);
             }
             let _ = persistence.send(message);
@@ -1069,7 +1205,11 @@ async fn run_rewind_replacement_failure_scenario() {
         200_000,
         Box::new(crate::session::chat_persistence::ChannelChatPersistence::new(forward_tx.clone())),
     );
-    let mut snap = actor.chat_state_handle.snapshot().await.expect("snapshot available");
+    let mut snap = actor
+        .chat_state_handle
+        .snapshot()
+        .await
+        .expect("snapshot available");
     snap.conversation = conversation;
     snap.prompt_index = 2;
     snap.prompt_texts = vec!["P0".into(), "P1".into()];
@@ -1082,7 +1222,9 @@ async fn run_rewind_replacement_failure_scenario() {
         .await;
     let barrier = || async {
         let (respond_to, done) = tokio::sync::oneshot::channel();
-        forward_tx.send(PersistenceMsg::FlushAndAck { respond_to }).unwrap();
+        forward_tx
+            .send(PersistenceMsg::FlushAndAck { respond_to })
+            .unwrap();
         let _ = done.await;
     };
     let request = || RewindRequest {
@@ -1095,13 +1237,23 @@ async fn run_rewind_replacement_failure_scenario() {
     let points_before = std::fs::read(&points_file).ok();
 
     test_seam::fail_history_replacements(&info.id.0, usize::MAX);
-    let resp = actor.handle_rewind(request()).await.expect("handle_rewind ok");
+    let resp = actor
+        .handle_rewind(request())
+        .await
+        .expect("handle_rewind ok");
     barrier().await;
 
-    assert!(!resp.success, "a rewind whose history was not saved is not a success: {resp:?}");
+    assert!(
+        !resp.success,
+        "a rewind whose history was not saved is not a success: {resp:?}"
+    );
     let error = resp.error.clone().unwrap_or_default();
     assert!(error.contains("conversation could not be saved"), "{error}");
-    assert_eq!(actor.chat_state_handle.get_prompt_index().await, 2, "the conversation is not rewound");
+    assert_eq!(
+        actor.chat_state_handle.get_prompt_index().await,
+        2,
+        "the conversation is not rewound"
+    );
     assert!(
         actor
             .chat_state_handle
@@ -1113,28 +1265,59 @@ async fn run_rewind_replacement_failure_scenario() {
     );
     let points = actor.file_state_tracker.get_rewind_points().await;
     assert!(
-        points.iter().any(|p| p.prompt_index == 1 && p.file_snapshots.len() == 1),
+        points
+            .iter()
+            .any(|p| p.prompt_index == 1 && p.file_snapshots.len() == 1),
         "the saved contents are kept for a retry"
     );
     // P146: rewind_points.jsonl is rewritten before the conversation is saved, and put back when that save fails.
-    assert_eq!(*truncations.borrow(), vec![1], "the rewrite was made under the rewind's lock");
-    assert_eq!(restores.get(), 1, "and put back when the conversation could not be saved");
-    assert_eq!(std::fs::read(&points_file).ok(), points_before, "rewind_points.jsonl is as it was");
-    assert_eq!(std::fs::read(&chat_file).unwrap(), chat_before, "chat_history.jsonl is unchanged");
+    assert_eq!(
+        *truncations.borrow(),
+        vec![1],
+        "the rewrite was made under the rewind's lock"
+    );
+    assert_eq!(
+        restores.get(),
+        1,
+        "and put back when the conversation could not be saved"
+    );
+    assert_eq!(
+        std::fs::read(&points_file).ok(),
+        points_before,
+        "rewind_points.jsonl is as it was"
+    );
+    assert_eq!(
+        std::fs::read(&chat_file).unwrap(),
+        chat_before,
+        "chat_history.jsonl is unchanged"
+    );
 
     // Replacements work again: the same rewind completes from the kept snapshots.
     test_seam::fail_history_replacements(&info.id.0, 0);
-    let retry = actor.handle_rewind(request()).await.expect("handle_rewind ok");
+    let retry = actor
+        .handle_rewind(request())
+        .await
+        .expect("handle_rewind ok");
     barrier().await;
     let saved = std::fs::read_to_string(&chat_file).unwrap();
     let _ = std::fs::remove_dir_all(&session_dir);
 
     assert!(retry.success, "{retry:?}");
     assert_eq!(actor.chat_state_handle.get_prompt_index().await, 1);
-    assert_eq!(std::fs::read_to_string(root.join("edited.txt")).unwrap(), "original");
+    assert_eq!(
+        std::fs::read_to_string(root.join("edited.txt")).unwrap(),
+        "original"
+    );
     assert_eq!(*truncations.borrow(), vec![1, 1]);
-    assert_eq!(restores.get(), 1, "a rewind that went through puts nothing back");
-    assert!(saved.contains("P0") && !saved.contains("P1"), "the rewound history is stored: {saved}");
+    assert_eq!(
+        restores.get(),
+        1,
+        "a rewind that went through puts nothing back"
+    );
+    assert!(
+        saved.contains("P0") && !saved.contains("P1"),
+        "the rewound history is stored: {saved}"
+    );
 }
 
 /// P114 (Fable P111 #1): a torn row in the middle of `rewind_points.jsonl` (a record cut short inside a multi-byte
@@ -1155,8 +1338,15 @@ async fn run_torn_middle_row_scenario() {
     let (mut actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p114-torn").await;
 
     let writer = fuigo_workspace::session::file_state::FileStateTracker::new();
-    for (prompt, file, before) in [(1, "a.txt", "a before 1"), (2, "d.txt", "café before 2"), (3, "b.txt", "b before 3"), (4, "c.txt", "c before 4")] {
-        writer.add_before_snapshot_for_prompt(prompt, &root.join(file), root, Some(before.into())).await;
+    for (prompt, file, before) in [
+        (1, "a.txt", "a before 1"),
+        (2, "d.txt", "café before 2"),
+        (3, "b.txt", "b before 3"),
+        (4, "c.txt", "c before 4"),
+    ] {
+        writer
+            .add_before_snapshot_for_prompt(prompt, &root.join(file), root, Some(before.into()))
+            .await;
     }
     let rows: Vec<Vec<u8>> = writer
         .get_rewind_points()
@@ -1174,51 +1364,121 @@ async fn run_torn_middle_row_scenario() {
         .collect();
     let saved = tempfile::tempdir().unwrap();
     let rewind_points = saved.path().join("rewind_points.jsonl");
-    std::fs::write(&rewind_points, rows.join(&b'\n').into_iter().chain([b'\n']).collect::<Vec<u8>>()).unwrap();
+    std::fs::write(
+        &rewind_points,
+        rows.join(&b'\n')
+            .into_iter()
+            .chain([b'\n'])
+            .collect::<Vec<u8>>(),
+    )
+    .unwrap();
     actor.file_state_tracker = std::sync::Arc::new(
-        fuigo_workspace::session::file_state::FileStateTracker::with_lazy_source(rewind_points.clone()),
+        fuigo_workspace::session::file_state::FileStateTracker::with_lazy_source(
+            rewind_points.clone(),
+        ),
     );
     for (file, now) in [("a.txt", "a now"), ("b.txt", "b now"), ("c.txt", "c now")] {
         std::fs::write(root.join(file), now).unwrap();
     }
 
-    let mut snap = actor.chat_state_handle.snapshot().await.expect("snapshot available");
-    snap.conversation = vec![ConversationItem::system("SYS"), ConversationItem::user("UI")];
+    let mut snap = actor
+        .chat_state_handle
+        .snapshot()
+        .await
+        .expect("snapshot available");
+    snap.conversation = vec![
+        ConversationItem::system("SYS"),
+        ConversationItem::user("UI"),
+    ];
     for i in 0..6 {
-        snap.conversation.push(ConversationItem::user(format!("P{i}")));
-        snap.conversation.push(ConversationItem::assistant(format!("R{i}")));
+        snap.conversation
+            .push(ConversationItem::user(format!("P{i}")));
+        snap.conversation
+            .push(ConversationItem::assistant(format!("R{i}")));
     }
     snap.prompt_index = 6;
     snap.prompt_texts = (0..6).map(|i| format!("P{i}")).collect();
     actor.chat_state_handle.restore_snapshot(snap);
-    let request = |target_prompt_index, mode| RewindRequest { target_prompt_index, force: true, mode };
+    let request = |target_prompt_index, mode| RewindRequest {
+        target_prompt_index,
+        force: true,
+        mode,
+    };
 
-    let refused = actor.handle_rewind(request(2, RewindMode::All)).await.expect("handle_rewind ok");
+    let refused = actor
+        .handle_rewind(request(2, RewindMode::All))
+        .await
+        .expect("handle_rewind ok");
     let error = refused.error.clone().unwrap_or_default();
     assert!(!refused.success, "{refused:?}");
     assert!(refused.reverted_files.is_empty(), "{refused:?}");
-    assert!(error.contains(&rewind_points.display().to_string()) && error.contains("line 2"), "names file and line: {error}");
-    assert!(error.contains("prompt #3 or later"), "says which file rewinds still work: {error}");
-    assert!(error.to_lowercase().contains("conversation-only"), "offers the conversation-only rewind: {error}");
-    assert!(!error.to_lowercase().contains("try again"), "retrying cannot repair the row: {error}");
+    assert!(
+        error.contains(&rewind_points.display().to_string()) && error.contains("line 2"),
+        "names file and line: {error}"
+    );
+    assert!(
+        error.contains("prompt #3 or later"),
+        "says which file rewinds still work: {error}"
+    );
+    assert!(
+        error.to_lowercase().contains("conversation-only"),
+        "offers the conversation-only rewind: {error}"
+    );
+    assert!(
+        !error.to_lowercase().contains("try again"),
+        "retrying cannot repair the row: {error}"
+    );
     for (file, now) in [("a.txt", "a now"), ("b.txt", "b now"), ("c.txt", "c now")] {
-        assert_eq!(std::fs::read_to_string(root.join(file)).unwrap(), now, "a refused rewind changed {file}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(file)).unwrap(),
+            now,
+            "a refused rewind changed {file}"
+        );
     }
-    assert_eq!(actor.chat_state_handle.get_prompt_index().await, 6, "the conversation is not rewound");
+    assert_eq!(
+        actor.chat_state_handle.get_prompt_index().await,
+        6,
+        "the conversation is not rewound"
+    );
     assert!(drained_truncate_requests(&persistence_rx).is_empty());
 
-    let restored = actor.handle_rewind(request(4, RewindMode::All)).await.expect("handle_rewind ok");
-    assert!(restored.success, "a rewind that does not need the damaged row works: {restored:?}");
-    assert_eq!(std::fs::read_to_string(root.join("c.txt")).unwrap(), "c before 4");
-    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "b now");
-    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a now");
+    let restored = actor
+        .handle_rewind(request(4, RewindMode::All))
+        .await
+        .expect("handle_rewind ok");
+    assert!(
+        restored.success,
+        "a rewind that does not need the damaged row works: {restored:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("c.txt")).unwrap(),
+        "c before 4"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("b.txt")).unwrap(),
+        "b now"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "a now"
+    );
     assert_eq!(actor.chat_state_handle.get_prompt_index().await, 4);
     assert_eq!(drained_truncate_requests(&persistence_rx), vec![4]);
 
-    let conversation_only = actor.handle_rewind(request(2, RewindMode::ConversationOnly)).await.expect("handle_rewind ok");
-    assert!(conversation_only.success, "the offered conversation-only rewind works: {conversation_only:?}");
+    let conversation_only = actor
+        .handle_rewind(request(2, RewindMode::ConversationOnly))
+        .await
+        .expect("handle_rewind ok");
+    assert!(
+        conversation_only.success,
+        "the offered conversation-only rewind works: {conversation_only:?}"
+    );
     assert_eq!(actor.chat_state_handle.get_prompt_index().await, 2);
-    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "b now", "files are left as they are");
+    assert_eq!(
+        std::fs::read_to_string(root.join("b.txt")).unwrap(),
+        "b now",
+        "files are left as they are"
+    );
 }
 
 /// P146 (K19): the rewind's rewrite of `rewind_points.jsonl` is part of the rewind. Its lock is taken before anything
@@ -1227,7 +1487,9 @@ async fn run_torn_middle_row_scenario() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_rewind_whose_rewind_points_rewrite_fails_is_not_a_success() {
     let local = tokio::task::LocalSet::new();
-    local.run_until(run_rewind_points_rewrite_failure_scenario()).await;
+    local
+        .run_until(run_rewind_points_rewrite_failure_scenario())
+        .await;
 }
 
 async fn run_rewind_points_rewrite_failure_scenario() {
@@ -1243,14 +1505,24 @@ async fn run_rewind_points_rewrite_failure_scenario() {
             while let Some(message) = rx.recv().await {
                 let (lock_fails, rewrite_fails) = *script.lock().unwrap();
                 match message {
-                    PersistenceMsg::LockRewindPointsRewrite { gate, respond_to } if gate.start() => {
+                    PersistenceMsg::LockRewindPointsRewrite { gate, respond_to }
+                        if gate.start() =>
+                    {
                         let _ = respond_to.send(if lock_fails {
-                            Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "held by another Fuigo process"))
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::WouldBlock,
+                                "held by another Fuigo process",
+                            ))
                         } else {
                             Ok(Default::default())
                         });
                     }
-                    PersistenceMsg::RewriteRewindPointsAndAck { rewrite, gate, respond_to, .. } if gate.start() => {
+                    PersistenceMsg::RewriteRewindPointsAndAck {
+                        rewrite,
+                        gate,
+                        respond_to,
+                        ..
+                    } if gate.start() => {
                         rewrites.lock().unwrap().push(rewrite);
                         let _ = respond_to.send(if rewrite_fails {
                             Err(std::io::Error::other("disk full"))
@@ -1258,7 +1530,9 @@ async fn run_rewind_points_rewrite_failure_scenario() {
                             Ok(Default::default())
                         });
                     }
-                    PersistenceMsg::EndRewindPointsAndAck { gate, respond_to, .. } if gate.start() => {
+                    PersistenceMsg::EndRewindPointsAndAck {
+                        gate, respond_to, ..
+                    } if gate.start() => {
                         let _ = respond_to.send(Ok(()));
                     }
                     _ => {}
@@ -1269,7 +1543,11 @@ async fn run_rewind_points_rewrite_failure_scenario() {
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
     let (actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p146-k19").await;
-    let mut snap = actor.chat_state_handle.snapshot().await.expect("snapshot available");
+    let mut snap = actor
+        .chat_state_handle
+        .snapshot()
+        .await
+        .expect("snapshot available");
     snap.conversation = vec![
         ConversationItem::system("SYS"),
         ConversationItem::user("UI"),
@@ -1286,17 +1564,40 @@ async fn run_rewind_points_rewrite_failure_scenario() {
         .file_state_tracker
         .add_before_snapshot_for_prompt(1, &root.join("edited.txt"), root, Some("original".into()))
         .await;
-    let request = |mode| RewindRequest { target_prompt_index: 1, force: true, mode };
+    let request = |mode| RewindRequest {
+        target_prompt_index: 1,
+        force: true,
+        mode,
+    };
 
     // 1. The lock is held elsewhere: refused, nothing changed, nothing rewritten.
-    let refused = actor.handle_rewind(request(RewindMode::All)).await.expect("handle_rewind ok");
+    let refused = actor
+        .handle_rewind(request(RewindMode::All))
+        .await
+        .expect("handle_rewind ok");
     assert!(!refused.success, "{refused:?}");
     let error = refused.error.clone().unwrap_or_default();
-    assert!(error.contains("Nothing was changed") && error.contains("held by another Fuigo process"), "{error}");
-    assert_eq!(std::fs::read_to_string(root.join("edited.txt")).unwrap(), "agent edit", "no file was reverted");
-    assert_eq!(actor.chat_state_handle.get_prompt_index().await, 2, "the conversation is not rewound");
     assert!(
-        actor.file_state_tracker.get_rewind_points().await.iter().any(|p| p.prompt_index == 1),
+        error.contains("Nothing was changed") && error.contains("held by another Fuigo process"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("edited.txt")).unwrap(),
+        "agent edit",
+        "no file was reverted"
+    );
+    assert_eq!(
+        actor.chat_state_handle.get_prompt_index().await,
+        2,
+        "the conversation is not rewound"
+    );
+    assert!(
+        actor
+            .file_state_tracker
+            .get_rewind_points()
+            .await
+            .iter()
+            .any(|p| p.prompt_index == 1),
         "the saved contents are kept"
     );
     assert!(rewrites.lock().unwrap().is_empty());
@@ -1304,30 +1605,56 @@ async fn run_rewind_points_rewrite_failure_scenario() {
     // 2. The lock is taken but the rewrite fails: not a success, the conversation is not rewound and every snapshot
     // is kept, so the same rewind can run again (the files were reverted, and the message says so).
     *script.lock().unwrap() = (false, true);
-    let incomplete = actor.handle_rewind(request(RewindMode::All)).await.expect("handle_rewind ok");
-    assert!(!incomplete.success, "a rewind whose rewind_points rewrite failed is not a success: {incomplete:?}");
+    let incomplete = actor
+        .handle_rewind(request(RewindMode::All))
+        .await
+        .expect("handle_rewind ok");
+    assert!(
+        !incomplete.success,
+        "a rewind whose rewind_points rewrite failed is not a success: {incomplete:?}"
+    );
     let error = incomplete.error.clone().unwrap_or_default();
     assert!(
-        error.contains("is incomplete") && error.contains("disk full") && error.contains("conversation was not rewound")
-            && error.contains("edited.txt") && error.contains("run the same rewind again"),
+        error.contains("is incomplete")
+            && error.contains("disk full")
+            && error.contains("conversation was not rewound")
+            && error.contains("edited.txt")
+            && error.contains("run the same rewind again"),
         "{error}"
     );
-    assert_eq!(actor.chat_state_handle.get_prompt_index().await, 2, "the conversation is not rewound");
+    assert_eq!(
+        actor.chat_state_handle.get_prompt_index().await,
+        2,
+        "the conversation is not rewound"
+    );
     assert!(
-        actor.file_state_tracker.get_rewind_points().await.iter().any(|p| p.prompt_index == 1),
+        actor
+            .file_state_tracker
+            .get_rewind_points()
+            .await
+            .iter()
+            .any(|p| p.prompt_index == 1),
         "the saved contents are kept for a retry"
     );
     assert_eq!(
         *rewrites.lock().unwrap(),
-        vec![crate::session::storage::RewindPointsRewrite::TruncateFrom(1)]
+        vec![crate::session::storage::RewindPointsRewrite::TruncateFrom(
+            1
+        )]
     );
 
     // 3. The same rewind, once the rewrite works, completes.
     *script.lock().unwrap() = (false, false);
-    let finished = actor.handle_rewind(request(RewindMode::All)).await.expect("handle_rewind ok");
+    let finished = actor
+        .handle_rewind(request(RewindMode::All))
+        .await
+        .expect("handle_rewind ok");
     assert!(finished.success, "{finished:?}");
     assert_eq!(actor.chat_state_handle.get_prompt_index().await, 1);
-    assert_eq!(std::fs::read_to_string(root.join("edited.txt")).unwrap(), "original");
+    assert_eq!(
+        std::fs::read_to_string(root.join("edited.txt")).unwrap(),
+        "original"
+    );
     assert_eq!(rewrites.lock().unwrap().len(), 2);
 }
 
@@ -1345,7 +1672,11 @@ async fn run_leftover_pre_rewind_scenario() {
     let root = project.path();
     let (persistence_tx, persistence_rx) = super::support::answering_persistence();
     let (actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p146-leftover").await;
-    let mut snap = actor.chat_state_handle.snapshot().await.expect("snapshot available");
+    let mut snap = actor
+        .chat_state_handle
+        .snapshot()
+        .await
+        .expect("snapshot available");
     snap.conversation = vec![
         ConversationItem::system("SYS"),
         ConversationItem::user("UI"),
@@ -1366,19 +1697,35 @@ async fn run_leftover_pre_rewind_scenario() {
     std::fs::create_dir_all(&session_dir).unwrap();
     let copy = session_dir.join("rewind_points.jsonl.pre-rewind");
     std::fs::write(&copy, b"{}\n").unwrap();
-    let request = || RewindRequest { target_prompt_index: 1, force: true, mode: RewindMode::All };
+    let request = || RewindRequest {
+        target_prompt_index: 1,
+        force: true,
+        mode: RewindMode::All,
+    };
 
-    let refused = actor.handle_rewind(request()).await.expect("handle_rewind ok");
+    let refused = actor
+        .handle_rewind(request())
+        .await
+        .expect("handle_rewind ok");
     assert!(!refused.success, "{refused:?}");
     let error = refused.error.clone().unwrap_or_default();
-    assert!(error.contains("rewind_points.jsonl.pre-rewind") && error.contains("Nothing was changed"), "{error}");
-    assert_eq!(std::fs::read_to_string(root.join("edited.txt")).unwrap(), "agent edit");
+    assert!(
+        error.contains("rewind_points.jsonl.pre-rewind") && error.contains("Nothing was changed"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("edited.txt")).unwrap(),
+        "agent edit"
+    );
     assert_eq!(actor.chat_state_handle.get_prompt_index().await, 2);
     assert!(drained_truncate_requests(&persistence_rx).is_empty());
 
     // Dealt with: the rewind runs.
     std::fs::remove_file(&copy).unwrap();
-    let done = actor.handle_rewind(request()).await.expect("handle_rewind ok");
+    let done = actor
+        .handle_rewind(request())
+        .await
+        .expect("handle_rewind ok");
     let _ = std::fs::remove_dir_all(&session_dir);
     assert!(done.success, "{done:?}");
     assert_eq!(drained_truncate_requests(&persistence_rx), vec![1]);
@@ -1402,17 +1749,23 @@ async fn run_abandoned_end_scenario() {
         tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
                 match message {
-                    PersistenceMsg::LockRewindPointsRewrite { gate, respond_to } if gate.start() => {
+                    PersistenceMsg::LockRewindPointsRewrite { gate, respond_to }
+                        if gate.start() =>
+                    {
                         let _ = respond_to.send(Ok(Default::default()));
                     }
-                    PersistenceMsg::RewriteRewindPointsAndAck { gate, respond_to, .. } if gate.start() => {
+                    PersistenceMsg::RewriteRewindPointsAndAck {
+                        gate, respond_to, ..
+                    } if gate.start() => {
                         // The real rewrite leaves the durable copy behind until the End.
                         if let Some(path) = copy_path.lock().unwrap().clone() {
                             std::fs::write(path, b"{}\n").unwrap();
                         }
                         let _ = respond_to.send(Ok(Default::default()));
                     }
-                    PersistenceMsg::EndRewindPointsAndAck { gate, respond_to, .. } if gate.start() => {
+                    PersistenceMsg::EndRewindPointsAndAck {
+                        gate, respond_to, ..
+                    } if gate.start() => {
                         // The queue was stuck: the End never ran.
                         let _ = respond_to.send(Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
@@ -1426,13 +1779,18 @@ async fn run_abandoned_end_scenario() {
     }
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
-    let (mut actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p153-abandoned-end").await;
+    let (mut actor, _gateway_rx) =
+        actor_on_real_fs(root, persistence_tx, "p153-abandoned-end").await;
     super::support::give_test_writer(&mut actor);
     let session_dir = crate::session::persistence::session_dir(&actor.session_info);
     std::fs::create_dir_all(&session_dir).unwrap();
     let copy = session_dir.join("rewind_points.jsonl.pre-rewind");
     *copy_path.lock().unwrap() = Some(copy.clone());
-    let mut snap = actor.chat_state_handle.snapshot().await.expect("snapshot available");
+    let mut snap = actor
+        .chat_state_handle
+        .snapshot()
+        .await
+        .expect("snapshot available");
     snap.conversation = vec![
         ConversationItem::system("SYS"),
         ConversationItem::user("UI"),
@@ -1449,18 +1807,32 @@ async fn run_abandoned_end_scenario() {
         .file_state_tracker
         .add_before_snapshot_for_prompt(1, &root.join("edited.txt"), root, Some("original".into()))
         .await;
-    let request = |target| RewindRequest { target_prompt_index: target, force: true, mode: RewindMode::All };
+    let request = |target| RewindRequest {
+        target_prompt_index: target,
+        force: true,
+        mode: RewindMode::All,
+    };
 
-    let done = actor.handle_rewind(request(1)).await.expect("handle_rewind ok");
+    let done = actor
+        .handle_rewind(request(1))
+        .await
+        .expect("handle_rewind ok");
     assert!(done.success, "{done:?}");
     assert!(
         copy.symlink_metadata().is_err(),
         "a rewind that went through leaves no rewind_points.jsonl.pre-rewind behind"
     );
-    let next = actor.handle_rewind(request(0)).await.expect("handle_rewind ok");
+    let next = actor
+        .handle_rewind(request(0))
+        .await
+        .expect("handle_rewind ok");
     let _ = std::fs::remove_dir_all(&session_dir);
     assert!(
-        !next.error.clone().unwrap_or_default().contains("did not finish"),
+        !next
+            .error
+            .clone()
+            .unwrap_or_default()
+            .contains("did not finish"),
         "the next rewind is not refused over a copy that was not left: {next:?}"
     );
 }
@@ -1471,41 +1843,52 @@ async fn run_abandoned_end_scenario() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_leftover_copy_refusal_says_when_to_move_it_and_a_link_is_not_followed() {
     let local = tokio::task::LocalSet::new();
-    local.run_until(async {
-        let project = tempfile::tempdir().unwrap();
-        let root = project.path();
-        let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
-        let (actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p153-refusal").await;
-        let mut snap = actor.chat_state_handle.snapshot().await.expect("snapshot available");
-        snap.conversation = vec![
-            ConversationItem::system("SYS"),
-            ConversationItem::user("UI"),
-            ConversationItem::user("P0"),
-            ConversationItem::assistant("R0"),
-        ];
-        snap.prompt_index = 1;
-        snap.prompt_texts = vec!["P0".into()];
-        actor.chat_state_handle.restore_snapshot(snap);
-        let session_dir = crate::session::persistence::session_dir(&actor.session_info);
-        std::fs::create_dir_all(&session_dir).unwrap();
-        // A dangling link: `exists()` follows it and says no; the copy check must not.
-        let copy = session_dir.join("rewind_points.jsonl.pre-rewind");
-        std::os::unix::fs::symlink(root.join("nowhere"), &copy).unwrap();
-        let refused = actor
-            .handle_rewind(RewindRequest { target_prompt_index: 0, force: true, mode: RewindMode::All })
-            .await
-            .expect("handle_rewind ok");
-        let _ = std::fs::remove_dir_all(&session_dir);
-        assert!(!refused.success, "{refused:?}");
-        let error = refused.error.clone().unwrap_or_default();
-        assert!(
-            error.contains("Delete it; move it over") && error.contains("transcript still shows the turns that rewind should have removed"),
-            "{error}"
-        );
-    })
-    .await;
+    local
+        .run_until(async {
+            let project = tempfile::tempdir().unwrap();
+            let root = project.path();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
+            let (actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p153-refusal").await;
+            let mut snap = actor
+                .chat_state_handle
+                .snapshot()
+                .await
+                .expect("snapshot available");
+            snap.conversation = vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("UI"),
+                ConversationItem::user("P0"),
+                ConversationItem::assistant("R0"),
+            ];
+            snap.prompt_index = 1;
+            snap.prompt_texts = vec!["P0".into()];
+            actor.chat_state_handle.restore_snapshot(snap);
+            let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+            std::fs::create_dir_all(&session_dir).unwrap();
+            // A dangling link: `exists()` follows it and says no; the copy check must not.
+            let copy = session_dir.join("rewind_points.jsonl.pre-rewind");
+            std::os::unix::fs::symlink(root.join("nowhere"), &copy).unwrap();
+            let refused = actor
+                .handle_rewind(RewindRequest {
+                    target_prompt_index: 0,
+                    force: true,
+                    mode: RewindMode::All,
+                })
+                .await
+                .expect("handle_rewind ok");
+            let _ = std::fs::remove_dir_all(&session_dir);
+            assert!(!refused.success, "{refused:?}");
+            let error = refused.error.clone().unwrap_or_default();
+            assert!(
+                error.contains("Delete it; move it over")
+                    && error.contains(
+                        "transcript still shows the turns that rewind should have removed"
+                    ),
+                "{error}"
+            );
+        })
+        .await;
 }
-
 
 // ── 51.1: neither a conversation rewind (edit and resend) nor a cancel that rewinds touches the project's files ──
 
@@ -1526,7 +1909,11 @@ async fn a_conversation_only_rewind_of_a_long_session_leaves_the_project_files_a
             record_prompt_6_edits(&actor, root).await;
 
             let resp = actor
-                .handle_rewind(RewindRequest { target_prompt_index: 3, force: true, mode: RewindMode::ConversationOnly })
+                .handle_rewind(RewindRequest {
+                    target_prompt_index: 3,
+                    force: true,
+                    mode: RewindMode::ConversationOnly,
+                })
                 .await
                 .expect("handle_rewind ok");
 
@@ -1537,8 +1924,16 @@ async fn a_conversation_only_rewind_of_a_long_session_leaves_the_project_files_a
 
             assert!(resp.success, "{resp:?}");
             assert!(resp.reverted_files.is_empty(), "no file reverted: {resp:?}");
-            assert_eq!(edited.as_deref(), Some("after prompt 6"), "the edited file keeps prompt 6's change");
-            assert_eq!(created.as_deref(), Some("created by prompt 6"), "the created file is not deleted");
+            assert_eq!(
+                edited.as_deref(),
+                Some("after prompt 6"),
+                "the edited file keeps prompt 6's change"
+            );
+            assert_eq!(
+                created.as_deref(),
+                Some("created by prompt 6"),
+                "the created file is not deleted"
+            );
             assert_eq!(prompt_index, 3, "the conversation was rewound");
         })
         .await;
@@ -1560,7 +1955,10 @@ async fn a_rewinding_cancel_leaves_the_project_files_alone() {
             restore_compacted_live_state(&actor).await;
             record_prompt_6_edits(&actor, root).await;
 
-            *actor.current_prompt_id.lock().expect("current_prompt_id mutex poisoned") = Some("rw".to_string());
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("rw".to_string());
             let (item, _rx) = super::turn_completion_emit_tests::pending_input("rw");
             {
                 let mut state = actor.state.lock().await;
@@ -1570,7 +1968,9 @@ async fn a_rewinding_cancel_leaves_the_project_files_alone() {
             }
             let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
-                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput { prompt_id: None },
+                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                        prompt_id: None,
+                    },
                     user_initiated: true,
                     ..Default::default()
                 })

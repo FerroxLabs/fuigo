@@ -11,10 +11,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use fuigo_peer::{
-    Hello, HostDir, HostId, Op, Reply, TryResult, choose_dir, socket_path,
-};
 use fuigo_peer::DirChoice;
+use fuigo_peer::{Hello, HostDir, HostId, Op, Reply, TryResult, choose_dir, socket_path};
 use tokio::net::UnixStream;
 
 use super::conn::{self, ConnError};
@@ -36,7 +34,10 @@ pub(crate) struct Locations {
 
 impl Locations {
     pub(crate) fn new(home: &Path, runtime: Option<&Path>) -> Self {
-        Self { home: home.to_path_buf(), runtime: runtime.filter(|p| p.is_absolute()).map(Path::to_path_buf) }
+        Self {
+            home: home.to_path_buf(),
+            runtime: runtime.filter(|p| p.is_absolute()).map(Path::to_path_buf),
+        }
     }
 
     /// From the process environment (`XDG_RUNTIME_DIR`).
@@ -72,7 +73,9 @@ impl Locations {
     pub(crate) fn choose(&self) -> DirChoice {
         choose_dir(
             self.home.as_os_str().len(),
-            self.runtime.as_ref().map(|r| r.as_os_str().len().saturating_add(RUNTIME_EXTRA)),
+            self.runtime
+                .as_ref()
+                .map(|r| r.as_os_str().len().saturating_add(RUNTIME_EXTRA)),
         )
     }
 
@@ -112,7 +115,9 @@ impl DialError {
             Self::Refused => TryResult::Refused,
             Self::NoSuchFile => TryResult::NoSuchFile,
             Self::VersionMismatch => TryResult::VersionMismatch,
-            Self::NoDirectory | Self::WrongUser | Self::ForeignHello | Self::Other => TryResult::Other,
+            Self::NoDirectory | Self::WrongUser | Self::ForeignHello | Self::Other => {
+                TryResult::Other
+            }
         }
     }
 }
@@ -165,7 +170,12 @@ pub(crate) async fn dial(
 }
 
 /// One reaping try: connect, uid check, hello each way, close. Keeps the announced host id (S3.6).
-pub(crate) async fn try_hello(loc: &Locations, our: &HostId, host_id: &HostId, dir: HostDir) -> TryResult {
+pub(crate) async fn try_hello(
+    loc: &Locations,
+    our: &HostId,
+    host_id: &HostId,
+    dir: HostDir,
+) -> TryResult {
     let Some(path) = loc.socket(host_id, dir) else {
         return TryResult::Other;
     };

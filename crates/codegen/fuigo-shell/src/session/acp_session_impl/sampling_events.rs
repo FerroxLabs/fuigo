@@ -504,7 +504,8 @@ impl SessionActor {
                         self.signals_handle().record_tool_success(&name);
                     }
                 }
-                self.unaccepted_output.note_hosted_finished(call_id.as_str());
+                self.unaccepted_output
+                    .note_hosted_finished(call_id.as_str());
                 let (title, _kind, _raw_input) = backend_tool_display(&name);
                 self.send_update(
                     acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(

@@ -243,8 +243,16 @@ impl SnapshotTurn {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let turn_id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let alive = std::sync::Arc::new(());
-        let _ = tx.send(PersistenceMsg::SnapshotBegin { turn_id, alive: std::sync::Arc::downgrade(&alive) });
-        Self { tx: tx.clone(), turn_id, alive, send_end: true }
+        let _ = tx.send(PersistenceMsg::SnapshotBegin {
+            turn_id,
+            alive: std::sync::Arc::downgrade(&alive),
+        });
+        Self {
+            tx: tx.clone(),
+            turn_id,
+            alive,
+            send_end: true,
+        }
     }
 
     /// Test seam: the turn goes away and its end is lost.
@@ -258,7 +266,9 @@ impl Drop for SnapshotTurn {
     fn drop(&mut self) {
         let _ = &self.alive;
         if self.send_end {
-            let _ = self.tx.send(PersistenceMsg::SnapshotEnd { turn_id: self.turn_id });
+            let _ = self.tx.send(PersistenceMsg::SnapshotEnd {
+                turn_id: self.turn_id,
+            });
         }
     }
 }
@@ -279,7 +289,10 @@ enum AckGateState {
 impl AckGate {
     /// Actor side: `true` when the request may run (the caller still waits).
     pub(crate) fn start(&self) -> bool {
-        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *state == AckGateState::Queued {
             *state = AckGateState::Started;
         }
@@ -288,7 +301,10 @@ impl AckGate {
 
     /// Caller side: `true` when the request had not started and now never will.
     pub(crate) fn abandon(&self) -> bool {
-        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *state == AckGateState::Queued {
             *state = AckGateState::Abandoned;
         }
@@ -309,13 +325,16 @@ pub enum PersistenceMsg {
     },
     ExecutionState {
         mutation: crate::session::execution_state::ExecutionMutation,
-        respond_to: tokio::sync::oneshot::Sender<io::Result<crate::session::execution_state::Snapshot>>,
+        respond_to:
+            tokio::sync::oneshot::Sender<io::Result<crate::session::execution_state::Snapshot>>,
     },
     CommitCompactionAndAck {
         checkpoint: crate::extensions::notification::CompactionCheckpointFile,
         activation: SessionUpdate,
         cancel: tokio_util::sync::CancellationToken,
-        respond_to: tokio::sync::oneshot::Sender<Result<(), fuigo_chat_state::commands::CompactionCommitError>>,
+        respond_to: tokio::sync::oneshot::Sender<
+            Result<(), fuigo_chat_state::commands::CompactionCommitError>,
+        >,
     },
     Update(SessionUpdate),
     /// A turn is about to echo its prompt: take the session's snapshot lock and keep it until the matching
@@ -386,7 +405,9 @@ pub enum PersistenceMsg {
     /// Skipped when `gate` says the rewind stopped waiting before it started.
     LockRewindPointsRewrite {
         gate: AckGate,
-        respond_to: tokio::sync::oneshot::Sender<io::Result<crate::session::storage::RewindPointsRewriteLock>>,
+        respond_to: tokio::sync::oneshot::Sender<
+            io::Result<crate::session::storage::RewindPointsRewriteLock>,
+        >,
     },
     /// The rewind's rewrite of `rewind_points.jsonl`, made before the rewound conversation is saved, while the rewind
     /// holds the lock [`PersistenceMsg::LockRewindPointsRewrite`] took (P146, K19). The reply carries what the file
@@ -396,7 +417,8 @@ pub enum PersistenceMsg {
         /// What the rewind commits next, for its journal (P164); `None`: the rewind leaves the conversation as it is.
         conversation: Option<crate::session::storage::RewindConversation>,
         gate: AckGate,
-        respond_to: tokio::sync::oneshot::Sender<io::Result<crate::session::storage::RewindPointsUndo>>,
+        respond_to:
+            tokio::sync::oneshot::Sender<io::Result<crate::session::storage::RewindPointsUndo>>,
     },
     /// The rewind of [`PersistenceMsg::RewriteRewindPointsAndAck`] is done. `put_back`: the rewound conversation was
     /// not saved, so the rewind did not go through and `rewind_points.jsonl` gets back what it held.
@@ -502,31 +524,58 @@ pub(crate) async fn compaction_fixture_persistence(
 ) -> mpsc::UnboundedSender<PersistenceMsg> {
     let dir = tempfile::tempdir().unwrap();
     let storage = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
-    let info = Info { id: acp::SessionId::new("compaction-fixture"), cwd: "/tmp".into() };
-    storage.init_session(&info, default_model_id()).await.unwrap();
+    let info = Info {
+        id: acp::SessionId::new("compaction-fixture"),
+        cwd: "/tmp".into(),
+    };
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         let _owned_dir = dir;
         while let Some(message) = rx.recv().await {
             match message {
-                PersistenceMsg::CommitCompactionAndAck { checkpoint, activation, cancel, respond_to } => {
+                PersistenceMsg::CommitCompactionAndAck {
+                    checkpoint,
+                    activation,
+                    cancel,
+                    respond_to,
+                } => {
                     use fuigo_chat_state::commands::CompactionCommitError;
                     let result = async {
                         if cancel.is_cancelled() {
-                            return Err(CompactionCommitError::NotCommitted(io::Error::other("cancelled fixture")));
+                            return Err(CompactionCommitError::NotCommitted(io::Error::other(
+                                "cancelled fixture",
+                            )));
                         }
-                        storage.write_compaction_checkpoint(&info, &checkpoint).await.map_err(CompactionCommitError::NotCommitted)?;
-                        storage.append_update_durable_commit_aware(&info, &activation).await.map_err(|error| match error {
-                            crate::session::storage::AppendUpdateError::NotCommitted(error) => CompactionCommitError::NotCommitted(error),
-                            crate::session::storage::AppendUpdateError::Committed(error) => CompactionCommitError::Committed(error),
-                        })?;
+                        storage
+                            .write_compaction_checkpoint(&info, &checkpoint)
+                            .await
+                            .map_err(CompactionCommitError::NotCommitted)?;
+                        storage
+                            .append_update_durable_commit_aware(&info, &activation)
+                            .await
+                            .map_err(|error| match error {
+                                crate::session::storage::AppendUpdateError::NotCommitted(error) => {
+                                    CompactionCommitError::NotCommitted(error)
+                                }
+                                crate::session::storage::AppendUpdateError::Committed(error) => {
+                                    CompactionCommitError::Committed(error)
+                                }
+                            })?;
                         let _ = observed.send(PersistenceMsg::CompactionCheckpoint(checkpoint));
                         let _ = observed.send(PersistenceMsg::Update(activation));
                         Ok(())
-                    }.await;
+                    }
+                    .await;
                     let _ = respond_to.send(result);
                 }
-                PersistenceMsg::ReplaceChatHistoryAndAck { messages, respond_to } => {
+                PersistenceMsg::ReplaceChatHistoryAndAck {
+                    messages,
+                    respond_to,
+                } => {
                     let _ = respond_to.send(Ok(()));
                     let _ = observed.send(PersistenceMsg::ReplaceChatHistory(messages));
                 }
@@ -536,7 +585,9 @@ pub(crate) async fn compaction_fixture_persistence(
                 PersistenceMsg::FlushAndAck { respond_to } => {
                     let _ = respond_to.send(Ok(()));
                 }
-                other => { let _ = observed.send(other); }
+                other => {
+                    let _ = observed.send(other);
+                }
             }
         }
     });
@@ -852,7 +903,11 @@ pub(crate) fn find_summary_by_session_id(session_id: &str) -> Option<Summary> {
 
 /// The folder of the persisted session `session_id`, under whichever cwd it was recorded (scans all CWD directories).
 pub(crate) fn find_persisted_session_dir(session_id: &str) -> Option<PathBuf> {
-    storage_view(&fuigo_home().join("sessions")).ok()?.find_persisted_session_dir(session_id).ok().flatten()
+    storage_view(&fuigo_home().join("sessions"))
+        .ok()?
+        .find_persisted_session_dir(session_id)
+        .ok()
+        .flatten()
 }
 
 /// Inner implementation with injectable root for testing.
@@ -1084,11 +1139,16 @@ pub(crate) async fn write_permission_policy_marker(
 
 /// Owner-only and durable session dir for writers that bypass `init_session` (pre-init fork stamp), made by the
 /// session's writer (F5-C4); the `<encoded-cwd>` parent (many sessions' folder) as before.
-pub(crate) fn ensure_owner_only_session_dir(writer: &fuigo_session_writer::SessionWriter) -> std::io::Result<PathBuf> {
+pub(crate) fn ensure_owner_only_session_dir(
+    writer: &fuigo_session_writer::SessionWriter,
+) -> std::io::Result<PathBuf> {
     if let Some(cwd_dir) = writer.dir().parent()
         && cwd_dir.is_dir()
     {
-        crate::session::storage::sync_cwd_marker_if_present_with(cwd_dir, crate::session::storage::sync_file_durable)?;
+        crate::session::storage::sync_cwd_marker_if_present_with(
+            cwd_dir,
+            crate::session::storage::sync_file_durable,
+        )?;
     }
     writer.ensure_folder_sync()?;
     Ok(writer.dir().to_path_buf())
@@ -1108,7 +1168,9 @@ pub(crate) fn get_prompt_file_path(info: &Info, prompt_index: usize) -> PathBuf 
 
 /// Inner implementation with an injectable fuigo home for tests.
 fn get_prompt_file_path_in(fuigo_home: &Path, info: &Info, prompt_index: usize) -> PathBuf {
-    session_dir_in(fuigo_home, info).join("prompts").join(format!("prompt_{}.txt", prompt_index))
+    session_dir_in(fuigo_home, info)
+        .join("prompts")
+        .join(format!("prompt_{}.txt", prompt_index))
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -1132,7 +1194,10 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = <Option<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
-    Ok(raw.as_ref().and_then(serde_json::Value::as_str).and_then(|s| s.parse().ok()))
+    Ok(raw
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| s.parse().ok()))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1245,7 +1310,11 @@ pub struct Summary {
     pub sandbox_profile: Option<String>,
     /// An effort this build does not know (written by a newer one) reads as unset, so the session resumes at the default
     /// effort instead of dropping out of the listings.
-    #[serde(default, deserialize_with = "lenient_reasoning_effort", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_reasoning_effort",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub reasoning_effort: Option<ReasoningEffort>,
     /// The context window (tokens) the user selected with `/context-window`; absent when the model default is in use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1675,12 +1744,16 @@ mod p188_crosses_attempts_tests {
         let chunk = |stream: Option<i64>| {
             let n = acp::SessionNotification::new(
                 acp::SessionId::new("s"),
-                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
-                    acp::TextContent::new("t"),
-                ))),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new("t")),
+                )),
             );
             match stream {
-                Some(stream) => n.meta(serde_json::json!({ "streamStartMs": stream }).as_object().cloned()),
+                Some(stream) => n.meta(
+                    serde_json::json!({ "streamStartMs": stream })
+                        .as_object()
+                        .cloned(),
+                ),
                 None => n,
             }
         };
@@ -1934,7 +2007,8 @@ impl SessionPersistence {
         let writer = self.storage.session_writer(&self.info)?;
         tokio::task::spawn_blocking(move || {
             writer.ensure_folder_sync()?;
-            writer.with_append_file(".disk_ok", |file| std::io::Write::write_all(file, b"ok"))??;
+            writer
+                .with_append_file(".disk_ok", |file| std::io::Write::write_all(file, b"ok"))??;
             let _ = writer.remove_sync(".disk_ok");
             io::Result::Ok(())
         })
@@ -1960,7 +2034,11 @@ impl SessionPersistence {
         }
         // Flush the merge-pending notification so the backfill re-reads it.
         let _ = self.flush_pending().await;
-        let persisted = match self.storage.load_session(&self.info, crate::session::storage::Access::Reader).await {
+        let persisted = match self
+            .storage
+            .load_session(&self.info, crate::session::storage::Access::Reader)
+            .await
+        {
             Ok(persisted) => persisted,
             Err(error) => {
                 tracing::warn!(%error, "writeback upgrade: failed to load session for backfill");
@@ -2191,15 +2269,21 @@ impl SessionPersistence {
     /// deadline, and re-checks `rx.is_empty()`): a queued message, such as the turn's own chat item and end, is always
     /// processed first, so the lock is never released ahead of a chat item whose echoes are already buffered (Astra P135 r3 H).
     async fn expire_snapshot_hold(&mut self) {
-        let Some(hold) = self.turn_start_guard.as_mut() else { return };
+        let Some(hold) = self.turn_start_guard.as_mut() else {
+            return;
+        };
         if hold.turn_alive() {
-            tracing::debug!(turn_id = hold.turn_id, "the snapshot lock stays held: its turn is still running");
+            tracing::debug!(
+                turn_id = hold.turn_id,
+                "the snapshot lock stays held: its turn is still running"
+            );
             hold.since = std::time::Instant::now();
             return;
         }
         let hold = self.turn_start_guard.take().expect("checked above");
         #[cfg(test)]
-        crate::session::storage::snapshot_lock::EXPIRY_RELEASES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::session::storage::snapshot_lock::EXPIRY_RELEASES
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::warn!(
             turn_id = hold.turn_id,
             held_ms = hold.since.elapsed().as_millis() as u64,
@@ -2215,17 +2299,19 @@ impl SessionPersistence {
         let mut last_worktree_touch = std::time::Instant::now();
         loop {
             let received = match self.turn_start_guard.as_ref().map(|hold| hold.expires_at()) {
-                Some(deadline) => match tokio::time::timeout_at(deadline.into(), self.rx.recv()).await {
-                    Ok(received) => received,
-                    Err(_) => {
-                        // `timeout_at` polls `recv` before the deadline, so this arm runs only when nothing was ready; the
-                        // check keeps the invariant explicit should a message have landed since.
-                        if self.rx.is_empty() {
-                            self.expire_snapshot_hold().await;
+                Some(deadline) => {
+                    match tokio::time::timeout_at(deadline.into(), self.rx.recv()).await {
+                        Ok(received) => received,
+                        Err(_) => {
+                            // `timeout_at` polls `recv` before the deadline, so this arm runs only when nothing was ready; the
+                            // check keeps the invariant explicit should a message have landed since.
+                            if self.rx.is_empty() {
+                                self.expire_snapshot_hold().await;
+                            }
+                            continue;
                         }
-                        continue;
                     }
-                },
+                }
                 None => self.rx.recv().await,
             };
             let Some(msg) = received else { break };
@@ -2237,7 +2323,10 @@ impl SessionPersistence {
             match msg {
                 PersistenceMsg::PresentationHints { hints, respond_to } => {
                     let result = match self.storage.session_writer(&self.info) {
-                        Ok(writer) => crate::session::tool_presentation::persist_hints_as(&writer, &hints).await,
+                        Ok(writer) => {
+                            crate::session::tool_presentation::persist_hints_as(&writer, &hints)
+                                .await
+                        }
                         Err(error) => Err(error),
                     };
                     let _ = respond_to.send(result);
@@ -2266,17 +2355,25 @@ impl SessionPersistence {
                     // A hold still open belongs to a turn whose end never arrived: it ends here (never two holds, and the
                     // old file must be closed before the lock is taken again, or this task would wait for itself).
                     if self.turn_start_guard.is_some() {
-                        tracing::warn!(turn_id, "a new turn began while the snapshot lock was still held; releasing the old hold");
+                        tracing::warn!(
+                            turn_id,
+                            "a new turn began while the snapshot lock was still held; releasing the old hold"
+                        );
                         let _ = self.flush_pending().await;
                         self.turn_start_guard = None;
                     }
-                    self.turn_start_guard = self
-                        .acquire_snapshot_lock()
-                        .await
-                        .map(|file| crate::session::storage::snapshot_lock::SnapshotHold::new(turn_id, file, alive));
+                    self.turn_start_guard = self.acquire_snapshot_lock().await.map(|file| {
+                        crate::session::storage::snapshot_lock::SnapshotHold::new(
+                            turn_id, file, alive,
+                        )
+                    });
                 }
                 PersistenceMsg::SnapshotEnd { turn_id } => {
-                    if self.turn_start_guard.as_ref().is_some_and(|hold| hold.turn_id == turn_id) {
+                    if self
+                        .turn_start_guard
+                        .as_ref()
+                        .is_some_and(|hold| hold.turn_id == turn_id)
+                    {
                         // The echoes still buffered are written before the hold ends.
                         let _ = self.flush_pending().await;
                         self.turn_start_guard = None;
@@ -2340,8 +2437,7 @@ impl SessionPersistence {
                     // files or in neither (P123, K17). The hold ends with the turn's `SnapshotEnd`, never with a chat item
                     // (a workflow reminder or a completion between turns is not the prompt, P135). The lock is taken here
                     // for a prompt item when no turn holds it.
-                    let is_turn_start =
-                        matches!(&chat_msg, ConversationItem::User(user) if user.prompt_index.is_some());
+                    let is_turn_start = matches!(&chat_msg, ConversationItem::User(user) if user.prompt_index.is_some());
                     let _turn_start = if is_turn_start {
                         let guard = if self.turn_start_guard.is_some() {
                             None
@@ -2452,7 +2548,9 @@ impl SessionPersistence {
                     }
                 }
                 PersistenceMsg::HeldWakes { queue, respond_to } => {
-                    let result = self.storage.session_writer(&self.info)
+                    let result = self
+                        .storage
+                        .session_writer(&self.info)
                         .and_then(|writer| queue.save(&writer));
                     self.observe_io(&result);
                     let _ = respond_to.send(result);
@@ -2623,29 +2721,53 @@ impl SessionPersistence {
                     if gate.start() {
                         let result = self.storage.lock_rewind_points_rewrite(&self.info).await;
                         if let Err(e) = &result {
-                            tracing::warn!(?e, "rewind refused: the rewind points rewrite lock was not taken");
+                            tracing::warn!(
+                                ?e,
+                                "rewind refused: the rewind points rewrite lock was not taken"
+                            );
                         }
                         // A reply nobody waits for any more drops the lock with it.
                         let _ = respond_to.send(result);
                     }
                 }
-                PersistenceMsg::RewriteRewindPointsAndAck { rewrite, conversation, gate, respond_to } => {
+                PersistenceMsg::RewriteRewindPointsAndAck {
+                    rewrite,
+                    conversation,
+                    gate,
+                    respond_to,
+                } => {
                     if gate.start() {
                         let result = self
                             .storage
                             .rewrite_rewind_points_holding(&self.info, rewrite, conversation)
                             .await;
                         if let Err(e) = &result {
-                            tracing::warn!(?e, ?rewrite, "failed to rewrite rewind points for a rewind");
+                            tracing::warn!(
+                                ?e,
+                                ?rewrite,
+                                "failed to rewrite rewind points for a rewind"
+                            );
                         }
                         let _ = respond_to.send(result);
                     }
                 }
-                PersistenceMsg::EndRewindPointsAndAck { undo, put_back, gate, respond_to } => {
+                PersistenceMsg::EndRewindPointsAndAck {
+                    undo,
+                    put_back,
+                    gate,
+                    respond_to,
+                } => {
                     if gate.start() {
-                        let result = self.storage.end_rewind_points_rewrite(&self.info, undo, put_back).await;
+                        let result = self
+                            .storage
+                            .end_rewind_points_rewrite(&self.info, undo, put_back)
+                            .await;
                         if let Err(e) = &result {
-                            tracing::warn!(?e, put_back, "failed to finish the rewind of rewind points");
+                            tracing::warn!(
+                                ?e,
+                                put_back,
+                                "failed to finish the rewind of rewind points"
+                            );
                         }
                         let _ = respond_to.send(result);
                     }
@@ -2718,9 +2840,14 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to persist git HEAD");
                     }
                 }
-                PersistenceMsg::ExecutionState { mutation, respond_to } => {
+                PersistenceMsg::ExecutionState {
+                    mutation,
+                    respond_to,
+                } => {
                     let result = match self.storage.session_writer(&self.info) {
-                        Ok(writer) => crate::session::execution_state::apply_as(&writer, mutation).await,
+                        Ok(writer) => {
+                            crate::session::execution_state::apply_as(&writer, mutation).await
+                        }
                         Err(error) => Err(error),
                     };
                     let _ = respond_to.send(result);
@@ -2734,7 +2861,12 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to write compaction checkpoint file");
                     }
                 }
-                PersistenceMsg::CommitCompactionAndAck { checkpoint, activation, cancel, respond_to } => {
+                PersistenceMsg::CommitCompactionAndAck {
+                    checkpoint,
+                    activation,
+                    cancel,
+                    respond_to,
+                } => {
                     use fuigo_chat_state::commands::CompactionCommitError;
                     let sync_marker = match (&self.remote_sync, &activation) {
                         (Some(_), SessionUpdate::Fuigo(marker)) => Some((**marker).clone()),
@@ -2742,13 +2874,20 @@ impl SessionPersistence {
                     };
                     let result = async {
                         if cancel.is_cancelled() {
-                            return Err(CompactionCommitError::NotCommitted(io::Error::other("compaction cancelled before prepare")));
+                            return Err(CompactionCommitError::NotCommitted(io::Error::other(
+                                "compaction cancelled before prepare",
+                            )));
                         }
-                        self.storage.write_compaction_checkpoint(&self.info, &checkpoint).await.map_err(CompactionCommitError::NotCommitted)?;
+                        self.storage
+                            .write_compaction_checkpoint(&self.info, &checkpoint)
+                            .await
+                            .map_err(CompactionCommitError::NotCommitted)?;
                         if cancel.is_cancelled() {
                             // Retain prepared files as raw evidence; without a
                             // marker they have no replay authority.
-                            return Err(CompactionCommitError::NotCommitted(io::Error::other("compaction cancelled before activation")));
+                            return Err(CompactionCommitError::NotCommitted(io::Error::other(
+                                "compaction cancelled before activation",
+                            )));
                         }
                         // The rewrite of chat_history.jsonl with the projection follows the acknowledgement as a
                         // separate message. The witness lets a load tell that this marker committed while that rewrite
@@ -2757,17 +2896,30 @@ impl SessionPersistence {
                             .write_compaction_witness(&self.info, &checkpoint)
                             .await
                             .map_err(CompactionCommitError::NotCommitted)?;
-                        self.handle_durable_append(activation).await.map_err(|error| match error {
-                            crate::session::storage::AppendUpdateError::NotCommitted(error) => CompactionCommitError::NotCommitted(error),
-                            crate::session::storage::AppendUpdateError::Committed(error) => CompactionCommitError::Committed(error),
-                        })
-                    }.await;
+                        self.handle_durable_append(activation)
+                            .await
+                            .map_err(|error| match error {
+                                crate::session::storage::AppendUpdateError::NotCommitted(error) => {
+                                    CompactionCommitError::NotCommitted(error)
+                                }
+                                crate::session::storage::AppendUpdateError::Committed(error) => {
+                                    CompactionCommitError::Committed(error)
+                                }
+                            })
+                    }
+                    .await;
                     if matches!(&result, Ok(()) | Err(CompactionCommitError::Committed(_))) {
                         // The marker is on disk: witness entries of earlier compactions are no longer needed.
-                        self.storage.compaction_activated(&self.info, &checkpoint.checkpoint_id).await;
+                        self.storage
+                            .compaction_activated(&self.info, &checkpoint.checkpoint_id)
+                            .await;
                         // Carry the checkpoint through remote storage so a pulled copy resumes with its summary.
                         if let (Some(sync), Some(marker)) = (&self.remote_sync, &sync_marker)
-                            && let Some(message) = crate::session::export::ExportedMessage::compaction_checkpoint(marker, &checkpoint)
+                            && let Some(message) =
+                                crate::session::export::ExportedMessage::compaction_checkpoint(
+                                    marker,
+                                    &checkpoint,
+                                )
                         {
                             sync.queue_checkpoint(message);
                         }
@@ -2814,9 +2966,14 @@ impl SessionPersistence {
     async fn replace_chat_history_now(&mut self, messages: &[ConversationItem]) -> io::Result<()> {
         #[cfg(test)]
         if test_seam::take_history_replacement_failure(&self.info.id.0) {
-            return Err(io::Error::other("injected chat history replacement failure"));
+            return Err(io::Error::other(
+                "injected chat history replacement failure",
+            ));
         }
-        let result = self.storage.replace_chat_history(&self.info, messages).await;
+        let result = self
+            .storage
+            .replace_chat_history(&self.info, messages)
+            .await;
         self.observe_io(&result);
         result
     }
@@ -2824,10 +2981,15 @@ impl SessionPersistence {
     /// Replace the chat history for a caller that may not report success unless the new history is stored (a rewind).
     /// `Ok` when `chat_history.jsonl` holds `messages`, even if bookkeeping after that failed (the history is what the
     /// caller asked to persist); `Err` only when the file still holds the previous history, so the caller can keep it.
-    async fn replace_chat_history_acknowledged(&mut self, messages: &[ConversationItem]) -> io::Result<()> {
+    async fn replace_chat_history_acknowledged(
+        &mut self,
+        messages: &[ConversationItem],
+    ) -> io::Result<()> {
         #[cfg(test)]
         if test_seam::take_history_replacement_failure(&self.info.id.0) {
-            return Err(io::Error::other("injected chat history replacement failure"));
+            return Err(io::Error::other(
+                "injected chat history replacement failure",
+            ));
         }
         let result = self
             .storage
@@ -3009,10 +3171,7 @@ fn collect_session_files_walk(base: &Path, dir: &Path, files: &mut Vec<CopiedSes
                     continue;
                 }
             };
-            files.push(CopiedSessionFile {
-                name,
-                data,
-            });
+            files.push(CopiedSessionFile { name, data });
         } else if file_type.is_dir() && path != base.join(archive_logs::TERMINAL_DIR) {
             // `terminal/` is bounded separately (newest first, per-log cap) by `collect_terminal_logs`.
             collect_session_files_walk(base, &path, files);
@@ -3242,7 +3401,8 @@ pub(crate) async fn new(
     }
     // F5-C4 (design §5.5): the persistence task writes as a clone of the session's live writer; the clone drops with
     // the task (the session's end), inside the close budget (§6.1).
-    let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir).with_writer(session_writer));
+    let storage: Box<dyn StorageAdapter> =
+        Box::new(JsonlStorageAdapter::with_root(root_dir).with_writer(session_writer));
 
     let mut summary = storage.init_session(info, model_id.clone()).await?;
     touch_worktree_for_session(info).await;
@@ -3328,8 +3488,9 @@ pub(crate) async fn new_with_explicit_dir(
     }
     // F5-C4: the child's writer (design §5.5 subagent row); its clone lives in the persistence task.
     let summary_writer = session_writer.clone();
-    let storage: Box<dyn StorageAdapter> =
-        Box::new(JsonlStorageAdapter::with_explicit_session_dir(target_dir).with_writer(session_writer));
+    let storage: Box<dyn StorageAdapter> = Box::new(
+        JsonlStorageAdapter::with_explicit_session_dir(target_dir).with_writer(session_writer),
+    );
 
     let mut summary = storage.init_session(info, model_id.clone()).await?;
     touch_worktree_for_session(info).await;
@@ -3440,7 +3601,9 @@ async fn warn_on_unreadable_compaction_checkpoint(
     info: &Info,
     updates_path: &std::path::Path,
 ) {
-    let checkpoint = match crate::session::helpers::replay::find_latest_compaction_checkpoint(updates_path) {
+    let checkpoint = match crate::session::helpers::replay::find_latest_compaction_checkpoint(
+        updates_path,
+    ) {
         Ok(Some(checkpoint)) => checkpoint,
         Ok(None) => return,
         Err(error) => {
@@ -3449,7 +3612,10 @@ async fn warn_on_unreadable_compaction_checkpoint(
             return;
         }
     };
-    let problem = match storage.read_compaction_checkpoint(info, &checkpoint.checkpoint_file).await {
+    let problem = match storage
+        .read_compaction_checkpoint(info, &checkpoint.checkpoint_file)
+        .await
+    {
         Ok(file) if file.schema_version == 1 && checkpoint.schema_version == 1 => return,
         Ok(file) => format!(
             "unsupported checkpoint schema (marker {}, file {})",
@@ -3505,29 +3671,36 @@ pub(crate) async fn load_light(
         crate::session::storage::Access::Reader => None,
     };
     // F5-C3 (design F5 §5.5, §5.7): the reconcile writes as the load's own writer; a reader skips it.
-    let rewind_notice = jsonl_storage.reconcile_interrupted_rewind_as(info, owner).await;
-    let (mut persisted, loaded_info, access) = match storage.load_session_without_updates(info, access).await {
-        Ok(p) => (p, info.clone(), access),
-        Err(e) => match backend {
-            Some(client) => {
-                let pulled = pull_on_miss(info, client, e, owner).await?;
-                // The owner's writer covers the pulled session only when it names the folder the pull landed in.
-                let pulled_access = match owner {
-                    Some(writer) if writer.dir() == session_dir(&pulled) => access,
-                    _ => crate::session::storage::Access::Reader,
-                };
-                let p = storage.load_session_without_updates(&pulled, pulled_access).await?;
-                (p, pulled, pulled_access)
-            }
-            None => return Err(e),
-        },
-    };
+    let rewind_notice = jsonl_storage
+        .reconcile_interrupted_rewind_as(info, owner)
+        .await;
+    let (mut persisted, loaded_info, access) =
+        match storage.load_session_without_updates(info, access).await {
+            Ok(p) => (p, info.clone(), access),
+            Err(e) => match backend {
+                Some(client) => {
+                    let pulled = pull_on_miss(info, client, e, owner).await?;
+                    // The owner's writer covers the pulled session only when it names the folder the pull landed in.
+                    let pulled_access = match owner {
+                        Some(writer) if writer.dir() == session_dir(&pulled) => access,
+                        _ => crate::session::storage::Access::Reader,
+                    };
+                    let p = storage
+                        .load_session_without_updates(&pulled, pulled_access)
+                        .await?;
+                    (p, pulled, pulled_access)
+                }
+                None => return Err(e),
+            },
+        };
     #[cfg(any(test, feature = "test-support"))]
     crate::session::storage::rewind_crash_seam::note_history_read(
         &loaded_info.id.0,
-        crate::session::storage::rewind_points_pre_rewind_copy(&session_dir(&loaded_info).join("rewind_points.jsonl"))
-            .symlink_metadata()
-            .is_ok(),
+        crate::session::storage::rewind_points_pre_rewind_copy(
+            &session_dir(&loaded_info).join("rewind_points.jsonl"),
+        )
+        .symlink_metadata()
+        .is_ok(),
     );
     // A torn line the reader skipped can leave a tool result without its call, which strict providers reject on every
     // request. Repair that here, behind a backup of the file as found (P96). The same holds when an earlier load
@@ -3558,7 +3731,8 @@ pub(crate) async fn load_light(
     // merges the assistant text around them (P88). The checkpoint is only inspected so a damaged one is reported; it
     // never decides what the model sees and never fails the load (it used to).
     if let Some(updates_path) = updates_file_path.as_ref() {
-        warn_on_unreadable_compaction_checkpoint(storage.as_ref(), &loaded_info, updates_path).await;
+        warn_on_unreadable_compaction_checkpoint(storage.as_ref(), &loaded_info, updates_path)
+            .await;
     }
 
     let persisted_info = PersistedInfo {
@@ -3580,7 +3754,8 @@ pub(crate) async fn load_light(
     // F5-C4 (design §5.5): a cold load's persistence task writes as a clone of the load's writer (moved on into the
     // actor); a resident load, or a pull that landed in another folder, gets none and writes nothing.
     drop(storage);
-    let persistence_storage = match owner.filter(|writer| writer.dir() == session_dir(&loaded_info)) {
+    let persistence_storage = match owner.filter(|writer| writer.dir() == session_dir(&loaded_info))
+    {
         Some(writer) => {
             if let Some(relay) = &relay_sync {
                 relay.attach_writer(writer.clone());
@@ -3669,7 +3844,9 @@ pub enum DeleteSessionError {
 
 /// A remote delete that has been built but not started: [`delete_session_history_in`] only polls it after the local
 /// session's writer lock is held.
-type RemoteDelete = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), crate::remote::client::BackendError>> + Send>>;
+type RemoteDelete = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), crate::remote::client::BackendError>> + Send>,
+>;
 
 /// Where a session copy was actually removed by [`delete_session_history`].
 ///
@@ -3708,7 +3885,15 @@ pub async fn delete_session_history(
     search_index: Option<&fuigo_session_search::SearchIndexManager>,
 ) -> Result<SessionDeletion, DeleteSessionError> {
     let deadline = tokio::time::Instant::now() + crate::session::session_writer_lock::CLAIM_WAIT;
-    delete_session_history_by(deadline, session_id, cwd, needs_remote, auth_manager, search_index).await
+    delete_session_history_by(
+        deadline,
+        session_id,
+        cwd,
+        needs_remote,
+        auth_manager,
+        search_index,
+    )
+    .await
 }
 
 /// [`delete_session_history`] whose writer claim (design F5 §6.3 step 1) waits at most until `claim_deadline`, then
@@ -3726,7 +3911,15 @@ pub(crate) async fn delete_session_history_by(
         let session_id = session_id.to_owned();
         Box::pin(async move { client.delete_session_data(&session_id).await }) as RemoteDelete
     });
-    delete_session_history_in_by(&fuigo_home(), session_id, cwd, remote, search_index, claim_deadline).await
+    delete_session_history_in_by(
+        &fuigo_home(),
+        session_id,
+        cwd,
+        remote,
+        search_index,
+        claim_deadline,
+    )
+    .await
 }
 
 /// Prefix of the name a session folder is moved to (next to it, in its cwd folder) while it is being deleted:
@@ -3746,7 +3939,9 @@ const DELETING_PREFIX: &str = ".fuigo-deleting-";
 /// F5 (design §6.3): this is the session writer's `delete_tree`, which keeps exactly that order (rename while held,
 /// release with the state `ReleasedForWipe`, wipe; release then remove in place when the rename is refused). Any later
 /// write through a clone of the writer answers `Gone` and recreates nothing. The writer drops after the wipe.
-async fn delete_local_session(session_writer: fuigo_session_writer::SessionWriter) -> io::Result<()> {
+async fn delete_local_session(
+    session_writer: fuigo_session_writer::SessionWriter,
+) -> io::Result<()> {
     let result = session_writer.delete_tree().await;
     drop(session_writer);
     result
@@ -3806,7 +4001,9 @@ async fn delete_session_history_in_by(
             )
             .await
             .map_err(|error| match error {
-                fuigo_session_writer::ClaimError::HeldElsewhere => DeleteSessionError::HeldElsewhere,
+                fuigo_session_writer::ClaimError::HeldElsewhere => {
+                    DeleteSessionError::HeldElsewhere
+                }
                 fuigo_session_writer::ClaimError::StillClosing => DeleteSessionError::StillClosing,
             })?,
         ),
@@ -3822,15 +4019,13 @@ async fn delete_session_history_in_by(
     let local_dir = local_info.as_ref().map(|info| session_dir_in(root, info));
     let mut wipe_error = None;
     let removed = match (local_info.clone(), session_writer) {
-        (Some(info), Some(session_writer)) => {
-            match delete_local_session(session_writer).await {
-                Ok(()) => Some(info),
-                Err(error) => {
-                    wipe_error = Some(error);
-                    None
-                }
+        (Some(info), Some(session_writer)) => match delete_local_session(session_writer).await {
+            Ok(()) => Some(info),
+            Err(error) => {
+                wipe_error = Some(error);
+                None
             }
-        }
+        },
         _ => None,
     };
     let local_removed = removed.is_some();
@@ -3853,7 +4048,10 @@ async fn delete_session_history_in_by(
     }
     // The eviction above is a point in time
     // Queue the indexer too so an upsert already under way, which would otherwise write the row back, is followed by a re-read that finds nothing
-    if let Some(info) = removed.as_ref().or(local_info.as_ref().filter(|_| folder_gone)) {
+    if let Some(info) = removed
+        .as_ref()
+        .or(local_info.as_ref().filter(|_| folder_gone))
+    {
         crate::session::storage::search::notify_session_updated(
             search_index,
             &info.id.to_string(),
@@ -3884,12 +4082,18 @@ fn classify_remote_delete(
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
 mod durable_update_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_delete_held_elsewhere_tests.rs"]
 mod delete_held_elsewhere_tests;
@@ -3898,7 +4102,10 @@ mod delete_held_elsewhere_tests;
 #[path = "persistence_delete_session_history_tests.rs"]
 mod delete_session_history_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_worktree_stamp_tests.rs"]
 mod worktree_stamp_tests;
@@ -4097,7 +4304,9 @@ async fn mark_session_live_with(
         }
         None => None,
     };
-    let mark = LiveMark { _sweep_lock: shared };
+    let mark = LiveMark {
+        _sweep_lock: shared,
+    };
     if !is_regular_summary() {
         return Ok(mark);
     }
@@ -4109,9 +4318,14 @@ async fn mark_session_live_with(
     // Only a lock actually taken excludes a repair (Astra r2); it is held to the end of the mark.
     // rb/re marks for B-F5 (design F5 §9.4): the liveness bump is a sanctioned summary section under the summary lock;
     // declared before the lock so the lock closes inside the marks.
-    let _rmw_marks = fuigo_session_writer::trace::sanctioned_rmw_guard(&[session_dir.join(SUMMARY_LOCK_FILE).as_path(), summary.as_path()]);
+    let _rmw_marks = fuigo_session_writer::trace::sanctioned_rmw_guard(&[
+        session_dir.join(SUMMARY_LOCK_FILE).as_path(),
+        summary.as_path(),
+    ]);
     let summary_lock = match open_lock_nofollow(session_dir, SUMMARY_LOCK_FILE) {
-        Some(lock) if take_lock_waiting(&lock, true, wait_limit).await == LockWait::Taken => Some(crate::session::storage::jsonl::HeldLock::new(lock)),
+        Some(lock) if take_lock_waiting(&lock, true, wait_limit).await == LockWait::Taken => {
+            Some(crate::session::storage::jsonl::HeldLock::new(lock))
+        }
         _ => None,
     };
     let summary_held = summary_lock.is_some();
@@ -4140,7 +4354,10 @@ async fn mark_session_live_with(
         && session_activity_scan(
             session_dir,
             ACTIVITY_SCAN_MAX_ENTRIES,
-            &[crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE, SUMMARY_LOCK_FILE],
+            &[
+                crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE,
+                SUMMARY_LOCK_FILE,
+            ],
         )
         .is_ok_and(|newest| {
             newest.is_some_and(|mtime| mtime.elapsed().map_or(true, |age| age < UNMARKED_SAFE_AGE))
@@ -4155,7 +4372,10 @@ async fn mark_session_live_with(
     if recently_used {
         return Ok(mark);
     }
-    Err(MarkLiveError::Unmarkable { dir: session_dir.to_path_buf(), error })
+    Err(MarkLiveError::Unmarkable {
+        dir: session_dir.to_path_buf(),
+        error,
+    })
 }
 
 /// The sidecar lock every `summary.json` writer holds (`storage::summary_write`).
@@ -4173,12 +4393,19 @@ enum LockWait {
 }
 
 /// Waits (asynchronously) until `lock` is taken, shared or exclusive.
-async fn take_lock_waiting(lock: &std::fs::File, exclusive: bool, wait_limit: std::time::Duration) -> LockWait {
+async fn take_lock_waiting(
+    lock: &std::fs::File,
+    exclusive: bool,
+    wait_limit: std::time::Duration,
+) -> LockWait {
     let started = tokio::time::Instant::now();
     loop {
         // UFCS: std's inherent `File::try_lock*` (Rust 1.89+) return a different error type.
-        let attempt =
-            if exclusive { fs2::FileExt::try_lock_exclusive(lock) } else { fs2::FileExt::try_lock_shared(lock) };
+        let attempt = if exclusive {
+            fs2::FileExt::try_lock_exclusive(lock)
+        } else {
+            fs2::FileExt::try_lock_shared(lock)
+        };
         match attempt {
             Err(error) if fuigo_workspace::util::is_lock_contended(&error) => {
                 if started.elapsed() >= wait_limit {
@@ -4194,7 +4421,10 @@ async fn take_lock_waiting(lock: &std::fs::File, exclusive: bool, wait_limit: st
 
 /// Sets `path`'s mtime to now without following a link at that path and without writing anything. Fails on a missing,
 /// non-regular or unwritable file.
-#[allow(clippy::disallowed_methods, reason = "liveness mark — mtime only, opens without create, writes no bytes, under the sweep lock, runs before the writer is claimed on load")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "liveness mark — mtime only, opens without create, writes no bytes, under the sweep lock, runs before the writer is claimed on load"
+)]
 fn touch_nofollow(path: &Path) -> io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     // Write access is required for `set_modified` on Windows; nothing is written
@@ -4223,7 +4453,11 @@ fn touch_nofollow(path: &Path) -> io::Result<()> {
 /// Where `session_dir`'s sweep lock lives: next to it, never inside it (see [`SWEEP_LOCK_PREFIX`]).
 fn sweep_lock_path(session_dir: &Path) -> Option<PathBuf> {
     let name = session_dir.file_name()?.to_string_lossy();
-    Some(session_dir.parent()?.join(format!("{SWEEP_LOCK_PREFIX}{name}")))
+    Some(
+        session_dir
+            .parent()?
+            .join(format!("{SWEEP_LOCK_PREFIX}{name}")),
+    )
 }
 
 /// The lock an attach holds shared while it marks `session_dir` live (see [`SWEEP_LOCK_PREFIX`]).
@@ -4309,7 +4543,11 @@ fn cleanup_pinned_level(
             return stats;
         }
     };
-    let chain: Vec<&sweep_pin::PinnedDir> = ancestors.iter().copied().chain(std::iter::once(dir)).collect();
+    let chain: Vec<&sweep_pin::PinnedDir> = ancestors
+        .iter()
+        .copied()
+        .chain(std::iter::once(dir))
+        .collect();
 
     for name in names {
         let name_text = name.to_string_lossy().into_owned();
@@ -4320,10 +4558,13 @@ fn cleanup_pinned_level(
             // deleted a folder the first one was putting back). One with activity newer than the TTL is kept (a
             // removal that had to be put back and could not be). A name that does not parse is kept.
             if let Some(session_name) = removing_session_name(&name_text)
-                && dir.child_info(&name).is_ok_and(|info| info.kind == EntryKind::Dir)
+                && dir
+                    .child_info(&name)
+                    .is_ok_and(|info| info.kind == EntryKind::Dir)
             {
                 let lock_name = format!("{SWEEP_LOCK_PREFIX}{session_name}");
-                if let Some(held) = try_lock_exclusive_pinned(&dir.child_path(&name), dir, &lock_name)
+                if let Some(held) =
+                    try_lock_exclusive_pinned(&dir.child_path(&name), dir, &lock_name)
                     && session_last_activity(&dir.child_path(&name))
                         .is_ok_and(|newest| newest.is_none_or(|mtime| is_stale(mtime, ttl_days)))
                     && dir.remove_child_tree(&name).is_ok()
@@ -4357,7 +4598,11 @@ fn cleanup_pinned_level(
                 && let Ok(info) = dir.child_info(&name)
                 && info.kind == EntryKind::File
                 && info.modified.is_some_and(|mtime| is_stale(mtime, ttl_days))
-                && let Some(held) = try_lock_exclusive_pinned(&dir.child_path(std::ffi::OsStr::new(session_name)), dir, &name_text)
+                && let Some(held) = try_lock_exclusive_pinned(
+                    &dir.child_path(std::ffi::OsStr::new(session_name)),
+                    dir,
+                    &name_text,
+                )
                 && session_is_gone()
             {
                 remove_pinned_file(dir, &name, &mut stats);
@@ -4368,7 +4613,9 @@ fn cleanup_pinned_level(
         if name_text.starts_with(DELETING_PREFIX) && matches!(level, CleanupLevel::Cwd) {
             // A delete that died between moving the session aside and removing it. Removed once nothing holds it (a
             // running delete still has its hold, or is past it and removing the same folder).
-            if dir.child_info(&name).is_ok_and(|info| info.kind == EntryKind::Dir)
+            if dir
+                .child_info(&name)
+                .is_ok_and(|info| info.kind == EntryKind::Dir)
                 && !crate::session::session_writer_lock::dir_open_elsewhere(&dir.child_path(&name))
                 && dir.remove_child_tree(&name).is_ok()
             {
@@ -4406,7 +4653,13 @@ fn cleanup_pinned_level(
                             continue;
                         }
                     };
-                    let child_stats = cleanup_pinned_level(&chain, &child, ttl_days, live_session_dir, CleanupLevel::Cwd);
+                    let child_stats = cleanup_pinned_level(
+                        &chain,
+                        &child,
+                        ttl_days,
+                        live_session_dir,
+                        CleanupLevel::Cwd,
+                    );
                     let removed_session = child_stats.sessions_removed > 0;
                     stats.absorb(child_stats);
                     // Released first: on Windows the pin itself would refuse the removal
@@ -4427,7 +4680,12 @@ fn cleanup_pinned_level(
                         // would mean its caches never age out
                         prune_pinned_session_caches(dir, &name, ttl_days, &mut stats);
                     } else {
-                        stats.absorb(cleanup_pinned_session(&chain, &name, ttl_days, &SweepHooks::none()));
+                        stats.absorb(cleanup_pinned_session(
+                            &chain,
+                            &name,
+                            ttl_days,
+                            &SweepHooks::none(),
+                        ));
                     }
                 }
             },
@@ -4451,13 +4709,23 @@ fn cleanup_session_dir(session_dir: &Path, ttl_days: u32) -> CleanupStats {
 /// rule is tested on Linux (not Windows itself: foreign handles, sharing modes, delete-pending names).
 trait SessionDirRename {
     /// Renames `from` to `to`, both in the pinned folder `dir`.
-    fn rename(&self, dir: &sweep_pin::PinnedDir, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io::Result<()>;
+    fn rename(
+        &self,
+        dir: &sweep_pin::PinnedDir,
+        from: &std::ffi::OsStr,
+        to: &std::ffi::OsStr,
+    ) -> io::Result<()>;
 }
 
 struct StdRename;
 
 impl SessionDirRename for StdRename {
-    fn rename(&self, dir: &sweep_pin::PinnedDir, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io::Result<()> {
+    fn rename(
+        &self,
+        dir: &sweep_pin::PinnedDir,
+        from: &std::ffi::OsStr,
+        to: &std::ffi::OsStr,
+    ) -> io::Result<()> {
         dir.rename_child(from, to)
     }
 }
@@ -4526,11 +4794,17 @@ fn cleanup_session_dir_with<'a>(
         after_rename: std::cell::RefCell::new(Some(Box::new(after_rename))),
     };
     let (Some(parent), Some(name)) = (session_dir.parent(), session_dir.file_name()) else {
-        return CleanupStats { errors: 1, ..CleanupStats::default() };
+        return CleanupStats {
+            errors: 1,
+            ..CleanupStats::default()
+        };
     };
     match sweep_pin::PinnedDir::open_root(parent) {
         Ok(cwd) => cleanup_pinned_session(&[&cwd], name, ttl_days, &hooks),
-        Err(_) => CleanupStats { errors: 1, ..CleanupStats::default() },
+        Err(_) => CleanupStats {
+            errors: 1,
+            ..CleanupStats::default()
+        },
     }
 }
 
@@ -4563,7 +4837,10 @@ fn cleanup_pinned_session(
         Some(mtime) => Ok(mtime),
         // A folder without files of its own (a stub) is judged by its own mtime, read before the sweep's lock files
         // are created in it (which changes that mtime)
-        None => cwd.child_info(name)?.modified.ok_or_else(|| io::Error::other("no mtime")),
+        None => cwd
+            .child_info(name)?
+            .modified
+            .ok_or_else(|| io::Error::other("no mtime")),
     });
     let last_activity = match first_look {
         Ok(t) => t,
@@ -4649,7 +4926,9 @@ fn cleanup_pinned_session(
     let removing = cwd.child_path(&removing_name);
     hooks.before_rename();
     if !chain.iter().all(|pinned| pinned.still_at_path())
-        || !cwd.child_info(name).is_ok_and(|info| info.kind == sweep_pin::EntryKind::Dir)
+        || !cwd
+            .child_info(name)
+            .is_ok_and(|info| info.kind == sweep_pin::EntryKind::Dir)
     {
         stats.errors += 1;
         tracing::warn!(
@@ -4676,7 +4955,11 @@ fn cleanup_pinned_session(
         Ok(None) => false,
         Err(_) => true,
     };
-    if marked_meanwhile || !cwd.child_info(&removing_name).is_ok_and(|info| info.kind == sweep_pin::EntryKind::Dir) {
+    if marked_meanwhile
+        || !cwd
+            .child_info(&removing_name)
+            .is_ok_and(|info| info.kind == sweep_pin::EntryKind::Dir)
+    {
         stats.errors += 1;
         put_back(cwd, &removing_name, name, session_dir);
         return stats;
@@ -4715,7 +4998,12 @@ fn cleanup_pinned_session(
 /// Puts a session the sweep moved off its path back, because something marked it in between. If its path has been
 /// taken meanwhile, or the filesystem has no atomic no-replace rename, the folder is kept under a name no sweep
 /// removes and that is logged (nothing restores it by itself; the warning names both paths).
-fn put_back(cwd: &sweep_pin::PinnedDir, removing_name: &std::ffi::OsStr, name: &std::ffi::OsStr, session_dir: &Path) {
+fn put_back(
+    cwd: &sweep_pin::PinnedDir,
+    removing_name: &std::ffi::OsStr,
+    name: &std::ffi::OsStr,
+    session_dir: &Path,
+) {
     // Never over anything at the path, not even an empty folder a creator is about to fill (Astra r3)
     match cwd.rename_child_noreplace_strict(removing_name, name) {
         Ok(()) => tracing::info!(
@@ -4790,7 +5078,12 @@ fn prune_pinned_session_caches(
     }
 }
 
-fn prune_pinned_blob_dir(session: &sweep_pin::PinnedDir, dir_name: &str, ttl_days: u32, stats: &mut CleanupStats) {
+fn prune_pinned_blob_dir(
+    session: &sweep_pin::PinnedDir,
+    dir_name: &str,
+    ttl_days: u32,
+    stats: &mut CleanupStats,
+) {
     let dir = match session.open_child(std::ffi::OsStr::new(dir_name)) {
         Ok(dir) => dir,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return,
@@ -4814,7 +5107,9 @@ fn prune_pinned_blob_dir(session: &sweep_pin::PinnedDir, dir_name: &str, ttl_day
             stats.errors += 1;
             continue;
         };
-        if info.kind == sweep_pin::EntryKind::File && info.modified.is_some_and(|mtime| is_stale(mtime, ttl_days)) {
+        if info.kind == sweep_pin::EntryKind::File
+            && info.modified.is_some_and(|mtime| is_stale(mtime, ttl_days))
+        {
             remove_pinned_file(&dir, &name, stats);
         }
     }
@@ -4823,7 +5118,10 @@ fn prune_pinned_blob_dir(session: &sweep_pin::PinnedDir, dir_name: &str, ttl_day
 /// Opens (creating, owner-only) the lock file `name` in `session_dir` without ever following a link at that path:
 /// `O_NOFOLLOW` on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` on Windows (a link is then opened itself and refused as not a
 /// regular file). `None` when it cannot be opened that way (a missing folder, a planted link).
-#[allow(clippy::disallowed_methods, reason = "lock sidecar (§5.6): summary.json.lock in the folder; the sweep lock is a sibling outside it")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "lock sidecar (§5.6): summary.json.lock in the folder; the sweep lock is a sibling outside it"
+)]
 fn open_lock_nofollow(session_dir: &Path, name: &str) -> Option<std::fs::File> {
     let path = session_dir.join(name);
     let mut options = std::fs::OpenOptions::new();
@@ -4862,7 +5160,11 @@ fn open_lock_nofollow(session_dir: &Path, name: &str) -> Option<std::fs::File> {
 
 /// The lock file `name` in the pinned `dir`, held exclusively for the sweep of `session_dir`. `None` when it is held or
 /// cannot be taken at all (a planted link, a filesystem without advisory locks): the session is then kept.
-fn try_lock_exclusive_pinned(session_dir: &Path, dir: &sweep_pin::PinnedDir, name: &str) -> Option<crate::session::storage::jsonl::HeldLock> {
+fn try_lock_exclusive_pinned(
+    session_dir: &Path,
+    dir: &sweep_pin::PinnedDir,
+    name: &str,
+) -> Option<crate::session::storage::jsonl::HeldLock> {
     let file = dir.open_lock(name)?;
     // UFCS: std's inherent `File::try_lock` (Rust 1.89+) returns a different error type.
     match fs2::FileExt::try_lock_exclusive(&file) {
@@ -4901,7 +5203,11 @@ fn session_last_activity_within(
     session_dir: &Path,
     max_entries: usize,
 ) -> io::Result<Option<std::time::SystemTime>> {
-    session_activity_scan(session_dir, max_entries, &[crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE])
+    session_activity_scan(
+        session_dir,
+        max_entries,
+        &[crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE],
+    )
 }
 
 /// The activity scan, skipping the named top-level files.
@@ -4924,9 +5230,15 @@ fn session_activity_scan(
         for entry in entries {
             let entry = entry?;
             budget = budget.checked_sub(1).ok_or_else(|| {
-                io::Error::other(format!("more than {max_entries} entries; session kept without judging it"))
+                io::Error::other(format!(
+                    "more than {max_entries} entries; session kept without judging it"
+                ))
             })?;
-            if depth == 0 && ignored_top_level.iter().any(|name| entry.file_name() == *name) {
+            if depth == 0
+                && ignored_top_level
+                    .iter()
+                    .any(|name| entry.file_name() == *name)
+            {
                 continue;
             }
             let metadata = match std::fs::symlink_metadata(entry.path()) {
@@ -4952,7 +5264,11 @@ fn session_activity_scan(
     Ok(newest)
 }
 
-fn remove_pinned_file(dir: &sweep_pin::PinnedDir, name: &std::ffi::OsStr, stats: &mut CleanupStats) {
+fn remove_pinned_file(
+    dir: &sweep_pin::PinnedDir,
+    name: &std::ffi::OsStr,
+    stats: &mut CleanupStats,
+) {
     match dir.remove_child_file(name) {
         Ok(()) => {
             stats.files_deleted += 1;
@@ -4979,7 +5295,10 @@ fn is_stale(mtime: std::time::SystemTime, ttl_days: u32) -> bool {
     mtime.elapsed().is_ok_and(|age| age > ttl)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_cleanup_stale_sessions_tests.rs"]
 mod cleanup_stale_sessions_tests;
@@ -4988,42 +5307,66 @@ mod cleanup_stale_sessions_tests;
 #[path = "persistence_agent_name_persistence_tests.rs"]
 mod agent_name_persistence_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_collect_session_files_tests.rs"]
 mod collect_session_files_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_session_exists_tests.rs"]
 mod session_exists_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_find_summary_by_session_id_tests.rs"]
 mod find_summary_by_session_id_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_resumed_sandbox_profile_tests.rs"]
 mod resumed_sandbox_profile_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_session_exists_for_cwd_tests.rs"]
 mod session_exists_for_cwd_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_find_local_child_tests.rs"]
 mod find_local_child_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_resolve_local_session_tests.rs"]
 mod resolve_local_session_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_repo_wide_resolution_tests.rs"]
 mod repo_wide_resolution_tests;
@@ -5047,7 +5390,8 @@ pub(crate) mod test_seam {
     );
     type Outcome = Result<(), crate::session::storage::AppendUpdateError>;
 
-    static HELD: Mutex<Option<HashMap<String, tokio::sync::oneshot::Receiver<()>>>> = Mutex::new(None);
+    static HELD: Mutex<Option<HashMap<String, tokio::sync::oneshot::Receiver<()>>>> =
+        Mutex::new(None);
     /// Per session: signalled once the held append has been written, and awaited just before the load's replay.
     static WRITTEN: Mutex<Option<HashMap<String, WrittenSignal>>> = Mutex::new(None);
     static FINISHED: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
@@ -5056,10 +5400,14 @@ pub(crate) mod test_seam {
 
     type BeforeTurnOwnerLock = Box<dyn FnOnce(&std::path::Path) + Send>;
     /// Per session: runs once, in the load, right before the actor takes `turn_owner.lock` (P176).
-    static BEFORE_TURN_OWNER_LOCK: Mutex<Option<HashMap<String, BeforeTurnOwnerLock>>> = Mutex::new(None);
+    static BEFORE_TURN_OWNER_LOCK: Mutex<Option<HashMap<String, BeforeTurnOwnerLock>>> =
+        Mutex::new(None);
 
     /// Runs `hook` (with the session folder) the next time `session_id`'s actor is about to take `turn_owner.lock`.
-    pub(crate) fn before_turn_owner_lock(session_id: &str, hook: impl FnOnce(&std::path::Path) + Send + 'static) {
+    pub(crate) fn before_turn_owner_lock(
+        session_id: &str,
+        hook: impl FnOnce(&std::path::Path) + Send + 'static,
+    ) {
         BEFORE_TURN_OWNER_LOCK
             .lock()
             .expect("before turn owner lock")
@@ -5112,15 +5460,17 @@ pub(crate) mod test_seam {
     ) -> tokio::sync::mpsc::UnboundedSender<super::PersistenceMsg> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (disk_full_tx, _disk_full_rx) = tokio::sync::watch::channel(false);
-        let sampling_client =
-            super::OaiCompatClient::new(fuigo_sampler::SamplerConfig::default()).expect("sampling client");
-        let summary = crate::session::summary::SummaryGenerator::new(crate::session::summary::SummaryConfig {
-            sampling_client,
-            model: String::new(),
-            policy: Default::default(),
-            session_id: info.id.to_string(),
-            persistence_tx: tx.downgrade(),
-        });
+        let sampling_client = super::OaiCompatClient::new(fuigo_sampler::SamplerConfig::default())
+            .expect("sampling client");
+        let summary = crate::session::summary::SummaryGenerator::new(
+            crate::session::summary::SummaryConfig {
+                sampling_client,
+                model: String::new(),
+                policy: Default::default(),
+                session_id: info.id.to_string(),
+                persistence_tx: tx.downgrade(),
+            },
+        );
         tokio::spawn(
             super::SessionPersistence {
                 info,

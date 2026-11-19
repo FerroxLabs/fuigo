@@ -13,8 +13,8 @@
 //! shown in the row and the status line, and an error on it is reported on it (see
 //! `subscription::inference::auth_error`), never retried on another.
 
-use crate::auth::provider_status::{Route, RouteKind};
 use crate::agent::config::{ModelEntry, ModelPrice};
+use crate::auth::provider_status::{Route, RouteKind};
 use indexmap::IndexMap;
 
 /// `vendor/model` and `model` are the same model; case is not significant.
@@ -48,7 +48,9 @@ impl RouteChoice {
                 Some(p) => format!("via Flux Router: {}", p.summary()),
                 None => "via Flux Router: one key, every model".to_string(),
             },
-            (RouteKind::Flux, false) => priced("needs a Flux Router key (fluxrouter.ai)".to_string()),
+            (RouteKind::Flux, false) => {
+                priced("needs a Flux Router key (fluxrouter.ai)".to_string())
+            }
             (RouteKind::Subscription, _) => {
                 format!("included in your {}: no per-token charge", self.route.label)
             }
@@ -147,7 +149,8 @@ mod tests {
 
     fn subscription_entry(wire: &str, provider: SubscriptionProvider) -> ModelEntry {
         let mut e = entry(wire);
-        let mut binding = crate::auth::AuthProviderRef::unresolved(format!("{} binding", provider.name()));
+        let mut binding =
+            crate::auth::AuthProviderRef::unresolved(format!("{} binding", provider.name()));
         binding.attach_trusted_config(Some(&crate::auth::AuthProviderConfig {
             subscription: Some(provider),
             ..Default::default()
@@ -163,7 +166,10 @@ mod tests {
     }
 
     fn catalog(entries: Vec<(&str, ModelEntry)>) -> IndexMap<String, ModelEntry> {
-        entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
     }
 
     #[test]
@@ -178,13 +184,19 @@ mod tests {
     fn a_model_reachable_three_ways_is_listed_once() {
         let cat = catalog(vec![
             ("grok-4.7", flux_entry("grok-4.7")),
-            ("xai/grok-4.7", subscription_entry("grok-4.7", SubscriptionProvider::Xai)),
+            (
+                "xai/grok-4.7",
+                subscription_entry("grok-4.7", SubscriptionProvider::Xai),
+            ),
             ("xai-key/grok-4.7", key_entry("grok-4.7", "XAI_API_KEY")),
         ]);
         let ranked = rank_catalog(&cat, true);
         assert_eq!(ranked.len(), 1, "one model, one row");
         let kinds: Vec<RouteKind> = ranked[0].choices.iter().map(|c| c.route.kind).collect();
-        assert_eq!(kinds, vec![RouteKind::Flux, RouteKind::Subscription, RouteKind::Key]);
+        assert_eq!(
+            kinds,
+            vec![RouteKind::Flux, RouteKind::Subscription, RouteKind::Key]
+        );
     }
 
     /// Every combination of Flux, subscription and key picks the best route that is ready.
@@ -207,7 +219,10 @@ mod tests {
             let _guard = fuigo_test_support::EnvGuard::set(var, "sk-ranking-test-key-123456");
             let mut entries = vec![("grok-4.7", flux_entry("grok-4.7"))];
             if sub {
-                entries.push(("xai/grok-4.7", subscription_entry("grok-4.7", SubscriptionProvider::Xai)));
+                entries.push((
+                    "xai/grok-4.7",
+                    subscription_entry("grok-4.7", SubscriptionProvider::Xai),
+                ));
             }
             if key {
                 entries.push(("k/grok-4.7", key_entry("grok-4.7", var)));
@@ -228,14 +243,26 @@ mod tests {
     fn ties_keep_catalogue_order_and_reachable_models_come_first() {
         let cat = catalog(vec![
             ("needs-flux", flux_entry("alpha")),
-            ("xai/beta", subscription_entry("beta", SubscriptionProvider::Xai)),
-            ("chatgpt/gamma", subscription_entry("gamma", SubscriptionProvider::Chatgpt)),
+            (
+                "xai/beta",
+                subscription_entry("beta", SubscriptionProvider::Xai),
+            ),
+            (
+                "chatgpt/gamma",
+                subscription_entry("gamma", SubscriptionProvider::Chatgpt),
+            ),
             ("also-needs-flux", flux_entry("delta")),
         ]);
-        let order: Vec<String> = rank_catalog(&cat, false).into_iter().map(|m| m.canonical).collect();
+        let order: Vec<String> = rank_catalog(&cat, false)
+            .into_iter()
+            .map(|m| m.canonical)
+            .collect();
         assert_eq!(order, ["beta", "gamma", "alpha", "delta"]);
         // With Flux set up everything is reachable and the catalogue order stands.
-        let order: Vec<String> = rank_catalog(&cat, true).into_iter().map(|m| m.canonical).collect();
+        let order: Vec<String> = rank_catalog(&cat, true)
+            .into_iter()
+            .map(|m| m.canonical)
+            .collect();
         assert_eq!(order, ["alpha", "beta", "gamma", "delta"]);
     }
 
@@ -244,34 +271,61 @@ mod tests {
     #[test]
     fn route_reasons_show_the_price_where_the_catalogue_knows_it() {
         let mut flux = flux_entry("grok-4.7");
-        flux.info.price = Some(ModelPrice { input_per_million: 2.5, output_per_million: 10.0 });
+        flux.info.price = Some(ModelPrice {
+            input_per_million: 2.5,
+            output_per_million: 10.0,
+        });
         let cat = catalog(vec![
             ("grok-4.7", flux),
-            ("xai/grok-4.7", subscription_entry("grok-4.7", SubscriptionProvider::Xai)),
+            (
+                "xai/grok-4.7",
+                subscription_entry("grok-4.7", SubscriptionProvider::Xai),
+            ),
             ("k/grok-4.7", key_entry("grok-4.7", "XAI_API_KEY")),
         ]);
         let ranked = rank_catalog(&cat, true);
         let reasons: Vec<String> = ranked[0].choices.iter().map(|c| c.reason()).collect();
-        assert_eq!(reasons[0], "via Flux Router: $2.5 in / $10 out per 1M tokens");
-        assert_eq!(reasons[1], "included in your Grok subscription: no per-token charge");
-        assert!(reasons[2].starts_with("needs ") || reasons[2].starts_with("billed to your "), "{reasons:?}");
+        assert_eq!(
+            reasons[0],
+            "via Flux Router: $2.5 in / $10 out per 1M tokens"
+        );
+        assert_eq!(
+            reasons[1],
+            "included in your Grok subscription: no per-token charge"
+        );
+        assert!(
+            reasons[2].starts_with("needs ") || reasons[2].starts_with("billed to your "),
+            "{reasons:?}"
+        );
         // No price published: the old wording stands.
         let cat = catalog(vec![("grok-4.7", flux_entry("grok-4.7"))]);
-        assert_eq!(rank_catalog(&cat, true)[0].choices[0].reason(), "via Flux Router: one key, every model");
+        assert_eq!(
+            rank_catalog(&cat, true)[0].choices[0].reason(),
+            "via Flux Router: one key, every model"
+        );
     }
 
     #[test]
     fn reasons_and_badges_name_the_route() {
         let cat = catalog(vec![
             ("grok-4.7", flux_entry("grok-4.7")),
-            ("xai/grok-4.7", subscription_entry("grok-4.7", SubscriptionProvider::Xai)),
+            (
+                "xai/grok-4.7",
+                subscription_entry("grok-4.7", SubscriptionProvider::Xai),
+            ),
             ("k/grok-4.7", key_entry("grok-4.7", "OPENAI_API_KEY")),
         ]);
         let ranked = rank_catalog(&cat, false);
         let choices = &ranked[0].choices;
-        assert_eq!(choices[0].route.badge(), "included in your Grok subscription");
+        assert_eq!(
+            choices[0].route.badge(),
+            "included in your Grok subscription"
+        );
         assert!(choices[0].reason().contains("no per-token charge"));
-        let flux = choices.iter().find(|c| c.route.kind == RouteKind::Flux).unwrap();
+        let flux = choices
+            .iter()
+            .find(|c| c.route.kind == RouteKind::Flux)
+            .unwrap();
         assert!(!flux.ready);
         assert!(flux.reason().contains("needs a Flux Router key"));
         assert_eq!(flux.word(), "flux");
@@ -287,7 +341,8 @@ mod tests {
             return;
         }
         let home = fuigo_test_support::FuigoHome::new();
-        let _k = fuigo_test_support::EnvGuard::set("OPENAI_API_KEY", "sk-test-openai-key-0123456789");
+        let _k =
+            fuigo_test_support::EnvGuard::set("OPENAI_API_KEY", "sk-test-openai-key-0123456789");
         let _a = fuigo_test_support::EnvGuard::unset("FUIGO_API_KEY");
         let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_API_KEY");
         crate::auth::key_models::write_cached_model_ids(
@@ -296,15 +351,33 @@ mod tests {
             &["gpt-5".to_owned(), "only-on-the-key".to_owned()],
         )
         .unwrap();
-        let mut resolved = crate::agent::config::resolve_model_list(&crate::agent::config::Config::default(), None);
-        let listed = resolved.get("openai-key/gpt-5").expect("the key's model is listed with no TOML");
+        let mut resolved = crate::agent::config::resolve_model_list(
+            &crate::agent::config::Config::default(),
+            None,
+        );
+        let listed = resolved
+            .get("openai-key/gpt-5")
+            .expect("the key's model is listed with no TOML");
         assert_eq!(listed.info.model, "gpt-5");
         assert_eq!(listed.route().kind, RouteKind::Key);
-        assert!(listed.route().label.contains("OpenAI key from OPENAI_API_KEY"), "{}", listed.route().label);
-        assert!(listed.api_key.is_none(), "the secret is not copied into the entry");
+        assert!(
+            listed
+                .route()
+                .label
+                .contains("OpenAI key from OPENAI_API_KEY"),
+            "{}",
+            listed.route().label
+        );
+        assert!(
+            listed.api_key.is_none(),
+            "the secret is not copied into the entry"
+        );
         // Without Flux, the key is the route and the model is usable.
         let ranked = rank_catalog(&resolved, false);
-        let only = ranked.iter().find(|m| m.canonical == "only-on-the-key").expect("listed");
+        let only = ranked
+            .iter()
+            .find(|m| m.canonical == "only-on-the-key")
+            .expect("listed");
         assert!(only.reachable() && only.primary().route.kind == RouteKind::Key);
         // With Flux serving gpt-5 too: one row, Flux first, the key as the alternate.
         resolved.insert("gpt-5".to_owned(), flux_entry("gpt-5"));
@@ -332,7 +405,10 @@ mod tests {
     fn three_routes() -> IndexMap<String, ModelEntry> {
         catalog(vec![
             ("grok-4.7", flux_entry("grok-4.7")),
-            ("xai/grok-4.7", subscription_entry("grok-4.7", SubscriptionProvider::Xai)),
+            (
+                "xai/grok-4.7",
+                subscription_entry("grok-4.7", SubscriptionProvider::Xai),
+            ),
             ("flux-only", flux_entry("flux-only")),
         ])
     }
@@ -358,11 +434,24 @@ mod tests {
         let _b = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_API_KEY");
         let infos = super::super::resolution::available_models(&three_routes(), false);
         let order: Vec<&str> = infos.keys().map(|k| k.0.as_ref()).collect();
-        assert_eq!(order, ["xai/grok-4.7", "grok-4.7", "flux-only"], "reachable first, then connect");
+        assert_eq!(
+            order,
+            ["xai/grok-4.7", "grok-4.7", "flux-only"],
+            "reachable first, then connect"
+        );
         let primary = meta_of(&infos, "xai/grok-4.7");
-        assert_eq!(primary["routes"][0]["badge"], "included in your Grok subscription");
+        assert_eq!(
+            primary["routes"][0]["badge"],
+            "included in your Grok subscription"
+        );
         assert_eq!(meta_of(&infos, "grok-4.7")["altRouteOf"], "xai/grok-4.7");
-        let connect = meta_of(&infos, "flux-only")["connect"].as_str().unwrap().to_owned();
-        assert!(connect.contains("Flux Router key") && connect.contains("fluxrouter.ai"), "{connect}");
+        let connect = meta_of(&infos, "flux-only")["connect"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            connect.contains("Flux Router key") && connect.contains("fluxrouter.ai"),
+            "{connect}"
+        );
     }
 }

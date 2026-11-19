@@ -709,7 +709,11 @@ async fn resolve_existing_session(
             if title_miss_hint {
                 anyhow::bail!(
                     "{REMOTE_RESTORE_NEEDS_WORKTREE}; {}",
-                    super::session_title_resolve::title_miss_hint_for(session_id, cwd, ctx.recent_session_selection)
+                    super::session_title_resolve::title_miss_hint_for(
+                        session_id,
+                        cwd,
+                        ctx.recent_session_selection
+                    )
                 );
             }
             anyhow::bail!("{REMOTE_RESTORE_NEEDS_WORKTREE}")
@@ -718,7 +722,11 @@ async fn resolve_existing_session(
             if title_miss_hint {
                 anyhow::bail!(
                     "Session does not exist: {}",
-                    super::session_title_resolve::title_miss_hint_for(session_id, cwd, ctx.recent_session_selection)
+                    super::session_title_resolve::title_miss_hint_for(
+                        session_id,
+                        cwd,
+                        ctx.recent_session_selection
+                    )
                 );
             }
             anyhow::bail!("Session does not exist")
@@ -732,7 +740,11 @@ async fn resolve_existing_session(
             restored.map_err(|e| {
                 anyhow::anyhow!(
                     "{e:#}; {}",
-                    super::session_title_resolve::title_miss_hint_for(session_id, cwd, ctx.recent_session_selection)
+                    super::session_title_resolve::title_miss_hint_for(
+                        session_id,
+                        cwd,
+                        ctx.recent_session_selection
+                    )
                 )
             })
         }

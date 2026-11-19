@@ -100,7 +100,10 @@ const MAKE_SHORT_FLAGS: &str = "bBdehikLnpqrRsStvw";
 /// One parsed `make` argument.
 pub(crate) enum MakeArg<'a> {
     /// An option by its long name (`file`, `eval`, `print-data-base`, ...) and its value.
-    Option { name: &'static str, value: Option<&'a str> },
+    Option {
+        name: &'static str,
+        value: Option<&'a str>,
+    },
     /// A command-line variable definition (`NAME=value`, `NAME:=value`, `NAME+=value`, ...).
     Assign { name: &'a str, value: &'a str },
     /// A goal (target name).
@@ -141,7 +144,9 @@ pub(crate) fn make_args(args: &[String]) -> Vec<MakeArg<'_>> {
                 None => (long, None),
             };
             let exact = MAKE_LONG.iter().find(|(name, _)| *name == typed);
-            let mut prefixed = MAKE_LONG.iter().filter(|(name, _)| !typed.is_empty() && name.starts_with(typed));
+            let mut prefixed = MAKE_LONG
+                .iter()
+                .filter(|(name, _)| !typed.is_empty() && name.starts_with(typed));
             let found = exact.or_else(|| match (prefixed.next(), prefixed.next()) {
                 (Some(only), None) => Some(only),
                 _ => None,
@@ -169,12 +174,19 @@ pub(crate) fn make_args(args: &[String]) -> Vec<MakeArg<'_>> {
         for (at, letter) in cluster.char_indices() {
             if MAKE_SHORT_FLAGS.contains(letter) {
                 out.push(MakeArg::Option {
-                    name: if letter == 'p' { "print-data-base" } else { "flag" },
+                    name: if letter == 'p' {
+                        "print-data-base"
+                    } else {
+                        "flag"
+                    },
                     value: None,
                 });
                 continue;
             }
-            let Some(&(_, name, kind)) = MAKE_SHORT_VALUED.iter().find(|(short, _, _)| *short == letter) else {
+            let Some(&(_, name, kind)) = MAKE_SHORT_VALUED
+                .iter()
+                .find(|(short, _, _)| *short == letter)
+            else {
                 out.push(MakeArg::Unknown);
                 break;
             };
@@ -213,12 +225,21 @@ const MAKE_EXEC_VARIABLES: &[&str] = &[
 /// function call (`$(shell ...)` runs when the variable is expanded).
 pub(super) fn make_runs_program(args: &[String]) -> bool {
     make_args(args).iter().any(|arg| match arg {
-        MakeArg::Option { name: "eval" | "print-data-base", .. } => true,
-        MakeArg::Option { name: "file" | "makefile", value } => {
+        MakeArg::Option {
+            name: "eval" | "print-data-base",
+            ..
+        } => true,
+        MakeArg::Option {
+            name: "file" | "makefile",
+            value,
+        } => {
             value.is_none_or(|path| path == "-" || names_stdin_stream(path) || is_unresolved(path))
         }
         MakeArg::Assign { name, value } => {
-            MAKE_EXEC_VARIABLES.contains(name) || value.contains(['$', '`']) || is_unresolved(value) || is_unresolved(name)
+            MAKE_EXEC_VARIABLES.contains(name)
+                || value.contains(['$', '`'])
+                || is_unresolved(value)
+                || is_unresolved(name)
         }
         _ => false,
     })
@@ -228,14 +249,37 @@ pub(super) fn make_runs_program(args: &[String]) -> bool {
 
 /// `-D` cache variables that name a program cmake or the build runs, or a script it includes.
 fn cmake_definition_runs_program(definition: &str) -> bool {
-    let name = definition.split(['=', ':']).next().unwrap_or(definition).to_ascii_uppercase();
+    let name = definition
+        .split(['=', ':'])
+        .next()
+        .unwrap_or(definition)
+        .to_ascii_uppercase();
     is_unresolved(definition)
         || (name.starts_with("CMAKE_")
-            && ["COMPILER", "LAUNCHER", "INCLUDE", "TOOLCHAIN", "MAKE_PROGRAM", "LINKER", "RULES_OVERRIDE", "COMMAND"]
-                .iter()
-                .any(|part| name.contains(part)))
-        || ["_EXECUTABLE", "_COMMAND", "_PROGRAM"].iter().any(|suffix| name.ends_with(suffix))
-        || matches!(name.as_str(), "CMAKE_AR" | "CMAKE_RANLIB" | "CMAKE_NM" | "CMAKE_OBJCOPY" | "CMAKE_OBJDUMP" | "CMAKE_STRIP")
+            && [
+                "COMPILER",
+                "LAUNCHER",
+                "INCLUDE",
+                "TOOLCHAIN",
+                "MAKE_PROGRAM",
+                "LINKER",
+                "RULES_OVERRIDE",
+                "COMMAND",
+            ]
+            .iter()
+            .any(|part| name.contains(part)))
+        || ["_EXECUTABLE", "_COMMAND", "_PROGRAM"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+        || matches!(
+            name.as_str(),
+            "CMAKE_AR"
+                | "CMAKE_RANLIB"
+                | "CMAKE_NM"
+                | "CMAKE_OBJCOPY"
+                | "CMAKE_OBJDUMP"
+                | "CMAKE_STRIP"
+        )
 }
 
 /// `cmake -E` (command mode: `env`, `copy`, `rm`, ...), `-P` (script mode), `-C` (an initial-cache script),
@@ -284,7 +328,8 @@ pub(super) fn cargo_runs_program(args: &[String]) -> bool {
         if word == "--config" || word.starts_with("--config=") || word.starts_with("-Z") {
             return true;
         }
-        if !word.starts_with('-') && !word.starts_with('+') && matches!(word.as_str(), "doc" | "d") {
+        if !word.starts_with('-') && !word.starts_with('+') && matches!(word.as_str(), "doc" | "d")
+        {
             doc = true;
         }
         if doc && word == "--open" {
@@ -306,9 +351,16 @@ pub(super) fn rustc_runs_program(args: &[String]) -> bool {
             return true;
         }
         let codegen = if let Some(rest) = word.strip_prefix("--codegen") {
-            rest.strip_prefix('=').or_else(|| rest.is_empty().then(|| next.map_or("", String::as_str)))
+            rest.strip_prefix('=')
+                .or_else(|| rest.is_empty().then(|| next.map_or("", String::as_str)))
         } else {
-            word.strip_prefix("-C").map(|rest| if rest.is_empty() { next.map_or("", String::as_str) } else { rest })
+            word.strip_prefix("-C").map(|rest| {
+                if rest.is_empty() {
+                    next.map_or("", String::as_str)
+                } else {
+                    rest
+                }
+            })
         };
         if let Some(setting) = codegen {
             let key = setting.split('=').next().unwrap_or(setting);
@@ -381,11 +433,29 @@ pub(super) fn just_runs_program(args: &[String]) -> bool {
         }
         if let Some(long) = word.strip_prefix("--") {
             let name = long.split('=').next().unwrap_or(long);
-            if matches!(name, "shell" | "shell-arg" | "shell-command" | "command" | "chooser" | "choose" | "edit") {
+            if matches!(
+                name,
+                "shell" | "shell-arg" | "shell-command" | "command" | "chooser" | "choose" | "edit"
+            ) {
                 return true;
             }
             if !long.contains('=')
-                && matches!(name, "justfile" | "working-directory" | "dotenv-filename" | "dotenv-path" | "tempdir" | "color" | "dump-format" | "list-heading" | "list-prefix" | "show" | "completions" | "request" | "usage")
+                && matches!(
+                    name,
+                    "justfile"
+                        | "working-directory"
+                        | "dotenv-filename"
+                        | "dotenv-path"
+                        | "tempdir"
+                        | "color"
+                        | "dump-format"
+                        | "list-heading"
+                        | "list-prefix"
+                        | "show"
+                        | "completions"
+                        | "request"
+                        | "usage"
+                )
             {
                 i += 1;
             }
@@ -416,7 +486,10 @@ pub(super) fn bazel_runs_program(args: &[String]) -> bool {
     args.iter().take_while(|w| *w != "--").any(|word| {
         word.strip_prefix("--").is_some_and(|long| {
             let name = long.split('=').next().unwrap_or(long);
-            matches!(name, "run_under" | "workspace_status_command" | "credential_helper" | "bazelrc")
+            matches!(
+                name,
+                "run_under" | "workspace_status_command" | "credential_helper" | "bazelrc"
+            )
         })
     })
 }
@@ -475,7 +548,9 @@ pub(super) fn uv_runs_program(args: &[String]) -> bool {
 
 /// `rustup doc` opens the browser unless it only prints the path (`--path`).
 pub(super) fn rustup_runs_program(args: &[String]) -> bool {
-    args.iter().find(|w| !w.starts_with('-') && !w.starts_with('+')).is_some_and(|sub| sub == "doc")
+    args.iter()
+        .find(|w| !w.starts_with('-') && !w.starts_with('+'))
+        .is_some_and(|sub| sub == "doc")
         && !args.iter().any(|w| w == "--path")
 }
 
@@ -484,7 +559,8 @@ pub(super) fn rustup_runs_program(args: &[String]) -> bool {
 /// `gh --web`/`-w` opens the browser, `gh auth status --show-token`/`-t` prints the token, and a `--jq`/`-q` filter
 /// can read the environment (`env`, `$ENV`).
 pub(super) fn gh_runs_program(args: &[String]) -> bool {
-    let auth_status = args.first().is_some_and(|w| w == "auth") && args.get(1).is_some_and(|w| w == "status");
+    let auth_status =
+        args.first().is_some_and(|w| w == "auth") && args.get(1).is_some_and(|w| w == "status");
     let mut i = 0;
     while let Some(word) = args.get(i) {
         i += 1;
@@ -497,8 +573,9 @@ pub(super) fn gh_runs_program(args: &[String]) -> bool {
                 return true;
             }
             if name == "jq"
-                && long_value(word, args.get(i))
-                    .is_none_or(|filter| is_unresolved(filter) || jq_reads_environment(&[filter.to_owned()]))
+                && long_value(word, args.get(i)).is_none_or(|filter| {
+                    is_unresolved(filter) || jq_reads_environment(&[filter.to_owned()])
+                })
             {
                 return true;
             }
@@ -513,7 +590,9 @@ pub(super) fn gh_runs_program(args: &[String]) -> bool {
                 't' if auth_status => return true,
                 'q' => {
                     let filter = short_value(&cluster[at + 1..], args.get(i));
-                    if filter.is_none_or(|filter| is_unresolved(filter) || jq_reads_environment(&[filter.to_owned()])) {
+                    if filter.is_none_or(|filter| {
+                        is_unresolved(filter) || jq_reads_environment(&[filter.to_owned()])
+                    }) {
                         return true;
                     }
                     break;

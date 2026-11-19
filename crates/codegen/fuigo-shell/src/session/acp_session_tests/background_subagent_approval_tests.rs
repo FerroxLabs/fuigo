@@ -54,11 +54,15 @@ fn client_answering(
         while let Some(message) = gateway_rx.recv().await {
             if let fuigo_acp_lib::AcpClientMessage::RequestPermission(args) = message {
                 asks_in_task.borrow_mut().push(args.request.clone());
-                let _ = args.response_tx.send(Ok(acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
-                        acp::PermissionOptionId::new(option_id),
-                    )),
-                )));
+                let _ = args
+                    .response_tx
+                    .send(Ok(acp::RequestPermissionResponse::new(
+                        acp::RequestPermissionOutcome::Selected(
+                            acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(
+                                option_id,
+                            )),
+                        ),
+                    )));
             }
         }
     });
@@ -93,8 +97,7 @@ async fn idle_parent_and_background_child(
         tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
     let (child_persistence_tx, _child_persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-    let mut child =
-        create_test_actor(0, 256_000, 85, child_gateway_tx, child_persistence_tx).await;
+    let mut child = create_test_actor(0, 256_000, 85, child_gateway_tx, child_persistence_tx).await;
     child.startup_hints.is_subagent = true;
     child.permissions = parent.permissions.clone();
     *child.agent.borrow_mut() = test_agent_with_tools(bash_toolset()).await;
@@ -153,7 +156,9 @@ async fn a_background_subagents_shell_ask_reaches_the_client_and_a_denial_reache
                 .await
                 .iter()
                 .filter_map(|item| match item {
-                    ConversationItem::ToolResult(result) if &*result.tool_call_id == "call-bash" => {
+                    ConversationItem::ToolResult(result)
+                        if &*result.tool_call_id == "call-bash" =>
+                    {
                         Some(result.content.to_string())
                     }
                     _ => None,

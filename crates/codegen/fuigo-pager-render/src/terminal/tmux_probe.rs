@@ -34,7 +34,8 @@ struct LiveTmuxCommandRunner;
 
 /// Set once a probe learns the tmux server `$TMUX` points at is not answering, so the other probes of this run do not
 /// each ask (and wait on) the same dead socket.
-static SERVER_UNREACHABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SERVER_UNREACHABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Wraps a runner so the first "no server" or timeout answer ends every later server query.
 /// `tmux -V` reads no server and always runs.
@@ -44,7 +45,10 @@ struct ServerGate<'a> {
 }
 
 impl<'a> ServerGate<'a> {
-    fn new(inner: &'a dyn TmuxCommandRunner, unreachable: &'a std::sync::atomic::AtomicBool) -> Self {
+    fn new(
+        inner: &'a dyn TmuxCommandRunner,
+        unreachable: &'a std::sync::atomic::AtomicBool,
+    ) -> Self {
         Self { inner, unreachable }
     }
 
@@ -486,14 +490,29 @@ mod tests {
         let down = std::sync::atomic::AtomicBool::new(false);
         let runner = FakeRunner::output(false, b"", b"no server running on /tmp/tmux-0/default\n");
         let gated = ServerGate::new(&runner, &down);
-        assert_eq!(query_control_mode_with(&gated), TmuxQueryResult::Unavailable);
-        assert_eq!(query_client_features_with(&gated), TmuxQueryResult::Unavailable);
-        assert_eq!(query_option_with(&gated, "extended-keys"), TmuxQueryResult::Unavailable);
-        assert_eq!(query_option_support_with(&gated, "allow-passthrough"), TmuxQueryResult::Unavailable);
+        assert_eq!(
+            query_control_mode_with(&gated),
+            TmuxQueryResult::Unavailable
+        );
+        assert_eq!(
+            query_client_features_with(&gated),
+            TmuxQueryResult::Unavailable
+        );
+        assert_eq!(
+            query_option_with(&gated, "extended-keys"),
+            TmuxQueryResult::Unavailable
+        );
+        assert_eq!(
+            query_option_support_with(&gated, "allow-passthrough"),
+            TmuxQueryResult::Unavailable
+        );
         assert_eq!(runner.calls.borrow().as_slice(), ["control-mode"]);
         // `tmux -V` needs no server and is never short-circuited.
         let _ = query_version_with(&gated);
-        assert_eq!(runner.calls.borrow().as_slice(), ["control-mode", "version"]);
+        assert_eq!(
+            runner.calls.borrow().as_slice(),
+            ["control-mode", "version"]
+        );
     }
 
     #[test]
@@ -504,8 +523,14 @@ mod tests {
             calls: RefCell::new(Vec::new()),
         };
         let gated = ServerGate::new(&runner, &down);
-        assert!(matches!(query_control_mode_with(&gated), TmuxQueryResult::Error(_)));
-        assert_eq!(query_client_features_with(&gated), TmuxQueryResult::Unavailable);
+        assert!(matches!(
+            query_control_mode_with(&gated),
+            TmuxQueryResult::Error(_)
+        ));
+        assert_eq!(
+            query_client_features_with(&gated),
+            TmuxQueryResult::Unavailable
+        );
         assert_eq!(runner.calls.borrow().len(), 1);
     }
 

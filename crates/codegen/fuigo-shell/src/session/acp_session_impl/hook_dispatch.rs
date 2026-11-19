@@ -123,9 +123,9 @@ impl SessionActor {
         let results: Vec<&HookRunResult> = results
             .iter()
             .filter(|r| match r {
-                HookRunResult::Failed { hook_name, error, .. }
-                    if fuigo_hooks::health::is_config_failure(error) =>
-                {
+                HookRunResult::Failed {
+                    hook_name, error, ..
+                } if fuigo_hooks::health::is_config_failure(error) => {
                     problems.push(fuigo_hooks::health::ConfigProblem {
                         hook_name: hook_name.clone(),
                         source: fuigo_hooks::health::hook_source(hook_name),
@@ -309,7 +309,9 @@ impl SessionActor {
             .bash
             .as_ref()
             .is_some_and(|m| {
-                m.get("auto_background_on_timeout").and_then(|v| v.as_bool()) == Some(true)
+                m.get("auto_background_on_timeout")
+                    .and_then(|v| v.as_bool())
+                    == Some(true)
                     && m.get("enabled_background").and_then(|v| v.as_bool()) != Some(false)
             })
     }
@@ -329,8 +331,9 @@ impl SessionActor {
         let tool_result = serde_json::to_value(output).unwrap_or(serde_json::Value::Null);
         let raw_input: serde_json::Value =
             serde_json::from_str(&prepared.raw_arguments).unwrap_or(serde_json::Value::Null);
-        let (tool_input_value, tool_input_truncated) =
-            truncate_payload(with_retired_bash_background_field(raw_input, self.bash_auto_background_enabled()));
+        let (tool_input_value, tool_input_truncated) = truncate_payload(
+            with_retired_bash_background_field(raw_input, self.bash_auto_background_enabled()),
+        );
         let (tool_result_value, tool_result_truncated) = truncate_payload(tool_result);
         let hook_tool_name = prepared.hook_tool_name().to_owned();
 
@@ -408,8 +411,9 @@ impl SessionActor {
         }
         let raw_input: serde_json::Value =
             serde_json::from_str(&prepared.raw_arguments).unwrap_or(serde_json::Value::Null);
-        let (tool_input, tool_input_truncated) =
-            fuigo_hooks::event::truncate_payload(with_retired_bash_background_field(raw_input, self.bash_auto_background_enabled()));
+        let (tool_input, tool_input_truncated) = fuigo_hooks::event::truncate_payload(
+            with_retired_bash_background_field(raw_input, self.bash_auto_background_enabled()),
+        );
         let hook_tool_name = prepared.hook_tool_name();
         self.dispatch_post_tool_use_failure_hook(
             fuigo_hooks::event::HookPayload::PostToolUseFailure {
@@ -526,7 +530,8 @@ impl SessionActor {
             return false;
         };
         let ctx = self.hook_run_ctx();
-        let gate = fuigo_hooks::dispatcher::dispatch_prompt_gate(&registry, &hook_envelope, &ctx).await;
+        let gate =
+            fuigo_hooks::dispatcher::dispatch_prompt_gate(&registry, &hook_envelope, &ctx).await;
         // The hook saw peer text: its block reason, error and output are not shown or logged. Names and outcome only.
         let redacted = redact_peer_hook_results(&gate.results);
         self.send_hook_execution(&event.to_string(), None, None, Some(prompt_id), &redacted)
@@ -613,21 +618,29 @@ pub(super) fn redact_peer_hook_results(
     results
         .iter()
         .map(|r| match r {
-            R::Success { hook_name, elapsed, .. } => R::Success {
+            R::Success {
+                hook_name, elapsed, ..
+            } => R::Success {
                 hook_name: hook_name.clone(),
                 elapsed: *elapsed,
                 http_info: None,
                 system_message: None,
             },
-            R::Skipped { hook_name } => R::Skipped { hook_name: hook_name.clone() },
-            R::Blocked { hook_name, elapsed, .. } => R::Blocked {
+            R::Skipped { hook_name } => R::Skipped {
+                hook_name: hook_name.clone(),
+            },
+            R::Blocked {
+                hook_name, elapsed, ..
+            } => R::Blocked {
                 hook_name: hook_name.clone(),
                 detail: String::new(),
                 elapsed: *elapsed,
                 http_info: None,
                 system_message: None,
             },
-            R::Failed { hook_name, elapsed, .. } => R::Failed {
+            R::Failed {
+                hook_name, elapsed, ..
+            } => R::Failed {
                 hook_name: hook_name.clone(),
                 error: String::new(),
                 elapsed: *elapsed,
@@ -769,10 +782,14 @@ pub(super) fn with_retired_bash_background_field(
     if !is_bash_shape {
         return input;
     }
-    let is_background = fuigo_tools::implementations::fuigo_build::bash::raw_input_requests_background(
-        &serde_json::Value::Object(obj.clone()),
+    let is_background =
+        fuigo_tools::implementations::fuigo_build::bash::raw_input_requests_background(
+            &serde_json::Value::Object(obj.clone()),
+        );
+    obj.insert(
+        "is_background".to_string(),
+        serde_json::Value::Bool(is_background),
     );
-    obj.insert("is_background".to_string(), serde_json::Value::Bool(is_background));
     obj.insert(
         "may_background_after_wait".to_string(),
         serde_json::Value::Bool(!is_background && auto_background_on_timeout),
@@ -787,15 +804,33 @@ mod retired_bash_background_field_tests {
 
     fn fields(input: serde_json::Value, auto_bg: bool) -> (serde_json::Value, serde_json::Value) {
         let out = compat(input, auto_bg);
-        (out["is_background"].clone(), out["may_background_after_wait"].clone())
+        (
+            out["is_background"].clone(),
+            out["may_background_after_wait"].clone(),
+        )
     }
 
     /// The hook payload must equal the runner's decision for every combination of the two fields.
     #[test]
     fn is_background_equals_the_runner_decision_in_every_combination() {
         use fuigo_tools::implementations::fuigo_build::bash::BashToolInput;
-        let blocks = [None, Some(json!(0)), Some(json!("0")), Some(json!(1)), Some(json!(5000)), Some(json!("5000"))];
-        let bools = [None, Some(json!(true)), Some(json!(false)), Some(json!("true")), Some(json!("false")), Some(json!("yes")), Some(json!(1))];
+        let blocks = [
+            None,
+            Some(json!(0)),
+            Some(json!("0")),
+            Some(json!(1)),
+            Some(json!(5000)),
+            Some(json!("5000")),
+        ];
+        let bools = [
+            None,
+            Some(json!(true)),
+            Some(json!(false)),
+            Some(json!("true")),
+            Some(json!("false")),
+            Some(json!("yes")),
+            Some(json!(1)),
+        ];
         for block in &blocks {
             for flag in &bools {
                 let mut input = json!({"command": "x", "description": "d"});
@@ -805,9 +840,10 @@ mod retired_bash_background_field_tests {
                 if let Some(f) = flag {
                     input["is_background"] = f.clone();
                 }
-                let runner = fuigo_tools::implementations::fuigo_build::BashTool::requests_background(
-                    &serde_json::from_value::<BashToolInput>(input.clone()).unwrap(),
-                );
+                let runner =
+                    fuigo_tools::implementations::fuigo_build::BashTool::requests_background(
+                        &serde_json::from_value::<BashToolInput>(input.clone()).unwrap(),
+                    );
                 for auto_bg in [false, true] {
                     if block.is_none() && flag.is_none() {
                         assert_eq!(compat(input.clone(), auto_bg), input);
@@ -823,17 +859,35 @@ mod retired_bash_background_field_tests {
 
     #[test]
     fn a_hostile_false_cannot_hide_a_background_task() {
-        let (is_bg, may) = fields(json!({"command": "x", "block_until_ms": 0, "is_background": false}), true);
+        let (is_bg, may) = fields(
+            json!({"command": "x", "block_until_ms": 0, "is_background": false}),
+            true,
+        );
         assert_eq!((is_bg, may), (json!(true), json!(false)));
-        let (is_bg, _) = fields(json!({"command": "x", "block_until_ms": 0, "background": "false"}), false);
+        let (is_bg, _) = fields(
+            json!({"command": "x", "block_until_ms": 0, "background": "false"}),
+            false,
+        );
         assert_eq!(is_bg, json!(true));
     }
 
     #[test]
     fn a_positive_wait_is_foreground_and_may_background_only_under_the_setting() {
-        assert_eq!(fields(json!({"command": "x", "block_until_ms": 1}), true), (json!(false), json!(true)));
-        assert_eq!(fields(json!({"command": "x", "block_until_ms": 1}), false), (json!(false), json!(false)));
-        assert_eq!(fields(json!({"command": "x", "block_until_ms": 1, "is_background": true}), false), (json!(false), json!(false)));
+        assert_eq!(
+            fields(json!({"command": "x", "block_until_ms": 1}), true),
+            (json!(false), json!(true))
+        );
+        assert_eq!(
+            fields(json!({"command": "x", "block_until_ms": 1}), false),
+            (json!(false), json!(false))
+        );
+        assert_eq!(
+            fields(
+                json!({"command": "x", "block_until_ms": 1, "is_background": true}),
+                false
+            ),
+            (json!(false), json!(false))
+        );
     }
 
     #[test]

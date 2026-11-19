@@ -5,6 +5,10 @@
 //! One checker for every caller (the peer locator in `fuigo-shell`, the bearer token file in `fuigo-mcp`). The pure policy
 //! ([`policy`]) compiles and is tested on every OS; the OS-calling part ([`sys`]) is Windows only.
 
+// Panic-path lints are denied in this crate (shipped code is panic = "abort"); tests may unwrap.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::await_holding_lock)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod policy;
 #[cfg(windows)]
 pub mod sys;
@@ -14,4 +18,7 @@ pub mod test_support;
 
 pub use policy::*;
 #[cfg(windows)]
-pub use sys::{FileAclRefusal, check_owner_only_file, check_owner_only_file_capped, drive_is_remote, our_sid, owner_and_dacl, read_owner_dacl, token_elevated};
+pub use sys::{
+    FileAclRefusal, check_owner_only_file, check_owner_only_file_capped, drive_is_remote, our_sid,
+    owner_and_dacl, read_owner_dacl, token_elevated,
+};

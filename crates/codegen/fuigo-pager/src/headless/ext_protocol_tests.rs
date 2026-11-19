@@ -1041,5 +1041,8 @@ fn turn_completed_decodes_to_the_end_of_turn_event() {
             "stop_reason": "end_turn",
         }),
     );
-    assert!(matches!(handle_ext_notification(&notif), ExtEvent::TurnCompleted));
+    assert!(matches!(
+        handle_ext_notification(&notif),
+        ExtEvent::TurnCompleted
+    ));
 }

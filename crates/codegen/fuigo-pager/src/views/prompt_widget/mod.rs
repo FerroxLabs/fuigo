@@ -1378,13 +1378,19 @@ impl PromptWidget {
     /// Right-arrow or Tab on a `/model` row that has other routes: replace the typed model with
     /// `<model> via `, so the dropdown lists that model's routes (each with its reason) and Enter on
     /// one uses it. `false` (nothing changed) on any other command or a model with a single route.
-    pub fn slash_open_model_routes(&mut self, models: &crate::acp::model_state::ModelState) -> bool {
+    pub fn slash_open_model_routes(
+        &mut self,
+        models: &crate::acp::model_state::ModelState,
+    ) -> bool {
         let snap = self.slash_state.snapshot();
         if snap.cursor_in_command {
             return false;
         }
         let text = self.textarea.text();
-        let command = text.trim_start().strip_prefix('/').and_then(|t| t.split_whitespace().next());
+        let command = text
+            .trim_start()
+            .strip_prefix('/')
+            .and_then(|t| t.split_whitespace().next());
         if !matches!(command, Some("model" | "m")) {
             return false;
         }
@@ -2799,7 +2805,11 @@ impl PromptWidget {
     /// The chips let a cancel or a failed send put the prompt back as it was typed.
     pub fn drain_send_now_payload(
         &mut self,
-    ) -> (String, Vec<PastedImage>, Vec<crate::app::agent::ChipElement>) {
+    ) -> (
+        String,
+        Vec<PastedImage>,
+        Vec<crate::app::agent::ChipElement>,
+    ) {
         let images = self.drain_images();
         let raw = self.text();
         let lead = raw.len() - raw.trim_start().len();

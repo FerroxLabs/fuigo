@@ -1595,11 +1595,10 @@ impl AcpUpdateTracker {
             {
                 crate::scrollback::blocks::keep_latest_prompt_resumed_image(scrollback, image);
             }
-            let numbers =
-                crate::prompt_images::sent_image_display_numbers(std::slice::from_ref(&chunk.content));
-            return crate::scrollback::blocks::mark_latest_prompt_images_sent(
-                scrollback, &numbers,
-            );
+            let numbers = crate::prompt_images::sent_image_display_numbers(std::slice::from_ref(
+                &chunk.content,
+            ));
+            return crate::scrollback::blocks::mark_latest_prompt_images_sent(scrollback, &numbers);
         }
         let text = extract_text_from_content(&chunk.content);
         if self.skip_next_skill_body {

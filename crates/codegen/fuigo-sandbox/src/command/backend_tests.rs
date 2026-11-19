@@ -570,7 +570,10 @@ fn a_tool_id_spelled_like_a_shell_init_spawn_stays_a_tool_call() {
 fn seatbelt_profile_pty_slave_regexes_are_end_anchored() {
     for (name, text) in [
         ("base", include_str!("backend/sbpl/base.sbpl")),
-        ("platform_defaults", include_str!("backend/sbpl/platform_defaults.sbpl")),
+        (
+            "platform_defaults",
+            include_str!("backend/sbpl/platform_defaults.sbpl"),
+        ),
     ] {
         let mut seen = 0;
         for line in text.lines().filter(|l| l.contains("/dev/ttys")) {

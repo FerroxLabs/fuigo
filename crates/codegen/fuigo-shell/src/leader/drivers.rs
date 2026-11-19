@@ -75,7 +75,11 @@ pub(crate) enum Verdict {
 pub(crate) enum SettleEvent {
     /// The first still-connected queued claimant took the session over. `token`: the reconnect token minted for it, which
     /// the server loop hands to the new owner (see `LEADER_OWNER_TOKEN_METHOD`).
-    Promoted { session_id: String, client: ClientId, token: String },
+    Promoted {
+        session_id: String,
+        client: ClientId,
+        token: String,
+    },
     /// The owner is gone, its window ended and nobody was queued.
     Vacated { session_id: String },
 }
@@ -113,13 +117,18 @@ pub(crate) struct Claim {
 impl std::fmt::Debug for SettleEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Promoted { session_id, client, .. } => f
+            Self::Promoted {
+                session_id, client, ..
+            } => f
                 .debug_struct("Promoted")
                 .field("session_id", session_id)
                 .field("client", client)
                 .field("token", &"<redacted>")
                 .finish(),
-            Self::Vacated { session_id } => f.debug_struct("Vacated").field("session_id", session_id).finish(),
+            Self::Vacated { session_id } => f
+                .debug_struct("Vacated")
+                .field("session_id", session_id)
+                .finish(),
         }
     }
 }
@@ -221,7 +230,10 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 fn slot_of(who: Claimer, now: Instant) -> Slot {
     match who {
         Claimer::Client(id) => Slot::Client(id),
-        Claimer::Relay => Slot::Relay { last: now, dropped: false },
+        Claimer::Relay => Slot::Relay {
+            last: now,
+            dropped: false,
+        },
     }
 }
 
@@ -243,13 +255,23 @@ fn promote_first(sid: &str, entry: &mut SessionOwner, events: &mut Vec<SettleEve
     let token = mint_token();
     entry.slot = Some(Slot::Client(client));
     entry.token = Some(token.clone());
-    events.push(SettleEvent::Promoted { session_id: sid.to_string(), client, token });
+    events.push(SettleEvent::Promoted {
+        session_id: sid.to_string(),
+        client,
+        token,
+    });
     true
 }
 
 impl BoardState {
     /// Record who may answer request `request_id` for `session_id`. `only_if_absent` leaves a request already routed alone.
-    fn set_answer_route(&mut self, request_id: &str, session_id: &str, answerer: Answerer, only_if_absent: bool) {
+    fn set_answer_route(
+        &mut self,
+        request_id: &str,
+        session_id: &str,
+        answerer: Answerer,
+        only_if_absent: bool,
+    ) {
         if let Some(entry) = self.answer_routes.get_mut(request_id) {
             if !only_if_absent {
                 *entry = (session_id.to_string(), answerer);
@@ -261,10 +283,13 @@ impl BoardState {
             self.answer_order.retain(|id| routes.contains_key(id));
         }
         while self.answer_routes.len() >= MAX_ANSWER_ROUTES {
-            let Some(oldest) = self.answer_order.pop_front() else { break };
+            let Some(oldest) = self.answer_order.pop_front() else {
+                break;
+            };
             self.answer_routes.remove(&oldest);
         }
-        self.answer_routes.insert(request_id.to_string(), (session_id.to_string(), answerer));
+        self.answer_routes
+            .insert(request_id.to_string(), (session_id.to_string(), answerer));
         self.answer_order.push_back(request_id.to_string());
     }
 
@@ -283,7 +308,9 @@ impl BoardState {
     /// A local window owns `session_id` (through its root), or its departed owner's grace window is open.
     fn locally_owned(&self, session_id: &str) -> bool {
         matches!(
-            self.sessions.get(self.root_of(session_id)).and_then(|e| e.slot.as_ref()),
+            self.sessions
+                .get(self.root_of(session_id))
+                .and_then(|e| e.slot.as_ref()),
             Some(Slot::Client(_) | Slot::Grace(_))
         )
     }
@@ -299,7 +326,9 @@ impl BoardState {
             let due = match entry.slot {
                 Some(Slot::Grace(until)) => now >= until,
                 Some(Slot::Relay { last, dropped }) => {
-                    dropped || (now.saturating_duration_since(last) >= relay_lease && !prompts.values().any(|s| s == sid))
+                    dropped
+                        || (now.saturating_duration_since(last) >= relay_lease
+                            && !prompts.values().any(|s| s == sid))
                 }
                 _ => false,
             };
@@ -310,7 +339,9 @@ impl BoardState {
             entry.token = None;
             if !promote_first(sid, entry, &mut self.events) {
                 entry.slot = None;
-                self.events.push(SettleEvent::Vacated { session_id: sid.clone() });
+                self.events.push(SettleEvent::Vacated {
+                    session_id: sid.clone(),
+                });
                 empty.push(sid.clone());
             }
         }
@@ -324,14 +355,30 @@ impl BoardState {
 impl OwnerBoard {
     pub(crate) fn new(grace: Duration) -> Self {
         Self {
-            state: Arc::new(std::sync::Mutex::new(BoardState { grace, relay_lease: RELAY_CLAIM_LEASE, sessions: HashMap::new(), events: Vec::new(), relay_loads: HashMap::new(), relay_inflight: HashMap::new(), relay_prompts: HashMap::new(), relay_answered_early: std::collections::VecDeque::new(), answer_routes: HashMap::new(), answer_order: std::collections::VecDeque::new(), child_parent: HashMap::new(), folder_trust: HashMap::new() })),
+            state: Arc::new(std::sync::Mutex::new(BoardState {
+                grace,
+                relay_lease: RELAY_CLAIM_LEASE,
+                sessions: HashMap::new(),
+                events: Vec::new(),
+                relay_loads: HashMap::new(),
+                relay_inflight: HashMap::new(),
+                relay_prompts: HashMap::new(),
+                relay_answered_early: std::collections::VecDeque::new(),
+                answer_routes: HashMap::new(),
+                answer_order: std::collections::VecDeque::new(),
+                child_parent: HashMap::new(),
+                folder_trust: HashMap::new(),
+            })),
             wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
     /// Settled view of the state. Wakes the server loop when settling produced events.
     fn state(&self) -> std::sync::MutexGuard<'_, BoardState> {
-        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut st = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if st.settle(Instant::now()) {
             self.wake.notify_one();
         }
@@ -368,7 +415,10 @@ impl OwnerBoard {
             .filter_map(|(sid, e)| match e.slot {
                 Some(Slot::Grace(until)) => Some(until),
                 // A claim with a prompt in flight has no idle deadline; answering the prompt wakes the loop to compute one.
-                Some(Slot::Relay { last, dropped: false }) if !prompts.values().any(|s| s == sid) => Some(last + lease),
+                Some(Slot::Relay {
+                    last,
+                    dropped: false,
+                }) if !prompts.values().any(|s| s == sid) => Some(last + lease),
                 _ => None,
             })
             .min()
@@ -388,7 +438,11 @@ impl OwnerBoard {
                     && token
                         .zip(entry.token.as_deref())
                         .is_some_and(|(presented, held)| constant_time_eq(held, presented));
-                if presented { Verdict::Owns { reclaimed: true } } else { Verdict::Foreign }
+                if presented {
+                    Verdict::Owns { reclaimed: true }
+                } else {
+                    Verdict::Foreign
+                }
             }
             Some(_) => Verdict::Foreign,
         }
@@ -418,7 +472,9 @@ impl OwnerBoard {
     /// nothing: only local loads are rolled back.
     pub(crate) fn rollback(&self, session_id: &str, who: Claimer, prev: Prev) {
         let mut st = self.state();
-        let Some(entry) = st.sessions.get_mut(session_id) else { return };
+        let Some(entry) = st.sessions.get_mut(session_id) else {
+            return;
+        };
         if !entry.slot.as_ref().is_some_and(|s| owns(s, who)) {
             return;
         }
@@ -448,7 +504,9 @@ impl OwnerBoard {
     pub(crate) fn add_pending(&self, session_id: &str, client: ClientId) {
         let mut st = self.state();
         let entry = st.sessions.entry(session_id.to_string()).or_default();
-        if !entry.pending.contains(&client) && !matches!(entry.slot, Some(Slot::Client(c)) if c == client) {
+        if !entry.pending.contains(&client)
+            && !matches!(entry.slot, Some(Slot::Client(c)) if c == client)
+        {
             entry.pending.push(client);
         }
     }
@@ -465,7 +523,12 @@ impl OwnerBoard {
 
     /// The live local owner of `session_id`, if it has one.
     pub(crate) fn owner_client(&self, session_id: &str) -> Option<ClientId> {
-        match self.state().sessions.get(session_id).and_then(|e| e.slot.as_ref()) {
+        match self
+            .state()
+            .sessions
+            .get(session_id)
+            .and_then(|e| e.slot.as_ref())
+        {
             Some(Slot::Client(c)) => Some(*c),
             _ => None,
         }
@@ -473,17 +536,32 @@ impl OwnerBoard {
 
     /// True while the departed local owner's grace window is open.
     pub(crate) fn in_grace(&self, session_id: &str) -> bool {
-        matches!(self.state().sessions.get(session_id).and_then(|e| e.slot.as_ref()), Some(Slot::Grace(_)))
+        matches!(
+            self.state()
+                .sessions
+                .get(session_id)
+                .and_then(|e| e.slot.as_ref()),
+            Some(Slot::Grace(_))
+        )
     }
 
     /// True when the session has no owner right now but connections are queued to take it over.
     pub(crate) fn has_pending(&self, session_id: &str) -> bool {
-        self.state().sessions.get(session_id).is_some_and(|e| !e.pending.is_empty())
+        self.state()
+            .sessions
+            .get(session_id)
+            .is_some_and(|e| !e.pending.is_empty())
     }
 
     /// True when the relay owns the session within its lease.
     pub(crate) fn relay_owns(&self, session_id: &str) -> bool {
-        matches!(self.state().sessions.get(session_id).and_then(|e| e.slot.as_ref()), Some(Slot::Relay { .. }))
+        matches!(
+            self.state()
+                .sessions
+                .get(session_id)
+                .and_then(|e| e.slot.as_ref()),
+            Some(Slot::Relay { .. })
+        )
     }
 
     /// Sessions `who` owns.
@@ -536,7 +614,8 @@ impl OwnerBoard {
                 *answerer = Answerer::Nobody;
             }
         }
-        st.folder_trust.retain(|_, (_, who)| *who != Some(Claimer::Client(client)));
+        st.folder_trust
+            .retain(|_, (_, who)| *who != Some(Claimer::Client(client)));
         drop(st);
         self.wake.notify_one();
     }
@@ -544,7 +623,14 @@ impl OwnerBoard {
     /// The relay sent a message for `session_id`: refreshes its claim if it holds one. Never creates a claim.
     pub(crate) fn relay_message(&self, session_id: &str) {
         let mut st = self.state();
-        if let Some(Slot::Relay { last, dropped: false }) = st.sessions.get_mut(session_id).and_then(|e| e.slot.as_mut()) {
+        if let Some(Slot::Relay {
+            last,
+            dropped: false,
+        }) = st
+            .sessions
+            .get_mut(session_id)
+            .and_then(|e| e.slot.as_mut())
+        {
             *last = Instant::now();
         }
     }
@@ -564,7 +650,9 @@ impl OwnerBoard {
 
     /// The relay's load request `request_id` just claimed `session_id` (replacing `prev`): remember how to undo it.
     pub(crate) fn note_relay_load(&self, request_id: &str, session_id: &str, prev: Prev) {
-        self.state().relay_loads.insert(request_id.to_string(), (session_id.to_string(), prev));
+        self.state()
+            .relay_loads
+            .insert(request_id.to_string(), (session_id.to_string(), prev));
     }
 
     /// The agent answered the relay's request `request_id`. If it was a load that claimed a session and failed, the
@@ -574,7 +662,10 @@ impl OwnerBoard {
             // One lock: the prompt leaves flight and the idle lease restarts together, so the claim cannot lapse between.
             let mut st = self.state();
             if let Some(sid) = st.relay_prompts.remove(request_id)
-                && let Some(Slot::Relay { last, dropped: false }) = st.sessions.get_mut(&sid).and_then(|e| e.slot.as_mut())
+                && let Some(Slot::Relay {
+                    last,
+                    dropped: false,
+                }) = st.sessions.get_mut(&sid).and_then(|e| e.slot.as_mut())
             {
                 *last = Instant::now();
                 drop(st);
@@ -591,8 +682,12 @@ impl OwnerBoard {
     /// the session, the claim does not lapse by idleness. A prompt for a session the relay does not own is not tracked.
     pub(crate) fn relay_prompt_started(&self, request_id: &str, session_id: &str) {
         let mut st = self.state();
-        if matches!(st.sessions.get(session_id).and_then(|e| e.slot.as_ref()), Some(Slot::Relay { dropped: false, .. })) {
-            st.relay_prompts.insert(request_id.to_string(), session_id.to_string());
+        if matches!(
+            st.sessions.get(session_id).and_then(|e| e.slot.as_ref()),
+            Some(Slot::Relay { dropped: false, .. })
+        ) {
+            st.relay_prompts
+                .insert(request_id.to_string(), session_id.to_string());
         }
     }
 
@@ -606,7 +701,8 @@ impl OwnerBoard {
                 *dropped = true;
             }
         }
-        st.folder_trust.retain(|_, (_, who)| *who != Some(Claimer::Relay));
+        st.folder_trust
+            .retain(|_, (_, who)| *who != Some(Claimer::Relay));
         drop(st);
         self.wake.notify_one();
     }
@@ -615,7 +711,11 @@ impl OwnerBoard {
     pub(crate) fn hold_for_relay(&self, session_id: &str, request_id: &str, payload: Arc<str>) {
         let mut st = self.state();
         // Already answered by the relay before the loop got here: nothing to hold, so nothing to hand over again.
-        if let Some(pos) = st.relay_answered_early.iter().position(|id| id == request_id) {
+        if let Some(pos) = st
+            .relay_answered_early
+            .iter()
+            .position(|id| id == request_id)
+        {
             st.relay_answered_early.remove(pos);
             return;
         }
@@ -647,7 +747,11 @@ impl OwnerBoard {
 
     /// The requests the relay never answered for `session_id`, in order (the relay's claim ended).
     pub(crate) fn take_relay_inflight(&self, session_id: &str) -> Vec<Arc<str>> {
-        let queue = self.state().relay_inflight.remove(session_id).unwrap_or_default();
+        let queue = self
+            .state()
+            .relay_inflight
+            .remove(session_id)
+            .unwrap_or_default();
         queue.into_iter().map(|(_, payload)| payload).collect()
     }
 
@@ -658,19 +762,22 @@ impl OwnerBoard {
         st.relay_inflight.remove(session_id);
         st.relay_prompts.retain(|_, sid| sid != session_id);
         st.answer_routes.retain(|_, (sid, _)| sid != session_id);
-        st.child_parent.retain(|child, parent| child != session_id && parent != session_id);
+        st.child_parent
+            .retain(|child, parent| child != session_id && parent != session_id);
         st.folder_trust.retain(|_, (sid, _)| sid != session_id);
     }
 
     /// The agent sent request `request_id` for `session_id`, not delivered to anybody yet: nobody's answer counts until
     /// [`OwnerBoard::deliver_request`] names who got it. A request already routed is left as it is.
     pub(crate) fn note_request(&self, request_id: &str, session_id: &str) {
-        self.state().set_answer_route(request_id, session_id, Answerer::Nobody, true);
+        self.state()
+            .set_answer_route(request_id, session_id, Answerer::Nobody, true);
     }
 
     /// Request `request_id` for `session_id` was delivered to `to`, the session's owner: only `to`'s answer counts.
     pub(crate) fn deliver_request(&self, request_id: &str, session_id: &str, to: Claimer) {
-        self.state().set_answer_route(request_id, session_id, Answerer::Only(to), false);
+        self.state()
+            .set_answer_route(request_id, session_id, Answerer::Only(to), false);
     }
 
     /// Whether `who`'s response to the agent's request `request_id` may reach the agent. A request the leader tracks is
@@ -704,14 +811,19 @@ impl OwnerBoard {
         let mut st = self.state();
         st.set_answer_route(request_id, session_id, Answerer::Nobody, true);
         st.folder_trust.retain(|_, (sid, _)| sid != session_id);
-        st.folder_trust.insert(request_id.to_string(), (session_id.to_string(), None));
+        st.folder_trust
+            .insert(request_id.to_string(), (session_id.to_string(), None));
     }
 
     /// P1 (1.0.40): the party whose admitted answer to `session_id`'s latest folder-trust request reached the agent, taken
     /// (the reopen notice is delivered once). `None` when it is unanswered, or its answerer disconnected (local or relay).
     pub(crate) fn take_folder_trust_answerer(&self, session_id: &str) -> Option<Claimer> {
         let mut st = self.state();
-        let id = st.folder_trust.iter().find(|(_, (sid, who))| sid == session_id && who.is_some()).map(|(id, _)| id.clone())?;
+        let id = st
+            .folder_trust
+            .iter()
+            .find(|(_, (sid, who))| sid == session_id && who.is_some())
+            .map(|(id, _)| id.clone())?;
         st.folder_trust.remove(&id).and_then(|(_, who)| who)
     }
 
@@ -721,7 +833,8 @@ impl OwnerBoard {
         if st.child_parent.len() >= MAX_ANSWER_ROUTES {
             st.child_parent.clear();
         }
-        st.child_parent.insert(child.to_string(), parent.to_string());
+        st.child_parent
+            .insert(child.to_string(), parent.to_string());
     }
 }
 
@@ -756,15 +869,27 @@ mod tests {
     #[test]
     fn first_claimer_owns_and_a_live_owner_makes_everyone_else_foreign() {
         let b = board(60_000);
-        assert_eq!(b.classify("s", Claimer::Client(A), None), Verdict::Owns { reclaimed: false });
+        assert_eq!(
+            b.classify("s", Claimer::Client(A), None),
+            Verdict::Owns { reclaimed: false }
+        );
         let claim = b.claim("s", Claimer::Client(A));
         assert_eq!(claim.token.as_deref().map(str::len), Some(32));
-        assert_eq!(b.classify("s", Claimer::Client(A), None), Verdict::Owns { reclaimed: false });
+        assert_eq!(
+            b.classify("s", Claimer::Client(A), None),
+            Verdict::Owns { reclaimed: false }
+        );
         assert_eq!(b.classify("s", Claimer::Client(B), None), Verdict::Foreign);
         assert_eq!(b.classify("s", Claimer::Relay, None), Verdict::Foreign);
-        assert_eq!(b.owner_state("s", Claimer::Client(A)), OwnerState::SelfOwner);
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(A)),
+            OwnerState::SelfOwner
+        );
         assert_eq!(b.owner_state("s", Claimer::Client(B)), OwnerState::Other);
-        assert_eq!(b.owner_state("other", Claimer::Client(B)), OwnerState::Unowned);
+        assert_eq!(
+            b.owner_state("other", Claimer::Client(B)),
+            OwnerState::Unowned
+        );
     }
 
     #[test]
@@ -773,14 +898,31 @@ mod tests {
         let token = b.claim("s", Claimer::Client(A)).token.unwrap();
         b.client_gone(A);
         assert!(b.in_grace("s"));
-        assert_eq!(b.owner_state("s", Claimer::Client(B)), OwnerState::Other, "a departed owner's session is still reserved");
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(B)),
+            OwnerState::Other,
+            "a departed owner's session is still reserved"
+        );
         assert_eq!(b.classify("s", Claimer::Client(B), None), Verdict::Foreign);
-        assert_eq!(b.classify("s", Claimer::Client(B), Some("wrong")), Verdict::Foreign);
-        assert_eq!(b.classify("s", Claimer::Relay, Some(&token)), Verdict::Foreign, "the relay holds no token");
-        assert_eq!(b.classify("s", Claimer::Client(B), Some(&token)), Verdict::Owns { reclaimed: true });
+        assert_eq!(
+            b.classify("s", Claimer::Client(B), Some("wrong")),
+            Verdict::Foreign
+        );
+        assert_eq!(
+            b.classify("s", Claimer::Relay, Some(&token)),
+            Verdict::Foreign,
+            "the relay holds no token"
+        );
+        assert_eq!(
+            b.classify("s", Claimer::Client(B), Some(&token)),
+            Verdict::Owns { reclaimed: true }
+        );
         b.claim("s", Claimer::Client(B));
         assert!(!b.in_grace("s"));
-        assert_eq!(b.owner_state("s", Claimer::Client(B)), OwnerState::SelfOwner);
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(B)),
+            OwnerState::SelfOwner
+        );
     }
 
     #[test]
@@ -789,8 +931,14 @@ mod tests {
         let old = b.claim("s", Claimer::Client(A)).token.unwrap();
         let new = b.claim("s", Claimer::Client(A)).token.unwrap();
         b.client_gone(A);
-        assert_eq!(b.classify("s", Claimer::Client(B), Some(&old)), Verdict::Foreign);
-        assert_eq!(b.classify("s", Claimer::Client(B), Some(&new)), Verdict::Owns { reclaimed: true });
+        assert_eq!(
+            b.classify("s", Claimer::Client(B), Some(&old)),
+            Verdict::Foreign
+        );
+        assert_eq!(
+            b.classify("s", Claimer::Client(B), Some(&new)),
+            Verdict::Owns { reclaimed: true }
+        );
     }
 
     #[test]
@@ -803,31 +951,55 @@ mod tests {
         b.client_gone(A);
         assert!(b.in_grace("s"));
         std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(b.owner_state("s", Claimer::Client(B)), OwnerState::SelfOwner);
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(B)),
+            OwnerState::SelfOwner
+        );
         assert_eq!(b.owner_state("s", Claimer::Client(C)), OwnerState::Other);
         let events = b.take_events();
-        let [SettleEvent::Promoted { session_id, client, token }] = events.as_slice() else { panic!("{events:?}") };
+        let [
+            SettleEvent::Promoted {
+                session_id,
+                client,
+                token,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("{events:?}")
+        };
         assert_eq!((session_id.as_str(), *client), ("s", B));
         // The promoted owner holds a token: after a blip it (and only it) reclaims the session.
         b.client_gone(B);
-        assert_eq!(b.classify("s", Claimer::Client(B), Some(token)), Verdict::Owns { reclaimed: true });
+        assert_eq!(
+            b.classify("s", Claimer::Client(B), Some(token)),
+            Verdict::Owns { reclaimed: true }
+        );
         assert_eq!(b.classify("s", Claimer::Client(C), None), Verdict::Foreign);
     }
 
     #[test]
-    fn a_failed_claim_leaving_the_session_unowned_promotes_the_first_queued_claimant_with_a_token() {
+    fn a_failed_claim_leaving_the_session_unowned_promotes_the_first_queued_claimant_with_a_token()
+    {
         let b = board(60_000);
         let claim = b.claim("s", Claimer::Client(A));
         b.add_pending("s", B);
         b.add_pending("s", C);
         b.rollback("s", Claimer::Client(A), claim.prev);
-        assert_eq!(b.owner_state("s", Claimer::Client(B)), OwnerState::SelfOwner);
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(B)),
+            OwnerState::SelfOwner
+        );
         assert_eq!(b.owner_state("s", Claimer::Client(C)), OwnerState::Other);
         let events = b.take_events();
-        let [SettleEvent::Promoted { client, token, .. }] = events.as_slice() else { panic!("{events:?}") };
+        let [SettleEvent::Promoted { client, token, .. }] = events.as_slice() else {
+            panic!("{events:?}")
+        };
         assert_eq!(*client, B);
         b.client_gone(B);
-        assert_eq!(b.classify("s", Claimer::Client(B), Some(token)), Verdict::Owns { reclaimed: true });
+        assert_eq!(
+            b.classify("s", Claimer::Client(B), Some(token)),
+            Verdict::Owns { reclaimed: true }
+        );
     }
 
     #[test]
@@ -848,12 +1020,22 @@ mod tests {
         b.client_gone(A);
         b.client_gone(B);
         std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(b.owner_state("s", Claimer::Client(C)), OwnerState::SelfOwner);
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(C)),
+            OwnerState::SelfOwner
+        );
         b.client_gone(C);
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(b.owner_state("s", Claimer::Client(C)), OwnerState::Unowned);
-        assert_eq!(b.classify("s", Claimer::Client(B), None), Verdict::Owns { reclaimed: false });
-        assert!(b.take_events().iter().any(|e| matches!(e, SettleEvent::Promoted { client, .. } if *client == C)));
+        assert_eq!(
+            b.classify("s", Claimer::Client(B), None),
+            Verdict::Owns { reclaimed: false }
+        );
+        assert!(
+            b.take_events()
+                .iter()
+                .any(|e| matches!(e, SettleEvent::Promoted { client, .. } if *client == C))
+        );
     }
 
     #[test]
@@ -865,7 +1047,10 @@ mod tests {
         assert_eq!(b.owner_state("s", Claimer::Client(A)), OwnerState::Unowned);
         b.claim("s", Claimer::Client(B));
         b.relay_message("s");
-        assert_eq!(b.owner_state("s", Claimer::Client(B)), OwnerState::SelfOwner);
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(B)),
+            OwnerState::SelfOwner
+        );
         assert_eq!(b.owner_state("s", Claimer::Relay), OwnerState::Other);
     }
 
@@ -883,12 +1068,21 @@ mod tests {
     fn relay_claim_lapses_when_the_relay_drops_and_hands_over_to_the_queue() {
         let b = board(60_000);
         assert!(b.claim_new_for_relay("s"));
-        assert!(!b.claim_new_for_relay("s"), "an existing owner is never displaced");
+        assert!(
+            !b.claim_new_for_relay("s"),
+            "an existing owner is never displaced"
+        );
         assert_eq!(b.classify("s", Claimer::Client(A), None), Verdict::Foreign);
-        assert_eq!(b.classify("s", Claimer::Relay, None), Verdict::Owns { reclaimed: false });
+        assert_eq!(
+            b.classify("s", Claimer::Relay, None),
+            Verdict::Owns { reclaimed: false }
+        );
         b.add_pending("s", A);
         b.relay_dropped();
-        assert_eq!(b.owner_state("s", Claimer::Client(A)), OwnerState::SelfOwner);
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(A)),
+            OwnerState::SelfOwner
+        );
         assert_eq!(b.owner_state("s", Claimer::Relay), OwnerState::Other);
     }
 
@@ -898,7 +1092,10 @@ mod tests {
         b.claim("s", Claimer::Relay);
         assert_eq!(b.classify("s", Claimer::Client(A), None), Verdict::Foreign);
         b.relay_dropped();
-        assert_eq!(b.classify("s", Claimer::Client(A), None), Verdict::Owns { reclaimed: false });
+        assert_eq!(
+            b.classify("s", Claimer::Client(A), None),
+            Verdict::Owns { reclaimed: false }
+        );
         assert_eq!(b.owner_state("s", Claimer::Relay), OwnerState::Unowned);
     }
 
@@ -912,9 +1109,17 @@ mod tests {
             std::thread::sleep(Duration::from_millis(40));
             b.relay_message("s");
         }
-        assert_eq!(b.owner_state("s", Claimer::Relay), OwnerState::SelfOwner, "a busy relay keeps its claim past the lease");
+        assert_eq!(
+            b.owner_state("s", Claimer::Relay),
+            OwnerState::SelfOwner,
+            "a busy relay keeps its claim past the lease"
+        );
         std::thread::sleep(Duration::from_millis(120));
-        assert_eq!(b.owner_state("s", Claimer::Client(A)), OwnerState::SelfOwner, "an idle relay's claim lapses to the queue");
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(A)),
+            OwnerState::SelfOwner,
+            "an idle relay's claim lapses to the queue"
+        );
         assert_eq!(b.owner_state("s", Claimer::Relay), OwnerState::Other);
     }
 
@@ -929,7 +1134,11 @@ mod tests {
         assert_eq!(b.foreign_owned_sessions(Claimer::Client(A)), ["b1", "r1"]);
         assert_eq!(b.owned_sessions(Claimer::Relay), ["r1"]);
         b.client_gone(B);
-        assert_eq!(b.foreign_owned_sessions(Claimer::Client(A)), ["b1", "r1"], "a session in grace is still somebody's");
+        assert_eq!(
+            b.foreign_owned_sessions(Claimer::Client(A)),
+            ["b1", "r1"],
+            "a session in grace is still somebody's"
+        );
     }
 
     #[test]
@@ -941,15 +1150,25 @@ mod tests {
         let first = b.claim("s", Claimer::Client(A));
         let second = b.claim("s", Claimer::Client(A));
         b.rollback("s", Claimer::Client(A), second.prev);
-        assert_eq!(b.owner_state("s", Claimer::Client(A)), OwnerState::SelfOwner, "back to the first claim");
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(A)),
+            OwnerState::SelfOwner,
+            "back to the first claim"
+        );
         b.client_gone(A);
-        assert_eq!(b.classify("s", Claimer::Client(B), first.token.as_deref()), Verdict::Owns { reclaimed: true });
+        assert_eq!(
+            b.classify("s", Claimer::Client(B), first.token.as_deref()),
+            Verdict::Owns { reclaimed: true }
+        );
         // Somebody else holds it now: A's rollback must not take it away.
         let stale = b.claim("s", Claimer::Client(A)).prev;
         b.client_gone(A);
         b.claim("s", Claimer::Client(B));
         b.rollback("s", Claimer::Client(A), stale);
-        assert_eq!(b.owner_state("s", Claimer::Client(B)), OwnerState::SelfOwner);
+        assert_eq!(
+            b.owner_state("s", Claimer::Client(B)),
+            OwnerState::SelfOwner
+        );
     }
 
     fn relay_owned(b: &OwnerBoard) {
@@ -1019,9 +1238,18 @@ mod tests {
         assert!(!b.admit_answer("7", Claimer::Client(B)));
         assert!(!b.admit_answer("7", Claimer::Relay));
         b.deliver_request("7", "s", Claimer::Client(A));
-        assert!(!b.admit_answer("7", Claimer::Client(B)), "a non-owner's answer is refused");
-        assert!(!b.admit_answer("7", Claimer::Relay), "the relay's answer is refused");
-        assert!(b.admit_answer("7", Claimer::Client(A)), "the owner's answer counts");
+        assert!(
+            !b.admit_answer("7", Claimer::Client(B)),
+            "a non-owner's answer is refused"
+        );
+        assert!(
+            !b.admit_answer("7", Claimer::Relay),
+            "the relay's answer is refused"
+        );
+        assert!(
+            b.admit_answer("7", Claimer::Client(A)),
+            "the owner's answer counts"
+        );
         // Answered: no longer tracked (a duplicate is the agent's to ignore).
         assert!(b.admit_answer("7", Claimer::Client(B)));
         // An id the leader never tracked (no session) is admitted as before.
@@ -1035,7 +1263,11 @@ mod tests {
         b.note_folder_trust_request("5", "s");
         b.deliver_request("5", "s", Claimer::Client(A));
         assert!(!b.admit_answer("5", Claimer::Client(B)));
-        assert_eq!(b.take_folder_trust_answerer("s"), None, "a refused answer records nobody");
+        assert_eq!(
+            b.take_folder_trust_answerer("s"),
+            None,
+            "a refused answer records nobody"
+        );
         assert!(b.admit_answer("5", Claimer::Client(A)));
         // Delivered again (a promotion) and answered again: the first answerer stays.
         b.deliver_request("5", "s", Claimer::Client(B));
@@ -1068,10 +1300,21 @@ mod tests {
         b.deliver_request("1", "s", Claimer::Client(A));
         b.note_folder_trust_request("2", "s");
         b.deliver_request("2", "s", Claimer::Client(B));
-        assert_eq!(b.take_folder_trust_answerer("s"), None, "request 2 is unanswered");
+        assert_eq!(
+            b.take_folder_trust_answerer("s"),
+            None,
+            "request 2 is unanswered"
+        );
         assert!(b.admit_answer("2", Claimer::Client(B)));
-        assert!(b.admit_answer("1", Claimer::Client(A)), "the old route still admits its answer");
-        assert_eq!(b.take_folder_trust_answerer("s"), Some(Claimer::Client(B)), "the notice follows request 2's answerer");
+        assert!(
+            b.admit_answer("1", Claimer::Client(A)),
+            "the old route still admits its answer"
+        );
+        assert_eq!(
+            b.take_folder_trust_answerer("s"),
+            Some(Claimer::Client(B)),
+            "the notice follows request 2's answerer"
+        );
         // Another session's request never touches this one's record.
         b.note_folder_trust_request("3", "s");
         b.note_folder_trust_request("4", "t");
@@ -1082,7 +1325,8 @@ mod tests {
     }
 
     #[test]
-    fn the_relay_answering_a_folder_trust_request_ahead_of_the_loop_is_recorded_and_its_drop_clears_it() {
+    fn the_relay_answering_a_folder_trust_request_ahead_of_the_loop_is_recorded_and_its_drop_clears_it()
+     {
         let r = board(30_000);
         relay_owned(&r);
         // Registered before the fan-out: the relay's answer, ahead of the server loop, is recorded as the relay's.
@@ -1096,7 +1340,11 @@ mod tests {
         r.claim("s", Claimer::Client(B));
         r.deliver_request("9", "s", Claimer::Client(B));
         assert!(r.admit_answer("9", Claimer::Client(B)));
-        assert_eq!(r.take_folder_trust_answerer("s"), None, "the relay's drop cleared its record");
+        assert_eq!(
+            r.take_folder_trust_answerer("s"),
+            None,
+            "the relay's drop cleared its record"
+        );
     }
 
     #[test]
@@ -1108,23 +1356,36 @@ mod tests {
         b.client_gone(A);
         assert!(!b.admit_answer("1", Claimer::Client(A)));
         assert!(!b.admit_answer("1", Claimer::Client(B)));
-        assert!(!b.admit_answer("1", Claimer::Relay), "the grace window keeps the session local");
+        assert!(
+            !b.admit_answer("1", Claimer::Relay),
+            "the grace window keeps the session local"
+        );
         b.deliver_request("1", "s", Claimer::Client(B));
         assert!(b.admit_answer("1", Claimer::Client(B)));
     }
 
     #[test]
-    fn the_relay_answers_its_own_sessions_requests_even_ahead_of_the_loop_but_never_a_local_childs() {
+    fn the_relay_answers_its_own_sessions_requests_even_ahead_of_the_loop_but_never_a_local_childs()
+    {
         let b = board(30_000);
         relay_owned(&b);
         b.note_request("5", "s");
-        assert!(b.admit_answer("5", Claimer::Relay), "the relay owns s: its early answer counts");
+        assert!(
+            b.admit_answer("5", Claimer::Relay),
+            "the relay owns s: its early answer counts"
+        );
         b.claim("ls", Claimer::Client(A));
         b.note_child("child", "ls");
         b.note_request("6", "child");
-        assert!(!b.admit_answer("6", Claimer::Relay), "a local owner's subagent request is not the relay's to answer");
+        assert!(
+            !b.admit_answer("6", Claimer::Relay),
+            "a local owner's subagent request is not the relay's to answer"
+        );
         b.forget("ls");
-        assert!(b.admit_answer("6", Claimer::Relay), "forgotten with its session");
+        assert!(
+            b.admit_answer("6", Claimer::Relay),
+            "forgotten with its session"
+        );
     }
 
     #[test]

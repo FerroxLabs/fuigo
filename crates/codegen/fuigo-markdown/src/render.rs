@@ -1191,11 +1191,21 @@ mod tests {
             let (output, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
             lines_to_text(&output.lines)
         };
-        assert_eq!(render("An ![image](src.png) here.\n\n"), vec!["An image (src.png) here."]);
-        assert_eq!(render("[![badge](b.svg)](https://x.example)\n\n"), vec!["badge (b.svg) (https://x.example)"]);
+        assert_eq!(
+            render("An ![image](src.png) here.\n\n"),
+            vec!["An image (src.png) here."]
+        );
+        assert_eq!(
+            render("[![badge](b.svg)](https://x.example)\n\n"),
+            vec!["badge (b.svg) (https://x.example)"]
+        );
         // A plain link and the raw view are untouched
-        assert_eq!(render("a [link](https://e.com) b\n\n"), vec!["a link (https://e.com) b"]);
-        let (raw, _) = render_markdown_ratatui_full("![image](src.png)\n\n", test_style::STYLE, false, None);
+        assert_eq!(
+            render("a [link](https://e.com) b\n\n"),
+            vec!["a link (https://e.com) b"]
+        );
+        let (raw, _) =
+            render_markdown_ratatui_full("![image](src.png)\n\n", test_style::STYLE, false, None);
         assert_eq!(lines_to_text(&raw.lines)[0], "![image](src.png)");
     }
 

@@ -1,7 +1,7 @@
 use super::*;
 use fuigo_hooks::dispatcher::{
-    AdditionalContext, OutputReplacement, PostToolUseBlock, PostToolUseResult, RejectedReplacement, ReplacementChoice, ReplacementKind,
-    SelectedReplacement,
+    AdditionalContext, OutputReplacement, PostToolUseBlock, PostToolUseResult, RejectedReplacement,
+    ReplacementChoice, ReplacementKind, SelectedReplacement,
 };
 use fuigo_hooks::event::{MAX_HOOK_OUTPUT_REPLACEMENT_CHARS, clip_text};
 use fuigo_hooks::result::HookRunResult;
@@ -40,7 +40,11 @@ pub(super) fn plan_post_tool_use_delivery(
 }
 
 fn downgrade_run(results: &mut [HookRunResult], rejection: RejectedReplacement) {
-    let RejectedReplacement { hook_name: rejected_hook, run_index, reason } = rejection;
+    let RejectedReplacement {
+        hook_name: rejected_hook,
+        run_index,
+        reason,
+    } = rejection;
     tracing::warn!(
         hook_name = %rejected_hook,
         reason = %reason,
@@ -98,7 +102,11 @@ fn post_tool_use_model_output(
         }
         RenderedReplacement::Rejected { reason } => (
             None,
-            Some(RejectedReplacement { hook_name: rejected_hook, run_index, reason }),
+            Some(RejectedReplacement {
+                hook_name: rejected_hook,
+                run_index,
+                reason,
+            }),
         ),
     }
 }

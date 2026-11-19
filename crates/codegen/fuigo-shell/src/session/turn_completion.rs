@@ -119,7 +119,9 @@ mod tests {
             "the scrubbed text must no longer name the status (premise of the test): {text}"
         );
         assert_eq!(
-            verdicts.expect("verdicts are stamped while credentials are held").http_status,
+            verdicts
+                .expect("verdicts are stamped while credentials are held")
+                .http_status,
             Some(503)
         );
     }

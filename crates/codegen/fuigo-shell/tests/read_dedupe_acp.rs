@@ -39,12 +39,22 @@ fn tool_output(requests: &[LogEntry], session: &acp::SessionId, call_id: &str) -
         .iter()
         .filter(|r| r.path == "/v1/chat/completions")
         .filter(|r| r.header("x-fuigo-session-id") == Some(&*session.0))
-        .filter_map(|r| r.body.as_ref().and_then(|b| b["messages"].as_array()).cloned())
+        .filter_map(|r| {
+            r.body
+                .as_ref()
+                .and_then(|b| b["messages"].as_array())
+                .cloned()
+        })
         .flatten()
         .filter(|m| m["role"] == "tool" && m["tool_call_id"] == call_id)
         .filter_map(|m| m["content"].as_str().map(str::to_owned))
         .next_back()
-        .unwrap_or_else(|| panic!("no tool result for {call_id} in any request of {}", session.0))
+        .unwrap_or_else(|| {
+            panic!(
+                "no tool result for {call_id} in any request of {}",
+                session.0
+            )
+        })
 }
 
 fn read_call(id: &str) -> ScriptedResponse {
@@ -57,7 +67,10 @@ fn read_call(id: &str) -> ScriptedResponse {
     ))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn repeat_read_of_unchanged_file_is_deduped_until_the_workspace_changes() {
     run_agent_test(|cwd, mock| async move {
@@ -80,7 +93,12 @@ fn repeat_read_of_unchanged_file_is_deduped_until_the_workspace_changes() {
 
         let (conn, _) = connect_and_auth(AutoApproveClient, "read-dedupe").await;
         let session = open_session(&conn, &cwd).await;
-        prompt_turn(&conn, &session, "Read a.txt twice, append to it, then read it again.").await;
+        prompt_turn(
+            &conn,
+            &session,
+            "Read a.txt twice, append to it, then read it again.",
+        )
+        .await;
         first.wait_satisfied().await;
         second.wait_satisfied().await;
         edit.wait_satisfied().await;
@@ -88,16 +106,26 @@ fn repeat_read_of_unchanged_file_is_deduped_until_the_workspace_changes() {
 
         let requests = mock.requests();
         let initial = tool_output(&requests, &session, "call_1");
-        assert!(initial.contains("alpha") && initial.contains("beta"), "first read returns content: {initial}");
+        assert!(
+            initial.contains("alpha") && initial.contains("beta"),
+            "first read returns content: {initial}"
+        );
         let repeat = tool_output(&requests, &session, "call_2");
         assert!(
-            repeat.contains("a.txt unchanged since your earlier read (2 lines, at turn 1); content omitted"),
+            repeat.contains(
+                "a.txt unchanged since your earlier read (2 lines, at turn 1); content omitted"
+            ),
             "repeat read of an unchanged file must return the note: {repeat}"
         );
-        assert!(!repeat.contains("alpha"), "the note must not repeat the content: {repeat}");
+        assert!(
+            !repeat.contains("alpha"),
+            "the note must not repeat the content: {repeat}"
+        );
         let after_edit = tool_output(&requests, &session, "call_4");
         assert!(
-            after_edit.contains("gamma") && after_edit.contains("alpha") && !after_edit.contains("content omitted"),
+            after_edit.contains("gamma")
+                && after_edit.contains("alpha")
+                && !after_edit.contains("content omitted"),
             "a read after a shell command returns the content again: {after_edit}"
         );
     });

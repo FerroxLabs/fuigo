@@ -3,7 +3,9 @@ use std::time::Duration;
 use fuigo_sandbox::WebsiteOrigin;
 use fuigo_sandbox::command::CommandTag;
 
-use crate::error::{ConnectionError, ProxyError, committed_write_error, write_all_idle, write_committed_idle};
+use crate::error::{
+    ConnectionError, ProxyError, committed_write_error, write_all_idle, write_committed_idle,
+};
 use crate::idle::IdleDeadline;
 use crate::metrics::{ProxyMetrics, ProxyOutcome};
 use crate::request::{ParsedRequest, parse_http_target, read_head, static_hop_by_hop};
@@ -291,13 +293,14 @@ async fn copy_exact<S: ProxyIo>(
     let mut deadline = IdleDeadline::new(idle, std::time::Instant::now(), &last);
     while remaining > 0 {
         let limit = remaining.min(buffer.len() as u64) as usize;
-        let count = deadline
-            .read(source, &mut buffer[..limit])
-            .await
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::TimedOut => ConnectionError::Committed(ProxyError::Timeout),
-                _ => ConnectionError::Committed(ProxyError::Connect),
-            })?;
+        let count =
+            deadline
+                .read(source, &mut buffer[..limit])
+                .await
+                .map_err(|error| match error.kind() {
+                    std::io::ErrorKind::TimedOut => ConnectionError::Committed(ProxyError::Timeout),
+                    _ => ConnectionError::Committed(ProxyError::Connect),
+                })?;
         if count == 0 {
             return Err(ConnectionError::Committed(ProxyError::Connect));
         }

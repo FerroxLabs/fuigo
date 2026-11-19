@@ -61,7 +61,10 @@ impl std::fmt::Debug for EndpointScopedCredentials {
         f.debug_struct("EndpointScopedCredentials")
             .field(
                 "endpoint",
-                &self.endpoint.as_ref().map(|url| fuigo_auth::redact_url(url.as_str())),
+                &self
+                    .endpoint
+                    .as_ref()
+                    .map(|url| fuigo_auth::redact_url(url.as_str())),
             )
             .field("has_auth_credentials", &self.auth_credentials.is_some())
             .field("has_api_key_provider", &self.api_key_provider.is_some())
@@ -326,6 +329,24 @@ impl MemoryBackendImpl {
     }
 }
 
+/// Withheld path text; the auto-injected recall block uses the same words.
+const WITHHELD_PATH: &str = "(file name withheld)";
+
+/// Apply the auto-injected recall path's screen to `memory_search` results: an excerpt the screener
+/// flags is dropped, and a flagged file name is withheld while the (safe) excerpt is kept.
+pub(crate) fn screen_search_results(results: Vec<MemorySearchResult>) -> Vec<MemorySearchResult> {
+    results
+        .into_iter()
+        .filter(|r| super::safety::is_safe_memory(&r.snippet))
+        .map(|mut r| {
+            if !super::safety::is_safe_memory(&r.path) {
+                r.path = WITHHELD_PATH.to_owned();
+            }
+            r
+        })
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl MemoryBackend for MemoryBackendImpl {
     #[tracing::instrument(name = "memory.search", skip_all, fields(
@@ -542,20 +563,22 @@ impl MemoryBackend for MemoryBackendImpl {
         self.search_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        Ok(results
-            .into_iter()
-            .map(|r| MemorySearchResult {
-                source_revision: r.source_revision,
-                chunk_id: r.chunk_id,
-                path: r.path,
-                start_line: r.start_line,
-                end_line: r.end_line,
-                score: r.score,
-                snippet: r.snippet,
-                source: r.source,
-                created_at: Some(r.created_at),
-            })
-            .collect())
+        Ok(screen_search_results(
+            results
+                .into_iter()
+                .map(|r| MemorySearchResult {
+                    source_revision: r.source_revision,
+                    chunk_id: r.chunk_id,
+                    path: r.path,
+                    start_line: r.start_line,
+                    end_line: r.end_line,
+                    score: r.score,
+                    snippet: r.snippet,
+                    source: r.source,
+                    created_at: Some(r.created_at),
+                })
+                .collect(),
+        ))
     }
 
     fn get(
@@ -1378,7 +1401,11 @@ mod tests {
         fn event(&self, event: &tracing::Event<'_>) {
             struct Text<'a>(&'a mut String);
             impl tracing::field::Visit for Text<'_> {
-                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
                     self.0.push_str(&format!("{}={value:?} ", field.name()));
                 }
             }
@@ -1412,10 +1439,19 @@ mod tests {
                 Some(Arc::new(AnyKey) as fuigo_tools::types::SharedApiKeyProvider),
             )
         });
-        assert!(denied.is_empty(), "control: untrusted endpoint drops the credential");
+        assert!(
+            denied.is_empty(),
+            "control: untrusted endpoint drops the credential"
+        );
         let logged = lines.lock().unwrap().clone();
-        assert!(logged.contains("session credentials withheld"), "control: {logged}");
-        assert!(logged.contains("gw.p149.invalid/v1"), "control: the location is logged: {logged}");
+        assert!(
+            logged.contains("session credentials withheld"),
+            "control: {logged}"
+        );
+        assert!(
+            logged.contains("gw.p149.invalid/v1"),
+            "control: the location is logged: {logged}"
+        );
         for secret in [PASS, QUERY, "p149u"] {
             assert!(!logged.contains(secret), "{secret} was logged: {logged}");
         }

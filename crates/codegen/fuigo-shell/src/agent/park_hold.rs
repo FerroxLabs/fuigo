@@ -44,7 +44,9 @@ fn mark_meta(meta: &mut Option<acp::Meta>) {
 }
 
 /// Set `params._meta["fuigo/released"] = true` on a JSON-RPC params object (left unchanged if not an object).
-fn mark_params(params: &std::sync::Arc<serde_json::value::RawValue>) -> std::sync::Arc<serde_json::value::RawValue> {
+fn mark_params(
+    params: &std::sync::Arc<serde_json::value::RawValue>,
+) -> std::sync::Arc<serde_json::value::RawValue> {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(params.get()) else {
         return params.clone();
     };
@@ -76,7 +78,9 @@ fn take_ticket(
     };
     let mut id = None;
     if let Some(object) = value.as_object_mut()
-        && let Some(meta) = object.get_mut("_meta").and_then(serde_json::Value::as_object_mut)
+        && let Some(meta) = object
+            .get_mut("_meta")
+            .and_then(serde_json::Value::as_object_mut)
     {
         id = meta.remove(TICKET_META_KEY).and_then(|v| v.as_u64());
         if meta.is_empty() {
@@ -98,7 +102,10 @@ enum RequestGate {
     Cancel,
 }
 
-#[allow(clippy::large_enum_variant, reason = "a held frame is queued once and written once; boxing buys nothing")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a held frame is queued once and written once; boxing buys nothing"
+)]
 enum HeldFrame {
     Session(acp::SessionNotification),
     Ext {
@@ -198,7 +205,6 @@ fn ext_frame_is_replay(n: &acp::ExtNotification) -> bool {
 }
 
 impl ParkFrameHold {
-
     fn push(&self, frame: HeldFrame) {
         let mut state = self.state.borrow_mut();
         if state.queue.len() >= MAX_HELD_FRAMES {
@@ -474,7 +480,9 @@ impl<C: acp::Client + 'static> acp::Client for ParkHoldClient<C> {
     }
 
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
-        if !session_frame_is_replay(&args) && self.hold.should_hold(Some(args.session_id.0.as_ref())) {
+        if !session_frame_is_replay(&args)
+            && self.hold.should_hold(Some(args.session_id.0.as_ref()))
+        {
             self.hold.push(HeldFrame::Session(args));
             return Ok(());
         }
@@ -485,10 +493,17 @@ impl<C: acp::Client + 'static> acp::Client for ParkHoldClient<C> {
     async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
         // The one strip point of the internal reverse-call ticket (before anything can write the params).
         let (ticket, params) = take_ticket(&args.params);
-        let args = if ticket.is_some() { acp::ExtRequest::new(args.method, params) } else { args };
+        let args = if ticket.is_some() {
+            acp::ExtRequest::new(args.method, params)
+        } else {
+            args
+        };
         // The implicit unpark's gateway barrier: everything queued before it has registered with the hold.
         // Internal: answered here, never written.
-        if is_method(&args.method, crate::extensions::session_park::PARK_BARRIER_METHOD) {
+        if is_method(
+            &args.method,
+            crate::extensions::session_park::PARK_BARRIER_METHOD,
+        ) {
             tokio::task::yield_now().await;
             return Ok(acp::ExtResponse::new(empty_raw()));
         }
@@ -507,7 +522,9 @@ impl<C: acp::Client + 'static> acp::Client for ParkHoldClient<C> {
                 Err(()) => Err(cancelled_request_error()),
                 Ok(true) => {
                     let params = mark_params(&args.params);
-                    self.inner.ext_method(acp::ExtRequest::new(args.method, params)).await
+                    self.inner
+                        .ext_method(acp::ExtRequest::new(args.method, params))
+                        .await
                 }
                 Ok(false) => self.inner.ext_method(args).await,
             };

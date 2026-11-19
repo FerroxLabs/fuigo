@@ -36,7 +36,7 @@ fn strip_trailing_separator(path: &Path) -> PathBuf {
 
 fn remote_url(repo: &git2::Repository) -> Option<String> {
     let origin = repo.find_remote("origin").ok()?;
-    origin.url().map(str::to_string)
+    origin.url().ok().map(str::to_string)
 }
 
 fn split_normalized_remote(remote: &str) -> Option<StatusLineRepo> {
@@ -233,7 +233,7 @@ impl SessionActor {
                 Ok(false) => repo
                     .head()
                     .ok()
-                    .and_then(|h| h.shorthand().map(str::to_string)),
+                    .and_then(|h| h.shorthand().ok().map(str::to_string)),
                 Ok(true) | Err(_) => None,
             };
             RepoState {

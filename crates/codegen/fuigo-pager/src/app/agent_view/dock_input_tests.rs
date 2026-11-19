@@ -2205,7 +2205,10 @@ fn compact_mode_hides_an_enabled_dock() {
     insert_running_task(&mut agent, "bg-1");
     set_compact(&mut agent, false);
     draw_frame(&mut agent);
-    assert!(agent.dock_on && agent.dock_shown, "the enabled dock paints when not compact");
+    assert!(
+        agent.dock_on && agent.dock_shown,
+        "the enabled dock paints when not compact"
+    );
     assert!(agent.pane_areas.dock.area() > 0);
 
     agent.active_pane = AgentPane::Dock;
@@ -2214,11 +2217,18 @@ fn compact_mode_hides_an_enabled_dock() {
     assert!(!agent.dock_on, "compact mode must switch the dock off");
     assert!(!agent.dock_shown, "compact mode must not paint the dock");
     assert_eq!(agent.pane_areas.dock.area(), 0, "no dock area is reserved");
-    assert_ne!(agent.active_pane, AgentPane::Dock, "focus leaves the hidden dock");
+    assert_ne!(
+        agent.active_pane,
+        AgentPane::Dock,
+        "focus leaves the hidden dock"
+    );
 
     set_compact(&mut agent, false);
     draw_frame(&mut agent);
-    assert!(agent.dock_shown, "leaving compact mode brings the dock back");
+    assert!(
+        agent.dock_shown,
+        "leaving compact mode brings the dock back"
+    );
 }
 
 /// Typing any character (non-ASCII, digits, punctuation) while the transcript has focus moves it to the prompt.
@@ -2232,7 +2242,10 @@ fn typing_any_character_in_transcript_focuses_prompt() {
         let outcome =
             agent.handle_scrollback_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &registry);
         assert!(
-            matches!(outcome, InputOutcome::ActionThenForward(Action::FocusPrompt)),
+            matches!(
+                outcome,
+                InputOutcome::ActionThenForward(Action::FocusPrompt)
+            ),
             "`{c}` must move to the prompt, got {outcome:?}"
         );
     }
@@ -2244,7 +2257,10 @@ fn typing_any_character_in_transcript_focuses_prompt() {
         let outcome =
             agent.handle_scrollback_key(&key(KeyCode::Char(c), KeyModifiers::NONE), &registry);
         assert!(
-            !matches!(outcome, InputOutcome::ActionThenForward(Action::FocusPrompt)),
+            !matches!(
+                outcome,
+                InputOutcome::ActionThenForward(Action::FocusPrompt)
+            ),
             "`{c}` must keep its own binding, got {outcome:?}"
         );
     }

@@ -182,11 +182,17 @@ async fn make_room(
     if pending.len() < MAX_PENDING {
         return;
     }
-    tracing::warn!(pending = pending.len(), "Writeback: buffer full, attempting emergency flush");
+    tracing::warn!(
+        pending = pending.len(),
+        "Writeback: buffer full, attempting emergency flush"
+    );
     metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
     if !do_flush(client, session_id, metadata, pending).await {
         let dropped = pending.drain(0..DROP_BATCH_SIZE.min(pending.len())).count();
-        tracing::error!(dropped = dropped, "Writeback: emergency flush failed, dropping oldest messages");
+        tracing::error!(
+            dropped = dropped,
+            "Writeback: emergency flush failed, dropping oldest messages"
+        );
     }
 }
 
@@ -271,8 +277,14 @@ mod checkpoint_flush_tests {
     fn queued_checkpoint_is_followed_by_a_flush() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sync = RemoteSync { tx };
-        sync.queue_checkpoint(ExportedMessage { content: "{}".into(), timestamp: None });
+        sync.queue_checkpoint(ExportedMessage {
+            content: "{}".into(),
+            timestamp: None,
+        });
         assert!(matches!(rx.try_recv(), Ok(SyncMsg::QueueRaw(_))));
-        assert!(matches!(rx.try_recv(), Ok(SyncMsg::Flush)), "checkpoint left buffered without a flush");
+        assert!(
+            matches!(rx.try_recv(), Ok(SyncMsg::Flush)),
+            "checkpoint left buffered without a flush"
+        );
     }
 }

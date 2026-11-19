@@ -67,12 +67,15 @@ pub enum WarningSeverity {
 ///
 /// The pre-TUI stderr line is overwritten when the TUI takes the screen, so this is what an interactive user sees.
 /// `warning` is the text from `fuigo_sandbox::unavailable_warning`; `None` means nothing to say.
-/// Split after the platform clause so both lines fit the single-slot banner, which does not wrap.
+/// Split after the platform clause and after each hint sentence so every line fits the single-slot banner, which does not wrap.
 pub fn sandbox_unavailable_startup_warning(warning: Option<&str>) -> Option<StartupWarning> {
     let text = warning?;
     Some(StartupWarning {
         severity: WarningSeverity::Warning,
-        message: text.replacen(": ", ":\n", 1),
+        message: text
+            .replacen(": ", ":\n", 1)
+            .replacen(" The sandbox is optional", "\nThe sandbox is optional", 1)
+            .replacen(" To use one", "\nTo use one", 1),
         action: None,
     })
 }

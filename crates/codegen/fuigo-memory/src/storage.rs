@@ -566,7 +566,9 @@ impl MemoryStorage {
                     let entry = entry.ok()?;
                     let path = entry.path();
                     // A link is skipped: it is another file's content under this name, and `/memory` lists the notes themselves.
-                    if path.extension().and_then(|e| e.to_str()) == Some("md") && is_plain_file(&path) {
+                    if path.extension().and_then(|e| e.to_str()) == Some("md")
+                        && is_plain_file(&path)
+                    {
                         Some(path)
                     } else {
                         None
@@ -1070,7 +1072,7 @@ fn workspace_identity(cwd: &Path) -> WorkspaceIdentity {
 pub(crate) fn extract_repo_identity(cwd: &Path) -> Option<String> {
     let repo = git2::Repository::discover(cwd).ok()?;
     let remote = repo.find_remote("origin").ok()?;
-    normalize_remote_url(remote.url()?)
+    normalize_remote_url(remote.url().ok()?)
 }
 
 /// Split a git remote URL into `(host, path)`.

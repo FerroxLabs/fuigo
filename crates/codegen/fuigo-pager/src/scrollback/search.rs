@@ -474,7 +474,9 @@ impl ScrollbackSearchState {
                 (!self.matches.is_empty()).then(|| {
                     self.matches
                         .iter()
-                        .position(|m| m.entry_id == anchor.entry_id && m.byte_range == anchor.byte_range)
+                        .position(|m| {
+                            m.entry_id == anchor.entry_id && m.byte_range == anchor.byte_range
+                        })
                         .unwrap_or_else(|| was_at.min(self.matches.len() - 1))
                 })
             }
@@ -1213,7 +1215,10 @@ mod tests {
 
         state.push_block(RenderBlock::user_prompt("foo three"));
         let t0 = std::time::Instant::now();
-        assert!(search.resync(&state, t0), "changed content enqueues a rescan");
+        assert!(
+            search.resync(&state, t0),
+            "changed content enqueues a rescan"
+        );
         for _ in 0..1000 {
             if search.poll() {
                 break;
@@ -1221,8 +1226,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert_eq!(search.match_count(), 3, "the new match is counted");
-        assert_eq!(search.current(), Some(&before), "the cursor stays on its match");
-        assert!(search.take_quiet_refresh(), "a rescan does not ask the view to scroll");
+        assert_eq!(
+            search.current(),
+            Some(&before),
+            "the cursor stays on its match"
+        );
+        assert!(
+            search.take_quiet_refresh(),
+            "a rescan does not ask the view to scroll"
+        );
         assert!(!search.take_quiet_refresh(), "reading it clears it");
     }
 
@@ -1232,7 +1244,10 @@ mod tests {
         let mut search = ScrollbackSearchState::open();
         update_and_wait(&mut search, "foo", &state);
         let t0 = std::time::Instant::now();
-        assert!(!search.resync(&state, t0), "nothing changed, nothing to rescan");
+        assert!(
+            !search.resync(&state, t0),
+            "nothing changed, nothing to rescan"
+        );
 
         state.push_block(RenderBlock::user_prompt("foo"));
         assert!(search.resync(&state, t0));
@@ -1253,7 +1268,11 @@ mod tests {
         state.push_block(RenderBlock::user_prompt("foo"));
         assert!(search.resync(&state, std::time::Instant::now()));
         update_and_wait(&mut search, "foo", &state);
-        assert_eq!(search.current_index(), Some(0), "a typed query parks on the first match");
+        assert_eq!(
+            search.current_index(),
+            Some(0),
+            "a typed query parks on the first match"
+        );
         assert!(!search.take_quiet_refresh());
     }
 }

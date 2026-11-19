@@ -372,7 +372,8 @@ impl AgentView {
     /// Ctrl+Enter is the send-now chord. A card in front owns the keyboard, so the chord is neither an answer nor a way past
     /// the card: it is held with a hint, and Enter alone picks the highlighted choice.
     fn card_swallows_send_now(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
-        let is_send_now_chord = key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_send_now_chord =
+            key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL);
         is_send_now_chord.then(|| {
             self.show_toast("Answer the prompt first (Enter picks the highlighted choice)");
             InputOutcome::Changed
@@ -3034,7 +3035,10 @@ mod p152_permission_typing_guard_tests {
             let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
             let _ = agent.handle_input(&Event::Key(key), &registry);
         }
-        assert!(agent.composer_key_at.is_some(), "composer typing is recorded");
+        assert!(
+            agent.composer_key_at.is_some(),
+            "composer typing is recorded"
+        );
         setup(&mut agent);
         agent.permission_queue.front_mut().unwrap().active_idx = 1; // the sticky allow-always row
         agent.guard_new_permission_card();
@@ -3045,16 +3049,25 @@ mod p152_permission_typing_guard_tests {
         );
         agent.permission_queue.front_mut().unwrap().active_idx = 1;
         let enter = press(&mut agent, KeyCode::Enter);
-        assert!(!is_select(&enter), "the Enter meant for the draft must not answer: {enter:?}");
+        assert!(
+            !is_select(&enter),
+            "the Enter meant for the draft must not answer: {enter:?}"
+        );
         let digit = press(&mut agent, KeyCode::Char('3'));
-        assert!(!is_select(&digit), "a digit meant for the draft must not answer: {digit:?}");
+        assert!(
+            !is_select(&digit),
+            "a digit meant for the draft must not answer: {digit:?}"
+        );
         assert_eq!(agent.permission_queue.len(), 1, "the prompt stays open");
     }
 
     /// Audit S9-F4 controls: no composer typing, or typing long before the card opened, leaves the card as it was.
     #[test]
     fn card_without_recent_composer_typing_answers_normally() {
-        for stale in [None, Instant::now().checked_sub(std::time::Duration::from_secs(5))] {
+        for stale in [
+            None,
+            Instant::now().checked_sub(std::time::Duration::from_secs(5)),
+        ] {
             let mut agent = make_agent();
             agent.composer_key_at = stale;
             setup(&mut agent);

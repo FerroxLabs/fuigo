@@ -76,8 +76,9 @@ fn token_styled_line(
 /// `[Image #N]` (or the path form `[Image #N: <path>]`) placeholders in `text`, with their numbers.
 fn image_placeholders(text: &str) -> impl Iterator<Item = (Range<usize>, usize)> + '_ {
     use std::sync::LazyLock;
-    static RE: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"\[Image #(\d+)(?::[^\]\n]*)?\]").expect("valid regex"));
+    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\[Image #(\d+)(?::[^\]\n]*)?\]").expect("valid regex")
+    });
     RE.captures_iter(text).filter_map(|c| {
         let whole = c.get(0)?;
         let number = c.get(1)?.as_str().parse().ok()?;
@@ -536,7 +537,12 @@ pub(crate) fn mark_latest_prompt_images_sent(
     let latest = (0..scrollback.len()).rev().find_map(|idx| {
         scrollback
             .get(idx)
-            .filter(|e| matches!(e.block, crate::scrollback::block::RenderBlock::UserPrompt(_)))
+            .filter(|e| {
+                matches!(
+                    e.block,
+                    crate::scrollback::block::RenderBlock::UserPrompt(_)
+                )
+            })
             .map(|e| e.id)
     });
     latest.is_some_and(|id| mark_entry_images_sent(scrollback, id, numbers))
@@ -548,14 +554,19 @@ pub(crate) fn keep_latest_prompt_resumed_image(
     image: crate::prompt_images::PastedImage,
 ) {
     let latest = (0..scrollback.len()).rev().find(|idx| {
-        scrollback
-            .get(*idx)
-            .is_some_and(|e| matches!(e.block, crate::scrollback::block::RenderBlock::UserPrompt(_)))
+        scrollback.get(*idx).is_some_and(|e| {
+            matches!(
+                e.block,
+                crate::scrollback::block::RenderBlock::UserPrompt(_)
+            )
+        })
     });
     if let Some(entry) = latest.and_then(|idx| scrollback.entry_mut(idx))
         && let crate::scrollback::block::RenderBlock::UserPrompt(block) = &mut entry.block
     {
-        block.resumed_images.retain(|kept| kept.display_number != image.display_number);
+        block
+            .resumed_images
+            .retain(|kept| kept.display_number != image.display_number);
         block.resumed_images.push(image);
     }
 }
@@ -1358,8 +1369,16 @@ mod sent_image_tests {
     fn placeholder_forms_and_bash_text() {
         let block = UserPromptBlock::new("[Image #3: /tmp/a.png] plain");
         assert_eq!(block.unsent_image_ranges(), vec![0..22]);
-        assert!(UserPromptBlock::new("no images here").unsent_image_ranges().is_empty());
-        assert!(UserPromptBlock::bash("echo [Image #1]").unsent_image_ranges().is_empty());
+        assert!(
+            UserPromptBlock::new("no images here")
+                .unsent_image_ranges()
+                .is_empty()
+        );
+        assert!(
+            UserPromptBlock::bash("echo [Image #1]")
+                .unsent_image_ranges()
+                .is_empty()
+        );
         let lines = UserPromptBlock::new("all plain").wrap_prompt_lines(80, None, true, false);
         assert_eq!(struck_text(&lines), "");
     }

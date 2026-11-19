@@ -10,6 +10,10 @@
 //! - [`SessionWriter`]: the counted in-process slot, the OS hold attached by the first mutating call, the write API.
 //! - [`trace`]: the B-F5 attribution marks, off unless `FUIGO_F5_TRACE_DIR` is set.
 
+// Panic-path lints are denied in this crate (shipped code is panic = "abort"); tests may unwrap.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::await_holding_lock)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod lock;
 #[doc(hidden)]
 pub mod owner_only;
@@ -22,14 +26,17 @@ mod writer;
 pub mod seams;
 
 pub use writer::{
-    Busy, ClaimError, DELETING_PREFIX, LOCK_SIDECARS, Refusal, ReplaceError, SessionAppend, SessionWriter, delete_observer,
-    disable_persistence, persistence_disabled, refusal,
+    Busy, ClaimError, DELETING_PREFIX, LOCK_SIDECARS, Refusal, ReplaceError, SessionAppend,
+    SessionWriter, delete_observer, disable_persistence, persistence_disabled, refusal,
 };
 
 #[cfg(debug_assertions)]
 pub use writer::debug_live_writers;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 mod writer_tests;

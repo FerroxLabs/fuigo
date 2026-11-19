@@ -35,12 +35,16 @@ impl StateTarget {
                 // 1.0.40's repair, kept through the writer (F5-X deviation 5): a directory where the state file belongs
                 // is removed before the write, as `replace_state_path` / `publish_durable` do by path.
                 if writer.dir().join(RESOURCES_STATE_FILE).is_dir() {
-                    tracing::warn!("Resources state path in the session folder is a directory — removing before write");
+                    tracing::warn!(
+                        "Resources state path in the session folder is a directory — removing before write"
+                    );
                     writer.remove_tree(RESOURCES_STATE_FILE).await?;
                 }
                 writer.replace_atomic(RESOURCES_STATE_FILE, json).await
             }
-            Self::Path(path) if durable => ResourcesPersistence::write_json_durable(path, value).await,
+            Self::Path(path) if durable => {
+                ResourcesPersistence::write_json_durable(path, value).await
+            }
             Self::Path(path) => ResourcesPersistence::write_json(path, value).await,
         }
     }
@@ -82,19 +86,30 @@ impl Drop for Tail {
         while let Ok(command) = self.rx.try_recv() {
             match command {
                 ResourcesPersistenceCommand::Save(snapshot) => self.pending = Some(snapshot),
-                ResourcesPersistenceCommand::SaveAndFlush { snapshot, respond_to } => {
+                ResourcesPersistenceCommand::SaveAndFlush {
+                    snapshot,
+                    respond_to,
+                } => {
                     self.pending = Some(snapshot);
                     acks.push(respond_to);
                 }
                 ResourcesPersistenceCommand::Flush(done) => flushed.push(done),
             }
         }
-        let result = self.pending.take().map_or(Ok(()), |snapshot| self.target.write_sync(&snapshot));
+        let result = self
+            .pending
+            .take()
+            .map_or(Ok(()), |snapshot| self.target.write_sync(&snapshot));
         if let Err(error) = &result {
             tracing::warn!(?error, state_path = ?self.state_path, "Failed to flush resources state at shutdown");
         }
         for ack in acks {
-            let _ = ack.send(result.as_ref().map(|_| ()).map_err(|error| io::Error::new(error.kind(), error.to_string())));
+            let _ = ack.send(
+                result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|error| io::Error::new(error.kind(), error.to_string())),
+            );
         }
         for done in flushed {
             let _ = done.send(());
@@ -331,7 +346,12 @@ impl ResourcesPersistence {
         target: StateTarget,
         state_path: PathBuf,
     ) {
-        let mut tail = Tail { rx, target, pending: None, state_path };
+        let mut tail = Tail {
+            rx,
+            target,
+            pending: None,
+            state_path,
+        };
         let mut debounce = tokio::time::interval(Duration::from_millis(500));
         debounce.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -406,7 +426,10 @@ impl ResourcesPersistence {
     /// session file like the others: 0600 on Unix (at creation, and tightened if the temp already existed looser), the
     /// owner-only ACL on Windows, where it used to keep the folder's inherited ACL. The rename keeps the temp's
     /// mode/ACL. Tightening is best effort: a filesystem without permissions must not stop tool state from being saved.
-    #[allow(clippy::disallowed_methods, reason = "StateTarget::Path branch writes resources_state.json outside any session folder (workspace daemon tree or headless state folder, via ResourcesPersistence::new_at, registry/types.rs:1241 only when ctx.session_writer is None); session folders go through the writer. Rests on ctx.state_path never naming a session folder, per code comment, not verified; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "StateTarget::Path branch writes resources_state.json outside any session folder (workspace daemon tree or headless state folder, via ResourcesPersistence::new_at, registry/types.rs:1241 only when ctx.session_writer is None); session folders go through the writer. Rests on ctx.state_path never naming a session folder, per code comment, not verified; not inside a session folder"
+    )]
     async fn create_owner_only(tmp_path: &Path) -> io::Result<tokio::fs::File> {
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
@@ -414,9 +437,14 @@ impl ResourcesPersistence {
         options.mode(0o600);
         let file = options.open(tmp_path).await?;
         if let Err(error) = fuigo_secrets::owner_only::restrict_to_owner(tmp_path) {
-            static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
             if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                tracing::warn!(?error, ?tmp_path, "resources state: could not restrict it to owner-only; continuing");
+                tracing::warn!(
+                    ?error,
+                    ?tmp_path,
+                    "resources state: could not restrict it to owner-only; continuing"
+                );
             }
         }
         Ok(file)
@@ -435,7 +463,10 @@ impl ResourcesPersistence {
         Self::cleanup_temp_on_error(&tmp_path, result).await
     }
 
-    #[allow(clippy::disallowed_methods, reason = "StateTarget::Path branch writes resources_state.json outside any session folder (workspace daemon tree or headless state folder, via ResourcesPersistence::new_at, registry/types.rs:1241 only when ctx.session_writer is None); session folders go through the writer. Rests on ctx.state_path never naming a session folder, per code comment, not verified; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "StateTarget::Path branch writes resources_state.json outside any session folder (workspace daemon tree or headless state folder, via ResourcesPersistence::new_at, registry/types.rs:1241 only when ctx.session_writer is None); session folders go through the writer. Rests on ctx.state_path never naming a session folder, per code comment, not verified; not inside a session folder"
+    )]
     async fn cleanup_temp_on_error(tmp_path: &Path, result: io::Result<()>) -> io::Result<()> {
         if result.is_err() {
             let _ = tokio::fs::remove_file(tmp_path).await;
@@ -449,7 +480,10 @@ impl ResourcesPersistence {
         Ok((path.with_extension("json.tmp"), json))
     }
 
-    #[allow(clippy::disallowed_methods, reason = "StateTarget::Path branch writes resources_state.json outside any session folder (workspace daemon tree or headless state folder, via ResourcesPersistence::new_at, registry/types.rs:1241 only when ctx.session_writer is None); session folders go through the writer. Rests on ctx.state_path never naming a session folder, per code comment, not verified; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "StateTarget::Path branch writes resources_state.json outside any session folder (workspace daemon tree or headless state folder, via ResourcesPersistence::new_at, registry/types.rs:1241 only when ctx.session_writer is None); session folders go through the writer. Rests on ctx.state_path never naming a session folder, per code comment, not verified; not inside a session folder"
+    )]
     async fn replace_state_path(path: &Path, tmp_path: &Path) -> io::Result<()> {
         if path.is_dir() {
             tracing::warn!(
@@ -528,7 +562,10 @@ impl ResourcesPersistence {
 // Old `PersistenceLayer` / `PersistenceRunner` deleted.
 // ToolState persistence replaced by Resources persistence via `ResourcesPersistence`.
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,15 +617,23 @@ mod tests {
         let path = dir.path().join("resources_state.json");
         let value = serde_json::json!({"state": {}});
 
-        ResourcesPersistence::write_json(&path, &value).await.unwrap();
+        ResourcesPersistence::write_json(&path, &value)
+            .await
+            .unwrap();
         assert_eq!(mode(&path), 0o600, "debounced writer");
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, b"stale").unwrap();
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o666)).unwrap();
-        ResourcesPersistence::write_json_durable(&path, &value).await.unwrap();
-        assert_eq!(mode(&path), 0o600, "durable writer over a loose leftover temp");
+        ResourcesPersistence::write_json_durable(&path, &value)
+            .await
+            .unwrap();
+        assert_eq!(
+            mode(&path),
+            0o600,
+            "durable writer over a loose leftover temp"
+        );
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
             value
@@ -875,13 +920,22 @@ mod tests {
         .await
         .unwrap();
         assert!(reached, "the channel-close flush reached its rename");
-        assert!(!SessionWriter::is_free(id), "the paused tail flush holds the writer");
+        assert!(
+            !SessionWriter::is_free(id),
+            "the paused tail flush holds the writer"
+        );
         let soon = tokio::time::Instant::now() + Duration::from_millis(200);
-        assert!(!SessionWriter::wait_free(id, soon).await, "wait_free cannot return before the flush lands");
+        assert!(
+            !SessionWriter::wait_free(id, soon).await,
+            "wait_free cannot return before the flush lands"
+        );
 
         gate.open();
         let later = tokio::time::Instant::now() + Duration::from_secs(10);
-        assert!(SessionWriter::wait_free(id, later).await, "the writer frees once the flush has landed");
+        assert!(
+            SessionWriter::wait_free(id, later).await,
+            "the writer frees once the flush has landed"
+        );
         let text = std::fs::read_to_string(folder.join(RESOURCES_STATE_FILE)).unwrap();
         assert!(text.contains("tail"), "the tail flush landed: {text}");
     }
@@ -896,24 +950,38 @@ mod tests {
         let id = "f5b6-resources-runtime-drop";
         let folder = dir.path().join(id);
         let writer = SessionWriter::try_claim(id, &folder).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let persistence = rt.block_on(async {
             let persistence = ResourcesPersistence::new(writer);
-            persistence.save_and_flush(serde_json::json!({"state": {"f5b6": "created"}})).await.unwrap();
+            persistence
+                .save_and_flush(serde_json::json!({"state": {"f5b6": "created"}}))
+                .await
+                .unwrap();
             persistence
                 .tx
-                .send(ResourcesPersistenceCommand::Save(serde_json::json!({"state": {"f5b6": "fired"}})))
+                .send(ResourcesPersistenceCommand::Save(
+                    serde_json::json!({"state": {"f5b6": "fired"}}),
+                ))
                 .unwrap();
             // The loop takes the save as its pending snapshot (the debounce has not ticked), as after a fire.
             tokio::task::yield_now().await;
             persistence
         });
-        assert!(!SessionWriter::is_free(id), "fixture: the loop holds the writer");
+        assert!(
+            !SessionWriter::is_free(id),
+            "fixture: the loop holds the writer"
+        );
         drop(persistence);
         drop(rt);
         assert!(SessionWriter::is_free(id), "the writer frees with the loop");
         let text = std::fs::read_to_string(folder.join(RESOURCES_STATE_FILE)).unwrap();
-        assert!(text.contains("fired"), "the pending save was lost with the runtime: {text}");
+        assert!(
+            text.contains("fired"),
+            "the pending save was lost with the runtime: {text}"
+        );
     }
 
     /// F5-X deviation 5, restored: through the session writer, a directory where `resources_state.json` belongs is
@@ -955,12 +1023,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join(id);
         let writer = SessionWriter::try_claim(id, &folder).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let gate = seams::arm(&format!("{seam}:{id}"));
         let persistence = rt.block_on(async {
             let persistence = ResourcesPersistence::new(writer);
             // A: the loop starts its blocking replace and awaits it.
-            let _ack = persistence.enqueue_save_and_flush(serde_json::json!({"state": {"r1h1": "older-A"}})).unwrap();
+            let _ack = persistence
+                .enqueue_save_and_flush(serde_json::json!({"state": {"r1h1": "older-A"}}))
+                .unwrap();
             let reached = tokio::task::spawn_blocking({
                 let gate = gate.clone();
                 move || gate.wait_reached(Duration::from_secs(10))
@@ -973,7 +1046,9 @@ mod tests {
         // B: queued behind the loop (which is still awaiting A); `Tail::drop` takes it.
         persistence
             .tx
-            .send(ResourcesPersistenceCommand::Save(serde_json::json!({"state": {"r1h1": "newer-B"}})))
+            .send(ResourcesPersistenceCommand::Save(
+                serde_json::json!({"state": {"r1h1": "newer-B"}}),
+            ))
             .unwrap();
         drop(persistence);
         let opener = std::thread::spawn({
@@ -991,6 +1066,9 @@ mod tests {
         }
         assert!(SessionWriter::is_free(id), "both writes finished");
         let text = std::fs::read_to_string(folder.join(RESOURCES_STATE_FILE)).unwrap();
-        assert!(text.contains("newer-B"), "an older snapshot landed after the newer shutdown flush: {text}");
+        assert!(
+            text.contains("newer-B"),
+            "an older snapshot landed after the newer shutdown flush: {text}"
+        );
     }
 }

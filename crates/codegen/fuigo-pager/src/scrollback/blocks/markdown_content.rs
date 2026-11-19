@@ -240,7 +240,9 @@ impl MarkdownContent {
             if restored == &block.body {
                 continue;
             }
-            for (offset, (drawn, original)) in block.body.split('\n').zip(restored.split('\n')).enumerate() {
+            for (offset, (drawn, original)) in
+                block.body.split('\n').zip(restored.split('\n')).enumerate()
+            {
                 if let Some(text) = texts.get_mut(block.output_line_range.start + offset)
                     && drawn != original
                     && let Some(head) = text.strip_suffix(drawn)
@@ -281,9 +283,7 @@ impl MarkdownContent {
     }
 
     /// The `[Copy]` rows this content earns: one per copyable fenced code block and per exportable table, in document order.
-    pub fn copy_row_specs(
-        &self,
-    ) -> Vec<(std::ops::Range<usize>, super::mermaid_content::CopyRow)> {
+    pub fn copy_row_specs(&self) -> Vec<(std::ops::Range<usize>, super::mermaid_content::CopyRow)> {
         let bodies = self.code_block_texts();
         let state = self.state.borrow();
         let view = state.renderer.view();

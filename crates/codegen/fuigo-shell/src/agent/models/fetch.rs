@@ -186,15 +186,28 @@ fn fetch_models_uncommitted(
     // serialised in this process so two racing paths cannot both send before the first 401 is recorded, and shared with
     // every other process through the on-disk memory.
     static ONE_FETCH_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one = ONE_FETCH_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = ONE_FETCH_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let memory = crate::auth::api_key_route_memory::RouteMemory::models_location();
     let env_key = crate::agent::auth_method::read_fuigo_api_key_env().ok();
-    let credential: Vec<&str> = env_key.as_deref().into_iter().chain(auth.map(|a| a.key.as_str())).collect();
+    let credential: Vec<&str> = env_key
+        .as_deref()
+        .into_iter()
+        .chain(auth.map(|a| a.key.as_str()))
+        .collect();
     let url = source.cache_origin();
     if let Some(m) = &memory
-        && let Some(wait) = m.models_wait(&url, &credential, crate::auth::api_key_route_memory::unix_now())
+        && let Some(wait) = m.models_wait(
+            &url,
+            &credential,
+            crate::auth::api_key_route_memory::unix_now(),
+        )
     {
-        tracing::debug!(wait_secs = wait, "models fetch skipped: this credential was rejected recently");
+        tracing::debug!(
+            wait_secs = wait,
+            "models fetch skipped: this credential was rejected recently"
+        );
         return ModelsPrefetch::Rejected;
     }
     let fetched = source.fetch(auth);

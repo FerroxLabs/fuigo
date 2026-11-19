@@ -7,9 +7,9 @@ mod support;
 use std::sync::Once;
 use std::sync::atomic::Ordering;
 
-use support::{send_one, test_config};
 use fuigo_sampler::SamplingClient;
 use fuigo_test_support::spawn_counting_server;
+use support::{send_one, test_config};
 
 /// Pin the env these assertions depend on before any client is built.
 /// Ambient shell exports (`FUIGO_SAMPLER_SHARED_CLIENT=0`, `FUIGO_POOL_MAX_IDLE=0`) could otherwise flip the expected pooling behavior.

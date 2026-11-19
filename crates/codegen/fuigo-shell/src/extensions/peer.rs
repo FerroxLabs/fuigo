@@ -23,14 +23,27 @@ use super::{ExtResult, parse_params, to_raw_response};
 use crate::agent::mvp_agent::MvpAgent;
 use crate::session::SessionHandle;
 use crate::session::peer_admission::{
-    HeldSummary, NoticeKind, OperatorPresence, PeerAdmissionConfig, PeerNotice, ReleaseError, ReleaseOutcome,
+    HeldSummary, NoticeKind, OperatorPresence, PeerAdmissionConfig, PeerNotice, ReleaseError,
+    ReleaseOutcome,
 };
 
 /// JSON-RPC code of every peer failure; `data.reason` says which.
 pub const PEER_ERROR_CODE: i32 = -32011;
-pub const METHODS: [&str; 4] = ["_fuigo/peer/configure", "_fuigo/peer/list", "_fuigo/peer/list_held", "_fuigo/peer/release"];
+pub const METHODS: [&str; 4] = [
+    "_fuigo/peer/configure",
+    "_fuigo/peer/list",
+    "_fuigo/peer/list_held",
+    "_fuigo/peer/release",
+];
 pub const OPERATOR_KINDS: [&str; 3] = ["attended", "may_return", "unattended"];
-pub const EVENTS: [&str; 6] = ["peer_held", "peer_released", "peer_refused", "peer_expired", "peer_reheld", "peer_warning"];
+pub const EVENTS: [&str; 6] = [
+    "peer_held",
+    "peer_released",
+    "peer_refused",
+    "peer_expired",
+    "peer_reheld",
+    "peer_warning",
+];
 const NAME_CAP: usize = 64;
 const TEXT_CAP: usize = 200;
 const PUMP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -51,20 +64,31 @@ pub(crate) fn capability() -> Value {
 // ---- errors ------------------------------------------------------------------------------------------------------------
 
 fn peer_err(reason: &str, message: &str) -> acp::Error {
-    acp::Error::new(PEER_ERROR_CODE, "Peer messaging error").data(crate::acp_error::error_data_with_fields(
-        crate::acp_error::AcpErrorKind::SessionUnavailable,
-        message,
-        json!({ "reason": reason }),
-    ))
+    acp::Error::new(PEER_ERROR_CODE, "Peer messaging error").data(
+        crate::acp_error::error_data_with_fields(
+            crate::acp_error::AcpErrorKind::SessionUnavailable,
+            message,
+            json!({ "reason": reason }),
+        ),
+    )
 }
 
 fn release_err(e: ReleaseError) -> acp::Error {
     match e {
-        ReleaseError::NoOperator => peer_err("no_operator", "this session's operator kind cannot release or refuse"),
+        ReleaseError::NoOperator => peer_err(
+            "no_operator",
+            "this session's operator kind cannot release or refuse",
+        ),
         ReleaseError::NotFound => peer_err("not_found", "no such held message"),
-        ReleaseError::BadToken => peer_err("bad_token", "the token is not the current token of that held message"),
+        ReleaseError::BadToken => peer_err(
+            "bad_token",
+            "the token is not the current token of that held message",
+        ),
         ReleaseError::Expired => peer_err("expired", "the hold ran out"),
-        ReleaseError::Unavailable => peer_err("unavailable", "peer messaging is unavailable for this session"),
+        ReleaseError::Unavailable => peer_err(
+            "unavailable",
+            "peer messaging is unavailable for this session",
+        ),
     }
 }
 
@@ -105,7 +129,10 @@ impl ClientSession for LiveSession {
         self.handle.peer_actor_gone()
     }
     async fn register(&self) {
-        crate::peer_inbox::host::ensure_session_registered(&self.id, self.handle.message_delivery());
+        crate::peer_inbox::host::ensure_session_registered(
+            &self.id,
+            self.handle.message_delivery(),
+        );
     }
     async fn configure(&self, config: PeerAdmissionConfig) {
         self.handle.configure_peer_admission(config).await;
@@ -141,7 +168,9 @@ impl ClientSession for LiveSession {
 }
 
 async fn render_list_reply(host: &dyn PeerHost, page: u32) -> Result<Value, String> {
-    let me = host.this_session().ok_or_else(|| "this session has no address yet".to_owned())?;
+    let me = host
+        .this_session()
+        .ok_or_else(|| "this session has no address yet".to_owned())?;
     let p = host.list(page).await.map_err(|e| match e {
         fuigo_peer::host::PeerHostError::Unavailable(r) => display_escape(&r, TEXT_CAP),
         fuigo_peer::host::PeerHostError::Failed => "the session list could not be read".to_owned(),
@@ -232,7 +261,9 @@ fn policy_of(p: &str) -> Option<PeerInboundPolicy> {
 /// leader unavailable). `NotStarted` is not a refusal.
 fn inbox_unavailable() -> Option<String> {
     match crate::peer_inbox::host::peer_inbox_status() {
-        crate::peer_inbox::host::PeerInboxStatus::Unavailable { reason } => Some(crate::peer_inbox::host::reason_message(reason)),
+        crate::peer_inbox::host::PeerInboxStatus::Unavailable { reason } => {
+            Some(crate::peer_inbox::host::reason_message(reason))
+        }
         _ => None,
     }
 }
@@ -246,7 +277,10 @@ fn check_inbox(unavailable: Option<String>) -> Result<(), acp::Error> {
 
 fn check_opted_in(s: &dyn ClientSession) -> Result<(), acp::Error> {
     if !s.opted_in() {
-        return Err(peer_err("not_opted_in", "call fuigo/peer/configure with optIn: true first"));
+        return Err(peer_err(
+            "not_opted_in",
+            "call fuigo/peer/configure with optIn: true first",
+        ));
     }
     Ok(())
 }
@@ -258,16 +292,23 @@ pub(crate) async fn configure_impl(
     req_value: Value,
     unavailable: Option<String>,
 ) -> Result<(Value, bool), acp::Error> {
-    let req: ConfigureReq = serde_json::from_value(req_value).map_err(crate::acp_error::invalid_params_from)?;
+    let req: ConfigureReq =
+        serde_json::from_value(req_value).map_err(crate::acp_error::invalid_params_from)?;
     check_inbox(unavailable)?;
     let (operator, policy) = if req.opt_in {
-        let kind = req.operator.as_deref().ok_or_else(|| crate::acp_error::invalid_params("operator is required with optIn: true"))?;
+        let kind = req.operator.as_deref().ok_or_else(|| {
+            crate::acp_error::invalid_params("operator is required with optIn: true")
+        })?;
         let op = operator_of(kind).ok_or_else(|| {
-            crate::acp_error::invalid_params("operator must be one of attended, may_return, unattended")
+            crate::acp_error::invalid_params(
+                "operator must be one of attended, may_return, unattended",
+            )
         })?;
         let policy = match req.policy.as_deref() {
             None => PeerInboundPolicy::default(),
-            Some(p) => policy_of(p).ok_or_else(|| crate::acp_error::invalid_params("policy must be one of accept, hold, refuse"))?,
+            Some(p) => policy_of(p).ok_or_else(|| {
+                crate::acp_error::invalid_params("policy must be one of accept, hold, refuse")
+            })?,
         };
         (op, policy)
     } else {
@@ -276,7 +317,13 @@ pub(crate) async fn configure_impl(
     if req.opt_in {
         s.register().await;
     }
-    s.configure(PeerAdmissionConfig { opted_in: req.opt_in, policy, operator, relay_driven: false }).await;
+    s.configure(PeerAdmissionConfig {
+        opted_in: req.opt_in,
+        policy,
+        operator,
+        relay_driven: false,
+    })
+    .await;
     // A (re)connecting client starts from nothing: every token handed out before this call dies now (S4.6).
     drop(s.list_held().await);
     Ok((
@@ -290,11 +337,19 @@ pub(crate) async fn configure_impl(
     ))
 }
 
-pub(crate) async fn list_impl(s: &dyn ClientSession, req_value: Value, unavailable: Option<String>) -> Result<Value, acp::Error> {
-    let req: ListReq = serde_json::from_value(req_value).map_err(crate::acp_error::invalid_params_from)?;
+pub(crate) async fn list_impl(
+    s: &dyn ClientSession,
+    req_value: Value,
+    unavailable: Option<String>,
+) -> Result<Value, acp::Error> {
+    let req: ListReq =
+        serde_json::from_value(req_value).map_err(crate::acp_error::invalid_params_from)?;
     check_inbox(unavailable)?;
     check_opted_in(s)?;
-    let mut v = s.list(req.page.min(3)).await.map_err(|m| peer_err("unavailable", &m))?;
+    let mut v = s
+        .list(req.page.min(3))
+        .await
+        .map_err(|m| peer_err("unavailable", &m))?;
     v["sessionId"] = json!(req.session_id);
     Ok(v)
 }
@@ -329,21 +384,41 @@ fn held_row(h: &HeldSummary, with_token: bool) -> Value {
     row
 }
 
-pub(crate) async fn list_held_impl(s: &dyn ClientSession, req_value: Value, unavailable: Option<String>) -> Result<Value, acp::Error> {
-    let req: HeldReq = serde_json::from_value(req_value).map_err(crate::acp_error::invalid_params_from)?;
+pub(crate) async fn list_held_impl(
+    s: &dyn ClientSession,
+    req_value: Value,
+    unavailable: Option<String>,
+) -> Result<Value, acp::Error> {
+    let req: HeldReq =
+        serde_json::from_value(req_value).map_err(crate::acp_error::invalid_params_from)?;
     check_inbox(unavailable)?;
     check_opted_in(s)?;
     // Fresh tokens: asking again voids the ones handed out before.
-    let rows: Vec<Value> = s.list_held().await.iter().map(|h| held_row(h, true)).collect();
+    let rows: Vec<Value> = s
+        .list_held()
+        .await
+        .iter()
+        .map(|h| held_row(h, true))
+        .collect();
     Ok(json!({ "sessionId": req.session_id, "held": rows }))
 }
 
-pub(crate) async fn release_impl(s: &dyn ClientSession, req_value: Value, unavailable: Option<String>) -> Result<Value, acp::Error> {
-    let req: ReleaseReq = serde_json::from_value(req_value).map_err(crate::acp_error::invalid_params_from)?;
+pub(crate) async fn release_impl(
+    s: &dyn ClientSession,
+    req_value: Value,
+    unavailable: Option<String>,
+) -> Result<Value, acp::Error> {
+    let req: ReleaseReq =
+        serde_json::from_value(req_value).map_err(crate::acp_error::invalid_params_from)?;
     check_inbox(unavailable)?;
     check_opted_in(s)?;
     // The client holds the opaque id; the store is keyed by the peer's own id.
-    let key = s.snapshot().await.iter().find(|h| held_ref(&h.from, &h.message_id) == req.held_id).map(|h| h.message_id.clone());
+    let key = s
+        .snapshot()
+        .await
+        .iter()
+        .find(|h| held_ref(&h.from, &h.message_id) == req.held_id)
+        .map(|h| h.message_id.clone());
     let key = key.unwrap_or_else(|| req.held_id.clone());
     let shown = display_escape(&req.held_id, TEXT_CAP);
     match req.action.as_deref().unwrap_or("release") {
@@ -355,13 +430,19 @@ pub(crate) async fn release_impl(s: &dyn ClientSession, req_value: Value, unavai
                 ReleaseOutcome::Dropped(r) => ("dropped", None, Some(format!("{r:?}"))),
                 ReleaseOutcome::Expired => ("expired", None, None),
             };
-            Ok(json!({ "sessionId": req.session_id, "heldId": shown, "action": "release", "result": result, "expiresAt": expires_at, "reason": why }))
+            Ok(
+                json!({ "sessionId": req.session_id, "heldId": shown, "action": "release", "result": result, "expiresAt": expires_at, "reason": why }),
+            )
         }
         "refuse" => {
             s.refuse(&key, &req.token).await.map_err(release_err)?;
-            Ok(json!({ "sessionId": req.session_id, "heldId": shown, "action": "refuse", "result": "refused" }))
+            Ok(
+                json!({ "sessionId": req.session_id, "heldId": shown, "action": "refuse", "result": "refused" }),
+            )
         }
-        _ => Err(crate::acp_error::invalid_params("action must be release or refuse")),
+        _ => Err(crate::acp_error::invalid_params(
+            "action must be release or refuse",
+        )),
     }
 }
 
@@ -391,12 +472,25 @@ pub(crate) fn held_event(session_id: &str, h: &HeldSummary, total_held: usize) -
 pub(crate) fn notice_event(session_id: &str, n: &PeerNotice) -> Value {
     let escaped_id = display_escape(&n.message_id, TEXT_CAP);
     let held_id = (!n.message_id.is_empty()).then(|| held_ref(&n.from, &n.message_id));
-    let detail = n.detail.as_deref().filter(|_| !matches!(n.kind, NoticeKind::PeerTurnNoReply | NoticeKind::PeerTurnDeclined)).map(|d| display_escape(d, TEXT_CAP));
+    let detail = n
+        .detail
+        .as_deref()
+        .filter(|_| {
+            !matches!(
+                n.kind,
+                NoticeKind::PeerTurnNoReply | NoticeKind::PeerTurnDeclined
+            )
+        })
+        .map(|d| display_escape(d, TEXT_CAP));
     // 26-4: the sentence names the sender; `detail` is the sender's `name [ref]`, already escaped by the session with `display_escape`.
     let label = n.detail.as_deref().unwrap_or("a peer session");
     let turn_text = match &n.kind {
-        NoticeKind::PeerTurnNoReply => Some(format!("The model ended the turn started by a message from {label} without a reply.")),
-        NoticeKind::PeerTurnDeclined => Some(format!("The model declined to act on the message from {label}.")),
+        NoticeKind::PeerTurnNoReply => Some(format!(
+            "The model ended the turn started by a message from {label} without a reply."
+        )),
+        NoticeKind::PeerTurnDeclined => Some(format!(
+            "The model declined to act on the message from {label}."
+        )),
         _ => None,
     };
     let (kind, text): (&str, Option<&str>) = match &n.kind {
@@ -410,13 +504,17 @@ pub(crate) fn notice_event(session_id: &str, n: &PeerNotice) -> Value {
         ),
         NoticeKind::GuardKeptFeatureOff => (
             "peer_warning",
-            Some("this session was influenced by a peer message earlier; the guard stays on with peer messaging off"),
+            Some(
+                "this session was influenced by a peer message earlier; the guard stays on with peer messaging off",
+            ),
         ),
         NoticeKind::LaunderingRefused => (
             "peer_warning",
             Some("a tool request matched a denial carried by a peer message and was refused"),
         ),
-        NoticeKind::PeerTurnNoReply | NoticeKind::PeerTurnDeclined => ("peer_warning", turn_text.as_deref()),
+        NoticeKind::PeerTurnNoReply | NoticeKind::PeerTurnDeclined => {
+            ("peer_warning", turn_text.as_deref())
+        }
         #[allow(unreachable_patterns)]
         _ => ("peer_warning", Some("a peer messaging notice")),
     };
@@ -424,7 +522,11 @@ pub(crate) fn notice_event(session_id: &str, n: &PeerNotice) -> Value {
     if let Some(t) = text {
         update["text"] = json!(t);
         // The turn notices carry the sender in the sentence; a subject would only repeat the message id.
-        update["subject"] = json!(if turn_text.is_some() { String::new() } else { escaped_id });
+        update["subject"] = json!(if turn_text.is_some() {
+            String::new()
+        } else {
+            escaped_id
+        });
     }
     if matches!(n.kind, NoticeKind::Refused(_) | NoticeKind::ModelRefused) {
         update["senderTold"] = json!(n.told);
@@ -444,7 +546,15 @@ pub(crate) async fn pump_once(
     pending: &mut VecDeque<PeerNotice>,
     emit: &(dyn Fn(Value) + Send + Sync),
 ) {
-    pump_tick(s, session_id, known, pending, emit, &crate::peer_inbox::driver::remote_attached).await;
+    pump_tick(
+        s,
+        session_id,
+        known,
+        pending,
+        emit,
+        &crate::peer_inbox::driver::remote_attached,
+    )
+    .await;
 }
 
 /// Most notices the pump keeps while it may not emit (same size as the session's notice ring).
@@ -496,7 +606,9 @@ pub(crate) async fn pump_tick(
 static PUMPS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
 fn pumps() -> std::sync::MutexGuard<'static, HashSet<String>> {
-    PUMPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    PUMPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Start the event pump of an opted-in session (one per session). It lives as long as the session's OWN opt-in (a remote client
@@ -509,13 +621,21 @@ fn start_pump(agent: &MvpAgent, session_id: String, s: std::sync::Arc<dyn Client
     let gateway = agent.gateway.clone();
     let emit = move |params: Value| {
         if let Ok(raw) = serde_json::value::to_raw_value(&params) {
-            gateway.forward_fire_and_forget(acp::ExtNotification::new("fuigo/session_notification", raw.into()));
+            gateway.forward_fire_and_forget(acp::ExtNotification::new(
+                "fuigo/session_notification",
+                raw.into(),
+            ));
         }
     };
     tokio::spawn(run_pump(s, session_id, emit, PUMP_INTERVAL));
 }
 
-async fn run_pump(s: std::sync::Arc<dyn ClientSession>, session_id: String, emit: impl Fn(Value) + Send + Sync, interval: std::time::Duration) {
+async fn run_pump(
+    s: std::sync::Arc<dyn ClientSession>,
+    session_id: String,
+    emit: impl Fn(Value) + Send + Sync,
+    interval: std::time::Duration,
+) {
     let mut known = HashSet::new();
     let mut pending = VecDeque::new();
     loop {
@@ -548,7 +668,10 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .session_handle_waiting_for_load(&acp::SessionId::new(sid.clone()))
         .await
         .ok_or_else(|| crate::acp_error::invalid_params(format!("session not found: {sid}")))?;
-    let session: std::sync::Arc<dyn ClientSession> = std::sync::Arc::new(LiveSession { id: sid.clone(), handle });
+    let session: std::sync::Arc<dyn ClientSession> = std::sync::Arc::new(LiveSession {
+        id: sid.clone(),
+        handle,
+    });
     let unavailable = inbox_unavailable();
     let method = args.method.as_ref().trim_start_matches('_');
     let reply = match method {

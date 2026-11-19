@@ -71,7 +71,7 @@ set `FUIGO_TOOL_PRESENTATION=full` to override it on resume. An explicit process
 spelling that an earlier version of the scan missed (section 6).
 - An earlier Beast rp at `f818f894` failed tip fuigo-test-support `the_chosen_loopback_carries_paused_clock_io` from the released-port race. That race was fixed in `94487771` and verified below.
 The single predicate is `AuthBackend::may_receive_session` → `is_fuigo_api_bearer_url`. The session token
-**Date:** 2026-10-01 · **Parent:** `ac7bfe92` (strike/integration; rebased from `8d250586`, earlier `14cab7e7`) ·
+**Date:** 2026-10-01 · **Parent:** `ac7bfe92` (rebased from `8d250586`, earlier `14cab7e7`) ·
 Rows before `f4-*` ran on working copies or earlier commits of the round.
 Earlier admissible runs at `f16f1461` (first gate): both packages exit 0, empty sets, same counts, logs `8c4a3b0a...` (bin) and `cbe2e460...` (pager).
 subsection, with the field table and the 3 rule ids. Unknown rules still count as denials.

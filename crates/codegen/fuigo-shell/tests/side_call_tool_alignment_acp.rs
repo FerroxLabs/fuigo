@@ -14,7 +14,12 @@ use fuigo_test_support::{MockInferenceServer, ScriptedResponse, SseEvent};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
-const DEFERRED_MEDIA: [&str; 4] = ["image_gen", "image_edit", "image_to_video", "reference_to_video"];
+const DEFERRED_MEDIA: [&str; 4] = [
+    "image_gen",
+    "image_edit",
+    "image_to_video",
+    "reference_to_video",
+];
 
 fn reply_tool(name: &str, args: Value) -> ScriptedResponse {
     ScriptedResponse::sse(vec![
@@ -44,7 +49,10 @@ fn tool_names(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-async fn interactive_session(conn: &acp::ClientSideConnection, cwd: &std::path::Path) -> acp::SessionId {
+async fn interactive_session(
+    conn: &acp::ClientSideConnection,
+    cwd: &std::path::Path,
+) -> acp::SessionId {
     tokio::time::timeout(
         RPC_TIMEOUT,
         conn.new_session(
@@ -74,7 +82,9 @@ struct Captured {
 fn captured(mock: &MockInferenceServer, session: &acp::SessionId) -> Vec<Captured> {
     mock.requests()
         .into_iter()
-        .filter(|r| r.path == "/v1/chat/completions" && r.header("x-fuigo-session-id") == Some(&*session.0))
+        .filter(|r| {
+            r.path == "/v1/chat/completions" && r.header("x-fuigo-session-id") == Some(&*session.0)
+        })
         .filter_map(|r| {
             Some(Captured {
                 req_id: r.header("x-fuigo-req-id").unwrap_or_default().to_owned(),
@@ -96,7 +106,9 @@ async fn side_call_after(
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let requests = captured(mock, session);
-        if let Some(index) = (from..requests.len()).find(|&i| requests[i].req_id.starts_with(prefix)) {
+        if let Some(index) =
+            (from..requests.len()).find(|&i| requests[i].req_id.starts_with(prefix))
+        {
             let main = requests[..index]
                 .iter()
                 .rev()
@@ -107,7 +119,10 @@ async fn side_call_after(
         assert!(
             Instant::now() < deadline,
             "no {prefix} request arrived: {:?}",
-            requests.iter().map(|r| r.req_id.clone()).collect::<Vec<_>>()
+            requests
+                .iter()
+                .map(|r| r.req_id.clone())
+                .collect::<Vec<_>>()
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -117,7 +132,10 @@ fn assert_same_tools(side: &Value, main: &Value, what: &str) {
     let main_tools = main["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("{what}: main turn sent no tools"));
-    assert!(!main_tools.is_empty(), "{what}: main turn sent an empty tool list");
+    assert!(
+        !main_tools.is_empty(),
+        "{what}: main turn sent an empty tool list"
+    );
     assert_eq!(
         serde_json::to_string(&side["tools"]).unwrap(),
         serde_json::to_string(&main["tools"]).unwrap(),
@@ -150,7 +168,8 @@ fn cache_aligned_side_calls_replay_the_main_turn_tool_list() {
             unsafe { std::env::set_var("FUIGO_TOOL_PRESENTATION", mode) };
             let session = interactive_session(&conn, &cwd).await;
             prompt_turn(&conn, &session, "Reply DONE without using tools.").await;
-            let (index, summary, main) = side_call_after(&mock, &session, "fuigo-turn-summary-", 0).await;
+            let (index, summary, main) =
+                side_call_after(&mock, &session, "fuigo-turn-summary-", 0).await;
             assert_same_tools(&summary, &main, &format!("{mode} turn summary"));
             let offered = tool_names(&main);
             if mode == "adaptive" {
@@ -178,24 +197,42 @@ fn cache_aligned_side_calls_replay_the_main_turn_tool_list() {
         let session = interactive_session(&conn, &cwd).await;
         mock.enqueue_response(
             "/v1/chat/completions",
-            reply_tool("search_tool", json!({"query": "image_gen", "scope": "native"})),
+            reply_tool(
+                "search_tool",
+                json!({"query": "image_gen", "scope": "native"}),
+            ),
         );
-        prompt_turn(&conn, &session, "Discover the image tool without executing it, then finish.").await;
-        let (index, summary, main) = side_call_after(&mock, &session, "fuigo-turn-summary-", 0).await;
+        prompt_turn(
+            &conn,
+            &session,
+            "Discover the image tool without executing it, then finish.",
+        )
+        .await;
+        let (index, summary, main) =
+            side_call_after(&mock, &session, "fuigo-turn-summary-", 0).await;
         assert!(
             tool_names(&main).iter().any(|n| n == "image_gen"),
             "reveal did not reach the next main request: {:?}",
             tool_names(&main)
         );
         assert_same_tools(&summary, &main, "adaptive turn summary after native reveal");
-        ext_method(&conn, "fuigo/recap", json!({"sessionId": session.to_string()})).await;
-        let (index, recap, main) = side_call_after(&mock, &session, "fuigo-recap-", index + 1).await;
+        ext_method(
+            &conn,
+            "fuigo/recap",
+            json!({"sessionId": session.to_string()}),
+        )
+        .await;
+        let (index, recap, main) =
+            side_call_after(&mock, &session, "fuigo-recap-", index + 1).await;
         assert_same_tools(&recap, &main, "adaptive recap after native reveal");
 
         prompt_turn(
             &conn,
             &session,
-            &format!("Continuity fixture: {}", "completed observation; ".repeat(600)),
+            &format!(
+                "Continuity fixture: {}",
+                "completed observation; ".repeat(600)
+            ),
         )
         .await;
         ext_method(
@@ -207,7 +244,8 @@ fn cache_aligned_side_calls_replay_the_main_turn_tool_list() {
             }),
         )
         .await;
-        let (_, compaction, main) = side_call_after(&mock, &session, "fuigo-compact-", index + 1).await;
+        let (_, compaction, main) =
+            side_call_after(&mock, &session, "fuigo-compact-", index + 1).await;
         assert_same_tools(&compaction, &main, "adaptive compaction");
     });
 }

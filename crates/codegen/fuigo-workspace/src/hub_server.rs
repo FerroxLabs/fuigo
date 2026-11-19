@@ -1344,7 +1344,10 @@ pub(crate) fn refuse_saved_key_in_configured_servers(
     configs
         .into_iter()
         .filter_map(|s| {
-            fuigo_config::key_naming::refuse_key_references_in_server_value(s, "configured over the workspace RPC")
+            fuigo_config::key_naming::refuse_key_references_in_server_value(
+                s,
+                "configured over the workspace RPC",
+            )
         })
         .collect()
 }

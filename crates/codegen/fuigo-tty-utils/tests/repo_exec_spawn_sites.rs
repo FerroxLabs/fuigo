@@ -9,7 +9,11 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 
 /// Crates that are test support (never shipped), skipped whole.
-const SKIPPED_CRATES: &[&str] = &["fuigo-test-support", "fuigo-test-utils", "fuigo-pager-pty-harness"];
+const SKIPPED_CRATES: &[&str] = &[
+    "fuigo-test-support",
+    "fuigo-test-utils",
+    "fuigo-pager-pty-harness",
+];
 
 /// The only files that implement the plugin install/publish commands the user typed (`git_command_user_invoked`).
 const USER_INVOKED_FILES: &[&str] = &[
@@ -30,10 +34,22 @@ const GIT_BIN_PATH_READS: &[(&str, &str)] = &[(
 
 /// Binary entries that must install the process judge before anything spawns.
 const JUDGE_INSTALLERS: &[(&str, &str)] = &[
-    ("crates/codegen/fuigo-pager-bin/src/main.rs", "install_process_judges"),
-    ("crates/codegen/fuigo-workspace/src/bin/workspace_server.rs", "install_process_judges"),
-    ("crates/codegen/fuigo-shell/src/bin/p15d-stdio-agent.rs", "install_process_judges"),
-    ("crates/codegen/fuigo-fast-worktree/src/bin/cli.rs", "install_repo_exec_judge"),
+    (
+        "crates/codegen/fuigo-pager-bin/src/main.rs",
+        "install_process_judges",
+    ),
+    (
+        "crates/codegen/fuigo-workspace/src/bin/workspace_server.rs",
+        "install_process_judges",
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/bin/p15d-stdio-agent.rs",
+        "install_process_judges",
+    ),
+    (
+        "crates/codegen/fuigo-fast-worktree/src/bin/cli.rs",
+        "install_repo_exec_judge",
+    ),
 ];
 
 fn repo_root() -> PathBuf {
@@ -79,22 +95,33 @@ fn lex(src: &str) -> (String, String) {
             blank(&mut code, i, j);
             blank(&mut shape, i, j);
             i = j;
-        } else if c == b'r' && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')) && {
-            let mut j = i + 1;
-            while j < n && b[j] == b'#' {
-                j += 1;
+        } else if c == b'r'
+            && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
+            && {
+                let mut j = i + 1;
+                while j < n && b[j] == b'#' {
+                    j += 1;
+                }
+                j < n && b[j] == b'"'
             }
-            j < n && b[j] == b'"'
-        } {
+        {
             let mut j = i + 1;
             let mut hashes = 0;
             while b[j] == b'#' {
                 hashes += 1;
                 j += 1;
             }
-            let close: Vec<u8> = std::iter::once(b'"').chain(std::iter::repeat_n(b'#', hashes)).collect();
-            let end = src[j + 1..].find(std::str::from_utf8(&close).unwrap()).map_or(n, |p| j + 1 + p + close.len());
-            blank(&mut shape, j + 1, end.saturating_sub(close.len()).max(j + 1));
+            let close: Vec<u8> = std::iter::once(b'"')
+                .chain(std::iter::repeat_n(b'#', hashes))
+                .collect();
+            let end = src[j + 1..]
+                .find(std::str::from_utf8(&close).unwrap())
+                .map_or(n, |p| j + 1 + p + close.len());
+            blank(
+                &mut shape,
+                j + 1,
+                end.saturating_sub(close.len()).max(j + 1),
+            );
             i = end;
         } else if c == b'"' {
             let mut j = i + 1;
@@ -127,7 +154,10 @@ fn lex(src: &str) -> (String, String) {
             i += 1;
         }
     }
-    (String::from_utf8(code).unwrap(), String::from_utf8(shape).unwrap())
+    (
+        String::from_utf8(code).unwrap(),
+        String::from_utf8(shape).unwrap(),
+    )
 }
 
 /// The byte range of the item following offset `from` (up to its closing `}` or terminating `;`), by `shape`.
@@ -170,7 +200,8 @@ struct Scanned {
 fn scan_file(src: &str) -> Scanned {
     let (mut code, mut shape) = lex(src);
     let attr_re = Regex::new(r"#!?\[cfg\([^\]\n]*\)\]").unwrap();
-    let mod_re = Regex::new(r"^\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;").unwrap();
+    let mod_re =
+        Regex::new(r"^\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;").unwrap();
     let mut test_mods = Vec::new();
     let mut whole_file_test = false;
     let mut blanks: Vec<(usize, usize)> = Vec::new();
@@ -204,22 +235,38 @@ fn scan_file(src: &str) -> Scanned {
             *v = String::from_utf8(bytes).unwrap();
         }
     }
-    Scanned { code, shape, test_mods, whole_file_test }
+    Scanned {
+        code,
+        shape,
+        test_mods,
+        whole_file_test,
+    }
 }
 
 fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(read) = std::fs::read_dir(dir) else { return };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = read.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let p = e.path();
         let name = e.file_name().to_string_lossy().to_string();
         if p.is_dir() {
-            if name == "tests" || name == "benches" || name == "examples" || name == "target" || name.ends_with("_tests") {
+            if name == "tests"
+                || name == "benches"
+                || name == "examples"
+                || name == "target"
+                || name.ends_with("_tests")
+            {
                 continue;
             }
             collect_rs(&p, out);
-        } else if name.ends_with(".rs") && !name.ends_with("_tests.rs") && name != "build.rs" && name != "tests.rs" {
+        } else if name.ends_with(".rs")
+            && !name.ends_with("_tests.rs")
+            && name != "build.rs"
+            && name != "tests.rs"
+        {
             out.push(p);
         }
     }
@@ -234,7 +281,10 @@ fn production_sources() -> Vec<Source> {
     let root = repo_root();
     let mut files = Vec::new();
     for group in ["crates/codegen", "crates/common"] {
-        let mut crates: Vec<_> = std::fs::read_dir(root.join(group)).expect(group).flatten().collect();
+        let mut crates: Vec<_> = std::fs::read_dir(root.join(group))
+            .expect(group)
+            .flatten()
+            .collect();
         crates.sort_by_key(|e| e.file_name());
         for c in crates {
             let name = c.file_name().to_string_lossy().to_string();
@@ -246,14 +296,21 @@ fn production_sources() -> Vec<Source> {
     }
     let mut scanned: Vec<(PathBuf, Scanned)> = Vec::new();
     for f in files {
-        let rel = f.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        let rel = f
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         // The judged builders live here; test-only binaries are not shipped.
         if rel.starts_with("crates/codegen/fuigo-tty-utils/src/")
-            || (rel.contains("/src/bin/") && rel.rsplit('/').next().is_some_and(|n| n.contains("bench")))
+            || (rel.contains("/src/bin/")
+                && rel.rsplit('/').next().is_some_and(|n| n.contains("bench")))
         {
             continue;
         }
-        let Ok(src) = std::fs::read_to_string(&f) else { continue };
+        let Ok(src) = std::fs::read_to_string(&f) else {
+            continue;
+        };
         scanned.push((f, scan_file(&src)));
     }
     // Files and directories only reached through `#[cfg(test)] mod name;`.
@@ -262,7 +319,11 @@ fn production_sources() -> Vec<Source> {
     for (f, s) in &scanned {
         let stem = f.file_stem().unwrap().to_string_lossy().to_string();
         let parent = f.parent().unwrap();
-        let base = if matches!(stem.as_str(), "mod" | "lib" | "main") { parent.to_path_buf() } else { parent.join(&stem) };
+        let base = if matches!(stem.as_str(), "mod" | "lib" | "main") {
+            parent.to_path_buf()
+        } else {
+            parent.join(&stem)
+        };
         for m in &s.test_mods {
             skipped_files.insert(base.join(format!("{m}.rs")));
             skipped_files.insert(base.join(m).join("mod.rs"));
@@ -274,8 +335,17 @@ fn production_sources() -> Vec<Source> {
     }
     scanned
         .into_iter()
-        .filter(|(f, _)| !skipped_files.contains(f) && !skipped_dirs.iter().any(|d| f.starts_with(d)))
-        .map(|(f, scanned)| Source { rel: f.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"), scanned })
+        .filter(|(f, _)| {
+            !skipped_files.contains(f) && !skipped_dirs.iter().any(|d| f.starts_with(d))
+        })
+        .map(|(f, scanned)| Source {
+            rel: f
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/"),
+            scanned,
+        })
         .collect()
 }
 
@@ -290,9 +360,19 @@ fn line_text(text: &str, line: usize) -> String {
 #[test]
 fn the_scanner_sees_the_codebase() {
     let sources = production_sources();
-    assert!(sources.len() > 500, "scanned only {} files; the scan is not reaching the crates", sources.len());
-    for expect in ["crates/codegen/fuigo-workspace/src/session/git.rs", "crates/codegen/fuigo-fast-worktree/src/sync.rs"] {
-        assert!(sources.iter().any(|s| s.rel == expect), "{expect} was not scanned");
+    assert!(
+        sources.len() > 500,
+        "scanned only {} files; the scan is not reaching the crates",
+        sources.len()
+    );
+    for expect in [
+        "crates/codegen/fuigo-workspace/src/session/git.rs",
+        "crates/codegen/fuigo-fast-worktree/src/sync.rs",
+    ] {
+        assert!(
+            sources.iter().any(|s| s.rel == expect),
+            "{expect} was not scanned"
+        );
     }
 }
 
@@ -321,7 +401,8 @@ struct Rules {
 
 const JUDGED: &str = "git_command_in|git_command_locking_in|git_command_at_in|jj_command_in|direnv_command_in|git_command_for_worktree|git_command_locking_for_worktree";
 
-static RULES: std::sync::LazyLock<Rules> = std::sync::LazyLock::new(|| Rules {
+static RULES: std::sync::LazyLock<Rules> = std::sync::LazyLock::new(|| {
+    Rules {
     raw_literal: Regex::new(r#"Command\s*::\s*new\s*\(\s*"(?:git|jj|direnv)(?:\.exe)?"\s*\)"#).unwrap(),
     raw_expr: Regex::new(r#"Command\s*::\s*new\s*\(\s*([^"\s)][^)]*)\)"#).unwrap(),
     names_tool: Regex::new(r"(^|[^A-Za-z0-9])(git|jj|direnv)($|[^A-Za-z0-9])").unwrap(),
@@ -338,6 +419,7 @@ static RULES: std::sync::LazyLock<Rules> = std::sync::LazyLock::new(|| Rules {
         r"(?:{JUDGED})\s*\([^;]*?\)\s*(?:\?|\.map_err\([^;]*?\)\?|\.ok\(\)|\.expect\([^;]*?\))?\s*\.current_dir\s*\("
     ))
     .unwrap(),
+}
 });
 
 /// Every violation in one scanned file, as `path:line: text [why]`.
@@ -355,7 +437,10 @@ fn violations_in(rel: &str, scanned: &Scanned) -> Vec<String> {
     }
     for c in rules.raw_expr.captures_iter(code) {
         if rules.names_tool.is_match(&c[1]) {
-            report(c.get(0).unwrap().start(), "Command::new on an expression naming git/jj/direnv");
+            report(
+                c.get(0).unwrap().start(),
+                "Command::new on an expression naming git/jj/direnv",
+            );
         }
     }
     for m in rules.git_bin_call.find_iter(code) {
@@ -371,7 +456,10 @@ fn violations_in(rel: &str, scanned: &Scanned) -> Vec<String> {
     }
     if !USER_INVOKED_FILES.contains(&rel) {
         for m in rules.user_invoked.find_iter(code) {
-            report(m.start(), "user-invoked git builder outside the install/publish files");
+            report(
+                m.start(),
+                "user-invoked git builder outside the install/publish files",
+            );
         }
     }
     if !GLOBAL_GIT_FILES.contains(&rel) {
@@ -398,9 +486,16 @@ fn violations_in(rel: &str, scanned: &Scanned) -> Vec<String> {
                 }
             }
         }
-        let retarget = Regex::new(&format!(r"\b{}\s*\.\s*current_dir\s*\(", regex::escape(&c[1]))).unwrap();
+        let retarget = Regex::new(&format!(
+            r"\b{}\s*\.\s*current_dir\s*\(",
+            regex::escape(&c[1])
+        ))
+        .unwrap();
         if let Some(m) = retarget.find(&code[at..end]) {
-            report(at + m.start(), "current_dir on a variable bound from a judged builder");
+            report(
+                at + m.start(),
+                "current_dir on a variable bound from a judged builder",
+            );
         }
     }
     violations
@@ -449,13 +544,26 @@ fn every_rule_fires_on_a_known_bad_snippet() {
         "#[cfg(test)]\nmod tests { fn t() { Command::new(\"git\"); } }",
         "fn f() { Command::new(\"github\"); Command::new(program); }",
     ] {
-        assert!(bad(src).is_empty(), "unexpected violation for: {src}: {:?}", bad(src));
+        assert!(
+            bad(src).is_empty(),
+            "unexpected violation for: {src}: {:?}",
+            bad(src)
+        );
     }
-    let allowed = violations_in(USER_INVOKED_FILES[0], &scan_file("fn f() { git_command_user_invoked(d); }"));
+    let allowed = violations_in(
+        USER_INVOKED_FILES[0],
+        &scan_file("fn f() { git_command_user_invoked(d); }"),
+    );
     assert!(allowed.is_empty(), "{allowed:?}");
-    let allowed = violations_in(GLOBAL_GIT_FILES[0], &scan_file("fn f() { git_command_global(); }"));
+    let allowed = violations_in(
+        GLOBAL_GIT_FILES[0],
+        &scan_file("fn f() { git_command_global(); }"),
+    );
     assert!(allowed.is_empty(), "{allowed:?}");
-    let allowed = violations_in(GIT_BIN_PATH_READS[0].0, &scan_file("fn f() { env::var_os(\"GIT_BIN_PATH\"); }"));
+    let allowed = violations_in(
+        GIT_BIN_PATH_READS[0].0,
+        &scan_file("fn f() { env::var_os(\"GIT_BIN_PATH\"); }"),
+    );
     assert!(allowed.is_empty(), "{allowed:?}");
 }
 
@@ -470,5 +578,9 @@ fn every_binary_entry_installs_the_judge() {
             missing.push(format!("{rel}:1: never calls {installer}"));
         }
     }
-    assert!(missing.is_empty(), "binary entries without the judge:\n{}", missing.join("\n"));
+    assert!(
+        missing.is_empty(),
+        "binary entries without the judge:\n{}",
+        missing.join("\n")
+    );
 }

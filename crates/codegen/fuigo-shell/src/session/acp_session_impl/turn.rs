@@ -183,7 +183,10 @@ pub(super) fn turn_end_of(
 ) -> crate::session::execution_state::TurnEnd {
     use crate::session::execution_state::TurnEnd;
     match result {
-        Ok(TurnOutcome::Completed { stop: CompletedStop::EndTurn, .. }) => TurnEnd::Succeeded,
+        Ok(TurnOutcome::Completed {
+            stop: CompletedStop::EndTurn,
+            ..
+        }) => TurnEnd::Succeeded,
         Ok(TurnOutcome::Completed { .. })
         | Ok(TurnOutcome::Cancelled { .. })
         | Ok(TurnOutcome::StationarityEnded { .. }) => TurnEnd::Interrupted,
@@ -203,7 +206,10 @@ fn runtime_limit_passed() -> bool {
 /// P144. Whether the runtime limit has passed: the process deadline (`process_expired`), or the
 /// execution has no time left (`execution_remaining`: the earlier of its durable deadline and an
 /// inherited parent's, the bound the transport clamps each request to).
-fn deadline_passed(process_expired: bool, execution_remaining: Option<std::time::Duration>) -> bool {
+fn deadline_passed(
+    process_expired: bool,
+    execution_remaining: Option<std::time::Duration>,
+) -> bool {
     process_expired || execution_remaining.is_some_and(|remaining| remaining.is_zero())
 }
 
@@ -217,8 +223,13 @@ fn deadline_passed(process_expired: bool, execution_remaining: Option<std::time:
 fn provider_answered(err: &acp::Error) -> bool {
     use fuigo_sampler::SamplingErrorKind as K;
     let data = err.data.as_ref();
-    let text = |key: &str| data.and_then(|data| data.get(key)).and_then(serde_json::Value::as_str);
-    if err.code == acp::Error::auth_required().code || data.is_some_and(|data| data.get("http_status").is_some()) {
+    let text = |key: &str| {
+        data.and_then(|data| data.get(key))
+            .and_then(serde_json::Value::as_str)
+    };
+    if err.code == acp::Error::auth_required().code
+        || data.is_some_and(|data| data.get("http_status").is_some())
+    {
         return true;
     }
     let deadline_refusal = [text("message"), Some(err.message.as_str())]
@@ -241,7 +252,11 @@ fn ends_at_runtime_limit(deadline_passed: bool, result: &Result<TurnOutcome, acp
             Err(err) => {
                 !crate::acp_error::ExecutionBudgetDenial::is_budget_denial(err)
                     && !provider_answered(err)
-                    && err.data.as_ref().and_then(|data| data.get("error_kind")).and_then(serde_json::Value::as_str)
+                    && err
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("error_kind"))
+                        .and_then(serde_json::Value::as_str)
                         != Some(crate::acp_error::ERROR_KIND_EXECUTION_INCOMPLETE)
             }
             _ => false,
@@ -251,26 +266,50 @@ fn ends_at_runtime_limit(deadline_passed: bool, result: &Result<TurnOutcome, acp
 #[cfg(test)]
 mod runtime_limit_end_tests {
     use super::{TurnOutcome, ends_at_runtime_limit};
-    use crate::acp_error::{AcpErrorKind, ExecutionBudgetDenial, ExecutionBudgetRule, error_data_with_fields};
+    use crate::acp_error::{
+        AcpErrorKind, ExecutionBudgetDenial, ExecutionBudgetRule, error_data_with_fields,
+    };
     use agent_client_protocol as acp;
 
     #[test]
     fn a_cancelled_or_failed_turn_past_the_deadline_is_the_runtime_limit() {
-        let cancelled = || Ok(TurnOutcome::Cancelled { category: None, context: None });
+        let cancelled = || {
+            Ok(TurnOutcome::Cancelled {
+                category: None,
+                context: None,
+            })
+        };
         let failed = || Err(crate::acp_error::internal_error("request timed out"));
         assert!(ends_at_runtime_limit(true, &cancelled()));
         assert!(ends_at_runtime_limit(true, &failed()));
-        assert!(!ends_at_runtime_limit(false, &cancelled()), "no deadline passed: a cancel stays a cancel");
-        assert!(!ends_at_runtime_limit(false, &failed()), "no deadline passed: a failure stays a failure");
-        assert!(!ends_at_runtime_limit(true, &Ok(TurnOutcome::MaxTurnsReached { limit: 1 })), "--max-turns keeps its stop");
-        let typed = ExecutionBudgetDenial::without_token_figures(ExecutionBudgetRule::ModelCallLimit).to_acp_error();
-        assert!(!ends_at_runtime_limit(true, &Err(typed)), "an existing denial keeps its rule");
+        assert!(
+            !ends_at_runtime_limit(false, &cancelled()),
+            "no deadline passed: a cancel stays a cancel"
+        );
+        assert!(
+            !ends_at_runtime_limit(false, &failed()),
+            "no deadline passed: a failure stays a failure"
+        );
+        assert!(
+            !ends_at_runtime_limit(true, &Ok(TurnOutcome::MaxTurnsReached { limit: 1 })),
+            "--max-turns keeps its stop"
+        );
+        let typed =
+            ExecutionBudgetDenial::without_token_figures(ExecutionBudgetRule::ModelCallLimit)
+                .to_acp_error();
+        assert!(
+            !ends_at_runtime_limit(true, &Err(typed)),
+            "an existing denial keeps its rule"
+        );
         let receipt = acp::Error::internal_error().data(error_data_with_fields(
             AcpErrorKind::ExecutionIncomplete,
             "receipt",
             serde_json::json!({ "partial": true }),
         ));
-        assert!(!ends_at_runtime_limit(true, &Err(receipt)), "an execution receipt keeps its shape");
+        assert!(
+            !ends_at_runtime_limit(true, &Err(receipt)),
+            "an execution receipt keeps its shape"
+        );
     }
 
     /// P144 (Astra r2). A failure the provider answered with its own cause (a status it sent, an
@@ -283,27 +322,66 @@ mod runtime_limit_end_tests {
         use crate::sampling::error::terminal_error_data;
         use fuigo_sampler::SamplingErrorKind as K;
         let said = |message: &str, status: Option<u16>, kind: K| {
-            Err(acp::Error::internal_error().data(terminal_error_data(message.into(), status, kind)))
+            Err(acp::Error::internal_error().data(terminal_error_data(
+                message.into(),
+                status,
+                kind,
+            )))
         };
         let err = |status: Option<u16>, kind: K| said("provider said no", status, kind);
-        assert!(!ends_at_runtime_limit(true, &err(Some(500), K::Api)), "a status the provider sent");
-        assert!(!ends_at_runtime_limit(true, &err(None, K::Auth)), "an authentication refusal");
-        assert!(!ends_at_runtime_limit(true, &err(None, K::RateLimited)), "a rate limit");
-        let unauthorized = Err(acp::Error::auth_required().data(terminal_error_data("401".into(), None, K::Api)));
-        assert!(!ends_at_runtime_limit(true, &unauthorized), "a 401 is an authentication refusal");
+        assert!(
+            !ends_at_runtime_limit(true, &err(Some(500), K::Api)),
+            "a status the provider sent"
+        );
+        assert!(
+            !ends_at_runtime_limit(true, &err(None, K::Auth)),
+            "an authentication refusal"
+        );
+        assert!(
+            !ends_at_runtime_limit(true, &err(None, K::RateLimited)),
+            "a rate limit"
+        );
+        let unauthorized =
+            Err(acp::Error::auth_required().data(terminal_error_data("401".into(), None, K::Api)));
+        assert!(
+            !ends_at_runtime_limit(true, &unauthorized),
+            "a 401 is an authentication refusal"
+        );
         // Astra r3: a provider answer can arrive status-less (a server-sent stream error, an
         // encrypted-content 400, a workflow child's error); it is still the provider's own cause.
-        assert!(!ends_at_runtime_limit(true, &err(None, K::Api)), "a status-less provider answer");
-        assert!(!ends_at_runtime_limit(true, &err(None, K::Serialization)), "an unreadable provider answer");
-        assert!(ends_at_runtime_limit(true, &err(None, K::Http)), "a transport failure with no answer");
-        assert!(ends_at_runtime_limit(true, &err(None, K::IdleTimeout)), "a stream that went silent");
-        assert!(ends_at_runtime_limit(true, &err(None, K::Cancelled)), "a request cut short");
+        assert!(
+            !ends_at_runtime_limit(true, &err(None, K::Api)),
+            "a status-less provider answer"
+        );
+        assert!(
+            !ends_at_runtime_limit(true, &err(None, K::Serialization)),
+            "an unreadable provider answer"
+        );
+        assert!(
+            ends_at_runtime_limit(true, &err(None, K::Http)),
+            "a transport failure with no answer"
+        );
+        assert!(
+            ends_at_runtime_limit(true, &err(None, K::IdleTimeout)),
+            "a stream that went silent"
+        );
+        assert!(
+            ends_at_runtime_limit(true, &err(None, K::Cancelled)),
+            "a request cut short"
+        );
         for refusal in [
             "execution deadline exhausted before transport",
             "execution deadline exhausted during subscription authentication",
         ] {
-            let pre_transport = Err(acp::Error::invalid_params().data(terminal_error_data(refusal.into(), None, K::Api)));
-            assert!(ends_at_runtime_limit(true, &pre_transport), "the deadline's own refusal: {refusal}");
+            let pre_transport = Err(acp::Error::invalid_params().data(terminal_error_data(
+                refusal.into(),
+                None,
+                K::Api,
+            )));
+            assert!(
+                ends_at_runtime_limit(true, &pre_transport),
+                "the deadline's own refusal: {refusal}"
+            );
         }
     }
 
@@ -315,8 +393,14 @@ mod runtime_limit_end_tests {
         use super::deadline_passed;
         use std::time::Duration;
         assert!(deadline_passed(true, None), "the process deadline");
-        assert!(deadline_passed(false, Some(Duration::ZERO)), "the execution's own or inherited deadline");
-        assert!(!deadline_passed(false, Some(Duration::from_millis(1))), "time left");
+        assert!(
+            deadline_passed(false, Some(Duration::ZERO)),
+            "the execution's own or inherited deadline"
+        );
+        assert!(
+            !deadline_passed(false, Some(Duration::from_millis(1))),
+            "time left"
+        );
         assert!(!deadline_passed(false, None), "no deadline at all");
     }
 }
@@ -325,9 +409,17 @@ mod runtime_limit_end_tests {
 pub(super) fn turn_end_of_error(err: &acp::Error) -> crate::session::execution_state::TurnEnd {
     use crate::session::execution_state::TurnEnd;
     let bounded_execution = crate::acp_error::ExecutionBudgetDenial::is_budget_denial(err)
-        || err.data.as_ref().and_then(|data| data.get("error_kind")).and_then(serde_json::Value::as_str)
+        || err
+            .data
+            .as_ref()
+            .and_then(|data| data.get("error_kind"))
+            .and_then(serde_json::Value::as_str)
             == Some(crate::acp_error::ERROR_KIND_EXECUTION_INCOMPLETE);
-    if bounded_execution { TurnEnd::Stopped } else { TurnEnd::Interrupted }
+    if bounded_execution {
+        TurnEnd::Stopped
+    } else {
+        TurnEnd::Interrupted
+    }
 }
 
 fn user_echo_mode(prompt_id: &str, input_origin: &InputOrigin) -> UserEchoMode {
@@ -511,20 +603,31 @@ impl SessionActor {
         self: &Arc<Self>,
         request: TurnInputRequest,
     ) -> PromptTurnResult {
-        let terminal = self.refusal_prompt.lock().unwrap().state == fuigo_sampling_types::refusal::PromptState::Terminal;
-        let starts_prompt = matches!(request.input_origin.as_prompt_origin(), super::super::PromptOrigin::User)
-            || (self.startup_hints.parent_session_id.is_some()
-                && matches!(request.input_origin.as_prompt_origin(), super::super::PromptOrigin::ParentAgentMessage { .. }));
+        let terminal = self.refusal_prompt.lock().unwrap().state
+            == fuigo_sampling_types::refusal::PromptState::Terminal;
+        let starts_prompt = matches!(
+            request.input_origin.as_prompt_origin(),
+            super::super::PromptOrigin::User
+        ) || (self.startup_hints.parent_session_id.is_some()
+            && matches!(
+                request.input_origin.as_prompt_origin(),
+                super::super::PromptOrigin::ParentAgentMessage { .. }
+            ));
         if terminal && !starts_prompt {
             self.hold_terminal_wake(&request).await?;
-            if let Some(ack) = request.persist_ack { let _ = ack.send(()); }
+            if let Some(ack) = request.persist_ack {
+                let _ = ack.send(());
+            }
             return ok_end_turn(0, None);
         }
         if starts_prompt {
             self.clear_terminal_prompt()?;
         }
         *self.refusal_prompt.lock().unwrap() = fuigo_sampling_types::refusal::PromptSM::new(false);
-        super::sampler_turn::bind_refusal_prompt(&self.session_info.id.to_string(),&self.refusal_prompt);
+        super::sampler_turn::bind_refusal_prompt(
+            &self.session_info.id.to_string(),
+            &self.refusal_prompt,
+        );
         let _active = fuigo_telemetry::activity::TURNS_ACTIVE.enter();
         let TurnInputRequest {
             prompt_id,
@@ -643,8 +746,7 @@ impl SessionActor {
                     slash_commands::SkillSlashRewrite::RewriteToRun
                 };
                 let availability = self.command_availability().await;
-                let (workflow_registry, named_workflows) = self
-                    .named_workflow_snapshot();
+                let (workflow_registry, named_workflows) = self.named_workflow_snapshot();
                 let resolved = slash_commands::resolve_human_intent(
                     prompt_blocks,
                     &slash_skills,
@@ -754,7 +856,10 @@ impl SessionActor {
                                 vec![text_block(reminder)]
                             }
                             GoalResumeOutcome::Message(msg) => {
-                                self.persist_host_turn_user_echo(&original_prompt_text, &input_origin);
+                                self.persist_host_turn_user_echo(
+                                    &original_prompt_text,
+                                    &input_origin,
+                                );
                                 self.mark_front_message_committed().await;
                                 self.send_host_turn_slash_command_output(&msg).await;
                                 return ok_end_turn(0, None);
@@ -921,24 +1026,49 @@ impl SessionActor {
         let active_goal = self.goal_tracker.lock().status()
             == Some(crate::session::goal_tracker::GoalStatus::Active);
         let _execution = if crate::session::execution_state::should_track_execution(
-            budget.is_some(), active_goal, self.max_turns.is_some(),
+            budget.is_some(),
+            active_goal,
+            self.max_turns.is_some(),
             self.tool_context.task_output_token_budget.is_some(),
             self.startup_hints.execution_parent_grant.is_some(),
         ) {
             {
-                let max_calls = budget.as_ref().and_then(|budget| budget.remaining_calls()).unwrap_or(u64::MAX);
-                let goal_id = self.goal_tracker.lock().snapshot()
+                let max_calls = budget
+                    .as_ref()
+                    .and_then(|budget| budget.remaining_calls())
+                    .unwrap_or(u64::MAX);
+                let goal_id = self
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
                     .filter(|goal| goal.status == crate::session::goal_tracker::GoalStatus::Active)
                     .map(|goal| goal.goal_id.clone());
-                let deadline_ms = budget.as_ref().and_then(|budget| budget.remaining()).map(|remaining| chrono::Utc::now().timestamp_millis()
-                    .saturating_add(i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX)));
+                let deadline_ms =
+                    budget
+                        .as_ref()
+                        .and_then(|budget| budget.remaining())
+                        .map(|remaining| {
+                            chrono::Utc::now().timestamp_millis().saturating_add(
+                                i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX),
+                            )
+                        });
                 let limits = {
                     let tracker = self.goal_tracker.lock();
-                    let goal = tracker.snapshot().filter(|goal| goal.status == crate::session::goal_tracker::GoalStatus::Active);
+                    let goal = tracker.snapshot().filter(|goal| {
+                        goal.status == crate::session::goal_tracker::GoalStatus::Active
+                    });
                     crate::session::execution_state::TokenLimits {
-                        total: goal.and_then(|goal| goal.token_budget).and_then(|limit| u64::try_from(limit).ok()),
-                        initial_total: goal.map(|goal| goal.tokens_used_high_water.max(0) as u64).unwrap_or(0),
-                        output: self.tool_context.task_output_token_budget.as_ref().and_then(|budget| budget.remaining()),
+                        total: goal
+                            .and_then(|goal| goal.token_budget)
+                            .and_then(|limit| u64::try_from(limit).ok()),
+                        initial_total: goal
+                            .map(|goal| goal.tokens_used_high_water.max(0) as u64)
+                            .unwrap_or(0),
+                        output: self
+                            .tool_context
+                            .task_output_token_budget
+                            .as_ref()
+                            .and_then(|budget| budget.remaining()),
                     }
                 };
                 // `max_tool_rounds` is the durable mirror of `--max-turns`, so it carries the SAME
@@ -958,15 +1088,38 @@ impl SessionActor {
                 let parent_grant = self.startup_hints.execution_parent_grant.clone();
                 let tx = &self.notifications.persistence_tx;
                 let opened = match &goal_id {
-                    Some(goal_id) => crate::session::execution_state::Execution::open_goal(
-                        tx, &session_id, goal_id, prompt_id, max_calls, deadline_ms, max_tool_rounds, limits, parent_grant,
-                    ).await,
-                    None => crate::session::execution_state::Execution::open(
-                        tx, &session_id, prompt_id, prompt_id, max_calls, deadline_ms, max_tool_rounds, limits, parent_grant,
-                    ).await,
+                    Some(goal_id) => {
+                        crate::session::execution_state::Execution::open_goal(
+                            tx,
+                            &session_id,
+                            goal_id,
+                            prompt_id,
+                            max_calls,
+                            deadline_ms,
+                            max_tool_rounds,
+                            limits,
+                            parent_grant,
+                        )
+                        .await
+                    }
+                    None => {
+                        crate::session::execution_state::Execution::open(
+                            tx,
+                            &session_id,
+                            prompt_id,
+                            prompt_id,
+                            max_calls,
+                            deadline_ms,
+                            max_tool_rounds,
+                            limits,
+                            parent_grant,
+                        )
+                        .await
+                    }
                 };
                 Some(opened.map_err(|error| {
-                    if let Some(denial) = crate::session::execution_state::budget_denial_of(&error) {
+                    if let Some(denial) = crate::session::execution_state::budget_denial_of(&error)
+                    {
                         // A spent limit (P44, P89): a denial, not a storage failure.
                         return denial.to_acp_error();
                     }
@@ -976,7 +1129,9 @@ impl SessionActor {
                     crate::acp_error::session_storage("Execution state could not be made durable")
                 })?)
             }
-        } else { None };
+        } else {
+            None
+        };
         let mut chunk_meta = serde_json::Map::new();
         chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
         chunk_meta.insert(
@@ -1011,7 +1166,8 @@ impl SessionActor {
             InputAuthority::ModelAuthoredUntrusted | InputAuthority::PeerUntrusted
         ) || matches!(
             input_origin.as_prompt_origin(),
-            super::super::PromptOrigin::SubagentTask | super::super::PromptOrigin::UnverifiedScheduled
+            super::super::PromptOrigin::SubagentTask
+                | super::super::PromptOrigin::UnverifiedScheduled
         ) {
             let prompt_gate_verdict = self
                 .dispatch_prompt_submit_hook(
@@ -1072,8 +1228,9 @@ impl SessionActor {
             // The session's snapshot lock is held for the turn start, from before the first echo until the chat item is
             // written and flushed: the guard's drop ends it on every exit (an invalid prompt, a failed image save, a cancel,
             // a panic), so a fork never waits on a turn that is gone (P135, K17).
-            let snapshot_turn =
-                crate::session::persistence::SnapshotTurn::begin(&self.notifications.persistence_tx);
+            let snapshot_turn = crate::session::persistence::SnapshotTurn::begin(
+                &self.notifications.persistence_tx,
+            );
             let echo_mode = user_echo_mode(prompt_id, &input_origin);
             for block in prompt_blocks.iter() {
                 let update = acp::SessionUpdate::UserMessageChunk(
@@ -1150,39 +1307,40 @@ impl SessionActor {
                 .normalize_images_with_notices(&mut context, raw_images, is_cursor)
                 .await;
             // A peer body is text only: no inline base64 image extraction.
-            let (query, extra_images) = if !self.is_cursor_harness() && !input_origin.as_prompt_origin().is_peer() {
-                let extraction = fuigo_tools::util::base64_images::extract_base64_images(query);
-                if extraction.images.is_empty() {
-                    (extraction.text, Vec::new())
-                } else {
-                    let cleaned_text = extraction.text;
-                    let count = extraction.images.len();
-                    tracing::info!(
-                        session_id = %self.session_info.id,
-                        count,
-                        "base64 images extracted from user query",
-                    );
-                    let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
-                        .images
-                        .into_iter()
-                        .map(|img| {
-                            agent_client_protocol::ImageContent::new(img.data, img.mime_type)
-                        })
-                        .collect();
-                    let nr =
-                        crate::session::image_normalize::normalize_images(acp_imgs, false).await;
-                    if !nr.re_encode_fallbacks.is_empty() {
-                        tracing::warn!(
+            let (query, extra_images) =
+                if !self.is_cursor_harness() && !input_origin.as_prompt_origin().is_peer() {
+                    let extraction = fuigo_tools::util::base64_images::extract_base64_images(query);
+                    if extraction.images.is_empty() {
+                        (extraction.text, Vec::new())
+                    } else {
+                        let cleaned_text = extraction.text;
+                        let count = extraction.images.len();
+                        tracing::info!(
                             session_id = %self.session_info.id,
-                            notes = %nr.re_encode_fallbacks.join(" "),
-                            "Extracted user query image kept original after re-encode failure",
+                            count,
+                            "base64 images extracted from user query",
                         );
+                        let acp_imgs: Vec<agent_client_protocol::ImageContent> = extraction
+                            .images
+                            .into_iter()
+                            .map(|img| {
+                                agent_client_protocol::ImageContent::new(img.data, img.mime_type)
+                            })
+                            .collect();
+                        let nr = crate::session::image_normalize::normalize_images(acp_imgs, false)
+                            .await;
+                        if !nr.re_encode_fallbacks.is_empty() {
+                            tracing::warn!(
+                                session_id = %self.session_info.id,
+                                notes = %nr.re_encode_fallbacks.join(" "),
+                                "Extracted user query image kept original after re-encode failure",
+                            );
+                        }
+                        (cleaned_text, nr.images)
                     }
-                    (cleaned_text, nr.images)
-                }
-            } else {
-                (query, Vec::new())
-            };
+                } else {
+                    (query, Vec::new())
+                };
             let assembled = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(
                 &context,
                 &query,
@@ -1275,7 +1433,9 @@ impl SessionActor {
                     .await?
             } else {
                 let writer = self.rebuild_spec.session_writer.as_ref().ok_or_else(|| {
-                    crate::acp_error::session_storage("no session writer: the images cannot be saved".to_string())
+                    crate::acp_error::session_storage(
+                        "no session writer: the images cannot be saved".to_string(),
+                    )
                 })?;
                 crate::session::image_describe::persist_and_prepend_image_files(
                     writer,
@@ -1469,8 +1629,7 @@ impl SessionActor {
                     let id_says_synthetic = id_origin.is_synthetic()
                         && input_origin.is_synthetic()
                         && !matches!(id_origin, crate::session::PromptOrigin::PeerMessage { .. });
-                    if id_says_synthetic || !self.has_pending_goal_continuation().await
-                    {
+                    if id_says_synthetic || !self.has_pending_goal_continuation().await {
                         let decision = if self.goal_runs_on_workflow_engine() {
                             self.run_goal_round_end().await
                         } else {
@@ -1834,21 +1993,45 @@ impl SessionActor {
         let usage = self.freeze_prompt_usage(prompt_id).await;
         self.persist_live_usage().await;
         if let Some(execution) = &_execution {
-            let state = execution.snapshot().await.map_err(|_| crate::acp_error::session_storage("Execution state unavailable"))?;
-            let goal_active = self.goal_tracker.lock().status() == Some(crate::session::goal_tracker::GoalStatus::Active);
-            let succeeded = matches!(&result, Ok(TurnOutcome::Completed { stop: CompletedStop::EndTurn, .. }));
-            if crate::session::execution_state::should_terminalize(goal_active, succeeded, state.phase) {
-                execution.record_edited_paths(self.chat_state_handle.get_agent_edited_paths().await).await
-                    .map_err(|_| crate::acp_error::session_storage("Execution evidence not durable"))?;
-                let receipt = execution.terminal_after(turn_end_of(&result)).await
-                    .map_err(|_| crate::acp_error::session_storage("Execution terminal receipt not durable"))?;
+            let state = execution
+                .snapshot()
+                .await
+                .map_err(|_| crate::acp_error::session_storage("Execution state unavailable"))?;
+            let goal_active = self.goal_tracker.lock().status()
+                == Some(crate::session::goal_tracker::GoalStatus::Active);
+            let succeeded = matches!(
+                &result,
+                Ok(TurnOutcome::Completed {
+                    stop: CompletedStop::EndTurn,
+                    ..
+                })
+            );
+            if crate::session::execution_state::should_terminalize(
+                goal_active,
+                succeeded,
+                state.phase,
+            ) {
+                execution
+                    .record_edited_paths(self.chat_state_handle.get_agent_edited_paths().await)
+                    .await
+                    .map_err(|_| {
+                        crate::acp_error::session_storage("Execution evidence not durable")
+                    })?;
+                let receipt = execution
+                    .terminal_after(turn_end_of(&result))
+                    .await
+                    .map_err(|_| {
+                        crate::acp_error::session_storage("Execution terminal receipt not durable")
+                    })?;
                 if receipt.partial && matches!(&result, Ok(TurnOutcome::Completed { .. })) {
                     // P144: a turn the loop finalized on a budget ended because that budget left no
                     // room for more work, so it reports as that budget's denial (`fuigo -p` exits 3,
                     // B4), still carrying the receipt. The budget was judged when the turn returned
                     // (`finalization_denial`), before cleanup, off the record still in `Finalizing`.
                     result = Err(match &finalization_denial {
-                        Some(denial) => crate::acp_error::execution_receipt_denial_error(&receipt, denial),
+                        Some(denial) => {
+                            crate::acp_error::execution_receipt_denial_error(&receipt, denial)
+                        }
                         None => crate::acp_error::execution_receipt_error(&receipt),
                     });
                 }
@@ -1860,13 +2043,22 @@ impl SessionActor {
         // The goal is stopped here, by the same transition the turn-end check would make, so the error that follows is not
         // read as an infrastructure failure that pauses a goal still active.
         if self.attach_non_interactive.get()
-            && matches!(&result, Ok(TurnOutcome::Completed { stop: CompletedStop::EndTurn, .. }))
+            && matches!(
+                &result,
+                Ok(TurnOutcome::Completed {
+                    stop: CompletedStop::EndTurn,
+                    ..
+                })
+            )
             && let Some(denial) = self.goal_budget_spent_denial().await
         {
             // The answer completed: say so on the error, with its structured output, so the headless run still
             // writes the answer in its one result document instead of an error document without it.
             let structured = match &result {
-                Ok(TurnOutcome::Completed { structured_output: Some(so), .. }) => Some(match so {
+                Ok(TurnOutcome::Completed {
+                    structured_output: Some(so),
+                    ..
+                }) => Some(match so {
                     Ok(v) => serde_json::json!({ "value": v }),
                     Err(e) => serde_json::json!({ "error": e }),
                 }),
@@ -1874,7 +2066,10 @@ impl SessionActor {
             };
             let mut err = denial.to_acp_error();
             if let Some(serde_json::Value::Object(data)) = err.data.as_mut() {
-                data.insert("answer_completed".to_string(), serde_json::Value::Bool(true));
+                data.insert(
+                    "answer_completed".to_string(),
+                    serde_json::Value::Bool(true),
+                );
                 if let Some(structured) = structured {
                     data.insert("answer_structured_output".to_string(), structured);
                 }
@@ -2323,7 +2518,11 @@ impl SessionActor {
                         max_retries: recovery.max_retries,
                         reason: format!("Auto-recovery: {error_desc}"),
                         error_type: None,
-                        upstream: result.as_ref().err().map(crate::sampling::error::upstream_from_acp).unwrap_or_default(),
+                        upstream: result
+                            .as_ref()
+                            .err()
+                            .map(crate::sampling::error::upstream_from_acp)
+                            .unwrap_or_default(),
                         verdicts: None,
                         discard_emitted: false,
                         message_id: None,
@@ -2690,7 +2889,10 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         salvage: &mut super::length_salvage::LengthSalvage,
     ) -> Result<TurnOutcome, acp::Error> {
-        let execution = crate::session::execution_state::Execution::for_prompt(&self.session_info.id.to_string(), req_id);
+        let execution = crate::session::execution_state::Execution::for_prompt(
+            &self.session_info.id.to_string(),
+            req_id,
+        );
         let mut memory_conversation = self.chat_state_handle.get_conversation().await;
         if crate::session::helpers::memory_context::invalidate_stale_memory_context(
             &mut memory_conversation,
@@ -2993,15 +3195,25 @@ impl SessionActor {
                     recall_only_tools,
                 );
             let finalize_execution = if let Some(execution) = &execution {
-                let state = execution.snapshot().await.map_err(|_| crate::acp_error::session_storage("Execution state unavailable"))?;
-                if state.phase == crate::session::execution_state::Phase::Terminal || state.completion_admitted {
-                    let receipt = execution.terminal(false).await.map_err(|_| crate::acp_error::session_storage("Execution terminal receipt unavailable"))?;
+                let state = execution.snapshot().await.map_err(|_| {
+                    crate::acp_error::session_storage("Execution state unavailable")
+                })?;
+                if state.phase == crate::session::execution_state::Phase::Terminal
+                    || state.completion_admitted
+                {
+                    let receipt = execution.terminal(false).await.map_err(|_| {
+                        crate::acp_error::session_storage("Execution terminal receipt unavailable")
+                    })?;
                     // P144: a continuation (a Stop hook, the goal loop) after the budget's reserved
                     // final answer ends here; that budget ended the run, so it is its typed denial too.
-                    return Err(match crate::session::execution_state::budget_finalization_denial(&state) {
-                        Some(denial) if receipt.partial => crate::acp_error::execution_receipt_denial_error(&receipt, &denial),
-                        _ => crate::acp_error::execution_receipt_error(&receipt),
-                    });
+                    return Err(
+                        match crate::session::execution_state::budget_finalization_denial(&state) {
+                            Some(denial) if receipt.partial => {
+                                crate::acp_error::execution_receipt_denial_error(&receipt, &denial)
+                            }
+                            _ => crate::acp_error::execution_receipt_error(&receipt),
+                        },
+                    );
                 }
                 // `--max-turns` is deliberately NOT one of these. Every bound listed here is an
                 // internal budget (call, deadline, token, durable tool-round), and finalizing on
@@ -3025,21 +3237,37 @@ impl SessionActor {
                 // reached on that path; it is bounded, pre-existing and unchanged here.
                 let finalizing = state.phase == crate::session::execution_state::Phase::Finalizing
                     || state.calls >= state.max_calls.saturating_sub(1)
-                    || state.max_tool_rounds.is_some_and(|limit| state.tool_rounds >= limit)
-                    || state.limits.total.is_some_and(|limit| state.total_tokens >= limit)
-                    || state.limits.output.is_some_and(|limit| state.output_tokens >= limit)
-                    || (state.unknown_usage && (state.limits.total.is_some() || state.limits.output.is_some()))
-                    || fuigo_sampler::execution_budget::process_budget().ok().flatten().is_some_and(|b| b.working_capacity_exhausted());
+                    || state
+                        .max_tool_rounds
+                        .is_some_and(|limit| state.tool_rounds >= limit)
+                    || state
+                        .limits
+                        .total
+                        .is_some_and(|limit| state.total_tokens >= limit)
+                    || state
+                        .limits
+                        .output
+                        .is_some_and(|limit| state.output_tokens >= limit)
+                    || (state.unknown_usage
+                        && (state.limits.total.is_some() || state.limits.output.is_some()))
+                    || fuigo_sampler::execution_budget::process_budget()
+                        .ok()
+                        .flatten()
+                        .is_some_and(|b| b.working_capacity_exhausted());
                 if finalizing || finalize_recall {
                     let finalized = if finalize_recall && !finalizing {
                         execution.finalize_recall().await
                     } else {
                         execution.finalize().await
                     };
-                    finalized.map_err(|_| crate::acp_error::session_storage("Execution finalization not durable"))?;
+                    finalized.map_err(|_| {
+                        crate::acp_error::session_storage("Execution finalization not durable")
+                    })?;
                 }
                 finalizing
-            } else { false };
+            } else {
+                false
+            };
             let finalize_response = finalize_recall || finalize_execution;
             let recall_exhausted = memory_recall_rounds >= 2;
             // OpenAI Responses profile: the advertised tool list never changes within a session, because every edit to
@@ -3097,23 +3325,71 @@ impl SessionActor {
             }
             // Presentation is applied AFTER recall-only classification and all
             // finalization/child restrictions. It cannot confer eligibility.
-            let adaptive = self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode() == "adaptive";
-            let deferred_native = if adaptive { self.adaptive_deferred_native(&effective_tools) } else { Default::default() };
+            let adaptive = self
+                .tool_metadata_snapshot
+                .lock()
+                .unwrap()
+                .native_presentation
+                .mode()
+                == "adaptive";
+            let deferred_native = if adaptive {
+                self.adaptive_deferred_native(&effective_tools)
+            } else {
+                Default::default()
+            };
             if adaptive {
-                let enabled = (constant_tool_list || !finalize_response) && effective_tools.iter().any(|tool| tool.name == "search_tool");
-                effective_tools = self.tool_metadata_snapshot.lock().unwrap().native_presentation.project(
-                    req_id, effective_tools, &deferred_native.keys().cloned().collect(), enabled,
-                );
+                let enabled = (constant_tool_list || !finalize_response)
+                    && effective_tools
+                        .iter()
+                        .any(|tool| tool.name == "search_tool");
+                effective_tools = self
+                    .tool_metadata_snapshot
+                    .lock()
+                    .unwrap()
+                    .native_presentation
+                    .project(
+                        req_id,
+                        effective_tools,
+                        &deferred_native.keys().cloned().collect(),
+                        enabled,
+                    );
             }
-            let presentation_checkpoint = self.tool_metadata_snapshot.lock().unwrap().native_presentation.pending_checkpoint();
+            let presentation_checkpoint = self
+                .tool_metadata_snapshot
+                .lock()
+                .unwrap()
+                .native_presentation
+                .pending_checkpoint();
             if let Some(hints) = presentation_checkpoint {
                 let (respond_to, receive) = tokio::sync::oneshot::channel();
-                self.notifications.persistence_tx.send(crate::session::persistence::PersistenceMsg::PresentationHints {
-                    hints: hints.clone(), respond_to,
-                }).map_err(|_| crate::acp_error::session_storage("Presentation persistence channel closed"))?;
-                receive.await.map_err(|_| crate::acp_error::session_storage("Presentation persistence acknowledgment lost"))?
-                    .map_err(|error| crate::acp_error::session_storage(format!("Presentation persistence failed: {error}")))?;
-                self.tool_metadata_snapshot.lock().unwrap().native_presentation.checkpoint_saved(hints);
+                self.notifications
+                    .persistence_tx
+                    .send(
+                        crate::session::persistence::PersistenceMsg::PresentationHints {
+                            hints: hints.clone(),
+                            respond_to,
+                        },
+                    )
+                    .map_err(|_| {
+                        crate::acp_error::session_storage("Presentation persistence channel closed")
+                    })?;
+                receive
+                    .await
+                    .map_err(|_| {
+                        crate::acp_error::session_storage(
+                            "Presentation persistence acknowledgment lost",
+                        )
+                    })?
+                    .map_err(|error| {
+                        crate::acp_error::session_storage(format!(
+                            "Presentation persistence failed: {error}"
+                        ))
+                    })?;
+                self.tool_metadata_snapshot
+                    .lock()
+                    .unwrap()
+                    .native_presentation
+                    .checkpoint_saved(hints);
             }
             // OpenAI-family models on the Responses backend get the request profile Codex uses: freeform
             // `apply_patch` (a grammar-constrained `custom` tool, no JSON escaping of the patch), `text.verbosity: low`
@@ -3121,7 +3397,8 @@ impl SessionActor {
             if openai_responses {
                 mark_freeform_apply_patch(&mut effective_tools);
             }
-            let advertised_native: std::collections::BTreeSet<String> = effective_tools.iter().map(|t| t.name.clone()).collect();
+            let advertised_native: std::collections::BTreeSet<String> =
+                effective_tools.iter().map(|t| t.name.clone()).collect();
             // Cache-aligned side calls replay exactly this list (see `side_call_tool_specs`)
             *self.last_sent_tool_specs.borrow_mut() = Some(effective_tools.clone());
             let build_req_start = std::time::Instant::now();
@@ -3172,10 +3449,17 @@ impl SessionActor {
             // P121 (K8): what this request's input is, so an Esc that leaves it unreported is charged at
             // least that much.
             if let Some(execution) = execution.as_ref() {
-                execution.note_request_context(fuigo_chat_state::estimate_conversation_tokens(&request.items));
+                execution.note_request_context(fuigo_chat_state::estimate_conversation_tokens(
+                    &request.items,
+                ));
             }
-            request.execution_admission = execution.as_ref().map(|e| e.begin_turn_request() as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>);
-            if finalize_response { request.purpose = fuigo_sampling_types::RequestPurpose::Completion; }
+            request.execution_admission = execution.as_ref().map(|e| {
+                e.begin_turn_request()
+                    as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>
+            });
+            if finalize_response {
+                request.purpose = fuigo_sampling_types::RequestPurpose::Completion;
+            }
             request.x_fuigo_session_id = Some(self.session_info.id.to_string());
             request.x_fuigo_turn_idx =
                 Some(self.chat_state_handle.get_prompt_index().await.to_string());
@@ -3208,7 +3492,9 @@ impl SessionActor {
                 // is rejected by chat-completions providers, so the choice is left open as before.
                 request.tool_choice = if constant_tool_list {
                     Some(if structured_output_tool && json_schema.is_some() {
-                        fuigo_sampling_types::ConversationToolChoice::Function(STRUCTURED_OUTPUT_TOOL.to_string())
+                        fuigo_sampling_types::ConversationToolChoice::Function(
+                            STRUCTURED_OUTPUT_TOOL.to_string(),
+                        )
                     } else {
                         fuigo_sampling_types::ConversationToolChoice::None
                     })
@@ -3220,23 +3506,37 @@ impl SessionActor {
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
-                .map_err(|message| match self.tool_context.task_output_budget_denial() {
-                    Some(denial) => denial.to_acp_error(),
-                    None => crate::acp_error::internal_error(message),
-                })?;
+                .map_err(
+                    |message| match self.tool_context.task_output_budget_denial() {
+                        Some(denial) => denial.to_acp_error(),
+                        None => crate::acp_error::internal_error(message),
+                    },
+                )?;
             if let Some(execution) = &execution {
-                let state = execution.snapshot().await.map_err(|_| crate::acp_error::session_storage("Execution token state unavailable"))?;
+                let state = execution.snapshot().await.map_err(|_| {
+                    crate::acp_error::session_storage("Execution token state unavailable")
+                })?;
                 if let Some(limit) = state.limits.output {
-                    let remaining = u32::try_from(limit.saturating_sub(state.output_tokens)).unwrap_or(u32::MAX);
+                    let remaining = u32::try_from(limit.saturating_sub(state.output_tokens))
+                        .unwrap_or(u32::MAX);
                     // Contract D.4: the same guard `admit_attempt` applies, caught one step earlier,
                     // so it reports as the same denial rather than a second, untyped shape.
                     if remaining == 0 {
-                        return Err(crate::session::execution_state::token_budget_denial(&state).map_or_else(
-                            || crate::acp_error::execution_incomplete("Execution output-token budget exhausted"),
-                            |denial| denial.to_acp_error(),
-                        ));
+                        return Err(crate::session::execution_state::token_budget_denial(&state)
+                            .map_or_else(
+                                || {
+                                    crate::acp_error::execution_incomplete(
+                                        "Execution output-token budget exhausted",
+                                    )
+                                },
+                                |denial| denial.to_acp_error(),
+                            ));
                     }
-                    request.max_output_tokens = Some(request.max_output_tokens.map_or(remaining, |configured| configured.min(remaining)));
+                    request.max_output_tokens = Some(
+                        request
+                            .max_output_tokens
+                            .map_or(remaining, |configured| configured.min(remaining)),
+                    );
                 }
             }
             if salvage.enabled() {
@@ -3340,7 +3640,11 @@ impl SessionActor {
                     self.tool_context.fail_task_output_usage_closed();
                     return Err(error);
                 }
-                Ok(SamplerTurnOutcome::RetryTransient { kind, status_code, upstream }) => {
+                Ok(SamplerTurnOutcome::RetryTransient {
+                    kind,
+                    status_code,
+                    upstream,
+                }) => {
                     // A server error closes the charged incident but proves nothing about a missing credential:
                     // keep the park so the next credential-less 401 re-parks without a fresh recovery dispatch
                     if matches!(kind, fuigo_sampler::SamplingErrorKind::Api) {
@@ -3431,7 +3735,10 @@ impl SessionActor {
                                              credential); retrying request"
                                         .to_string(),
                                     error_type: None,
-                                    upstream: fuigo_sampling_types::error::UpstreamError { http_status: Some(401), ..Default::default() },
+                                    upstream: fuigo_sampling_types::error::UpstreamError {
+                                        http_status: Some(401),
+                                        ..Default::default()
+                                    },
                                     verdicts: None,
                                     discard_emitted: false,
                                     message_id: None,
@@ -3439,8 +3746,12 @@ impl SessionActor {
                                 },
                             ))
                             .await;
-                            pace_uncharged_resubmit(store, self.auth_manager.as_deref(), super::auth_retry::paced(delay))
-                                .await;
+                            pace_uncharged_resubmit(
+                                store,
+                                self.auth_manager.as_deref(),
+                                super::auth_retry::paced(delay),
+                            )
+                            .await;
                             continue;
                         }
                         AuthRetryDecision::Backoff { attempt, delay } => {
@@ -3467,7 +3778,10 @@ impl SessionActor {
                                     reason: "Re-authenticated after 401; retrying request"
                                         .to_string(),
                                     error_type: None,
-                                    upstream: fuigo_sampling_types::error::UpstreamError { http_status: Some(401), ..Default::default() },
+                                    upstream: fuigo_sampling_types::error::UpstreamError {
+                                        http_status: Some(401),
+                                        ..Default::default()
+                                    },
                                     verdicts: None,
                                     discard_emitted: false,
                                     message_id: None,
@@ -3579,7 +3893,8 @@ impl SessionActor {
                     "tokens_per_sec": tokens_per_sec,
                 })),
             );
-            self.observe_compaction_validation(latency.last_attempt_total_tokens).await;
+            self.observe_compaction_validation(latency.last_attempt_total_tokens)
+                .await;
             if let Some(usage) = response.usage.as_ref() {
                 self.chat_state_handle
                     .record_token_usage(u64::from(usage.total_tokens));
@@ -3658,15 +3973,32 @@ impl SessionActor {
                 );
             }
             let mut tool_calls = response.tool_calls().to_vec();
-            if !deferred_native.is_empty() && tool_calls.iter().any(|call| deferred_native.contains_key(&call.name)) {
-                let current = self.present_tool_specs(self.prepare_tool_definitions().await.into_iter().map(ToolSpec::from).collect());
+            if !deferred_native.is_empty()
+                && tool_calls
+                    .iter()
+                    .any(|call| deferred_native.contains_key(&call.name))
+            {
+                let current = self.present_tool_specs(
+                    self.prepare_tool_definitions()
+                        .await
+                        .into_iter()
+                        .map(ToolSpec::from)
+                        .collect(),
+                );
                 for call in &tool_calls {
                     if let Some(expected) = deferred_native.get(&call.name) {
                         if !advertised_native.contains(&call.name) {
-                            return Err(crate::acp_error::internal_error("Native tool was not advertised in this request; discover its schema with search_tool scope=native before calling it"));
+                            return Err(crate::acp_error::internal_error(
+                                "Native tool was not advertised in this request; discover its schema with search_tool scope=native before calling it",
+                            ));
                         }
-                        if !current.iter().any(|tool| tool.name == call.name && crate::session::tool_presentation::fingerprint(tool) == *expected) {
-                            return Err(crate::acp_error::internal_error("Native tool schema changed during inference; refresh discovery before execution"));
+                        if !current.iter().any(|tool| {
+                            tool.name == call.name
+                                && crate::session::tool_presentation::fingerprint(tool) == *expected
+                        }) {
+                            return Err(crate::acp_error::internal_error(
+                                "Native tool schema changed during inference; refresh discovery before execution",
+                            ));
                         }
                     }
                 }
@@ -3684,11 +4016,14 @@ impl SessionActor {
                 if finalize_execution
                     && let Some(execution) = &execution
                     && let Ok(state) = execution.snapshot().await
-                    && let Some(denial) = crate::session::execution_state::budget_finalization_denial(&state)
+                    && let Some(denial) =
+                        crate::session::execution_state::budget_finalization_denial(&state)
                 {
                     return Err(denial.to_acp_error());
                 }
-                return Err(crate::acp_error::internal_error("Tool call rejected during finalization"));
+                return Err(crate::acp_error::internal_error(
+                    "Tool call rejected during finalization",
+                ));
             }
             let over_cap = self.media_gen_over_cap(&tool_calls);
             if fuigo_tools::media_gen_limits::should_resample_egregious(
@@ -4092,19 +4427,36 @@ impl SessionActor {
             // Memory tools stay advertised after the recall limit (a constant tool list); a call past the limit is
             // answered with an error result instead of running, so the model sees the limit without a failed turn.
             let tool_call_responses = if recall_exhausted && !finalize_response {
-                self.reject_memory_calls_after_limit(tool_call_responses).await?
+                self.reject_memory_calls_after_limit(tool_call_responses)
+                    .await?
             } else {
                 tool_call_responses
             };
-            let execution_tool_ids = tool_call_responses.iter().map(|call| call.id.clone()).collect::<Vec<_>>();
+            let execution_tool_ids = tool_call_responses
+                .iter()
+                .map(|call| call.id.clone())
+                .collect::<Vec<_>>();
             if let Some(execution) = &execution {
-                execution.tools(execution_tool_ids.clone()).await.map_err(|_| crate::acp_error::session_storage("Tool execution admission not durable or finalizing"))?;
+                execution
+                    .tools(execution_tool_ids.clone())
+                    .await
+                    .map_err(|_| {
+                        crate::acp_error::session_storage(
+                            "Tool execution admission not durable or finalizing",
+                        )
+                    })?;
             }
             let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
             if execute_tool_calls_result.is_ok()
                 && !matches!(&execute_tool_calls_result, Ok(ToolLoop::Cancelled))
-                && let Some(execution) = &execution {
-                execution.tools_settled(execution_tool_ids).await.map_err(|_| crate::acp_error::session_storage("Tool execution settlement not durable"))?;
+                && let Some(execution) = &execution
+            {
+                execution
+                    .tools_settled(execution_tool_ids)
+                    .await
+                    .map_err(|_| {
+                        crate::acp_error::session_storage("Tool execution settlement not durable")
+                    })?;
             }
             match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {

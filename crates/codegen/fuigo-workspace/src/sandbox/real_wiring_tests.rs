@@ -1279,7 +1279,10 @@ async fn off_starts_no_proxy_and_the_real_child_sees_no_sandbox() {
                 .unwrap_or_else(|| panic!("the shell's own argv is in the output: {text}"))
         };
         let head = argv_line("ARGV_HEAD=");
-        assert!(head.contains("-O extglob -c "), "the shell runs a -c script: {head}");
+        assert!(
+            head.contains("-O extglob -c "),
+            "the shell runs a -c script: {head}"
+        );
         let argv0 = head.split(' ').next().unwrap_or_default();
         assert!(
             argv0.ends_with("bash"),

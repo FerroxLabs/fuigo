@@ -52,7 +52,10 @@ async fn a_trust_grant_does_not_let_a_repo_plugin_replace_the_users_own_server()
         .to_string(),
     )
     .unwrap();
-    let cfg = DiscoveryConfig { enabled: vec!["corpplug".to_string()], ..Default::default() };
+    let cfg = DiscoveryConfig {
+        enabled: vec!["corpplug".to_string()],
+        ..Default::default()
+    };
     let compat = fuigo_tools::types::compat::CompatConfig::default();
     let handle = SharedPluginRegistryHandle::new(None, vec![]);
 
@@ -60,11 +63,17 @@ async fn a_trust_grant_does_not_let_a_repo_plugin_replace_the_users_own_server()
     crate::agent::folder_trust::record_for_test(repo.path(), false);
     let untrusted = handle.build_for_cwd(repo.path(), &cfg, &[], false);
     assert!(
-        !untrusted.as_deref().is_some_and(|r| r.active_plugins().iter().any(|p| p.name == "corpplug")),
+        !untrusted
+            .as_deref()
+            .is_some_and(|r| r.active_plugins().iter().any(|p| p.name == "corpplug")),
         "fixture: the repo plugin is inactive while the folder is untrusted"
     );
     let forwarded = crate::util::config::load_mcp_servers(repo.path(), &compat);
-    assert_eq!(command_of(&forwarded, "corp"), Some("p141-user-corp-server"), "fixture: the pager forwards the user's corp");
+    assert_eq!(
+        command_of(&forwarded, "corp"),
+        Some("p141-user-corp-server"),
+        "fixture: the pager forwards the user's corp"
+    );
     let ingress = crate::session::managed_mcp::admit_client_mcp_servers_for_seed(
         forwarded,
         repo.path(),
@@ -77,18 +86,22 @@ async fn a_trust_grant_does_not_let_a_repo_plugin_replace_the_users_own_server()
     crate::agent::folder_trust::record_for_test(repo.path(), true);
     let trusted = handle.build_for_cwd(repo.path(), &cfg, &[], true);
     assert!(
-        trusted.as_deref().is_some_and(|r| r.active_plugins().iter().any(|p| p.name == "corpplug")),
+        trusted
+            .as_deref()
+            .is_some_and(|r| r.active_plugins().iter().any(|p| p.name == "corpplug")),
         "fixture: the repo plugin is active once the folder is trusted"
     );
     // The grant's MCP merge (`reload_project_servers_after_grant`).
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    assert!(crate::session::managed_mcp::merge_and_send_managed_mcp_update_with_notices(
-        &tx,
-        repo.path(),
-        seed.clone(),
-        handle.snapshot().as_deref(),
-        &compat,
-    ));
+    assert!(
+        crate::session::managed_mcp::merge_and_send_managed_mcp_update_with_notices(
+            &tx,
+            repo.path(),
+            seed.clone(),
+            handle.snapshot().as_deref(),
+            &compat,
+        )
+    );
     let mut grant_update = None;
     while let Ok(cmd) = rx.try_recv() {
         if let crate::session::SessionCommand::UpdateMcpServers { mcp_servers, .. } = cmd {
@@ -96,7 +109,11 @@ async fn a_trust_grant_does_not_let_a_repo_plugin_replace_the_users_own_server()
         }
     }
     let grant_update = grant_update.expect("the grant sent an MCP update");
-    assert_eq!(command_of(&grant_update, "corp"), Some("p141-user-corp-server"), "grant merge: corp is not the user's");
+    assert_eq!(
+        command_of(&grant_update, "corp"),
+        Some("p141-user-corp-server"),
+        "grant merge: corp is not the user's"
+    );
 
     // Then `ReloadPlugins` with the registry built for the session's cwd on the granted verdict.
     let local = tokio::task::LocalSet::new();

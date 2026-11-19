@@ -705,8 +705,9 @@ pub(super) fn dispatch_send_btw(
 /// A side question with no agent view to ask in: its images go, and the user is told.
 fn drop_btw_images(app: &mut AppView, images: &mut Vec<crate::prompt_images::PastedImage>) {
     if !images.is_empty() {
-        app.pending_image_notices
-            .push(format!("{NO_SESSION_NOTICE} (attached image(s) were not sent)"));
+        app.pending_image_notices.push(format!(
+            "{NO_SESSION_NOTICE} (attached image(s) were not sent)"
+        ));
         app.flush_image_notices_if_root();
     }
     crate::prompt_images::drain_and_cleanup(images);
@@ -717,7 +718,9 @@ fn notify_btw(agent: &mut crate::app::agent_view::AgentView, minimal: bool, mess
     if minimal {
         agent
             .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::system(message.to_string()));
+            .push_block(crate::scrollback::block::RenderBlock::system(
+                message.to_string(),
+            ));
     } else {
         agent.show_toast(message);
     }
@@ -780,7 +783,10 @@ pub(super) fn start_side_question(
         } else {
             // A question still loading is replaced: stop its model call, and its late answer no longer matches
             if let Some(old) = agent.btw_request_id.take() {
-                effects.push(Effect::CancelBtw { session_id: session_id.clone(), request_id: old });
+                effects.push(Effect::CancelBtw {
+                    session_id: session_id.clone(),
+                    request_id: old,
+                });
             }
             agent.clear_btw_owned_selection();
             agent.btw_state = Some(crate::views::btw_overlay::BtwOverlayState::Loading {

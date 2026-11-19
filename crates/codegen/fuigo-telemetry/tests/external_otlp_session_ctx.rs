@@ -7,8 +7,8 @@ mod otlp_collector;
 
 use std::sync::Arc;
 
-use otlp_collector as col;
 use fuigo_telemetry::external;
+use otlp_collector as col;
 
 #[test]
 fn ambient_ctx_injects_session_turn_and_prompt_id() {
@@ -76,7 +76,8 @@ fn ambient_ctx_injects_session_turn_and_prompt_id() {
     );
 
     // ── Event carries session.id, turn_number, prompt.id, event.sequence ──
-    let prompt = col::find_event(&collected, "fuigo_code.user_prompt").expect("user_prompt present");
+    let prompt =
+        col::find_event(&collected, "fuigo_code.user_prompt").expect("user_prompt present");
     assert_eq!(
         prompt.attrs.get("session.id").and_then(|v| v.as_str()),
         Some("sess-ctx"),

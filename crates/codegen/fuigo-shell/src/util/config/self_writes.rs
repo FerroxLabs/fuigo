@@ -22,7 +22,10 @@ struct Ledger {
 
 // Tests run in parallel in one process: a per-thread ledger keeps them from seeing each other's writes.
 #[cfg(not(test))]
-static LEDGER: std::sync::Mutex<Ledger> = std::sync::Mutex::new(Ledger { seq: 0, entries: VecDeque::new() });
+static LEDGER: std::sync::Mutex<Ledger> = std::sync::Mutex::new(Ledger {
+    seq: 0,
+    entries: VecDeque::new(),
+});
 #[cfg(test)]
 thread_local! {
     static LEDGER: std::cell::RefCell<Ledger> = std::cell::RefCell::new(Ledger::default());
@@ -31,7 +34,9 @@ thread_local! {
 fn with<R>(f: impl FnOnce(&mut Ledger) -> R) -> R {
     #[cfg(not(test))]
     {
-        f(&mut LEDGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        f(&mut LEDGER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
     }
     #[cfg(test)]
     {
@@ -63,5 +68,10 @@ pub(crate) fn current_seq() -> u64 {
 
 /// The sequence number of the NEWEST entry if it is newer than `floor` and has this hash. Older entries never match.
 pub(crate) fn newest_matching_since(floor: u64, hash: &str) -> Option<u64> {
-    with(|l| l.entries.back().filter(|(s, h)| *s > floor && h == hash).map(|(s, _)| *s))
+    with(|l| {
+        l.entries
+            .back()
+            .filter(|(s, h)| *s > floor && h == hash)
+            .map(|(s, _)| *s)
+    })
 }

@@ -881,9 +881,18 @@ mod tests {
     #[test]
     fn feedback_common_headers_keep_identity_for_fluxrouter() {
         let client = FeedbackClient::new("https://api.fluxrouter.ai/v1", None);
-        let request = client.get("https://api.fluxrouter.ai/v1/feedback/config").build().unwrap();
-        assert_eq!(request.headers()[CLIENT_VERSION_HEADER], fuigo_version::VERSION);
-        let request = client.get("https://feedback.example/v1/feedback/config").build().unwrap();
+        let request = client
+            .get("https://api.fluxrouter.ai/v1/feedback/config")
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()[CLIENT_VERSION_HEADER],
+            fuigo_version::VERSION
+        );
+        let request = client
+            .get("https://feedback.example/v1/feedback/config")
+            .build()
+            .unwrap();
         assert!(!request.headers().contains_key(CLIENT_VERSION_HEADER));
     }
 
@@ -1149,7 +1158,10 @@ mod forbidden_tests {
 }
 
 /// Auth resolve and 401 recovery tests.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod auth_refresh_tests {
     use super::*;

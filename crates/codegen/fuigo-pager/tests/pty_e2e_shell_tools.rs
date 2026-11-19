@@ -26,8 +26,6 @@ mod edit_hl_inplace_refresh_pty;
 mod edit_merge_parallel_pty;
 #[path = "pty_e2e/edit_merge_sequential_pty.rs"]
 mod edit_merge_sequential_pty;
-#[path = "pty_e2e/rewind_restores_files_pty.rs"]
-mod rewind_restores_files_pty;
 #[path = "pty_e2e/file_path_with_space_emits_full_osc8_hyperlink.rs"]
 mod file_path_with_space_emits_full_osc8_hyperlink;
 #[path = "pty_e2e/folder_trust_cwd_is_home_git_repo_no_prompt.rs"]
@@ -60,3 +58,5 @@ mod mid_text_skill_token_echo_styled_pty;
 mod permission_prompt_hook_chimes_only_on_real_wait;
 #[path = "pty_e2e/permission_prompt_preselects_allow_once_and_holds_typed_enter.rs"]
 mod permission_prompt_preselects_allow_once_and_holds_typed_enter;
+#[path = "pty_e2e/rewind_restores_files_pty.rs"]
+mod rewind_restores_files_pty;

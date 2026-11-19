@@ -36,7 +36,11 @@ fn config_supplied_agent_id_header_is_always_stripped() {
         let local = apply_agent_id_header(&mut headers, "srv", url, ctx).unwrap();
         assert_eq!(local, expect_local, "{url}");
         assert_eq!(agent_ids(&headers), expect_ids, "{url}: {headers:?}");
-        assert!(headers.iter().any(|(n, v)| n == "Authorization" && v == "Bearer keep"));
+        assert!(
+            headers
+                .iter()
+                .any(|(n, v)| n == "Authorization" && v == "Bearer keep")
+        );
     }
 }
 

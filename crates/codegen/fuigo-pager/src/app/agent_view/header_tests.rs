@@ -86,7 +86,10 @@ fn clicking_the_header_branch_copies_the_full_branch_name() {
         .rect
         .expect("the branch label is a click target");
     let row = header_row(&agent, &buf);
-    assert!(row.contains("feature/a-rather-long-branch-name"), "row = {row:?}");
+    assert!(
+        row.contains("feature/a-rather-long-branch-name"),
+        "row = {row:?}"
+    );
     assert_eq!(
         agent.header_branch_name().as_deref(),
         Some("feature/a-rather-long-branch-name")

@@ -13,7 +13,9 @@ fn data_image(bytes: usize) -> ContentPart {
 /// default trigger but over a 30 MB (Messages-style) cap's.
 #[test]
 fn a_smaller_request_cap_lowers_the_compaction_trigger() {
-    let source = vec![ConversationItem::user_with_parts(vec![data_image(28_000_000)])];
+    let source = vec![ConversationItem::user_with_parts(vec![data_image(
+        28_000_000,
+    )])];
     let uncapped = build_compaction_chat_history(source.clone(), None, true, None, 0);
     let capped = build_compaction_chat_history(source, None, true, NonZeroU64::new(30_000_000), 0);
     assert!(!uncapped.image_budget.needs_image_compaction);
@@ -82,8 +84,13 @@ fn prepared_image_only_agent_history_cannot_be_projected_again() {
     };
     image_only.content = vec![data_image(100)];
 
-    let prepared =
-        build_compaction_chat_history(vec![ConversationItem::User(image_only)], None, true, None, 0);
+    let prepared = build_compaction_chat_history(
+        vec![ConversationItem::User(image_only)],
+        None,
+        true,
+        None,
+        0,
+    );
     let final_boundary = CompactionHistoryInput::from(prepared).prepare(None, 0);
     let ConversationItem::User(user) = &final_boundary.items[0] else {
         panic!("prepared agent message must stay a user item");

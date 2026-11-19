@@ -61,7 +61,10 @@ mod tests {
     #[test]
     fn turning_vim_off_restores_the_default_shape_once() {
         assert_eq!(shape_escape(true, VimMode::Normal, false), Some("\x1b[2 q"));
-        assert_eq!(shape_escape(false, VimMode::Normal, false), Some("\x1b[0 q"));
+        assert_eq!(
+            shape_escape(false, VimMode::Normal, false),
+            Some("\x1b[0 q")
+        );
         assert_eq!(shape_escape(false, VimMode::Normal, false), None);
     }
 }

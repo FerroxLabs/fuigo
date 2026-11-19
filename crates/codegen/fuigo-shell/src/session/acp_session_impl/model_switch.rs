@@ -145,12 +145,11 @@ impl SessionActor {
                         self.agent.borrow().system_prompt().to_owned()
                     };
                     // The memory block is injected once per segment, so the rewrite must carry it over
-                    sys.content = std::sync::Arc::<str>::from(
-                        crate::session::human_rules::keep_memory_tail(
+                    sys.content =
+                        std::sync::Arc::<str>::from(crate::session::human_rules::keep_memory_tail(
                             self.recompose_system_prompt(&template, Some(&sys.content)),
                             &sys.content,
-                        ),
-                    );
+                        ));
                     break;
                 }
             }
@@ -515,15 +514,29 @@ impl SessionActor {
                 self.head_holder_owed.set(false);
             }
             let list_current = rebuilt_trusted
-                && !conversation.iter().any(ConversationItem::project_files_withheld);
+                && !conversation
+                    .iter()
+                    .any(ConversationItem::project_files_withheld);
             self.instructions_built_trusted.set(list_current);
             self.withheld_pending.set(!list_current);
             self.chat_state_handle.replace_conversation(conversation);
         }
         let snapshot = self.chat_state_handle.get_conversation().await;
-        persist_chat_history_jsonl_sync(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &snapshot);
-        save_prompt_context(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &new_prompt_context);
-        save_system_prompt(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &new_system_prompt);
+        persist_chat_history_jsonl_sync(
+            &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
+            &snapshot,
+        );
+        save_prompt_context(
+            &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
+            &new_prompt_context,
+        );
+        save_system_prompt(
+            &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
+            &new_system_prompt,
+        );
         self.note_history_not_rewritten("the new agent's instructions")
             .await;
         self.mcp_reminder_dirty
@@ -549,7 +562,11 @@ impl SessionActor {
             return;
         }
         *self.system_prompt_override.borrow_mut() = Some(system_prompt.clone());
-        save_system_prompt_override(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &system_prompt);
+        save_system_prompt_override(
+            &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
+            &system_prompt,
+        );
         let Some(changed) = self
             .chat_state_handle
             .replace_system_head(&system_prompt)
@@ -561,7 +578,11 @@ impl SessionActor {
             );
             return;
         };
-        save_system_prompt(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &system_prompt);
+        save_system_prompt(
+            &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
+            &system_prompt,
+        );
         if changed {
             tracing::info!(
                 session_id = %self.session_info.id.0,

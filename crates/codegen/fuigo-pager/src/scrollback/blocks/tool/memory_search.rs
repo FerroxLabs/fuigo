@@ -213,7 +213,11 @@ impl BlockContent for MemorySearchToolCallBlock {
                         .collect();
                     for sl in &snippet_lines {
                         let trimmed = sl.trim();
-                        let display = snippet_window(trimmed, &self.query, ctx.content_width().saturating_sub(4));
+                        let display = snippet_window(
+                            trimmed,
+                            &self.query,
+                            ctx.content_width().saturating_sub(4),
+                        );
                         lines.push(
                             BlockLine::from(Line::from(Span::styled(
                                 format!("    {display}"),
@@ -305,14 +309,20 @@ fn snippet_window(line: &str, query: &str, width: usize) -> String {
     if UnicodeWidthStr::width(line) <= width {
         return line.to_owned();
     }
-    let fold = |s: &str| -> Vec<char> { s.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect() };
+    let fold = |s: &str| -> Vec<char> {
+        s.chars()
+            .map(|c| c.to_lowercase().next().unwrap_or(c))
+            .collect()
+    };
     let haystack = fold(line);
     let first_hit = query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|term| term.chars().count() >= 2)
         .filter_map(|term| {
             let needle = fold(term);
-            haystack.windows(needle.len()).position(|w| w == needle.as_slice())
+            haystack
+                .windows(needle.len())
+                .position(|w| w == needle.as_slice())
         })
         .min();
     let Some(hit) = first_hit else {
@@ -322,7 +332,10 @@ fn snippet_window(line: &str, query: &str, width: usize) -> String {
     let start = hit.saturating_sub(width / 4);
     let prefix = if start > 0 { "…" } else { "" };
     let rest: String = chars[start..].iter().collect();
-    format!("{prefix}{}", truncate_str(&rest, width.saturating_sub(prefix.width())))
+    format!(
+        "{prefix}{}",
+        truncate_str(&rest, width.saturating_sub(prefix.width()))
+    )
 }
 
 fn shorten_path(path: &str) -> &str {
@@ -486,7 +499,13 @@ session content
             .output(&ctx)
             .lines
             .iter()
-            .map(|l| l.content.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.content
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -505,7 +524,11 @@ session content
 
     #[test]
     fn a_long_line_shows_the_part_that_matched_the_query() {
-        let long = format!("{} the graphite stack is required for PRs {}", "filler words ".repeat(30), "tail ".repeat(30));
+        let long = format!(
+            "{} the graphite stack is required for PRs {}",
+            "filler words ".repeat(30),
+            "tail ".repeat(30)
+        );
         let lines = render_text(&block_with_snippet("graphite stack", &long), 80);
         let preview = lines
             .iter()
@@ -518,10 +541,18 @@ session content
     #[test]
     fn a_short_line_and_a_line_without_a_match_are_shown_as_before() {
         let lines = render_text(&block_with_snippet("graphite", "use graphite for PRs"), 80);
-        assert!(lines.iter().any(|l| l.trim() == "use graphite for PRs"), "{lines:#?}");
+        assert!(
+            lines.iter().any(|l| l.trim() == "use graphite for PRs"),
+            "{lines:#?}"
+        );
         let long = "unrelated words ".repeat(20);
         let lines = render_text(&block_with_snippet("graphite", &long), 80);
-        assert!(lines.iter().any(|l| l.trim_start().starts_with("unrelated words")), "{lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.trim_start().starts_with("unrelated words")),
+            "{lines:#?}"
+        );
     }
 
     #[test]

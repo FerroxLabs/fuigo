@@ -1201,8 +1201,10 @@ mod tests {
                 .collect();
             run.current_phase = None;
             run.agents.clear();
-            let mut state = WorkflowsViewState::default();
-            state.detail_run_id = Some(run.run_id.clone());
+            let mut state = WorkflowsViewState {
+                detail_run_id: Some(run.run_id.clone()),
+                ..Default::default()
+            };
             let area = Rect::new(0, 0, width, 40);
             let mut buf = Buffer::empty(area);
             render_workflows(
@@ -1222,8 +1224,10 @@ mod tests {
     fn row_81_b18_workflows_roster_navigation_has_stable_geometry() {
         for width in [40, 43, 60, 80] {
             let run = make_run("stable", "flow", "active");
-            let mut state = WorkflowsViewState::default();
-            state.detail_run_id = Some(run.run_id.clone());
+            let mut state = WorkflowsViewState {
+                detail_run_id: Some(run.run_id.clone()),
+                ..Default::default()
+            };
             let area = Rect::new(0, 0, width, 24);
             let mut buf = Buffer::empty(area);
             render_workflows(

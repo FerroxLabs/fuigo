@@ -92,17 +92,53 @@ pub fn default_collapsed() -> std::collections::HashSet<usize> {
 /// Rows of the "Vim Normal mode" section: (keys as displayed, short label, description).
 /// Mirrors the prompt vim engine in `views/prompt_widget/vim.rs`.
 const VIM_NORMAL_ROWS: &[(&str, &str, &str)] = &[
-    ("Esc", "normal", "Leave Insert mode for Normal mode (Esc in Normal mode does nothing)"),
-    ("i a I A o O", "insert", "Enter Insert mode: before or after the cursor, at line start or end, on a new line"),
+    (
+        "Esc",
+        "normal",
+        "Leave Insert mode for Normal mode (Esc in Normal mode does nothing)",
+    ),
+    (
+        "i a I A o O",
+        "insert",
+        "Enter Insert mode: before or after the cursor, at line start or end, on a new line",
+    ),
     ("h j k l", "move", "Left, down, up, right (counts work: 3l)"),
     ("w b e", "word", "Next word, previous word, end of word"),
-    ("0 ^ $", "line", "Start of line, first non-blank, end of line"),
-    ("gg G", "buffer", "First line, last line (with a count, that line)"),
-    ("f t F T ; ,", "find", "Find a character on the line; ; repeats, , repeats backward"),
-    ("d c y", "operator", "Delete, change or yank over a motion: dw, c$, y2e (dd, cc, yy for whole lines)"),
-    ("x X D C s S", "delete", "Delete a character, to line end, or change them"),
-    ("p P", "put", "Paste the last delete or yank after or before the cursor"),
-    ("r J ~", "edit", "Replace a character, join lines, toggle case"),
+    (
+        "0 ^ $",
+        "line",
+        "Start of line, first non-blank, end of line",
+    ),
+    (
+        "gg G",
+        "buffer",
+        "First line, last line (with a count, that line)",
+    ),
+    (
+        "f t F T ; ,",
+        "find",
+        "Find a character on the line; ; repeats, , repeats backward",
+    ),
+    (
+        "d c y",
+        "operator",
+        "Delete, change or yank over a motion: dw, c$, y2e (dd, cc, yy for whole lines)",
+    ),
+    (
+        "x X D C s S",
+        "delete",
+        "Delete a character, to line end, or change them",
+    ),
+    (
+        "p P",
+        "put",
+        "Paste the last delete or yank after or before the cursor",
+    ),
+    (
+        "r J ~",
+        "edit",
+        "Replace a character, join lines, toggle case",
+    ),
     ("u Ctrl+R", "undo", "Undo and redo (counts work: 3u)"),
     ("Enter", "send", "Submit the prompt, as in Insert mode"),
 ];

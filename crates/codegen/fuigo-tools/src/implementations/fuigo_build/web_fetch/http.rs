@@ -50,7 +50,11 @@ impl HttpClient {
             return Ok(client);
         }
         // Client was invalidated — rebuild with a fresh connection pool.
-        let fresh = Arc::new(Self::build(&self.params, &|name| std::env::var_os(name), None)?);
+        let fresh = Arc::new(Self::build(
+            &self.params,
+            &|name| std::env::var_os(name),
+            None,
+        )?);
         self.inner.store(Some(Arc::clone(&fresh)));
         Ok(fresh)
     }
@@ -58,7 +62,10 @@ impl HttpClient {
     /// The client for a request to `url`: [`Self::get_or_rebuild`], unless the destination host is one of the
     /// configured proxies' names. That name is exempt from the address check only while it is dialled as a proxy; as
     /// a destination its addresses are judged like any other (delta review D4). Redirects stay on the same host.
-    pub(crate) fn get_or_rebuild_for(&self, url: &url::Url) -> Result<Arc<reqwest::Client>, WebFetchError> {
+    pub(crate) fn get_or_rebuild_for(
+        &self,
+        url: &url::Url,
+    ) -> Result<Arc<reqwest::Client>, WebFetchError> {
         let env = |name: &str| std::env::var_os(name);
         let Some(host) = url.host_str() else {
             return self.get_or_rebuild();
@@ -73,7 +80,8 @@ impl HttpClient {
             return Ok(Arc::new(cached.1.clone()));
         }
         let fresh = Self::build(&self.params, &env, Some(host))?;
-        self.proxy_destination.store(Some(Arc::new((host.to_owned(), fresh.clone()))));
+        self.proxy_destination
+            .store(Some(Arc::new((host.to_owned(), fresh.clone()))));
         Ok(Arc::new(fresh))
     }
 
@@ -123,12 +131,16 @@ impl HttpClient {
         // `destination` host itself: a client built for a request to a proxy's own name judges it (delta review D4).
         let check = super::ssrf::address_check(params.allow_local());
         let mut proxy_hosts = proxy_hosts(params.proxy_endpoint.as_deref(), env);
-        proxy_hosts.retain(|proxy| destination.is_none_or(|host| !proxy.eq_ignore_ascii_case(host)));
+        proxy_hosts
+            .retain(|proxy| destination.is_none_or(|host| !proxy.eq_ignore_ascii_case(host)));
         let check: fuigo_extra_ca::egress::AddressCheck = if proxy_hosts.is_empty() {
             check
         } else {
             Arc::new(move |host, addrs| {
-                if proxy_hosts.iter().any(|proxy| proxy.eq_ignore_ascii_case(host)) {
+                if proxy_hosts
+                    .iter()
+                    .any(|proxy| proxy.eq_ignore_ascii_case(host))
+                {
                     Ok(())
                 } else {
                     check(host, addrs)
@@ -141,8 +153,14 @@ impl HttpClient {
 }
 
 /// The environment variables naming a proxy reqwest would use on its own.
-const PROXY_VARIABLES: [&str; 6] =
-    ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"];
+const PROXY_VARIABLES: [&str; 6] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
 
 /// Whether the environment names a proxy reqwest would use on its own.
 #[cfg(test)]
@@ -178,6 +196,10 @@ fn proxy_hosts(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test clients hit localhost mocks"
+)]
 mod tests {
     use super::*;
 
@@ -237,13 +259,44 @@ mod tests {
         );
     }
 
+    /// Fable delta-3 Low 7: the tests below build clients that read the process environment, so a runner with a proxy
+    /// set would route their requests through it. Each runs in a child process with every proxy variable removed
+    /// (and must report `1 passed`), so it neither returns early nor depends on the runner. In the parent this
+    /// returns `false` once the child has passed; in the child it returns `true` and the test body runs.
+    fn run_in_clean_child(test: &str) -> bool {
+        const MARK: &str = "FUIGO_WEB_FETCH_CLEAN_CHILD";
+        if std::env::var_os(MARK).is_some() {
+            return true;
+        }
+        let module = module_path!().split_once("::").unwrap().1;
+        let name = format!("{module}::{test}");
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+            .env(MARK, "1");
+        for var in PROXY_VARIABLES
+            .iter()
+            .chain(&["NO_PROXY", "no_proxy", "REQUEST_METHOD"])
+        {
+            command.env_remove(var);
+        }
+        let output = command.stdin(std::process::Stdio::null()).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{test} failed in a clean child\n{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
     /// The client's own resolver refuses a name that answers with a blocked address, so the
     /// address judged is the address dialled (audit S5-F8). `localhost` answers loopback without
     /// the network; the listener must never see a connection.
     #[tokio::test]
     async fn client_resolver_refuses_a_name_that_answers_loopback() {
-        if system_proxy_in_environment(&|name| std::env::var_os(name)) {
-            return; // behind a proxy the target's name is not resolved by this client
+        if !run_in_clean_child("client_resolver_refuses_a_name_that_answers_loopback") {
+            return;
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -255,7 +308,10 @@ mod tests {
         assert!(result.is_err(), "a loopback answer must be refused");
         let accepted =
             tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await;
-        assert!(accepted.is_err(), "nothing may have connected to the listener");
+        assert!(
+            accepted.is_err(),
+            "nothing may have connected to the listener"
+        );
     }
 
     /// Audit R03: a proxy named in the environment does not cover every request (`NO_PROXY`, or a
@@ -263,8 +319,10 @@ mod tests {
     /// resolved address judged. Here only `HTTPS_PROXY` is set and the request is plain `http`.
     #[tokio::test]
     async fn a_direct_request_beside_an_environment_proxy_still_checks_the_address() {
-        if system_proxy_in_environment(&|name| std::env::var_os(name)) {
-            return; // the real environment would route this request through its own proxy
+        if !run_in_clean_child(
+            "a_direct_request_beside_an_environment_proxy_still_checks_the_address",
+        ) {
+            return;
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -276,25 +334,35 @@ mod tests {
         assert!(result.is_err(), "a loopback answer must be refused");
         let accepted =
             tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await;
-        assert!(accepted.is_err(), "nothing may have connected to the listener");
+        assert!(
+            accepted.is_err(),
+            "nothing may have connected to the listener"
+        );
     }
 
     /// Delta review D4: a configured proxy's name dialled as the destination itself (here plain `http`, which an
     /// `HTTPS_PROXY` does not carry, so the connection is direct) still has its address judged.
     #[tokio::test]
     async fn a_proxy_name_used_as_the_destination_is_still_checked() {
-        if system_proxy_in_environment(&|name| std::env::var_os(name)) {
-            return; // the real environment would route this request through its own proxy
+        if !run_in_clean_child("a_proxy_name_used_as_the_destination_is_still_checked") {
+            return;
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let env = |name: &str| (name == "HTTPS_PROXY").then(|| std::ffi::OsString::from(format!("http://localhost:{port}")));
-        let client = HttpClient::build(&WebFetchParams::default(), &env, Some("localhost")).unwrap();
+        let env = |name: &str| {
+            (name == "HTTPS_PROXY")
+                .then(|| std::ffi::OsString::from(format!("http://localhost:{port}")))
+        };
+        let client =
+            HttpClient::build(&WebFetchParams::default(), &env, Some("localhost")).unwrap();
         let result = client.get(format!("http://localhost:{port}/")).send().await;
         assert!(result.is_err(), "a loopback answer must be refused");
         let accepted =
             tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await;
-        assert!(accepted.is_err(), "nothing may have connected to the listener");
+        assert!(
+            accepted.is_err(),
+            "nothing may have connected to the listener"
+        );
     }
 
     /// Audit R03: only the configured proxies' names skip the address check, read from the
@@ -307,7 +375,10 @@ mod tests {
             _ => None,
         };
         let hosts = proxy_hosts(Some("http://egress.local:3128"), &env);
-        assert_eq!(hosts, vec!["egress.local".to_owned(), "corp-proxy.internal".to_owned()]);
+        assert_eq!(
+            hosts,
+            vec!["egress.local".to_owned(), "corp-proxy.internal".to_owned()]
+        );
         assert!(proxy_hosts(None, &|_| None).is_empty());
     }
 
@@ -334,7 +405,9 @@ mod tests {
         // The request the proxy does not cover dials directly; its resolved address is still judged.
         let direct = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            client.get(format!("http://localhost:{direct_port}/")).send(),
+            client
+                .get(format!("http://localhost:{direct_port}/"))
+                .send(),
         )
         .await
         .expect("the direct request must finish");
@@ -367,18 +440,27 @@ mod tests {
             command.env("NO_PROXY", no_proxy);
         }
         command
-            .env("FUIGO_PROXY_CHILD_DIRECT_PORT", direct.local_addr().unwrap().port().to_string())
+            .env(
+                "FUIGO_PROXY_CHILD_DIRECT_PORT",
+                direct.local_addr().unwrap().port().to_string(),
+            )
             .env("FUIGO_PROXY_CHILD_CONTROL_URL", control_url);
         let output = command.output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("PROXY_CHILD_RAN"), "the child test did not run: {stdout}");
+        assert!(
+            stdout.contains("PROXY_CHILD_RAN"),
+            "the child test did not run: {stdout}"
+        );
         assert!(
             output.status.success(),
             "child failed: {stdout}{}",
             String::from_utf8_lossy(&output.stderr)
         );
         proxy.set_nonblocking(true).unwrap();
-        assert!(proxy.accept().is_ok(), "positive control: the environment proxy was never dialled");
+        assert!(
+            proxy.accept().is_ok(),
+            "positive control: the environment proxy was never dialled"
+        );
         direct.set_nonblocking(true).unwrap();
         let seen = direct.accept();
         assert!(
@@ -392,7 +474,11 @@ mod tests {
     #[test]
     fn direct_requests_beside_a_real_environment_proxy_still_check_the_address() {
         // Covered by NO_PROXY: only localhost is exempt from the proxy.
-        run_with_environment_proxy(&["HTTP_PROXY"], Some("localhost"), "http://control.invalid/");
+        run_with_environment_proxy(
+            &["HTTP_PROXY"],
+            Some("localhost"),
+            "http://control.invalid/",
+        );
         // Uncovered scheme: only HTTPS_PROXY is set and the request is plain http.
         run_with_environment_proxy(&["HTTPS_PROXY"], None, "https://control.invalid/");
     }

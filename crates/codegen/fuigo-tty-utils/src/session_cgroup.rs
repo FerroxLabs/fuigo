@@ -68,7 +68,10 @@ pub enum Unavailable {
     /// No place for the lock file.
     LockDir(String),
     /// `mkdir` of the process or probe directory failed (`errno` as returned).
-    MkdirRefused { path: String, errno: i32 },
+    MkdirRefused {
+        path: String,
+        errno: i32,
+    },
     /// No `cgroup.kill` (kernel before 5.14).
     NoCgroupKill,
     ProcsNotWritable(String),
@@ -223,7 +226,12 @@ mod stub {
     }
     impl ProbeEnv {
         pub fn system() -> Self {
-            Self { cgroup_root: PathBuf::new(), own_cgroup: None, lock_dir: PathBuf::new(), require_cgroup2: true }
+            Self {
+                cgroup_root: PathBuf::new(),
+                own_cgroup: None,
+                lock_dir: PathBuf::new(),
+                require_cgroup2: true,
+            }
         }
     }
 
@@ -263,13 +271,22 @@ mod stub {
             Path::new("")
         }
         #[allow(dead_code)]
-        pub(crate) fn spawn(&self, _cmd: &mut std::process::Command) -> Result<std::process::Child, SpawnError> {
+        pub(crate) fn spawn(
+            &self,
+            _cmd: &mut std::process::Command,
+        ) -> Result<std::process::Child, SpawnError> {
             Err(SpawnError::Closed)
         }
-        pub(crate) fn place(&self, _cmd: &mut std::process::Command) -> Result<PlaceLease<'_>, super::PlaceError> {
+        pub(crate) fn place(
+            &self,
+            _cmd: &mut std::process::Command,
+        ) -> Result<PlaceLease<'_>, super::PlaceError> {
             Err(super::PlaceError::Unavailable)
         }
-        pub(crate) fn place_or_latch(&self, _cmd: &mut std::process::Command) -> Result<PlaceLease<'_>, super::PlaceError> {
+        pub(crate) fn place_or_latch(
+            &self,
+            _cmd: &mut std::process::Command,
+        ) -> Result<PlaceLease<'_>, super::PlaceError> {
             Err(super::PlaceError::Unavailable)
         }
         pub(crate) fn latch_breached(&self) {}

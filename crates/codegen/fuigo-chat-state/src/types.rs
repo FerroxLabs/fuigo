@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 
-use serde::{Deserialize, Serialize};
 use fuigo_sampling_types::{ConversationItem, SamplingConfig};
+use serde::{Deserialize, Serialize};
 
 /// The bare, UN-nonced memory-context tag. Fuigo no longer emits it: anyone can
 /// write this literal (a repo's AGENTS.md, a file name, a tool result), so it is
@@ -181,7 +181,10 @@ impl std::fmt::Debug for Credentials {
         f.debug_struct("Credentials")
             .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
             .field("auth_type", auth_type)
-            .field("alpha_test_key", &alpha_test_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "alpha_test_key",
+                &alpha_test_key.as_ref().map(|_| "<redacted>"),
+            )
             .field("client_version", client_version)
             .finish()
     }
@@ -338,12 +341,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }

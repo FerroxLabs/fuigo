@@ -63,7 +63,10 @@ fn task_params_from(effective_params: &serde_json::Value) -> TaskParams {
 }
 
 /// Runs before parameter remapping. Its keys are the canonical names.
-fn exported_input_schema(input_schema: &serde_json::Value, params: &TaskParams) -> serde_json::Value {
+fn exported_input_schema(
+    input_schema: &serde_json::Value,
+    params: &TaskParams,
+) -> serde_json::Value {
     let mut schema = input_schema.clone();
     let Some(obj) = schema.as_object_mut() else {
         return schema;

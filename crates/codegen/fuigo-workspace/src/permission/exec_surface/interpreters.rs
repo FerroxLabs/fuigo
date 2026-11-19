@@ -52,7 +52,10 @@ fn script_after_double_dash(args: &[String], i: usize) -> bool {
 
 fn long_name(word: &str) -> Option<(&str, bool)> {
     let long = word.strip_prefix("--")?;
-    Some(long.split_once('=').map_or((long, false), |(name, _)| (name, true)))
+    Some(
+        long.split_once('=')
+            .map_or((long, false), |(name, _)| (name, true)),
+    )
 }
 
 /// `python [opts] (-c code | -m module | script | -) [args]`.
@@ -86,14 +89,21 @@ fn python(args: &[String]) -> bool {
             match option {
                 // Inline code; `-i` reads a program from stdin after the script.
                 'c' | 'i' => return true,
-                'm' => return if rest.is_empty() { skip_value(args, &mut i) } else { false },
+                'm' => {
+                    return if rest.is_empty() {
+                        skip_value(args, &mut i)
+                    } else {
+                        false
+                    };
+                }
                 'W' | 'X' => {
                     if rest.is_empty() && skip_value(args, &mut i) {
                         return true;
                     }
                     break;
                 }
-                'b' | 'B' | 'd' | 'E' | 'h' | 'I' | 'O' | 'P' | 'q' | 's' | 'S' | 'u' | 'v' | 'V' | 'x' | 'R' | '?' => {}
+                'b' | 'B' | 'd' | 'E' | 'h' | 'I' | 'O' | 'P' | 'q' | 's' | 'S' | 'u' | 'v'
+                | 'V' | 'x' | 'R' | '?' => {}
                 _ => return true,
             }
         }
@@ -105,7 +115,9 @@ fn python(args: &[String]) -> bool {
 fn perl_module_is_plain(value: &str) -> bool {
     let name = value.strip_prefix('-').unwrap_or(value);
     name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
 }
 
 /// `perl [switches] [--] [programfile] [args]`.
@@ -159,7 +171,8 @@ fn perl(args: &[String]) -> bool {
                     if chars.peek().is_some_and(|(_, c)| matches!(c, 'x' | 'X')) {
                         chars.next();
                         let mut hex = String::new();
-                        while let Some((_, c)) = chars.peek().filter(|(_, c)| c.is_ascii_hexdigit()) {
+                        while let Some((_, c)) = chars.peek().filter(|(_, c)| c.is_ascii_hexdigit())
+                        {
                             hex.push(*c);
                             chars.next();
                         }
@@ -172,7 +185,8 @@ fn perl(args: &[String]) -> bool {
                         }
                     }
                 }
-                'a' | 'c' | 'n' | 'p' | 's' | 'S' | 't' | 'T' | 'u' | 'U' | 'w' | 'W' | 'X' | 'v' | 'h' => {}
+                'a' | 'c' | 'n' | 'p' | 's' | 'S' | 't' | 'T' | 'u' | 'U' | 'w' | 'W' | 'X'
+                | 'v' | 'h' => {}
                 _ => return true,
             }
         }
@@ -194,13 +208,15 @@ fn ruby(args: &[String]) -> bool {
         if let Some((name, attached)) = long_name(word) {
             match name {
                 "version" | "help" | "copyright" | "verbose" | "yjit" | "jit" | "rjit" => {}
-                "encoding" | "external-encoding" | "internal-encoding" | "dump" | "backtrace-limit"
-                | "crash-report" | "parser" | "disable" | "enable" => {
+                "encoding" | "external-encoding" | "internal-encoding" | "dump"
+                | "backtrace-limit" | "crash-report" | "parser" | "disable" | "enable" => {
                     if !attached && skip_value(args, &mut i) {
                         return true;
                     }
                 }
-                _ if ["disable-", "enable-", "yjit-", "rjit-"].iter().any(|p| name.starts_with(p)) => {}
+                _ if ["disable-", "enable-", "yjit-", "rjit-"]
+                    .iter()
+                    .any(|p| name.starts_with(p)) => {}
                 _ => return true,
             }
             continue;
@@ -244,23 +260,74 @@ fn ruby(args: &[String]) -> bool {
 
 /// Node long options that take a separate value; any other long option is a flag.
 const NODE_LONG_VALUE: &[&str] = &[
-    "require", "import", "loader", "experimental-loader", "conditions", "title", "inspect-port", "debug-port",
-    "env-file", "env-file-if-exists", "input-type", "stack-size", "redirect-warnings", "diagnostic-dir",
-    "report-dir", "report-directory", "report-filename", "report-signal", "heapsnapshot-signal",
-    "heapsnapshot-near-heap-limit", "icu-data-dir", "openssl-config", "tls-cipher-list", "tls-keylog",
-    "use-largepages", "secure-heap", "secure-heap-min", "unhandled-rejections", "dns-result-order", "disable-proto",
-    "experimental-policy", "policy-integrity", "watch-path", "watch-kill-signal", "test-name-pattern",
-    "test-skip-pattern", "test-reporter", "test-reporter-destination", "test-concurrency", "test-shard",
-    "test-timeout", "test-coverage-include", "test-coverage-exclude", "cpu-prof-dir", "cpu-prof-name",
-    "cpu-prof-interval", "heap-prof-dir", "heap-prof-name", "heap-prof-interval", "max-http-header-size",
-    "experimental-config-file", "localstorage-file", "trace-event-categories", "trace-event-file-pattern",
-    "snapshot-blob", "experimental-sea-config", "disable-warning", "max-old-space-size", "max-semi-space-size",
+    "require",
+    "import",
+    "loader",
+    "experimental-loader",
+    "conditions",
+    "title",
+    "inspect-port",
+    "debug-port",
+    "env-file",
+    "env-file-if-exists",
+    "input-type",
+    "stack-size",
+    "redirect-warnings",
+    "diagnostic-dir",
+    "report-dir",
+    "report-directory",
+    "report-filename",
+    "report-signal",
+    "heapsnapshot-signal",
+    "heapsnapshot-near-heap-limit",
+    "icu-data-dir",
+    "openssl-config",
+    "tls-cipher-list",
+    "tls-keylog",
+    "use-largepages",
+    "secure-heap",
+    "secure-heap-min",
+    "unhandled-rejections",
+    "dns-result-order",
+    "disable-proto",
+    "experimental-policy",
+    "policy-integrity",
+    "watch-path",
+    "watch-kill-signal",
+    "test-name-pattern",
+    "test-skip-pattern",
+    "test-reporter",
+    "test-reporter-destination",
+    "test-concurrency",
+    "test-shard",
+    "test-timeout",
+    "test-coverage-include",
+    "test-coverage-exclude",
+    "cpu-prof-dir",
+    "cpu-prof-name",
+    "cpu-prof-interval",
+    "heap-prof-dir",
+    "heap-prof-name",
+    "heap-prof-interval",
+    "max-http-header-size",
+    "experimental-config-file",
+    "localstorage-file",
+    "trace-event-categories",
+    "trace-event-file-pattern",
+    "snapshot-blob",
+    "experimental-sea-config",
+    "disable-warning",
+    "max-old-space-size",
+    "max-semi-space-size",
     "run",
 ];
 
 /// A preload (`-r`, `--require`, `--import`, `--loader`) is a module file unless it is a `data:` URL (inline code).
 fn node_preload_hidden(value: &str) -> bool {
-    is_unresolved(value) || value.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+    is_unresolved(value)
+        || value
+            .get(..5)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
 }
 
 fn node_value(args: &[String], i: &mut usize, attached: Option<&str>, preload: bool) -> bool {
@@ -296,12 +363,17 @@ fn node(args: &[String]) -> bool {
             {
                 return true;
             }
-            let (name, value) = long.split_once('=').map_or((long, None), |(name, value)| (name, Some(value)));
+            let (name, value) = long
+                .split_once('=')
+                .map_or((long, None), |(name, value)| (name, Some(value)));
             if matches!(name, "test" | "run") {
                 project_mode = true;
             }
             if NODE_LONG_VALUE.contains(&name) {
-                let preload = matches!(name, "require" | "import" | "loader" | "experimental-loader");
+                let preload = matches!(
+                    name,
+                    "require" | "import" | "loader" | "experimental-loader"
+                );
                 if node_value(args, &mut i, value, preload) {
                     return true;
                 }
@@ -331,11 +403,23 @@ fn node(args: &[String]) -> bool {
 }
 
 /// Deno flags that take a separate value.
-const DENO_VALUE: &[&str] = &["-c", "--config", "--import-map", "--location", "--seed", "--cert", "--ext", "--preload"];
+const DENO_VALUE: &[&str] = &[
+    "-c",
+    "--config",
+    "--import-map",
+    "--location",
+    "--seed",
+    "--cert",
+    "--ext",
+    "--preload",
+];
 
 /// `deno [subcommand] [flags] [script]`: `eval`, `repl` and a bare `deno` (a REPL) run hidden code, so does `-` (stdin).
 fn deno(args: &[String]) -> bool {
-    if args.iter().any(|w| is_unresolved(w) || w == "-" || w.starts_with("--eval")) {
+    if args
+        .iter()
+        .any(|w| is_unresolved(w) || w == "-" || w.starts_with("--eval"))
+    {
         return true;
     }
     let mut i = 0;
@@ -365,9 +449,31 @@ fn deno(args: &[String]) -> bool {
 
 /// Bun flags that take a separate value.
 const BUN_VALUE: &[&str] = &[
-    "-r", "--preload", "--require", "--import", "--cwd", "--env-file", "-c", "--config", "--tsconfig-override", "-d",
-    "--define", "-l", "--loader", "--main-fields", "--extension-order", "--jsx-factory", "--jsx-fragment",
-    "--jsx-import-source", "--jsx-runtime", "--port", "--conditions", "-F", "--filter", "--shell", "--elide-lines",
+    "-r",
+    "--preload",
+    "--require",
+    "--import",
+    "--cwd",
+    "--env-file",
+    "-c",
+    "--config",
+    "--tsconfig-override",
+    "-d",
+    "--define",
+    "-l",
+    "--loader",
+    "--main-fields",
+    "--extension-order",
+    "--jsx-factory",
+    "--jsx-fragment",
+    "--jsx-import-source",
+    "--jsx-runtime",
+    "--port",
+    "--conditions",
+    "-F",
+    "--filter",
+    "--shell",
+    "--elide-lines",
 ];
 
 /// `bun [flags] (file | subcommand) [args]`: `-e`/`--eval`, `-p`/`--print`, `repl`, `exec` and stdin run hidden code.
@@ -420,7 +526,9 @@ fn php(args: &[String]) -> bool {
         }
         if let Some((name, attached)) = long_name(word) {
             match name {
-                "run" | "process-code" | "process-begin" | "process-end" | "interactive" => return true,
+                "run" | "process-code" | "process-begin" | "process-end" | "interactive" => {
+                    return true;
+                }
                 "file" => return !attached && skip_value(args, &mut i),
                 "php-ini" | "define" | "zend-extension" | "docroot" | "process-file" => {
                     if !attached && skip_value(args, &mut i) {
@@ -434,7 +542,8 @@ fn php(args: &[String]) -> bool {
                     }
                     no_stdin = true;
                 }
-                "info" | "modules" | "version" | "help" | "ini" | "syntax-check" | "syntax-highlight" | "strip" => {
+                "info" | "modules" | "version" | "help" | "ini" | "syntax-check"
+                | "syntax-highlight" | "strip" => {
                     no_stdin = true;
                 }
                 "no-php-ini" | "no-header" | "hide-args" | "no-chdir" => {}
@@ -515,5 +624,6 @@ fn tcl(name: &str, args: &[String]) -> bool {
         }
         rest = &rest[2..];
     }
-    rest.first().is_none_or(|script| script.starts_with('-') || is_unresolved(script))
+    rest.first()
+        .is_none_or(|script| script.starts_with('-') || is_unresolved(script))
 }

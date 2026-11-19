@@ -366,7 +366,8 @@ async fn resume_or_continue_with_no_session_persistence_is_a_clear_error() {
     clippy::disallowed_methods,
     reason = "F5-A: the test reads the cwd bucket path only to seed an old permission.toml in a temp FUIGO_HOME and to assert nothing was written under sessions; it never writes a session folder"
 )]
-async fn r1h3_sandboxed_subagent_runs_on_a_cold_home_and_over_old_permission_state_write_nothing_under_sessions() {
+async fn r1h3_sandboxed_subagent_runs_on_a_cold_home_and_over_old_permission_state_write_nothing_under_sessions()
+ {
     let (server, sandbox) = fixture().await;
     let sessions = sandbox.fuigo_home().join("sessions");
     let arguments = serde_json::json!({
@@ -443,7 +444,9 @@ async fn r1h3_sandboxed_subagent_runs_on_a_cold_home_and_over_old_permission_sta
                 .collect();
             let last = posts.last().cloned().unwrap_or_default();
             assert!(
-                posts.len() >= 3 && last.contains("<subagent_result>") && last.contains("Echo: say hi"),
+                posts.len() >= 3
+                    && last.contains("<subagent_result>")
+                    && last.contains("Echo: say hi"),
                 "{label}: the subagent spawned and ran its own turn ({} model requests)\n{}\nstderr: {}",
                 posts.len(),
                 server.request_log_summary(),
@@ -503,11 +506,15 @@ async fn r1h3_sandboxed_subagent_runs_on_a_cold_home_and_over_old_permission_sta
     clippy::disallowed_methods,
     reason = "F5-A: the test seeds a warm cwd bucket by path in a temp FUIGO_HOME and asserts nothing under sessions changed; it never writes a session folder"
 )]
-async fn r2_no_session_persistence_matrix_cold_and_warm_home_by_sandbox_mode_writes_nothing_and_refuses_nothing() {
+async fn r2_no_session_persistence_matrix_cold_and_warm_home_by_sandbox_mode_writes_nothing_and_refuses_nothing()
+ {
     let mut failures = Vec::new();
     for warm in [false, true] {
         for mode in ["off", "observe", "enforce", "strict"] {
-            let cell = format!("{} home / sandbox {mode}", if warm { "warm" } else { "cold" });
+            let cell = format!(
+                "{} home / sandbox {mode}",
+                if warm { "warm" } else { "cold" }
+            );
             let (server, sandbox) = fixture().await;
             let sessions = sandbox.fuigo_home().join("sessions");
             if warm {
@@ -544,14 +551,22 @@ async fn r2_no_session_persistence_matrix_cold_and_warm_home_by_sandbox_mode_wri
                     format!("{cell}: {label} (responses)"),
                     InferenceRequestMatcher::foreground(InferenceEndpoint::Responses),
                     ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
-                        "", call, name, arguments, "test-model",
+                        "",
+                        call,
+                        name,
+                        arguments,
+                        "test-model",
                     )),
                 ));
                 _expectations.push(server.expect_response(
                     format!("{cell}: {label} (chat completions)"),
                     InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
                     ScriptedResponse::sse(sse::chat_completions_reasoning_then_tool_call_events(
-                        "", call, name, arguments, "test-model",
+                        "",
+                        call,
+                        name,
+                        arguments,
+                        "test-model",
                     )),
                 ));
             }
@@ -564,16 +579,35 @@ async fn r2_no_session_persistence_matrix_cold_and_warm_home_by_sandbox_mode_wri
             };
             let before = tree();
             let mut cmd = tokio::process::Command::new(pager_binary());
-            cmd.args(["-p", "run a command, then a subagent", "--trust", "--yolo", "--no-session-persistence"])
-                .args(["--sandbox", if mode == "strict" { "strict" } else { "workspace" }])
-                .env("FUIGO_SANDBOX_MODE", if mode == "strict" { "enforce" } else { mode })
-                .current_dir(sandbox.workspace());
+            cmd.args([
+                "-p",
+                "run a command, then a subagent",
+                "--trust",
+                "--yolo",
+                "--no-session-persistence",
+            ])
+            .args([
+                "--sandbox",
+                if mode == "strict" {
+                    "strict"
+                } else {
+                    "workspace"
+                },
+            ])
+            .env(
+                "FUIGO_SANDBOX_MODE",
+                if mode == "strict" { "enforce" } else { mode },
+            )
+            .current_dir(sandbox.workspace());
             let result = run_headless_in_sandbox_borrowed(cmd, &sandbox).await;
             let stderr_lower = result.stderr.to_lowercase();
             if mode == "strict"
                 && (stderr_lower.contains("unsupported") || stderr_lower.contains("not supported"))
             {
-                println!("SKIPPED {cell}: strict sandbox is not supported on this platform: {}", result.stderr.trim());
+                println!(
+                    "SKIPPED {cell}: strict sandbox is not supported on this platform: {}",
+                    result.stderr.trim()
+                );
                 continue;
             }
             let changed = diff(&before, &tree());
@@ -581,7 +615,10 @@ async fn r2_no_session_persistence_matrix_cold_and_warm_home_by_sandbox_mode_wri
                 failures.push(format!("{cell}: (a) sessions/ changed: {changed:?}"));
             }
             let ran = std::fs::read_to_string(sandbox.workspace().join("r2_shell_ran.txt")).ok();
-            if result.timed_out || result.status.code() != Some(0) || ran.as_deref() != Some("r2-shell-ran") {
+            if result.timed_out
+                || result.status.code() != Some(0)
+                || ran.as_deref() != Some("r2-shell-ran")
+            {
                 failures.push(format!(
                     "{cell}: (b) the shell command did not run (exit {:?}, file {ran:?})\nstderr:\n{}\nrequests:\n{}",
                     result.status.code(),
@@ -595,5 +632,10 @@ async fn r2_no_session_persistence_matrix_cold_and_warm_home_by_sandbox_mode_wri
             }
         }
     }
-    assert!(failures.is_empty(), "{} cell(s) failed:\n{}", failures.len(), failures.join("\n---\n"));
+    assert!(
+        failures.is_empty(),
+        "{} cell(s) failed:\n{}",
+        failures.len(),
+        failures.join("\n---\n")
+    );
 }

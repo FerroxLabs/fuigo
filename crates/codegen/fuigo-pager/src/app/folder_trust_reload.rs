@@ -28,7 +28,8 @@ pub(crate) const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_sec
 /// Shown in place of the transcript while the reload runs.
 pub(crate) const RELOADING: &str = "Folder trust is on. Reloading this session to use it...";
 /// Added to the transcript when the reload finished.
-pub(crate) const RELOADED: &str = "Folder trust is on. This session was reloaded with the folder's settings.";
+pub(crate) const RELOADED: &str =
+    "Folder trust is on. This session was reloaded with the folder's settings.";
 /// Close answered `timeout`: the session was still saving when its close budget ran out.
 pub(crate) const CLOSE_TIMEOUT: &str = "Folder trust is on, but this session was still saving after 8 seconds, so it \
                                         was not reloaded. Reopen this session to use it.";
@@ -52,7 +53,10 @@ pub(crate) enum Phase {
     Closing,
     /// Close answered `closed` and `session/load` is in flight inside the reload window `generation`; input is held.
     /// `untrusted_commands` is the pre-grant command and skill list, dropped from view when the reload starts.
-    Loading { generation: u64, untrusted_commands: Vec<acp::AvailableCommand> },
+    Loading {
+        generation: u64,
+        untrusted_commands: Vec<acp::AvailableCommand>,
+    },
 }
 
 /// The session id of a `folder_trust_reload` notification, if `notif` is one.
@@ -61,7 +65,11 @@ pub(crate) fn reload_notification_session(notif: &acp::ExtNotification) -> Optio
         return None;
     }
     let params: serde_json::Value = serde_json::from_str(notif.params.get()).ok()?;
-    if params.pointer("/update/sessionUpdate").and_then(|v| v.as_str()) != Some(RELOAD_UPDATE) {
+    if params
+        .pointer("/update/sessionUpdate")
+        .and_then(|v| v.as_str())
+        != Some(RELOAD_UPDATE)
+    {
         return None;
     }
     params
@@ -89,7 +97,11 @@ pub(crate) fn close_outcome(meta: Option<&acp::Meta>) -> String {
 /// The agent and session a (wrapped) load result is for.
 pub(crate) fn loaded_target(result: &TaskResult) -> Option<(AgentId, acp::SessionId)> {
     match result {
-        TaskResult::SessionLoaded { agent_id, session_id, .. } => Some((*agent_id, session_id.clone())),
+        TaskResult::SessionLoaded {
+            agent_id,
+            session_id,
+            ..
+        } => Some((*agent_id, session_id.clone())),
         _ => None,
     }
 }
@@ -113,7 +125,8 @@ pub(crate) fn mark_owed(app: &mut AppView, agent_id: AgentId, session_id: &acp::
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return false;
     };
-    if agent.session.session_id.as_ref() != Some(session_id) || agent.folder_trust_reload.is_some() {
+    if agent.session.session_id.as_ref() != Some(session_id) || agent.folder_trust_reload.is_some()
+    {
         return false;
     }
     agent.folder_trust_reload = Some(Phase::Owed);
@@ -154,7 +167,10 @@ pub(crate) fn poll(app: &mut AppView) -> Vec<Effect> {
             continue;
         };
         agent.folder_trust_reload = Some(Phase::Closing);
-        effects.push(Effect::FolderTrustClose { agent_id: *agent_id, session_id });
+        effects.push(Effect::FolderTrustClose {
+            agent_id: *agent_id,
+            session_id,
+        });
     }
     effects
 }
@@ -164,9 +180,12 @@ pub(crate) fn holds_input(app: &AppView) -> bool {
     let super::app_view::ActiveView::Agent(id) = app.active_view else {
         return false;
     };
-    app.agents
-        .get(&id)
-        .is_some_and(|agent| matches!(agent.folder_trust_reload, Some(Phase::Closing | Phase::Loading { .. })))
+    app.agents.get(&id).is_some_and(|agent| {
+        matches!(
+            agent.folder_trust_reload,
+            Some(Phase::Closing | Phase::Loading { .. })
+        )
+    })
 }
 
 fn next_generation() -> u64 {
@@ -186,7 +205,9 @@ pub(crate) fn handle_closed(
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return Vec::new();
     };
-    if agent.folder_trust_reload != Some(Phase::Closing) || agent.session.session_id.as_ref() != Some(session_id) {
+    if agent.folder_trust_reload != Some(Phase::Closing)
+        || agent.session.session_id.as_ref() != Some(session_id)
+    {
         return Vec::new();
     }
     let message = match outcome.as_deref() {
@@ -206,7 +227,11 @@ pub(crate) fn handle_closed(
         return Vec::new();
     }
     let generation = next_generation();
-    let cwd = if agent.session.cwd.as_os_str().is_empty() { fallback_cwd } else { agent.session.cwd.clone() };
+    let cwd = if agent.session.cwd.as_os_str().is_empty() {
+        fallback_cwd
+    } else {
+        agent.session.cwd.clone()
+    };
     let yolo = agent.session.is_yolo();
     let auto = super::dispatch::effective_auto(yolo, agent.session.is_auto());
     let mut meta = serde_json::json!({ "yoloMode": yolo, "autoMode": auto });
@@ -218,8 +243,17 @@ pub(crate) fn handle_closed(
     let untrusted_commands = std::mem::take(&mut agent.session.available_commands);
     agent.session.available_commands_generation += 1;
     agent.begin_session_reload_labeled(generation, RELOADING);
-    agent.folder_trust_reload = Some(Phase::Loading { generation, untrusted_commands });
-    vec![Effect::FolderTrustLoad { agent_id, session_id: session_id.clone(), cwd, meta, generation }]
+    agent.folder_trust_reload = Some(Phase::Loading {
+        generation,
+        untrusted_commands,
+    });
+    vec![Effect::FolderTrustLoad {
+        agent_id,
+        session_id: session_id.clone(),
+        cwd,
+        meta,
+        generation,
+    }]
 }
 
 /// The reload's `session/load` finished: close the reload window and say how it went.
@@ -233,13 +267,19 @@ pub(crate) fn handle_loaded(
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return Vec::new();
     };
-    let Some(Phase::Loading { generation: open, .. }) = agent.folder_trust_reload.as_ref() else {
+    let Some(Phase::Loading {
+        generation: open, ..
+    }) = agent.folder_trust_reload.as_ref()
+    else {
         return Vec::new();
     };
     if *open != generation || agent.session.session_id.as_ref() != Some(session_id) {
         return Vec::new();
     }
-    let Some(Phase::Loading { untrusted_commands, .. }) = agent.folder_trust_reload.take() else {
+    let Some(Phase::Loading {
+        untrusted_commands, ..
+    }) = agent.folder_trust_reload.take()
+    else {
         return Vec::new();
     };
     let ok = result.is_ok();

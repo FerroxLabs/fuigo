@@ -136,9 +136,9 @@ pub(crate) fn completed_event(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use super::*;
     use fuigo_sampling_types::responses_ptc::{PROGRAM_CARRIER_NAME, PROGRAM_OUTPUT_CARRIER_NAME};
+    use std::collections::HashSet;
 
     const PROGRAM: &str = r#"{"type":"program","id":"prog_item_1","call_id":"prog_1","code":"text('x')","fingerprint":"fp"}"#;
 

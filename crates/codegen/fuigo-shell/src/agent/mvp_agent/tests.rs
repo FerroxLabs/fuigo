@@ -1380,7 +1380,7 @@ async fn p71_turn_artifact_upload_is_gated_by_destination() {
 async fn p149_turn_trace_uploads_are_scrubbed_of_credentials() {
     use fuigo_file_utils::gate_testkit::RecordingEndpoint;
     const SENT: &str = "fuigo-p149-SYNTH-turn-upload-key-01";
-    const GHP: &str = "ghp_p149SYNTHp149SYNTHp149SYNTHp149SYNTH";
+    const GHP: &str = concat!("gh", "p_p149SYNTHp149SYNTHp149SYNTHp149SYNTH");
     const PEM_BODY: &str = "MIIEp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHAA";
     fuigo_telemetry::sent_credentials::record(SENT);
     let home = tempfile::tempdir().unwrap();
@@ -9683,8 +9683,10 @@ async fn r5_acp_clear_yields(legacy: bool) {
         });
     }
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut cfg = crate::agent::config::Config::default();
-    cfg.fuigo_com_config = config;
+    let cfg = crate::agent::config::Config {
+        fuigo_com_config: config,
+        ..Default::default()
+    };
     let agent = MvpAgent::new(GatewaySender::new(tx), &cfg, manager, None).unwrap();
     use fs2::FileExt as _;
     let lock = std::fs::File::create(dir.path().join("auth.json.lock")).unwrap();

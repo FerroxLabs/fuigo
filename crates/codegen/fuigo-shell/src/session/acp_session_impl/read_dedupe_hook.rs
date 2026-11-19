@@ -173,13 +173,20 @@ impl SessionActor {
         &self,
         approved: &[PreparedToolCall],
     ) -> (Vec<Arc<Option<DedupePlan>>>, bool) {
-        let marker = self.chat_state_handle.get_last_compaction_prompt_index().await;
-        self.read_dedupe.borrow_mut().observe_compaction_marker(marker);
+        let marker = self
+            .chat_state_handle
+            .get_last_compaction_prompt_index()
+            .await;
+        self.read_dedupe
+            .borrow_mut()
+            .observe_compaction_marker(marker);
         let mutating = approved
             .iter()
             .any(|p| call_invalidates(&p.tool_name, p.is_read_only));
         if mutating {
-            self.read_dedupe.borrow_mut().invalidate_all("mutating tool call in batch");
+            self.read_dedupe
+                .borrow_mut()
+                .invalidate_all("mutating tool call in batch");
             return (approved.iter().map(|_| Arc::new(None)).collect(), true);
         }
         let mut plans = Vec::with_capacity(approved.len());
@@ -212,7 +219,9 @@ impl SessionActor {
                     continue;
                 };
                 if hash_bytes(&bytes) != cached.hash {
-                    self.read_dedupe.borrow_mut().invalidate_all("file changed on disk");
+                    self.read_dedupe
+                        .borrow_mut()
+                        .invalidate_all("file changed on disk");
                     plan.remaining.push(entry);
                     continue;
                 }
@@ -231,7 +240,11 @@ impl SessionActor {
                     plan.first_path = path.clone();
                     plan.first_lines = cached.lines;
                 }
-                plan.notes.push(unchanged_note(&entry.path, cached.lines, cached.prompt_index));
+                plan.notes.push(unchanged_note(
+                    &entry.path,
+                    cached.lines,
+                    cached.prompt_index,
+                ));
                 plan.deduped_paths.push(path);
             }
             if plan.notes.is_empty() {
@@ -252,7 +265,9 @@ impl SessionActor {
     /// A batch that mutated anything clears the cache again once it has run.
     pub(super) fn finish_read_dedupe_batch(&self, mutating: bool) {
         if mutating {
-            self.read_dedupe.borrow_mut().invalidate_all("mutating batch finished");
+            self.read_dedupe
+                .borrow_mut()
+                .invalidate_all("mutating batch finished");
         }
     }
 
@@ -312,7 +327,10 @@ impl SessionActor {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod p174_tests {
     use super::*;
@@ -348,16 +366,26 @@ mod p174_tests {
         let args = serde_json::json!({ "target_file": "/w/secrets/key", "files": [{ "path": "/w/ok.txt" }] });
         assert!(judged_read_entries(&prepared(args.clone(), Some(vec!["/w/ok.txt"]))).is_none());
         assert!(judged_read_entries(&prepared(args.clone(), None)).is_none());
-        let entries = judged_read_entries(&prepared(args, Some(vec!["/w/secrets/key", "/w/ok.txt"])))
-            .expect("every entry was judged");
+        let entries =
+            judged_read_entries(&prepared(args, Some(vec!["/w/secrets/key", "/w/ok.txt"])))
+                .expect("every entry was judged");
         assert_eq!(
-            entries.iter().map(|(e, _)| e.path.as_str()).collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|(e, _)| e.path.as_str())
+                .collect::<Vec<_>>(),
             vec!["/w/secrets/key", "/w/ok.txt"]
         );
         // Astra r2 HIGH: dedupe hashes the file the reader opens, never its own `cwd.join` of the spelling.
         assert_eq!(
-            entries.iter().map(|(_, opened)| opened.clone()).collect::<Vec<_>>(),
-            vec![PathBuf::from("/opened/w/secrets/key"), PathBuf::from("/opened/w/ok.txt")]
+            entries
+                .iter()
+                .map(|(_, opened)| opened.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/opened/w/secrets/key"),
+                PathBuf::from("/opened/w/ok.txt")
+            ]
         );
     }
 
@@ -368,7 +396,11 @@ mod p174_tests {
         local
             .run_until(async move {
                 let actor = crate::session::acp_session::support::create_test_actor(
-                    0, 256_000, 85, gateway_tx, persistence_tx,
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
                 )
                 .await;
                 let input =
@@ -388,7 +420,10 @@ mod p174_tests {
         std::fs::write(dir.path().join("shot\u{202F}1.png"), b"x").expect("write sibling");
         let asked = dir.path().join("shot 1.png").to_string_lossy().into_owned();
         let got = judged(serde_json::json!({ "target_file": asked })).await;
-        assert!(got.is_none(), "a missing file is not deduped and its directory is not scanned; got {got:?}");
+        assert!(
+            got.is_none(),
+            "a missing file is not deduped and its directory is not scanned; got {got:?}"
+        );
     }
 
     /// The fix keeps the judged file the one the reader opens: symlinks are followed.
@@ -402,7 +437,12 @@ mod p174_tests {
         let link = dir.path().join("link.txt");
         std::os::unix::fs::symlink(&real, &link).expect("symlink");
         let asked = link.to_string_lossy().into_owned();
-        let got = judged(serde_json::json!({ "target_file": asked.clone() })).await.expect("resolved");
-        assert_eq!(got, vec![(asked, dunce::canonicalize(&real).expect("canonical"))]);
+        let got = judged(serde_json::json!({ "target_file": asked.clone() }))
+            .await
+            .expect("resolved");
+        assert_eq!(
+            got,
+            vec![(asked, dunce::canonicalize(&real).expect("canonical"))]
+        );
     }
 }

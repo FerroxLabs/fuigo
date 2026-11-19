@@ -37,7 +37,10 @@ fn require_regular(metadata: &std::fs::Metadata) -> io::Result<()> {
         return Ok(());
     }
     if metadata.is_dir() {
-        return Err(io::Error::new(io::ErrorKind::IsADirectory, "is a directory"));
+        return Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            "is a directory",
+        ));
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -107,7 +110,10 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
     Ok(bytes)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "file_reader_tests.rs"]
 mod tests;

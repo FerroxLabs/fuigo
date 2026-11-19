@@ -4,9 +4,7 @@
 //! evaluation recovers it ([`crate::permission::bash_permission_script::PermissionScript`]) without guessing variable
 //! values. The functions here decide what such a script may clear.
 
-use super::{
-    BashEvaluation, bash_request_floor_requires_prompt, narrow_allow_clears_write_floor,
-};
+use super::{BashEvaluation, bash_request_floor_requires_prompt, narrow_allow_clears_write_floor};
 use crate::permission::auto_mode::ClassifierSecurityFinding;
 use crate::permission::auto_mode::ClassifierSecurityFinding::{UnresolvedArgument, UnvettedEnv};
 use crate::permission::policy::CompiledPolicy;

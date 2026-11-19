@@ -9,7 +9,9 @@ use super::*;
 use crate::session::peer_admission::{
     Live, PeerAdminCmd, PeerAdminReply, PeerSubmit, ReleaseOutcome, Submitted, msg_key, now_mono,
 };
-use crate::session::peer_message::{PeerAdmission, PeerRefusal, peer_messaging_enabled, wrap_peer_message};
+use crate::session::peer_message::{
+    PeerAdmission, PeerRefusal, peer_messaging_enabled, wrap_peer_message,
+};
 use fuigo_peer::{DeliveryOutcome, RejectReason};
 
 impl SessionActor {
@@ -31,7 +33,10 @@ impl SessionActor {
         let wrapped = wrap_peer_message(&envelope);
         let prompt_id = format!("peer-message-{}", envelope.message_id);
         // Decision 35: the blocking prompt hook runs on a real peer message, before anything is queued.
-        if self.peer_prompt_hook_refuses(&envelope, &wrapped, &prompt_id).await {
+        if self
+            .peer_prompt_hook_refuses(&envelope, &wrapped, &prompt_id)
+            .await
+        {
             return PeerAdmission::Refused(PeerRefusal::Policy);
         }
         let input_origin = InputOrigin::new(super::PromptOrigin::PeerMessage {
@@ -86,8 +91,12 @@ impl SessionActor {
             self.mark_peer_influenced();
             // S7.3: a released message's denials are carried by this session until `/peers clear-influence`; S7.4: the model
             // may refuse this message by id.
-            self.permissions.peer_influence().denials().carry(&envelope.message_id, &envelope.denied_recently);
-            self.peer_admission.mirror_carry(&envelope.message_id, &envelope.denied_recently);
+            self.permissions
+                .peer_influence()
+                .denials()
+                .carry(&envelope.message_id, &envelope.denied_recently);
+            self.peer_admission
+                .mirror_carry(&envelope.message_id, &envelope.denied_recently);
             self.peer_admission.note_delivered(&envelope);
             self.commit_queued_delivery(&mut state, PreparedDelivery(item));
         }
@@ -108,14 +117,22 @@ impl SessionActor {
     ///
     /// Armed at enqueue AND at every blocked start (`maybe_start_running_task`), one waiter per session at a time:
     /// the waiter forgets itself before it restarts the queue, so a restart that blocks again re-arms.
-    pub(super) fn wake_peer_rows_after_hold(self: &Arc<Self>, completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>) {
-        static ARMED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    pub(super) fn wake_peer_rows_after_hold(
+        self: &Arc<Self>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
+    ) {
+        static ARMED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
         let armed = ARMED.get_or_init(Default::default);
         let id = self.session_info.id.0.to_string();
         if !crate::session::quiesce::is_ancestor_holding(&id) {
             return;
         }
-        if !armed.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone()) {
+        if !armed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone())
+        {
             return;
         }
         let session = self.clone();
@@ -143,14 +160,22 @@ impl SessionActor {
     /// Scheduled-fire rows start nothing while this session or an ancestor has a park entry in ANY phase
     /// (`Unparking` included): only the client prompt that began an un-park finishes it. Wait (off the actor loop)
     /// until no entry is left, then start the queue. One waiter per session; no-op when no entry exists.
-    pub(super) fn wake_scheduled_rows_after_park(self: &Arc<Self>, completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>) {
-        static ARMED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    pub(super) fn wake_scheduled_rows_after_park(
+        self: &Arc<Self>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
+    ) {
+        static ARMED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
         let armed = ARMED.get_or_init(Default::default);
         let id = self.session_info.id.0.to_string();
         if !crate::session::quiesce::has_park_in_tree(&id) {
             return;
         }
-        if !armed.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone()) {
+        if !armed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone())
+        {
             return;
         }
         let session = self.clone();
@@ -202,7 +227,10 @@ pub(super) struct PeerStoredState {
 }
 
 impl PeerStoredState {
-    pub(super) fn from_history(is_subagent: bool, conversation: &[crate::sampling::ConversationItem]) -> Self {
+    pub(super) fn from_history(
+        is_subagent: bool,
+        conversation: &[crate::sampling::ConversationItem],
+    ) -> Self {
         if is_subagent {
             return Self::default();
         }
@@ -227,7 +255,13 @@ impl PeerStoredState {
     ) -> (usize, usize) {
         if !self.carried.is_empty() {
             for (kind, hash, id) in &self.carried.carried {
-                log.carry(id, &[fuigo_peer::DenialStamp { tool_kind: kind.clone(), target_hash: hash.clone() }]);
+                log.carry(
+                    id,
+                    &[fuigo_peer::DenialStamp {
+                        tool_kind: kind.clone(),
+                        target_hash: hash.clone(),
+                    }],
+                );
             }
             admission.restore_peer_state(&self.carried);
         }
@@ -239,7 +273,10 @@ impl PeerStoredState {
                 let keys = d
                     .keys
                     .iter()
-                    .map(|(kind, hash)| fuigo_workspace::permission::DenialKey { kind: kind.clone(), hash: hash.clone() })
+                    .map(|(kind, hash)| fuigo_workspace::permission::DenialKey {
+                        kind: kind.clone(),
+                        hash: hash.clone(),
+                    })
                     .collect();
                 log.record_keys(keys, now_mono.saturating_sub(age));
                 n += 1;
@@ -266,7 +303,10 @@ pub(super) fn restore_peer_integrity_hold(
 }
 
 /// Whether the stored history of a main session leaves the integrity hold up (decided by item kind).
-pub(super) fn peer_integrity_hold_from_history(is_subagent: bool, conversation: &[crate::sampling::ConversationItem]) -> bool {
+pub(super) fn peer_integrity_hold_from_history(
+    is_subagent: bool,
+    conversation: &[crate::sampling::ConversationItem],
+) -> bool {
     !is_subagent && fuigo_sampling_types::history_has_peer_integrity_hold(conversation)
 }
 
@@ -299,7 +339,10 @@ impl SessionActor {
     /// the drain, passed to a turn (the in-flight ring) or a turn started or joined by a peer input is running.
     /// The caller holds the state lock, the lock under which every path that sets the flag runs.
     fn peer_work_outstanding_locked(&self, state: &State) -> bool {
-        state.pending_inputs.iter().any(|i| i.input_origin.as_prompt_origin().is_peer())
+        state
+            .pending_inputs
+            .iter()
+            .any(|i| i.input_origin.as_prompt_origin().is_peer())
             || self.peer_admission.has_undelivered()
             || self.peer_admission.peer_turn_in_flight()
     }
@@ -322,11 +365,11 @@ impl SessionActor {
             }
             // `push_state_marker_and_ack` sends its command before its first await, so polling it once enqueues the marker
             // while the lock is held (ordering); the same future is awaited for the ack after the lock is released.
-            let mut append = Box::pin(
-                self.chat_state_handle
-                    .push_state_marker_and_ack(crate::sampling::ConversationItem::peer_influence_marker(false)),
-            );
-            let first = std::future::poll_fn(|cx| std::task::Poll::Ready(append.as_mut().poll(cx))).await;
+            let mut append = Box::pin(self.chat_state_handle.push_state_marker_and_ack(
+                crate::sampling::ConversationItem::peer_influence_marker(false),
+            ));
+            let first =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(append.as_mut().poll(cx))).await;
             if matches!(first, std::task::Poll::Ready(None)) {
                 return PeerClear::NotRecorded;
             }
@@ -342,7 +385,11 @@ impl SessionActor {
             std::task::Poll::Pending => append.await,
         };
         #[cfg(test)]
-        let acked = if take_clear_append_failure() { None } else { acked };
+        let acked = if take_clear_append_failure() {
+            None
+        } else {
+            acked
+        };
         if acked.is_none() {
             self.mark_peer_influenced();
             // The cleared marker may or may not be stored: history must agree with the kept lists either way.
@@ -377,9 +424,16 @@ impl SessionActor {
         if !peer_messaging_enabled() || self.startup_hints.is_subagent {
             return;
         }
-        let Some(state) = self.peer_admission.snapshot_peer_state() else { return };
+        let Some(state) = self.peer_admission.snapshot_peer_state() else {
+            return;
+        };
         let item = crate::sampling::ConversationItem::peer_carried_denials_marker(&state);
-        if self.chat_state_handle.push_state_marker_and_ack(item).await.is_none() {
+        if self
+            .chat_state_handle
+            .push_state_marker_and_ack(item)
+            .await
+            .is_none()
+        {
             self.peer_admission.mark_state_dirty();
         }
     }
@@ -387,7 +441,13 @@ impl SessionActor {
     /// Tell admission how many denial keys the carried list had to drop (`carried_stats()`), for the held row and the release
     /// notice (counts only).
     fn sync_carried_overflow(&self) {
-        self.peer_admission.set_carried_overflow(self.permissions.peer_influence().denials().carried_stats().overflow);
+        self.peer_admission.set_carried_overflow(
+            self.permissions
+                .peer_influence()
+                .denials()
+                .carried_stats()
+                .overflow,
+        );
     }
 
     /// S7.3: turn the laundering hits queued by the permission handle into human notices and audit lines. Cheap when none.
@@ -417,12 +477,18 @@ impl SessionActor {
         // repair, which answers a tool call of the running batch that has no result yet with a synthetic "cancelled" result (its
         // real result then makes two for one id, a 400 on every later request). A mid-batch persist therefore still writes now.
         let wall = crate::session::peer_admission::now_secs();
-        let fresh = self.peer_admission.new_denials(self.permissions.peer_influence().denials().entries());
+        let fresh = self
+            .peer_admission
+            .new_denials(self.permissions.peer_influence().denials().entries());
         let total = fresh.len();
         for (i, keys) in fresh.into_iter().enumerate() {
             let keys: Vec<(String, String)> = keys.into_iter().map(|k| (k.kind, k.hash)).collect();
             // A targetless denial has no marker (and the permission side never records one).
-            let Some(item) = crate::sampling::ConversationItem::peer_denial_keys_marker(&keys, wall) else { continue };
+            let Some(item) =
+                crate::sampling::ConversationItem::peer_denial_keys_marker(&keys, wall)
+            else {
+                continue;
+            };
             if self.append_denial_marker(item).await.is_none() {
                 // Same as the carried marker: this one and the rest are not lost, they are written at the next persist point.
                 self.peer_admission.unsync_tail(total - i);
@@ -431,7 +497,12 @@ impl SessionActor {
         }
         if let Some(state) = self.peer_admission.take_state_to_store() {
             let item = crate::sampling::ConversationItem::peer_carried_denials_marker(&state);
-            if self.chat_state_handle.push_state_marker_and_ack(item).await.is_none() {
+            if self
+                .chat_state_handle
+                .push_state_marker_and_ack(item)
+                .await
+                .is_none()
+            {
                 self.peer_admission.mark_state_dirty();
             }
         }
@@ -447,17 +518,27 @@ impl SessionActor {
 
     /// The `PeerHost` this session's peer tools and `/peers` talk to. A subagent gets an unavailable one: it reaches its
     /// family only through `send_subagent_message`.
-    pub(super) fn peer_host(self: &std::sync::Arc<Self>) -> std::sync::Arc<dyn fuigo_peer::host::PeerHost> {
+    pub(super) fn peer_host(
+        self: &std::sync::Arc<Self>,
+    ) -> std::sync::Arc<dyn fuigo_peer::host::PeerHost> {
         use crate::peer_inbox::tool_host::{SessionPeerHost, UnavailableHost};
         if self.startup_hints.is_subagent {
-            return std::sync::Arc::new(UnavailableHost::new("a subagent messages its own family with send_subagent_message"));
+            return std::sync::Arc::new(UnavailableHost::new(
+                "a subagent messages its own family with send_subagent_message",
+            ));
         }
         let (permissions, plan) = (self.permissions.clone(), self.plan_mode.clone());
-        let mode = std::sync::Arc::new(move || fuigo_peer::PeerMode::from(permissions.effective_peer_mode(plan.lock().is_active())));
+        let mode = std::sync::Arc::new(move || {
+            fuigo_peer::PeerMode::from(permissions.effective_peer_mode(plan.lock().is_active()))
+        });
         // S5.6: the conversation a send continues comes from this session's own turn state (the peer message that started or
         // joined the running turn), never from a tool argument.
         let conv = self.peer_admission.turn_conv_handle();
-        let turn_conv = std::sync::Arc::new(move || conv.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone());
+        let turn_conv = std::sync::Arc::new(move || {
+            conv.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        });
         std::sync::Arc::new(SessionPeerHost::new(
             self.session_info.id.0.to_string(),
             self.permissions.peer_influence().denials().clone(),
@@ -481,14 +562,20 @@ impl SessionActor {
             }
         };
         if verb == "held" {
-            let Some(rows) = list().await else { return "Held peer messages could not be read.".to_owned() };
+            let Some(rows) = list().await else {
+                return "Held peer messages could not be read.".to_owned();
+            };
             if rows.is_empty() {
                 return "No held peer messages.".to_owned();
             }
             let now = crate::session::peer_admission::now_secs();
             let mut out = format!("{} held peer message(s):", rows.len());
             for r in rows {
-                let name = if fuigo_peer::is_valid_display_name(&r.from_name) { r.from_name.as_str() } else { "" };
+                let name = if fuigo_peer::is_valid_display_name(&r.from_name) {
+                    r.from_name.as_str()
+                } else {
+                    ""
+                };
                 out.push_str(&format!(
                     "\n  {id}  from \"{name}\" [{from_ref}]  reason: {reasons}{detail}  expires in {left}s",
                     id = crate::session::peer_message::escape_attr(&r.message_id),
@@ -501,22 +588,47 @@ impl SessionActor {
             }
             return out;
         }
-        let Some(id) = id.filter(|_| extra.is_none()) else { return format!("Usage: /peers {verb} <message-id>") };
+        let Some(id) = id.filter(|_| extra.is_none()) else {
+            return format!("Usage: /peers {verb} <message-id>");
+        };
         // Fresh tokens for every call (the old ones die); only an id held in THIS session is found.
         let token = match list().await {
-            Some(rows) => rows.into_iter().find(|r| r.message_id == id).map(|r| r.token),
+            Some(rows) => rows
+                .into_iter()
+                .find(|r| r.message_id == id)
+                .map(|r| r.token),
             None => return "Held peer messages could not be read.".to_owned(),
         };
-        let Some(token) = token else { return "Unknown or no longer held message id.".to_owned() };
+        let Some(token) = token else {
+            return "Unknown or no longer held message id.".to_owned();
+        };
         let shown = crate::session::peer_message::escape_attr(id);
         match verb {
-            "release" => match self.peer_admission.admin(PeerAdminCmd::Release { message_id: id.to_owned(), token }).await {
-                Some(PeerAdminReply::Release(Ok(outcome))) => format!("Released {shown}: {outcome:?}."),
+            "release" => match self
+                .peer_admission
+                .admin(PeerAdminCmd::Release {
+                    message_id: id.to_owned(),
+                    token,
+                })
+                .await
+            {
+                Some(PeerAdminReply::Release(Ok(outcome))) => {
+                    format!("Released {shown}: {outcome:?}.")
+                }
                 Some(PeerAdminReply::Release(Err(e))) => format!("Not released ({e:?})."),
                 _ => "The release could not be made.".to_owned(),
             },
-            _ => match self.peer_admission.admin(PeerAdminCmd::Reject { message_id: id.to_owned(), token }).await {
-                Some(PeerAdminReply::Reject(Ok(()))) => format!("Refused {shown}. The sender is told it was refused."),
+            _ => match self
+                .peer_admission
+                .admin(PeerAdminCmd::Reject {
+                    message_id: id.to_owned(),
+                    token,
+                })
+                .await
+            {
+                Some(PeerAdminReply::Reject(Ok(()))) => {
+                    format!("Refused {shown}. The sender is told it was refused.")
+                }
                 Some(PeerAdminReply::Reject(Err(e))) => format!("Not refused ({e:?})."),
                 _ => "The refusal could not be made.".to_owned(),
             },
@@ -528,13 +640,22 @@ impl SessionActor {
         self: &std::sync::Arc<Self>,
     ) -> fuigo_tools::implementations::fuigo_build::peer_tools::PeerRefuseHandle {
         use fuigo_tools::implementations::fuigo_build::peer_tools::RefusePeerMessageInput;
-        let (tx, mut rx) = mpsc::unbounded_channel::<(RefusePeerMessageInput, tokio::sync::oneshot::Sender<Result<String, String>>)>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<(
+            RefusePeerMessageInput,
+            tokio::sync::oneshot::Sender<Result<String, String>>,
+        )>();
         let weak = std::sync::Arc::downgrade(self);
         tokio::task::spawn_local(async move {
             while let Some((input, reply)) = rx.recv().await {
                 let Some(session) = weak.upgrade() else { break };
-                let args = fuigo_peer::tools::RefusePeerMessageArgs { message_id: input.message_id, reason: input.reason };
-                let answer = args.validate().map_err(|_| "message_id or reason is too long".to_owned()).and_then(|()| session.refuse_peer_message(&args));
+                let args = fuigo_peer::tools::RefusePeerMessageArgs {
+                    message_id: input.message_id,
+                    reason: input.reason,
+                };
+                let answer = args
+                    .validate()
+                    .map_err(|_| "message_id or reason is too long".to_owned())
+                    .and_then(|()| session.refuse_peer_message(&args));
                 let _ = reply.send(answer);
             }
         });
@@ -547,11 +668,20 @@ impl SessionActor {
     }
 
     /// S7.4: run `refuse_peer_message`. `Err` is an error result for the model (unavailable or unknown id), never a panic.
-    pub(super) fn refuse_peer_message(&self, args: &fuigo_peer::tools::RefusePeerMessageArgs) -> Result<String, String> {
+    pub(super) fn refuse_peer_message(
+        &self,
+        args: &fuigo_peer::tools::RefusePeerMessageArgs,
+    ) -> Result<String, String> {
         if !self.refuse_peer_message_available() {
-            return Err("There is nothing to refuse: no peer message has been delivered to this session.".to_owned());
+            return Err(
+                "There is nothing to refuse: no peer message has been delivered to this session."
+                    .to_owned(),
+            );
         }
-        match self.peer_admission.refuse_by_model(&args.message_id, &args.reason) {
+        match self
+            .peer_admission
+            .refuse_by_model(&args.message_id, &args.reason)
+        {
             Ok(done) => Ok(format!(
                 "Refused. The sender was told and is held for the rest of this session (the human can lift this with \
                  `/peers clear-influence`). The human sees the message id and your reason (escaped, cut to 200 characters): {}",
@@ -563,8 +693,14 @@ impl SessionActor {
 
     /// 26-4/26-5: a turn started by a peer message just ended. Applies only with the feature on and only to a turn that completed
     /// (`EndTurn` or a provider `Refusal` stop): a cancelled, failed or length-cut turn is left alone.
-    pub(super) fn finish_peer_started_turn(&self, origin: &PromptOrigin, result: &crate::session::commands::PromptTurnResult) {
-        let PromptOrigin::PeerMessage { message_id, .. } = origin else { return };
+    pub(super) fn finish_peer_started_turn(
+        &self,
+        origin: &PromptOrigin,
+        result: &crate::session::commands::PromptTurnResult,
+    ) {
+        let PromptOrigin::PeerMessage { message_id, .. } = origin else {
+            return;
+        };
         if !peer_messaging_enabled() {
             return;
         }
@@ -594,7 +730,9 @@ impl SessionActor {
         cmd: PeerAdminCmd,
         completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) -> PeerAdminReply {
-        if !peer_messaging_enabled() && matches!(cmd, PeerAdminCmd::Configure(_) | PeerAdminCmd::TakeNotices) {
+        if !peer_messaging_enabled()
+            && matches!(cmd, PeerAdminCmd::Configure(_) | PeerAdminCmd::TakeNotices)
+        {
             return PeerAdminReply::Done;
         }
         self.prune_peer_tracking().await;
@@ -618,14 +756,16 @@ impl SessionActor {
                     }
                 }
             }
-            PeerAdminCmd::Reject { message_id, token } => PeerAdminReply::Reject(
-                self.peer_admission.reject(&message_id, &token, now_mono()),
-            ),
+            PeerAdminCmd::Reject { message_id, token } => {
+                PeerAdminReply::Reject(self.peer_admission.reject(&message_id, &token, now_mono()))
+            }
             PeerAdminCmd::ListHeld => {
                 self.sync_carried_overflow();
                 PeerAdminReply::Held(self.peer_admission.list_held(now_mono()))
             }
-            PeerAdminCmd::HeldSnapshot => PeerAdminReply::Held(self.peer_admission.held_snapshot(now_mono())),
+            PeerAdminCmd::HeldSnapshot => {
+                PeerAdminReply::Held(self.peer_admission.held_snapshot(now_mono()))
+            }
             PeerAdminCmd::Configure(config) => {
                 self.peer_admission.configure(config);
                 PeerAdminReply::Done
@@ -634,9 +774,15 @@ impl SessionActor {
                 self.peer_admission.record_sent_notice(&message_id, kind);
                 PeerAdminReply::Done
             }
-            PeerAdminCmd::SentNoticeWake { message_id, kind, target } => {
-                self.peer_admission.record_sent_notice_opt(&message_id, kind);
-                self.wake_for_peer_notice(&message_id, kind, &target, completion_tx).await;
+            PeerAdminCmd::SentNoticeWake {
+                message_id,
+                kind,
+                target,
+            } => {
+                self.peer_admission
+                    .record_sent_notice_opt(&message_id, kind);
+                self.wake_for_peer_notice(&message_id, kind, &target, completion_tx)
+                    .await;
                 PeerAdminReply::Done
             }
             PeerAdminCmd::TakeNotices => {
@@ -683,7 +829,9 @@ impl SessionActor {
                 screen_mode: None,
                 verbatim: true,
                 json_schema: None,
-                input_origin: InputOrigin::new(super::PromptOrigin::PeerNotice { message_id: message_id.to_owned() }),
+                input_origin: InputOrigin::new(super::PromptOrigin::PeerNotice {
+                    message_id: message_id.to_owned(),
+                }),
                 task_wake_fallback: None,
                 tool_overrides_update: None,
                 respond_to,
@@ -706,14 +854,18 @@ impl SessionActor {
         completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) -> PeerSubmit {
         if !peer_messaging_enabled() {
-            return PeerSubmit::Outcome(DeliveryOutcome::Rejected { reason: RejectReason::Unavailable });
+            return PeerSubmit::Outcome(DeliveryOutcome::Rejected {
+                reason: RejectReason::Unavailable,
+            });
         }
         // Not offered (not opted in, or a remote client is attached, S4.1): `unavailable` FIRST, exactly like an unknown
         // session, before any integrity or baseline work, so a send to such a session leaves no marker, warning or task.
         {
             let c = self.peer_admission.config();
             if !c.opted_in || c.relay_driven || crate::peer_inbox::driver::remote_attached() {
-                return PeerSubmit::Outcome(DeliveryOutcome::Rejected { reason: RejectReason::Unavailable });
+                return PeerSubmit::Outcome(DeliveryOutcome::Rejected {
+                    reason: RejectReason::Unavailable,
+                });
             }
         }
         // S6.6: a write by a background command since the last tool batch is seen before this message is judged.
@@ -733,8 +885,13 @@ impl SessionActor {
         let key = msg_key(&envelope);
         match self.peer_admission.submit(envelope.clone(), now, &live) {
             Submitted::Done(outcome) => PeerSubmit::Outcome(outcome),
-            Submitted::Enqueue => match self.enqueue_admitted_peer_row(envelope, completion_tx).await {
-                PeerAdmission::Admitted { .. } => PeerSubmit::Outcome(DeliveryOutcome::Delivered {}),
+            Submitted::Enqueue => match self
+                .enqueue_admitted_peer_row(envelope, completion_tx)
+                .await
+            {
+                PeerAdmission::Admitted { .. } => {
+                    PeerSubmit::Outcome(DeliveryOutcome::Delivered {})
+                }
                 PeerAdmission::Refused(reason) => {
                     self.peer_admission.untrack(&key);
                     match reason {
@@ -755,14 +912,21 @@ impl SessionActor {
     /// Packet 11: admission for a watch-only send. The same front door as `submit_peer_message` (not offered, integrity, size,
     /// shape, baseline) and the same ingress and decision (`probe_watch`); `Delivered {}` only when a message would be admitted.
     /// Nothing is stored, queued or started.
-    pub(super) async fn probe_peer_watch(self: &Arc<Self>, envelope: fuigo_peer::Envelope) -> PeerSubmit {
+    pub(super) async fn probe_peer_watch(
+        self: &Arc<Self>,
+        envelope: fuigo_peer::Envelope,
+    ) -> PeerSubmit {
         if !peer_messaging_enabled() {
-            return PeerSubmit::Outcome(DeliveryOutcome::Rejected { reason: RejectReason::Unavailable });
+            return PeerSubmit::Outcome(DeliveryOutcome::Rejected {
+                reason: RejectReason::Unavailable,
+            });
         }
         {
             let c = self.peer_admission.config();
             if !c.opted_in || c.relay_driven || crate::peer_inbox::driver::remote_attached() {
-                return PeerSubmit::Outcome(DeliveryOutcome::Rejected { reason: RejectReason::Unavailable });
+                return PeerSubmit::Outcome(DeliveryOutcome::Rejected {
+                    reason: RejectReason::Unavailable,
+                });
             }
         }
         self.recheck_peer_integrity().await;
@@ -791,7 +955,10 @@ impl SessionActor {
         for envelope in enter {
             let key = msg_key(&envelope);
             let id = envelope.message_id.clone();
-            if let PeerAdmission::Refused(why) = self.enqueue_admitted_peer_row(envelope, completion_tx.clone()).await {
+            if let PeerAdmission::Refused(why) = self
+                .enqueue_admitted_peer_row(envelope, completion_tx.clone())
+                .await
+            {
                 self.peer_admission.untrack(&key);
                 let dropped = match why {
                     PeerRefusal::Policy => RejectReason::PolicyRefused,
@@ -814,7 +981,9 @@ impl SessionActor {
             .pending_inputs
             .iter()
             .filter_map(|i| match i.input_origin.as_prompt_origin() {
-                PromptOrigin::PeerMessage { message_id, from } => Some((from.clone(), message_id.clone())),
+                PromptOrigin::PeerMessage { message_id, from } => {
+                    Some((from.clone(), message_id.clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -823,16 +992,31 @@ impl SessionActor {
     }
 
     /// Start-of-turn check for a turn begun by a peer row: `false` when the hold is up, in which case the row went back to held.
-    pub(super) fn peer_turn_row_still_qualifies(&self, request: &super::turn_task::TurnInputRequest) -> bool {
-        let PromptOrigin::PeerMessage { message_id, from } = request.input_origin.as_prompt_origin() else { return true };
-        self.peer_admission.recheck_queued(&(from.clone(), message_id.clone()), now_mono(), &self.peer_live())
+    pub(super) fn peer_turn_row_still_qualifies(
+        &self,
+        request: &super::turn_task::TurnInputRequest,
+    ) -> bool {
+        let PromptOrigin::PeerMessage { message_id, from } =
+            request.input_origin.as_prompt_origin()
+        else {
+            return true;
+        };
+        self.peer_admission.recheck_queued(
+            &(from.clone(), message_id.clone()),
+            now_mono(),
+            &self.peer_live(),
+        )
     }
 
     /// Recheck queued peer rows just before they enter a turn; rows that no longer qualify are taken out of the queue (they are
     /// back in the held store, or dropped with a notice). `front_only`: only the row at the front (about to start). Returns true if
     /// any row was removed. A peer row this state does not track is not qualified and is removed too.
     pub(super) fn demote_unqualified_peer_rows(&self, state: &mut State, front_only: bool) -> bool {
-        if !state.pending_inputs.iter().any(|i| i.input_origin.as_prompt_origin().is_peer()) {
+        if !state
+            .pending_inputs
+            .iter()
+            .any(|i| i.input_origin.as_prompt_origin().is_peer())
+        {
             return false;
         }
         let (now, live) = (now_mono(), self.peer_live());
@@ -911,12 +1095,17 @@ impl SessionActor {
             });
         }
         envelope.from_mode = self.effective_peer_mode().into();
-        self.peer_admission.track_direct_for_test(envelope.clone(), now_mono());
-        self.enqueue_admitted_peer_row(envelope, completion_tx).await
+        self.peer_admission
+            .track_direct_for_test(envelope.clone(), now_mono());
+        self.enqueue_admitted_peer_row(envelope, completion_tx)
+            .await
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "peer_admit_tests.rs"]
 mod tests;

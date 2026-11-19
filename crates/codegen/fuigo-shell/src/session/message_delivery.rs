@@ -123,7 +123,8 @@ pub(crate) struct PeerGate {
 
 impl PeerGate {
     pub(crate) fn set_opted_in(&self, value: bool) {
-        self.opted_in.store(value, std::sync::atomic::Ordering::SeqCst);
+        self.opted_in
+            .store(value, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The client's own opt-in, ignoring the remote-attached fact (the event pump's lifetime follows this).
@@ -133,7 +134,8 @@ impl PeerGate {
 
     pub(crate) fn is_opted_in(&self) -> bool {
         // S4.1: while a remote client is attached to this process no session is addressable, whatever `opted_in` says.
-        self.opted_in.load(std::sync::atomic::Ordering::SeqCst) && !crate::peer_inbox::driver::remote_attached()
+        self.opted_in.load(std::sync::atomic::Ordering::SeqCst)
+            && !crate::peer_inbox::driver::remote_attached()
     }
 
     pub(crate) fn in_flight(&self) -> usize {
@@ -149,7 +151,10 @@ impl PeerGate {
             if cur >= MAX_PEER_IN_FLIGHT {
                 return None;
             }
-            match self.in_flight.compare_exchange(cur, cur + 1, SeqCst, SeqCst) {
+            match self
+                .in_flight
+                .compare_exchange(cur, cur + 1, SeqCst, SeqCst)
+            {
                 Ok(_) => return Some(PeerSlot(self.clone())),
                 Err(now) => cur = now,
             }
@@ -164,7 +169,9 @@ pub struct PeerSlot(Arc<PeerGate>);
 
 impl Drop for PeerSlot {
     fn drop(&mut self) {
-        self.0.in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -235,11 +242,18 @@ impl MessageDeliveryHandle {
 
     /// Packet 11: a watch-only send (empty body + `watch`) goes through the same bounded hand-in and the same admission gate as a
     /// message, but is only judged: `Outcome(Delivered {})` means "admitted, register the watch"; nothing is stored or queued.
-    pub(crate) async fn probe_peer_watch(&self, envelope: fuigo_peer::Envelope) -> super::peer_admission::PeerSubmit {
+    pub(crate) async fn probe_peer_watch(
+        &self,
+        envelope: fuigo_peer::Envelope,
+    ) -> super::peer_admission::PeerSubmit {
         self.hand_in_peer(envelope, true).await
     }
 
-    async fn hand_in_peer(&self, envelope: fuigo_peer::Envelope, probe: bool) -> super::peer_admission::PeerSubmit {
+    async fn hand_in_peer(
+        &self,
+        envelope: fuigo_peer::Envelope,
+        probe: bool,
+    ) -> super::peer_admission::PeerSubmit {
         use super::peer_admission::PeerSubmit;
         use super::peer_message::peer_messaging_enabled;
         if !peer_messaging_enabled() {
@@ -277,20 +291,32 @@ impl MessageDeliveryHandle {
         }
         let (respond_to, _rx) = oneshot::channel();
         let _ = self.cmd_tx.send(SessionCommand::PeerAdmission {
-            cmd: super::peer_admission::PeerAdminCmd::SentNotice { message_id: message_id.to_owned(), kind },
+            cmd: super::peer_admission::PeerAdminCmd::SentNotice {
+                message_id: message_id.to_owned(),
+                kind,
+            },
             respond_to,
         });
     }
 
     /// Packet 11: tell the session a notice about a message it sent (`kind` `None` = `outcome unknown`); the session records it
     /// and wakes the model with fixed text. Fire and forget; nothing happens with the flag off.
-    pub(crate) fn record_sent_notice_wake(&self, message_id: &str, kind: Option<fuigo_peer::NoticeKind>, target: String) {
+    pub(crate) fn record_sent_notice_wake(
+        &self,
+        message_id: &str,
+        kind: Option<fuigo_peer::NoticeKind>,
+        target: String,
+    ) {
         if !super::peer_message::peer_messaging_enabled() {
             return;
         }
         let (respond_to, _rx) = oneshot::channel();
         let _ = self.cmd_tx.send(SessionCommand::PeerAdmission {
-            cmd: super::peer_admission::PeerAdminCmd::SentNoticeWake { message_id: message_id.to_owned(), kind, target },
+            cmd: super::peer_admission::PeerAdminCmd::SentNoticeWake {
+                message_id: message_id.to_owned(),
+                kind,
+                target,
+            },
             respond_to,
         });
     }
@@ -366,13 +392,21 @@ impl OwnedActiveDescendantGrant {
 pub(crate) fn peer_test_session(
     session_id: &str,
     answer: Option<super::peer_admission::PeerSubmit>,
-) -> (MessageDeliveryHandle, mpsc::UnboundedReceiver<fuigo_peer::Envelope>) {
+) -> (
+    MessageDeliveryHandle,
+    mpsc::UnboundedReceiver<fuigo_peer::Envelope>,
+) {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     let (seen_tx, seen_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         let mut parked = Vec::new();
         while let Some(cmd) = cmd_rx.recv().await {
-            if let SessionCommand::PeerMessage { envelope, respond_to, .. } = cmd {
+            if let SessionCommand::PeerMessage {
+                envelope,
+                respond_to,
+                ..
+            } = cmd
+            {
                 let _ = seen_tx.send(*envelope);
                 match &answer {
                     Some(a) => {
@@ -383,7 +417,10 @@ pub(crate) fn peer_test_session(
             }
         }
     });
-    (MessageDeliveryHandle::new(cmd_tx, session_id.to_owned()).with_gate(opted_in_gate()), seen_rx)
+    (
+        MessageDeliveryHandle::new(cmd_tx, session_id.to_owned()).with_gate(opted_in_gate()),
+        seen_rx,
+    )
 }
 
 /// A gate for a test session that is opted in (the directory only offers opted-in sessions).
@@ -398,7 +435,10 @@ pub(crate) fn opted_in_gate() -> Arc<PeerGate> {
 #[cfg(test)]
 pub(crate) fn peer_test_notice_session(
     session_id: &str,
-) -> (MessageDeliveryHandle, mpsc::UnboundedReceiver<(String, fuigo_peer::NoticeKind)>) {
+) -> (
+    MessageDeliveryHandle,
+    mpsc::UnboundedReceiver<(String, fuigo_peer::NoticeKind)>,
+) {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     let (seen_tx, seen_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -408,7 +448,11 @@ pub(crate) fn peer_test_notice_session(
                     super::peer_admission::PeerAdminCmd::SentNotice { message_id, kind } => {
                         let _ = seen_tx.send((message_id, kind));
                     }
-                    super::peer_admission::PeerAdminCmd::SentNoticeWake { message_id, kind: Some(kind), .. } => {
+                    super::peer_admission::PeerAdminCmd::SentNoticeWake {
+                        message_id,
+                        kind: Some(kind),
+                        ..
+                    } => {
                         let _ = seen_tx.send((message_id, kind));
                     }
                     _ => {}
@@ -416,7 +460,10 @@ pub(crate) fn peer_test_notice_session(
             }
         }
     });
-    (MessageDeliveryHandle::new(cmd_tx, session_id.to_owned()).with_gate(opted_in_gate()), seen_rx)
+    (
+        MessageDeliveryHandle::new(cmd_tx, session_id.to_owned()).with_gate(opted_in_gate()),
+        seen_rx,
+    )
 }
 
 #[cfg(test)]

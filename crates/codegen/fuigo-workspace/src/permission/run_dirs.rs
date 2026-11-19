@@ -33,14 +33,26 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(r.join("nowhere"), r.join("dangling")).unwrap();
         let _trust = TestFolderTrust::only(&[r.as_path()]);
-        assert!(run_dirs_trust(std::slice::from_ref(&r)).is_trusted(), "an existing cwd of a trusted folder");
-        assert!(run_dirs_trust(&[r.clone(), r.join("sub")]).is_trusted(), "an existing workdir of a trusted folder");
-        assert!(!run_dirs_trust(&[r.join("gone")]).is_trusted(), "a missing cwd under a trusted folder");
+        assert!(
+            run_dirs_trust(std::slice::from_ref(&r)).is_trusted(),
+            "an existing cwd of a trusted folder"
+        );
+        assert!(
+            run_dirs_trust(&[r.clone(), r.join("sub")]).is_trusted(),
+            "an existing workdir of a trusted folder"
+        );
+        assert!(
+            !run_dirs_trust(&[r.join("gone")]).is_trusted(),
+            "a missing cwd under a trusted folder"
+        );
         assert!(
             !run_dirs_trust(&[r.clone(), r.join("gone").join("deeper")]).is_trusted(),
             "a missing workdir under a trusted folder"
         );
         #[cfg(unix)]
-        assert!(!run_dirs_trust(&[r.clone(), r.join("dangling")]).is_trusted(), "a workdir that does not resolve");
+        assert!(
+            !run_dirs_trust(&[r.clone(), r.join("dangling")]).is_trusted(),
+            "a workdir that does not resolve"
+        );
     }
 }

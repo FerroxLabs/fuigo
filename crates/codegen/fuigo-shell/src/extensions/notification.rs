@@ -1205,7 +1205,11 @@ pub enum RetryState {
         /// P188: the `_meta.streamStartMs` every update of the discarded attempt carried. A client that keys on it
         /// drops exactly that attempt's output (live and on replay) instead of inferring where the response began.
         /// Only meaningful with `discardEmitted`; absent when the attempt's stream start is unknown.
-        #[serde(rename = "streamStartMs", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "streamStartMs",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         stream_start_ms: Option<i64>,
     },
     /// All retries have been exhausted
@@ -1259,7 +1263,9 @@ impl RetryState {
         use fuigo_telemetry::sent_credentials::scrub_in_place;
         self.stamp_verdicts();
         match self {
-            Self::Retrying {upstream,..} | Self::Exhausted {upstream,..} | Self::Failed {upstream,..} => upstream.project(),
+            Self::Retrying { upstream, .. }
+            | Self::Exhausted { upstream, .. }
+            | Self::Failed { upstream, .. } => upstream.project(),
         }
         match self {
             Self::Retrying { reason, .. } | Self::Exhausted { reason, .. } => {
@@ -1627,14 +1633,19 @@ impl From<FeedbackRequestData> for FeedbackRequestNotification {
 /// its `checkpoint_file` is trusted only in the exact form compaction writes, `compaction_checkpoints/<token>.json`
 /// with a plain-token name; anything else (`..`, an absolute path, extra components) resolves to a path that never
 /// exists, so the caller sees an ordinary missing checkpoint and nothing outside the session directory is touched.
-pub(crate) fn contained_checkpoint_path(session_dir: &std::path::Path, checkpoint_file: &str) -> std::path::PathBuf {
+pub(crate) fn contained_checkpoint_path(
+    session_dir: &std::path::Path,
+    checkpoint_file: &str,
+) -> std::path::PathBuf {
     let ok = checkpoint_file
         .strip_prefix("compaction_checkpoints/")
         .and_then(|n| n.strip_suffix(".json"))
         .is_some_and(|id| {
             !id.is_empty()
                 && id.len() <= 128
-                && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         });
     if ok {
         session_dir.join(checkpoint_file)
@@ -1652,12 +1663,17 @@ pub(crate) fn contained_checkpoint_path(session_dir: &std::path::Path, checkpoin
 /// a missing checkpoint, the way they treat a marker whose path is refused as text. Neither the directory nor the
 /// file is ever followed through a symlink, including one swapped in after a check, and a FIFO there cannot block the
 /// read (see `open_beneath_nofollow`).
-pub(crate) fn read_contained_checkpoint(session_dir: &std::path::Path, checkpoint_file: &str) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_contained_checkpoint(
+    session_dir: &std::path::Path,
+    checkpoint_file: &str,
+) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
     let refused = |what: &str| {
         let error = std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("compaction checkpoint {checkpoint_file:?} refused: {what}; it is treated as missing"),
+            format!(
+                "compaction checkpoint {checkpoint_file:?} refused: {what}; it is treated as missing"
+            ),
         );
         tracing::warn!(session_dir = %session_dir.display(), %error, "compaction checkpoint refused");
         error
@@ -1666,7 +1682,9 @@ pub(crate) fn read_contained_checkpoint(session_dir: &std::path::Path, checkpoin
     if path.file_name() == Some(std::ffi::OsStr::new(".rejected")) {
         return Err(refused("its path is not inside compaction_checkpoints/"));
     }
-    let relative = path.strip_prefix(session_dir).map_err(|_| refused("its path is not inside the session folder"))?;
+    let relative = path
+        .strip_prefix(session_dir)
+        .map_err(|_| refused("its path is not inside the session folder"))?;
     let mut file = match crate::session::storage::open_beneath_nofollow(session_dir, relative) {
         Ok(file) => file,
         Err(crate::session::storage::BeneathRefusal::Refused(what)) => return Err(refused(what)),
@@ -1723,7 +1741,11 @@ pub struct CompactionCheckpointFile {
     /// latest checkpoint carries `inherited_prefix_len`, which loses every tool call after it (P88). Under the new key a
     /// compaction made by this version reads as a legacy checkpoint there, so running an older binary on the same
     /// sessions keeps their history intact.
-    #[serde(default, rename = "resolved_prefix_len", alias = "inherited_prefix_len")]
+    #[serde(
+        default,
+        rename = "resolved_prefix_len",
+        alias = "inherited_prefix_len"
+    )]
     pub inherited_prefix_len: Option<usize>,
     /// Unique checkpoint identifier (matches [`CompactionCheckpointInfo::checkpoint_id`]).
     pub checkpoint_id: String,
@@ -2936,14 +2958,21 @@ mod tests {
         let json = serde_json::to_value(&with).unwrap();
         assert_eq!(json["route"], "Grok subscription");
         assert_eq!(serde_json::from_value::<SessionUpdate>(json).unwrap(), with);
-        let without = serde_json::to_value(SessionUpdate::model_changed("grok-4.7", None, None)).unwrap();
-        assert!(without.get("route").is_none(), "an unset route is not serialised: {without}");
+        let without =
+            serde_json::to_value(SessionUpdate::model_changed("grok-4.7", None, None)).unwrap();
+        assert!(
+            without.get("route").is_none(),
+            "an unset route is not serialised: {without}"
+        );
         let old: SessionUpdate = serde_json::from_value(serde_json::json!({
             "sessionUpdate": "model_changed",
             "model_id": "m",
         }))
         .unwrap();
-        assert!(matches!(old, SessionUpdate::ModelChanged { route: None, .. }));
+        assert!(matches!(
+            old,
+            SessionUpdate::ModelChanged { route: None, .. }
+        ));
     }
 
     /// `ModelChanged` round-trips through JSON: a follower client deserializes the exact same value the agent serialized.
@@ -3305,7 +3334,10 @@ mod tests {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod contained_checkpoint_path_tests {
     use super::contained_checkpoint_path;
@@ -3329,7 +3361,11 @@ mod contained_checkpoint_path_tests {
             "",
         ] {
             let p = contained_checkpoint_path(dir, bad);
-            assert_eq!(p, dir.join("compaction_checkpoints/.rejected"), "{bad:?} escaped: {p:?}");
+            assert_eq!(
+                p,
+                dir.join("compaction_checkpoints/.rejected"),
+                "{bad:?} escaped: {p:?}"
+            );
         }
     }
 
@@ -3347,13 +3383,24 @@ mod contained_checkpoint_path_tests {
         let dir = session.path().join("compaction_checkpoints");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("good.json"), b"INSIDE").unwrap();
-        assert_eq!(read_contained_checkpoint(session.path(), "compaction_checkpoints/good.json").unwrap(), b"INSIDE");
+        assert_eq!(
+            read_contained_checkpoint(session.path(), "compaction_checkpoints/good.json").unwrap(),
+            b"INSIDE"
+        );
 
         std::os::unix::fs::symlink(&secret, dir.join("linked.json")).unwrap();
         std::os::unix::fs::symlink(&secret, dir.join(".rejected")).unwrap();
-        for marker in ["compaction_checkpoints/linked.json", "../outside.json", "compaction_checkpoints/missing.json"] {
+        for marker in [
+            "compaction_checkpoints/linked.json",
+            "../outside.json",
+            "compaction_checkpoints/missing.json",
+        ] {
             let error = read_contained_checkpoint(session.path(), marker).expect_err(marker);
-            assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{marker}: {error}");
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::NotFound,
+                "{marker}: {error}"
+            );
         }
 
         // A symlinked directory: the name inside it is a regular file, but outside the session.
@@ -3361,20 +3408,34 @@ mod contained_checkpoint_path_tests {
         std::fs::create_dir(other.path().join("x")).unwrap();
         std::fs::write(other.path().join("x/good.json"), b"OUTSIDE").unwrap();
         let session2 = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(other.path().join("x"), session2.path().join("compaction_checkpoints")).unwrap();
-        let error = read_contained_checkpoint(session2.path(), "compaction_checkpoints/good.json").expect_err("dir link");
+        std::os::unix::fs::symlink(
+            other.path().join("x"),
+            session2.path().join("compaction_checkpoints"),
+        )
+        .unwrap();
+        let error = read_contained_checkpoint(session2.path(), "compaction_checkpoints/good.json")
+            .expect_err("dir link");
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
 
         // A FIFO with no writer: refused at once instead of blocking the read (the open does not wait for a writer).
         let fifo = std::ffi::CString::new(dir.join("fifo.json").to_str().unwrap()).unwrap();
         // SAFETY: mkfifo(3) on a NUL-terminated path.
-        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "make the fifo");
+        assert_eq!(
+            unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) },
+            0,
+            "make the fifo"
+        );
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let session_path = session.path().to_path_buf();
         std::thread::spawn(move || {
-            let _ = done_tx.send(read_contained_checkpoint(&session_path, "compaction_checkpoints/fifo.json"));
+            let _ = done_tx.send(read_contained_checkpoint(
+                &session_path,
+                "compaction_checkpoints/fifo.json",
+            ));
         });
-        let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("a FIFO must not block the read");
+        let outcome = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a FIFO must not block the read");
         let error = outcome.expect_err("a FIFO is not a checkpoint");
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
     }

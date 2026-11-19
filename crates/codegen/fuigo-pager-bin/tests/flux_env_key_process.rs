@@ -12,7 +12,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use fuigo_test_support::{
-    InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, MockModelEntry, ScriptedResponse, TestSandbox, sse,
+    InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, MockModelEntry,
+    ScriptedResponse, TestSandbox, sse,
 };
 
 const FLUX: &str = "flux-env-SYNTH-flux-key-0001";
@@ -40,7 +41,8 @@ fn run_child(sandbox: &TestSandbox, args: &[&str]) -> (Option<i32>, String, Stri
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[allow(clippy::disallowed_methods)] // test-owned child, waited on (or killed and reaped) in this function
+    #[allow(clippy::disallowed_methods)]
+    // test-owned child, waited on (or killed and reaped) in this function
     let mut child = cmd.spawn().expect("spawn fuigo-pager");
     let mut so = child.stdout.take().unwrap();
     let mut se = child.stderr.take().unwrap();
@@ -71,19 +73,30 @@ fn run_child(sandbox: &TestSandbox, args: &[&str]) -> (Option<i32>, String, Stri
 
 /// A mock that answers inference only for `Authorization: Bearer <accepts>`, with one scripted text turn.
 async fn server_accepting(accepts: &str) -> MockInferenceServer {
-    let server = MockInferenceServer::start_with_required_auth(vec![MockModelEntry::new("test-model")], accepts)
-        .await
-        .expect("start the mock inference server");
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("test-model")],
+        accepts,
+    )
+    .await
+    .expect("start the mock inference server");
     server.preset_allow_access();
     for (name, endpoint, events) in [
-        ("hi (responses)", InferenceEndpoint::Responses, sse::responses_api_script_exact("hello there", "test-model")),
+        (
+            "hi (responses)",
+            InferenceEndpoint::Responses,
+            sse::responses_api_script_exact("hello there", "test-model"),
+        ),
         (
             "hi (chat completions)",
             InferenceEndpoint::ChatCompletions,
             sse::chat_completion_script_exact("hello there", "test-model"),
         ),
     ] {
-        let _ = server.expect_response(name, InferenceRequestMatcher::foreground(endpoint), ScriptedResponse::sse(events));
+        let _ = server.expect_response(
+            name,
+            InferenceRequestMatcher::foreground(endpoint),
+            ScriptedResponse::sse(events),
+        );
     }
     server
 }
@@ -104,7 +117,9 @@ fn inference_authorizations(server: &MockInferenceServer) -> Vec<String> {
     server
         .requests()
         .iter()
-        .filter(|e| e.method == "POST" && (e.path.contains("completions") || e.path.contains("responses")))
+        .filter(|e| {
+            e.method == "POST" && (e.path.contains("completions") || e.path.contains("responses"))
+        })
         .filter_map(|e| e.authorization.clone())
         .collect()
 }
@@ -114,7 +129,9 @@ async fn headless_uses(env: &'static [(&'static str, &'static str)], expected: &
     let server = server_accepting(expected).await;
     let sandbox = sandbox_with(&server, env);
     let (code, stdout, stderr) =
-        tokio::task::spawn_blocking(move || run_child(&sandbox, &["-p", "say hi", "--trust"])).await.unwrap();
+        tokio::task::spawn_blocking(move || run_child(&sandbox, &["-p", "say hi", "--trust"]))
+            .await
+            .unwrap();
     assert!(
         !stderr.contains("Not signed in") && !stdout.contains("Not signed in"),
         "{env:?}: headless -p ignored the key\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -124,10 +141,20 @@ async fn headless_uses(env: &'static [(&'static str, &'static str)], expected: &
         !sent.is_empty() && sent.iter().all(|a| a == &format!("Bearer {expected}")),
         "{env:?}: the model request must carry the {expected} bearer, saw {sent:?}\nstderr:\n{stderr}"
     );
-    assert_eq!(code, Some(0), "{env:?}: the run succeeds\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("hello there"), "{env:?}: the scripted reply is printed\nstdout:\n{stdout}");
+    assert_eq!(
+        code,
+        Some(0),
+        "{env:?}: the run succeeds\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("hello there"),
+        "{env:?}: the scripted reply is printed\nstdout:\n{stdout}"
+    );
     for secret in [FLUX, FUIGO, LEGACY] {
-        assert!(!stdout.contains(secret) && !stderr.contains(secret), "{env:?}: a key was printed");
+        assert!(
+            !stdout.contains(secret) && !stderr.contains(secret),
+            "{env:?}: a key was printed"
+        );
     }
 }
 
@@ -138,8 +165,20 @@ async fn headless_with_only_flux_api_key_authenticates() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn headless_precedence_is_fuigo_then_legacy_then_flux() {
-    headless_uses(&[("FUIGO_API_KEY", FUIGO), ("FUIGO_CODE_API_KEY", LEGACY), ("FLUX_API_KEY", FLUX)], FUIGO).await;
-    headless_uses(&[("FUIGO_CODE_API_KEY", LEGACY), ("FLUX_API_KEY", FLUX)], LEGACY).await;
+    headless_uses(
+        &[
+            ("FUIGO_API_KEY", FUIGO),
+            ("FUIGO_CODE_API_KEY", LEGACY),
+            ("FLUX_API_KEY", FLUX),
+        ],
+        FUIGO,
+    )
+    .await;
+    headless_uses(
+        &[("FUIGO_CODE_API_KEY", LEGACY), ("FLUX_API_KEY", FLUX)],
+        LEGACY,
+    )
+    .await;
     headless_uses(&[("FUIGO_API_KEY", FUIGO), ("FLUX_API_KEY", FLUX)], FUIGO).await;
     // A blank higher-precedence variable does not hide a real one below it (discovery skips it the same way).
     headless_uses(&[("FUIGO_API_KEY", "  "), ("FLUX_API_KEY", FLUX)], FLUX).await;
@@ -151,7 +190,9 @@ async fn headless_with_no_key_still_says_not_signed_in() {
     let server = server_accepting(FLUX).await;
     let sandbox = sandbox_with(&server, &[]);
     let (code, stdout, stderr) =
-        tokio::task::spawn_blocking(move || run_child(&sandbox, &["-p", "say hi", "--trust"])).await.unwrap();
+        tokio::task::spawn_blocking(move || run_child(&sandbox, &["-p", "say hi", "--trust"]))
+            .await
+            .unwrap();
     assert_eq!(code, Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stderr.contains("Not signed in"), "{stderr}");
     assert!(inference_authorizations(&server).is_empty());
@@ -162,12 +203,23 @@ async fn models_with_only_flux_api_key_is_authenticated() {
     let server = server_accepting(FLUX).await;
     let sandbox = sandbox_with(&server, &[("FLUX_API_KEY", FLUX)]);
     let (code, stdout, stderr) =
-        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"])).await.unwrap();
+        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"]))
+            .await
+            .unwrap();
     assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("You are using FLUX_API_KEY."), "names the variable in use\nstdout:\n{stdout}");
+    assert!(
+        stdout.contains("You are using FLUX_API_KEY."),
+        "names the variable in use\nstdout:\n{stdout}"
+    );
     assert!(!stdout.contains("not authenticated"), "{stdout}");
-    assert!(stdout.contains("test-model"), "the catalogue was fetched with the key\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(!stdout.contains(FLUX) && !stderr.contains(FLUX), "the key was printed");
+    assert!(
+        stdout.contains("test-model"),
+        "the catalogue was fetched with the key\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains(FLUX) && !stderr.contains(FLUX),
+        "the key was printed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -175,7 +227,9 @@ async fn models_names_the_variable_that_wins() {
     let server = server_accepting(FUIGO).await;
     let sandbox = sandbox_with(&server, &[("FUIGO_API_KEY", FUIGO), ("FLUX_API_KEY", FLUX)]);
     let (code, stdout, stderr) =
-        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"])).await.unwrap();
+        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"]))
+            .await
+            .unwrap();
     assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("You are using FUIGO_API_KEY."), "{stdout}");
 }
@@ -188,12 +242,23 @@ async fn models_with_only_a_saved_key_says_which_credential_it_uses() {
     let sandbox = sandbox_with(&server, &[]);
     fuigo_shell::auth::store_api_key(sandbox.fuigo_home(), SAVED).expect("save the key");
     let (code, stdout, stderr) =
-        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"])).await.unwrap();
+        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"]))
+            .await
+            .unwrap();
     assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("Using your saved Flux Router key."), "names the credential\nstdout:\n{stdout}");
+    assert!(
+        stdout.contains("Using your saved Flux Router key."),
+        "names the credential\nstdout:\n{stdout}"
+    );
     assert!(!stdout.contains("not authenticated"), "{stdout}");
-    assert!(stdout.contains("Default model:"), "the listing ran\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(!stdout.contains(SAVED) && !stderr.contains(SAVED), "the key was printed");
+    assert!(
+        stdout.contains("Default model:"),
+        "the listing ran\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains(SAVED) && !stderr.contains(SAVED),
+        "the key was printed"
+    );
 }
 
 /// The environment outranks the saved key, as at runtime, and the banner names the variable.
@@ -203,7 +268,9 @@ async fn models_prefers_the_env_key_over_the_saved_key() {
     let sandbox = sandbox_with(&server, &[("FLUX_API_KEY", FLUX)]);
     fuigo_shell::auth::store_api_key(sandbox.fuigo_home(), SAVED).expect("save the key");
     let (code, stdout, stderr) =
-        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"])).await.unwrap();
+        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"]))
+            .await
+            .unwrap();
     assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("You are using FLUX_API_KEY."), "{stdout}");
     assert!(!stdout.contains("saved Flux Router key"), "{stdout}");
@@ -215,7 +282,15 @@ async fn models_with_no_key_says_not_authenticated() {
     let server = server_accepting(FLUX).await;
     let sandbox = sandbox_with(&server, &[]);
     let (_code, stdout, stderr) =
-        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"])).await.unwrap();
-    assert!(stdout.contains("You are not authenticated."), "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(!stdout.contains("saved Flux Router key") && !stdout.contains("You are using"), "{stdout}");
+        tokio::task::spawn_blocking(move || run_child(&sandbox, &["models"]))
+            .await
+            .unwrap();
+    assert!(
+        stdout.contains("You are not authenticated."),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("saved Flux Router key") && !stdout.contains("You are using"),
+        "{stdout}"
+    );
 }

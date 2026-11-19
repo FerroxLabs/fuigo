@@ -10,11 +10,13 @@
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use command_fds::FdMapping;
@@ -37,10 +39,10 @@ const INIT_STATE_MARKER: &str = "__FUIGO_INIT_STATE_MARKER__";
 /// Maximum time to wait for a shell state init (login shell + rc files).
 const INIT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Maximum time to wait for the dump reader task after the child process exits.
-/// Uses a 5s close timeout. If a background process inherits fd 4,
-/// the reader would hang forever without this.
-const DUMP_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum time to wait for the dump once the command is over (the shell is gone or has begun writing it).
+/// If a background process inherits fd 4, the reader would hang forever without this. It never runs while the
+/// command itself is still running: a foreground command may take as long as it likes.
+pub(super) const DUMP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Environment overrides applied to every agent terminal / persistent shell spawn.
 /// Prevents color/pager noise in captured output and marks the process as agent-driven.
@@ -149,6 +151,12 @@ dump_bash_state() {
 /// as base64-encoded replayable shell snippets.
 const DUMP_ZSH_STATE_SCRIPT: &str = r##"
 function dump_zsh_state() {
+  # The caller's options, copied before `emulate -L` below resets them to zsh's defaults for this function (u46 r3:
+  # without this the dump only ever listed the emulation's own options and no option a command set carried). The
+  # options block is the difference from those defaults, spelled as `setopt` lists it (`NAME` / `noNAME`).
+  builtin zmodload -F zsh/parameter p:options 2>/dev/null
+  local -A __fuigo_caller_opts
+  __fuigo_caller_opts=("${(@kv)options}")
   emulate -L zsh -o errreturn -o pipefail
   set -u
 
@@ -178,11 +186,14 @@ function dump_zsh_state() {
   env_vars=$(__FUIGO_CREDENTIAL_SCRUB__; builtin typeset -xp 2>/dev/null | command grep -viE '_proxy=|FUIGO_SANDBOX|FUIGO_AGENT=|SUDO_ASKPASS|FUIGO_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
-  # errreturn/pipefail here are this function's own `emulate -L` options
-  # (setopt lists them while inside); replaying them would abort later user
-  # commands.
+  # nounset/errexit/errreturn/pipefail would abort later user commands.
   local zsh_opts
-  zsh_opts=$(setopt 2>/dev/null | command grep -vE '^(nounset|errexit|errreturn|pipefail)$' | command awk '{printf "builtin setopt %s 2>/dev/null || true\n", $0}' || true)
+  local __fuigo_o
+  # u46 r4: the baseline is zsh's own defaults (`emulate -R zsh` resets every option; plain `emulate` only the portability
+  # ones, which left options such as nocaseglob equal on both sides and so never carried). `extendedglob` is the option
+  # Fuigo's init shell starts with (`-o extendedglob`), not the user's: replaying it would turn an unquoted `^`, `#` or
+  # `~` in every command into a glob operator.
+  zsh_opts=$(emulate -R zsh; for __fuigo_o in ${(ok)__fuigo_caller_opts}; do [[ ${__fuigo_caller_opts[$__fuigo_o]} == "${options[$__fuigo_o]-}" ]] && continue; if [[ ${__fuigo_caller_opts[$__fuigo_o]} == on ]]; then builtin print -r -- "$__fuigo_o"; else builtin print -r -- "no$__fuigo_o"; fi; done | command grep -vE '^(no)?(nounset|errexit|errreturn|pipefail|localoptions|localtraps|localpatterns|extendedglob)$' | command awk '{printf "builtin setopt %s 2>/dev/null || true\n", $0}' || true)
   _emit_encoded "$zsh_opts" "ZSH_OPTS_B64"
 
   # TRAP* and hook functions act as soon as they are defined (before the restore guard runs), so they are not kept.
@@ -246,8 +257,14 @@ impl ShellKind {
         // Scrub inside the capture subshell, before serialization. This handles
         // mixed-case names and multiline values without parsing shell source.
         script
-            .replace("__FUIGO_CREDENTIAL_SCRUB__", &self.credential_scrub("builtin exit 1"))
-            .replace("__FUIGO_UNREPLAYED_FUNCTIONS__", &super::restore_guard::zsh_unreplayed_functions())
+            .replace(
+                "__FUIGO_CREDENTIAL_SCRUB__",
+                &self.credential_scrub("builtin exit 1"),
+            )
+            .replace(
+                "__FUIGO_UNREPLAYED_FUNCTIONS__",
+                &super::restore_guard::zsh_unreplayed_functions(),
+            )
     }
 
     /// Shell code that unsets every exported credential variable on the denylist, running
@@ -330,6 +347,22 @@ pub struct ShellState {
     pub snapshot: String,
     /// Which shell produced this state.
     pub shell: ShellKind,
+    /// u46 r2/r3: how confined the spawn that wrote this state ran, and the state last written by an unconfined one
+    /// ([`ReplayTrust`]).
+    pub trust: ReplayTrust,
+}
+
+/// u46 r3: what the persistent shell knows about who wrote its state. One rule for everything a spawn leaves that can
+/// act as code (environment, options, aliases, functions): it replays only into a spawn AT LEAST AS CONFINED as the
+/// one that wrote it (`producer`). A less confined spawn gets the directory from the latest state and everything else
+/// from `trusted_snapshot`, the state last written by an unconfined spawn (the login capture is the user's own
+/// startup files, or an `off`/`observe` command), so the user's own settings survive a switch out of the sandbox.
+#[derive(Debug, Clone, Default)]
+pub struct ReplayTrust {
+    pub producer: crate::sandbox_launch::SpawnConfinement,
+    /// The snapshot an unconfined spawn last wrote. `None` while `producer` is unconfined: the current snapshot is
+    /// that state (kept once, not copied on every command of the normal path).
+    pub trusted_snapshot: Option<String>,
 }
 
 impl ShellState {
@@ -371,12 +404,16 @@ impl ShellState {
         let call = crate::sandbox_launch::CallId::shell_init("shell-state");
         crate::sandbox_launch::prepare(sandbox_hook, &mut plain, &call)?;
         let parts = crate::sandbox_launch::CommandParts::capture(&plain);
-        let mut child = fuigo_tty_utils::ProcessScope::spawn_placed(session_scope, || parts.new_command(), |cmd, _hook| {
-            // P189: spawn_placed has already registered the placement as the first pre_exec.
-            parts.apply(cmd);
-            crate::sandbox_launch::wire_prepared(cmd, fuigo_tty_utils::null_stdio());
-            Ok::<(), std::convert::Infallible>(())
-        })
+        let mut child = fuigo_tty_utils::ProcessScope::spawn_placed(
+            session_scope,
+            || parts.new_command(),
+            |cmd, _hook| {
+                // P189: spawn_placed has already registered the placement as the first pre_exec.
+                parts.apply(cmd);
+                crate::sandbox_launch::wire_prepared(cmd, fuigo_tty_utils::null_stdio());
+                Ok::<(), std::convert::Infallible>(())
+            },
+        )
         .map_err(|e| {
             let e = match e {
                 fuigo_tty_utils::SpawnPlacedError::Spawn(e) => e,
@@ -417,6 +454,7 @@ impl ShellState {
         match parse_dump(shell, snapshot_raw) {
             Some((parsed_cwd, rest)) => Ok(Self {
                 cwd: parsed_cwd,
+                trust: ReplayTrust::default(),
                 snapshot: rest,
                 shell,
             }),
@@ -427,6 +465,7 @@ impl ShellState {
                     cwd: cwd.to_path_buf(),
                     snapshot: String::new(),
                     shell,
+                    trust: Default::default(),
                 })
             }
         }
@@ -454,6 +493,31 @@ impl ShellState {
         search_shadows: super::SearchShadowConfig,
         spawn_notice: Option<&str>,
     ) -> std::io::Result<PreparedCommand> {
+        let bash_major = match self.shell {
+            ShellKind::Bash => bash_major(self.shell.binary_path()),
+            ShellKind::Zsh => None,
+        };
+        self.prepare_command_for(
+            user_command,
+            cwd_override,
+            search_shadows,
+            spawn_notice,
+            bash_major,
+        )
+    }
+
+    /// [`Self::prepare_command`] for a bash whose major version is `bash_major` (`None`: unknown or zsh). Bash
+    /// below 4 gets its state dump through a named FIFO (audit L3, see the comment at the wrapper); every other
+    /// shell keeps the descriptor-based channel unchanged.
+    pub(crate) fn prepare_command_for(
+        &self,
+        user_command: &str,
+        cwd_override: Option<&Path>,
+        search_shadows: super::SearchShadowConfig,
+        spawn_notice: Option<&str>,
+        bash_major: Option<u32>,
+    ) -> std::io::Result<PreparedCommand> {
+        let use_fifo = self.shell == ShellKind::Bash && bash_major.is_some_and(|major| major < 4);
         let dump_script = self.shell.dump_script();
         let dump_fn = self.shell.dump_function_name();
         let sudo_inject = sudo_alias_injection();
@@ -463,7 +527,13 @@ impl ShellState {
         // os_pipe() creates fds with O_CLOEXEC (atomically on Linux,
         // best-effort on macOS) so concurrent forks can't leak them.
         let (state_in_read, state_in_write) = os_pipe()?;
-        let (state_out_read, state_out_write) = os_pipe()?;
+        let (state_out_read, state_out_write, fifo) = if use_fifo {
+            let (reader, fifo) = make_dump_fifo()?;
+            (reader, None, Some(fifo))
+        } else {
+            let (read, write) = os_pipe()?;
+            (read, Some(write), None)
+        };
 
         // Ensure the parent-only ends have CLOEXEC (redundant on Linux
         // where os_pipe uses pipe2, but needed as a safety net on macOS
@@ -480,15 +550,30 @@ impl ShellState {
         // inherit) and closes it around the user command with `200>&-`; fd 4 is closed throughout. Zsh keeps it on
         // fd 4 and closes it with `4>&-` (zsh cannot name a descriptor above 9 in a redirection, and `{var}>&-`
         // closes for good). Accepted limit: while the command runs, the shell keeps a saved copy of the pipe to
-        // restore afterwards; a builtin in the same shell can reach its own descriptors (bash: the copy at fd 10+;
-        // bash 3 also hands that copy to the programs it runs), which only lets the command alter state it could
-        // set directly anyway. (Plain `exec`: `builtin exec` would apply the redirections to the `builtin` command
-        // only and undo them.)
+        // restore afterwards; a builtin in the same shell can reach its own descriptors (bash: the copy at fd 10+),
+        // which only lets the command alter state it could set directly anyway. (Plain `exec`: `builtin exec`
+        // would apply the redirections to the `builtin` command only and undo them.)
+        // Bash below 4 (stock macOS 3.2) also hands that saved copy to the programs it runs, and closing it breaks the
+        // restore. There the shell holds no descriptor for the dump at all: it writes the dump to a named FIFO the
+        // parent made in a private 0700 directory (`make_dump_fifo`), opened only for that one write after the user
+        // command; fd 4 is not mapped. The parent removes FIFO and directory when its reader ends (`DumpPipe`).
         // The wrapper command:
         // 1. Read prior snapshot from fd 3, eval it (restores env/funcs/aliases/opts)
         // 2. Run the user's command (passed as $1)
         // 3. Dump new state to fd 4
         // 4. Exit with the user command's exit code
+        let (channel_open, dump_to, channel_close) = match &fifo {
+            Some(fifo) => (
+                "".to_owned(),
+                format!(">{}", sh_single_quote(fifo.path())),
+                "",
+            ),
+            None => (
+                "exec 200>&4 4>&-; ".to_owned(),
+                ">&200".to_owned(),
+                " 200>&-",
+            ),
+        };
         let wrapper = match self.shell {
             ShellKind::Bash => format!(
                 // Merge the user command's stderr into its
@@ -522,10 +607,10 @@ impl ShellState {
                 //
                 // u35: the restore guard runs first after the snapshot eval (shadowing functions and aliases out,
                 // parse-affecting options forced); the rest runs only if it succeeded. See `restore_guard`.
-                "exec 200>&4 4>&-; {dump_script} \
+                "{channel_open}{dump_script} \
                  snap=$(command cat <&3) && builtin shopt -s extglob && builtin eval -- \"$snap\" && \
                  {{ {guarded}}}; \
-                 COMMAND_EXIT_CODE=$?; builtin unset __fuigo_user_cmd 2>/dev/null; {dump_fn} >&200; builtin exit $COMMAND_EXIT_CODE",
+                 COMMAND_EXIT_CODE=$?; builtin unset __fuigo_user_cmd 2>/dev/null; {dump_fn} {dump_to}; builtin exit $COMMAND_EXIT_CODE",
                 guarded = super::restore_guard::bash_guarded(&format!(
                     "builtin set +u 2>/dev/null || true; \
                      builtin export FUIGO_AGENT=1; \
@@ -533,7 +618,7 @@ impl ShellState {
                      builtin shopt -s expand_aliases 2>/dev/null; {sudo_inject}{search_inject}\
                      builtin printf '%s' \"${{2:-}}\"; \
                      __fuigo_user_cmd=\"$1\"; builtin declare +x __fuigo_user_cmd 2>/dev/null; builtin set --; \
-                     builtin eval \"$__fuigo_user_cmd\" 2>&1 200>&-; "
+                     builtin eval \"$__fuigo_user_cmd\" 2>&1{channel_close}; "
                 )),
             ),
             // After snapshot restore: force nonomatch so login dumps cannot re-arm NOMATCH for model globs.
@@ -578,31 +663,61 @@ impl ShellState {
             args.push(notice.into());
         }
 
-        let fd_mappings = vec![
-            FdMapping {
-                parent_fd: state_in_read,
-                child_fd: 3,
-            },
-            FdMapping {
+        let mut fd_mappings = vec![FdMapping {
+            parent_fd: state_in_read,
+            child_fd: 3,
+        }];
+        if let Some(state_out_write) = state_out_write {
+            fd_mappings.push(FdMapping {
                 parent_fd: state_out_write,
                 child_fd: 4,
-            },
-        ];
+            });
+        }
 
         Ok(PreparedCommand {
             binary: self.shell.binary_path().to_string(),
             args,
             fd_mappings,
             state_in_write,
-            state_out_read,
+            state_out_read: DumpPipe {
+                fifo,
+                fd: state_out_read,
+                child_pid: 0,
+            },
             cwd: effective_cwd.to_path_buf(),
         })
     }
 
-    /// What to write to the state-in pipe for the next command: the snapshot as a replay script (see
-    /// [`replay_script`]).
+    /// What to write to the state-in pipe for the next command when it runs as confined as the spawn that wrote this
+    /// state: the snapshot as a replay script (see [`replay_script`]).
     pub fn replay_script(&self) -> Vec<u8> {
-        replay_script(self.shell, &self.snapshot)
+        replay_script_with(self.shell, &self.snapshot, self.trusted_snapshot(), false)
+    }
+
+    /// u46 r3: [`Self::replay_script`] for a spawn running under `next`. When `next` is less confined than the spawn
+    /// that wrote this state ([`SpawnConfinement::is_less_confined_than`]) only the directory comes from it: the
+    /// environment, options, aliases and functions come from the state an unconfined spawn last wrote
+    /// ([`ReplayTrust`]), with a warning in the command's output when that leaves anything out.
+    ///
+    /// [`SpawnConfinement::is_less_confined_than`]: crate::sandbox_launch::SpawnConfinement::is_less_confined_than
+    pub fn replay_script_for(&self, next: &crate::sandbox_launch::SpawnConfinement) -> Vec<u8> {
+        let less_confined = next.is_less_confined_than(&self.trust.producer);
+        replay_script_with(
+            self.shell,
+            &self.snapshot,
+            self.trusted_snapshot(),
+            less_confined,
+        )
+    }
+
+    /// The state an unconfined spawn last wrote: the current snapshot while its producer is unconfined, else the one
+    /// kept aside when a confined spawn first replaced it (empty if none was kept).
+    fn trusted_snapshot(&self) -> &str {
+        if self.trust.producer == crate::sandbox_launch::SpawnConfinement::default() {
+            &self.snapshot
+        } else {
+            self.trust.trusted_snapshot.as_deref().unwrap_or_default()
+        }
     }
 
     /// Update this state from a raw dump string (read from fd 4).
@@ -617,6 +732,8 @@ impl ShellState {
         }
     }
 
+    /// Install a dump without changing who is recorded as having written the state (tests, and callers that know
+    /// no spawn confinement).
     pub fn update_from_dump(&mut self, raw: &str) -> bool {
         match parse_dump(self.shell, raw) {
             Some((new_cwd, new_snapshot)) => {
@@ -632,6 +749,32 @@ impl ShellState {
             }
         }
     }
+
+    /// u46 r3: install a dump written by a spawn that ran under `producer`. An unconfined producer's state is the
+    /// trusted state from now on; the first confined producer after one keeps the state it replaces aside as the
+    /// trusted state ([`ReplayTrust`]).
+    pub fn update_from_dump_by(
+        &mut self,
+        raw: &str,
+        producer: crate::sandbox_launch::SpawnConfinement,
+    ) -> bool {
+        let Some((new_cwd, new_snapshot)) = parse_dump(self.shell, raw) else {
+            tracing::debug!("shell state dump markers missing, keeping previous state");
+            return false;
+        };
+        if new_cwd.is_absolute() {
+            self.cwd = new_cwd;
+        }
+        let unconfined = crate::sandbox_launch::SpawnConfinement::default();
+        let previous = std::mem::replace(&mut self.snapshot, new_snapshot);
+        if producer == unconfined {
+            self.trust.trusted_snapshot = None;
+        } else if self.trust.producer == unconfined {
+            self.trust.trusted_snapshot = Some(previous);
+        }
+        self.trust.producer = producer;
+        true
+    }
 }
 
 /// Everything needed to spawn a persistent shell command.
@@ -646,8 +789,8 @@ pub struct PreparedCommand {
     pub fd_mappings: Vec<FdMapping>,
     /// Write end of the state-input pipe. Caller writes `snapshot` here, then drops.
     pub state_in_write: OwnedFd,
-    /// Read end of the state-output pipe. Caller reads the new dump from here after exit.
-    pub state_out_read: OwnedFd,
+    /// Read end of the state-output channel. Caller reads the new dump from here after exit.
+    pub state_out_read: DumpPipe,
     /// Working directory for the child process.
     pub cwd: PathBuf,
 }
@@ -655,6 +798,127 @@ pub struct PreparedCommand {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// The parent's end of the state-dump channel. For bash 3 it also owns the FIFO the shell writes to, so FIFO and
+/// directory are removed whenever this is dropped: after a normal read, a timeout, an aborted reader or an error
+/// before spawn.
+pub struct DumpPipe {
+    // Declared first so it drops first: the path is unlinked before the descriptor closes, so a shell that opens the
+    // path late finds nothing (instead of blocking on a FIFO nobody reads).
+    fifo: Option<DumpFifo>,
+    fd: OwnedFd,
+    child_pid: u32,
+}
+
+impl DumpPipe {
+    /// Tell a FIFO-backed reader which process writes the dump, so it stops waiting when that process is gone
+    /// without having written one (a pipe reports that by EOF; a FIFO the parent holds open for reading does not).
+    pub fn watch_child(&mut self, pid: Option<u32>) {
+        self.child_pid = pid.unwrap_or(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fifo_path(&self) -> Option<&Path> {
+        self.fifo.as_ref().map(DumpFifo::path)
+    }
+}
+
+impl AsRawFd for DumpPipe {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+/// A private directory (mode 0700, made by `mkdtemp`) holding the dump FIFO (mode 0600).
+struct DumpFifo {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl DumpFifo {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Make the dump FIFO and open it for reading and writing (non-blocking, close-on-exec): holding a write end keeps
+/// the open from blocking and the reader from seeing EOF before the shell has written.
+fn make_dump_fifo() -> std::io::Result<(OwnedFd, DumpFifo)> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::Builder::new().prefix("fuigo-dump-").tempdir()?;
+    // `mkdtemp` already makes it 0700; say so explicitly rather than rely on the library's default.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a fresh private temp directory outside any session folder, emptied and removed with the dump channel"
+    )]
+    let restricted = std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700));
+    restricted?;
+    let path = dir.path().join("dump");
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: `c_path` is a valid NUL-terminated path that outlives both calls.
+    let fd = unsafe {
+        if libc::mkfifo(c_path.as_ptr(), 0o600) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just opened and nothing else owns it.
+    let reader = unsafe { OwnedFd::from_raw_fd(fd) };
+    Ok((reader, DumpFifo { path, _dir: dir }))
+}
+
+/// `path` as one single-quoted shell word.
+fn sh_single_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// Major version of the bash at `binary`, probed once per path (`None`: it could not be run or read). Only the
+/// answer "below 4" changes anything, so an unknown version keeps the descriptor-based channel.
+fn bash_major(binary: &str) -> Option<u32> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<u32>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(found) = cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(binary).copied())
+    {
+        return found;
+    }
+    let probed = probe_bash_major(binary);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(binary.to_owned(), probed);
+    }
+    probed
+}
+
+pub(crate) fn probe_bash_major(binary: &str) -> Option<u32> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a one-shot `bash -c printf` that is waited on and exits at once; nothing outlives it"
+    )]
+    // P189-unplaced: a probe, not a session tool process: `bash -c printf` runs for milliseconds and is waited on here.
+    let out = std::process::Command::new(binary)
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "printf %s \"${BASH_VERSINFO[0]}\"",
+        ])
+        .env_remove("BASH_ENV")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+}
 
 /// Create an OS pipe, returning `(read_end, write_end)` as `OwnedFd`.
 ///
@@ -724,52 +988,489 @@ fn snapshot_blocks(snapshot: &str) -> Vec<(&str, Vec<u8>)> {
         if end.strip_prefix("FUIGO_SNAP_EOF_") != Some(name) {
             continue;
         }
-        if let Ok(text) = base64::engine::general_purpose::STANDARD.decode(payload.trim()) {
+        if let Ok(mut text) = base64::engine::general_purpose::STANDARD.decode(payload.trim()) {
+            if name == "ENV_VARS_B64" {
+                text = scrub_env_block(&text);
+            }
             blocks.push((name, text));
         }
     }
     blocks
 }
 
-/// u35: the script the wrapper evaluates to restore `snapshot`, built from its decoded blocks so that the replay
-/// calls nothing a replayed definition can intercept (no `eval`, `command`, `base64` or `builtin` after the first
-/// definition): exports, then options with the lines that turn on `xtrace` (and bash history) left out (a traced command expands `PS4`,
-/// command substitutions included, before the restore guard could turn it off), then alias expansion off, the aliases,
-/// and the function definitions last. Defining a function runs nothing (zsh `TRAP*` and hook functions, which do act
-/// on definition, are not dumped), and the restore guard runs right after. Text outside the dump's blocks, and blocks
-/// of other names, are not replayed.
-pub(crate) fn replay_script(shell: ShellKind, snapshot: &str) -> Vec<u8> {
-    let blocks = snapshot_blocks(snapshot);
-    let block = |name: &str| -> &[u8] {
-        blocks.iter().find(|(n, _)| *n == name).map(|(_, text)| text.as_slice()).unwrap_or_default()
+/// True for a variable name the dump never carries into a snapshot (the dump's own `grep -v` list plus the credential
+/// denylist). Compared case-insensitively, as the dump's filter is.
+fn is_denied_env_name(name: &[u8]) -> bool {
+    let name = String::from_utf8_lossy(name).to_ascii_uppercase();
+    const DENIED: &[&str] = &[
+        "SUDO_ASKPASS",
+        "FUIGO_ASKPASS",
+        "ELECTRON_RUN_AS_NODE",
+        "SSH_AUTH_SOCK",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR",
+        "WAYLAND_DISPLAY",
+        "GPG_TTY",
+        "FUIGO_AGENT",
+    ];
+    name.ends_with("_PROXY")
+        || name.contains("FUIGO_SANDBOX")
+        || DENIED.contains(&name.as_str())
+        || crate::util::shell_env_policy::credential_env_names()
+            .iter()
+            .any(|denied| denied.eq_ignore_ascii_case(&name))
+}
+
+/// r1h3, u46 r2: the env block of a snapshot with every command that is not a plain export of an allowed variable
+/// removed ([`env_command_entries`]). The shell's own dump only ever writes such commands, but a frame is only as
+/// trustworthy as whoever wrote it (a running command can write a complete frame of its own into the channel), so
+/// installing a frame must not carry anything else.
+fn scrub_env_block(script: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(script.len());
+    for command in env_block_commands(script) {
+        if command.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        if env_command_entries(command).is_some() {
+            out.extend_from_slice(command);
+            out.push(b'\n');
+        }
+    }
+    out
+}
+
+/// An env block split at unquoted newlines and `;` (quote-aware, like [`shell_commands`]).
+fn env_block_commands(script: &[u8]) -> Vec<&[u8]> {
+    let mut commands = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < script.len() {
+        match script[i] {
+            b'\\' => i += 1,
+            b'\'' => {
+                i += 1;
+                while i < script.len() && script[i] != b'\'' {
+                    i += 1;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < script.len() && script[i] != b'"' {
+                    if script[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'$' if script.get(i + 1) == Some(&b'\'') => {
+                i += 2;
+                while i < script.len() && script[i] != b'\'' {
+                    if script[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'\n' | b';' => {
+                commands.push(&script[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    commands.push(&script[start.min(script.len())..]);
+    commands
+}
+
+/// One variable an env block exports: its name and value (`None`: exported without one).
+type EnvEntry = (Vec<u8>, Option<Vec<u8>>);
+
+/// u46 r2: one command of an env block read as data, or `None` when it is anything but what `export -p` /
+/// `typeset -xp` print: `declare`/`typeset`/`export`, attribute flags only (no nameref `-n`, array `-a`/`-A`,
+/// function `-f`), then `NAME` or `NAME=value` words with a valid, allowed name (so `NAME+=value`, `eval …` and
+/// expansions are not read), or zsh's tied `export -T NAME name=( … )`. The values are quote-removed text.
+fn env_command_entries(command: &[u8]) -> Option<Vec<EnvEntry>> {
+    if let Some(entry) = zsh_tied_export(command) {
+        return Some(vec![entry]);
+    }
+    let commands = shell_commands(command);
+    let [Some(words)] = commands.as_slice() else {
+        return None;
     };
-    // Option lines left out: `xtrace` (see above), and in bash `history`/`histexpand`, which inside this one eval
-    // would turn on `!` history expansion for the definitions that follow (`eval` only switches history off for its
-    // own text, and the dump's per-block evals used to scope it). The guard forces `histexpand` off anyway.
-    let (options, dropped, aliases_off): (&[&str], &[&[u8]], &[u8]) = match shell {
-        ShellKind::Bash => (
-            &["POSIX_OPTS_B64", "BASH_OPTS_B64"],
-            &[b"set -o xtrace", b"set -o history", b"set -o histexpand"],
-            b"builtin shopt -u expand_aliases",
-        ),
-        ShellKind::Zsh => (&["ZSH_OPTS_B64"], &[b"builtin setopt xtrace "], b"builtin unsetopt aliases"),
+    let (verb, args) = words.split_first()?;
+    if !matches!(verb.as_slice(), b"declare" | b"typeset" | b"export") {
+        return None;
+    }
+    let mut entries = Vec::new();
+    for arg in args {
+        if let Some(flags) = arg.strip_prefix(b"-") {
+            let attributes = !flags.is_empty()
+                && flags
+                    .iter()
+                    .all(|b| matches!(b, b'x' | b'r' | b'i' | b'l' | b'u' | b't' | b'g'));
+            if !attributes {
+                return None;
+            }
+            continue;
+        }
+        let (name, value) = match arg.iter().position(|&b| b == b'=') {
+            Some(eq) => (&arg[..eq], Some(arg[eq + 1..].to_vec())),
+            None => (arg.as_slice(), None),
+        };
+        if !is_env_name(name) || is_denied_env_name(name) {
+            return None;
+        }
+        entries.push((name.to_vec(), value));
+    }
+    Some(entries)
+}
+
+/// zsh's `export -T NAME name=( word … )` (an exported tied parameter such as `PATH`, also with other attribute
+/// letters such as `-UT`) as `NAME` and its words joined with `:`; `None` for anything else.
+fn zsh_tied_export(command: &[u8]) -> Option<EnvEntry> {
+    // `export -T` and the same with other attribute letters (`-UT` after `typeset -U PATH path`; Fable r3 M3).
+    let rest = command.trim_ascii().strip_prefix(b"export -")?;
+    let (flags, rest) = rest.split_at(rest.iter().position(|&b| b == b' ')?);
+    let rest = &rest[1..];
+    if !flags.contains(&b'T')
+        || !flags
+            .iter()
+            .all(|b| matches!(b, b'T' | b'U' | b'x' | b'r' | b'l' | b'u' | b'g'))
+    {
+        return None;
+    }
+    let (name, rest) = rest.split_at(rest.iter().position(|&b| b == b' ')?);
+    let rest = &rest[1..];
+    let open = rest.windows(2).position(|w| w == b"=(")?;
+    let (array, inner) = (&rest[..open], rest[open + 2..].strip_suffix(b")")?);
+    if !is_env_name(name) || !is_env_name(array) || is_denied_env_name(name) {
+        return None;
+    }
+    let words = match shell_commands(inner).as_slice() {
+        [] => Vec::new(),
+        [Some(words)] => words.clone(),
+        _ => return None,
+    };
+    Some((name.to_vec(), Some(words.join(&b':'))))
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_env_name(name: &[u8]) -> bool {
+    name.split_first().is_some_and(|(first, rest)| {
+        (first.is_ascii_alphabetic() || *first == b'_')
+            && rest.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    })
+}
+
+/// u46 r2: every variable an env block exports, read as data ([`env_command_entries`]).
+fn env_entries(script: &[u8]) -> Vec<EnvEntry> {
+    env_block_commands(script)
+        .into_iter()
+        .filter_map(env_command_entries)
+        .flatten()
+        .collect()
+}
+
+/// `text` as one single-quoted shell word.
+fn push_single_quoted(out: &mut Vec<u8>, text: &[u8]) {
+    out.push(b'\'');
+    for &b in text {
+        if b == b'\'' {
+            out.extend_from_slice(b"'\\''");
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(b'\'');
+}
+
+/// u46 r3: variables that pick code a shell or the dynamic loader runs on its own (a startup file, a prompt or trace
+/// string, an exported function, a preloaded library). They replay from the state an unconfined spawn wrote (the
+/// user's own startup files or an unsandboxed command, which could run that code anyway); from a sandboxed
+/// command's state only into an equally confined spawn (u46 r3tweak, see [`replayed_env_entries`]).
+fn is_startup_env_name(name: &[u8]) -> bool {
+    const STARTUP: &[&[u8]] = &[
+        b"BASH_ENV",
+        b"ENV",
+        b"PROMPT_COMMAND",
+        b"PS0",
+        b"PS4",
+        b"PROMPT4",
+        b"ZDOTDIR",
+        b"LD_PRELOAD",
+        b"LD_LIBRARY_PATH",
+        b"LD_AUDIT",
+    ];
+    STARTUP.contains(&name) || name.starts_with(b"DYLD_") || name.starts_with(b"BASH_FUNC_")
+}
+
+/// u46 r2/r3: the variables a replay exports: `block`'s data entries, except the startup selectors
+/// ([`is_startup_env_name`]), which come from `trusted_block` (the env block of the state an unconfined spawn wrote).
+///
+/// u46 r3tweak: `same_trust` (the next spawn is at least as confined as the one that wrote `block`): the startup
+/// selectors carry from `block` like any other variable, since nothing is escalated. PS4 and PROMPT4 only act
+/// under xtrace, which is never replayed, so they stay trusted-only in every case (they are harmless to drop).
+fn replayed_env_entries(block: &[u8], trusted_block: &[u8], same_trust: bool) -> Vec<EnvEntry> {
+    let trusted_only = |name: &[u8]| {
+        is_startup_env_name(name) && (!same_trust || matches!(name, b"PS4" | b"PROMPT4"))
+    };
+    let mut entries: Vec<EnvEntry> = env_entries(block)
+        .into_iter()
+        .filter(|(name, _)| !trusted_only(name))
+        .collect();
+    entries.extend(
+        env_entries(trusted_block)
+            .into_iter()
+            .filter(|(name, _)| trusted_only(name)),
+    );
+    entries
+}
+
+/// u46 r2: the env block rebuilt from its data as `export NAME='value'` (or `export NAME`) lines, as
+/// [`replay_script_with`] writes them. Attributes (integer, readonly, case) are not carried: an integer attribute
+/// would evaluate the value arithmetically, which is code.
+#[cfg(test)]
+fn env_replay(block: &[u8], trusted_block: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, value) in replayed_env_entries(block, trusted_block, true) {
+        out.extend_from_slice(b"export ");
+        out.extend_from_slice(&name);
+        if let Some(value) = value {
+            out.push(b'=');
+            push_single_quoted(&mut out, &value);
+        }
+        out.push(b'\n');
+    }
+    out
+}
+
+/// u46 r3: an option name exactly as the dump spells it: lower case, `[a-z][a-z0-9_-]*` for bash (`set -o` and
+/// `shopt` names, `interactive-comments`), `[a-z][a-z0-9]*` for zsh (`setopt` prints names lower case without
+/// underscores, a default-on option that is off as `noNAME`).
+fn is_canonical_option_name(shell: ShellKind, name: &[u8]) -> bool {
+    name.split_first().is_some_and(|(first, rest)| {
+        first.is_ascii_lowercase()
+            && rest.iter().all(|&b| {
+                b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || (shell == ShellKind::Bash && matches!(b, b'_' | b'-'))
+            })
+    })
+}
+
+/// u46 r2/r3: an options-block line to replay: exactly a form the dump writes (bash `set -o NAME`, `set +o NAME`,
+/// `shopt -s NAME`, `shopt -u NAME`; zsh `builtin setopt NAME 2>/dev/null || true`) with a canonical name
+/// ([`is_canonical_option_name`]), and never one that names tracing or echoing input. A traced command expands `PS4`
+/// (command substitutions included, with zsh's `promptsubst`) before the restore guard could switch it off, so
+/// `xtrace` and `verbose` are not replayed in any form, nor `noexec` (no command would run, all silently "succeed";
+/// Fable r3 L1): zsh reads option names ignoring case and underscores and
+/// takes `noNAME` as the negation, so the check is on the name lower-cased, underscores dropped, with and without a
+/// leading `no`. In bash `history`/`histexpand` are left out too: inside this one eval they would turn on `!`
+/// history expansion for the definitions that follow (`eval` only switches history off for its own text); the guard
+/// forces `histexpand` off anyway.
+fn is_replayed_option_line(shell: ShellKind, line: &[u8]) -> bool {
+    let name = match shell {
+        ShellKind::Bash => [&b"set -o "[..], b"set +o ", b"shopt -s ", b"shopt -u "]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(*prefix)),
+        ShellKind::Zsh => line
+            .strip_prefix(b"builtin setopt ")
+            .and_then(|rest| rest.strip_suffix(b" 2>/dev/null || true")),
+    };
+    let Some(name) = name.filter(|name| is_canonical_option_name(shell, name)) else {
+        return false;
+    };
+    let normal: Vec<u8> = name
+        .iter()
+        .filter(|&&b| b != b'_')
+        .map(u8::to_ascii_lowercase)
+        .collect();
+    let positive = normal.strip_prefix(b"no").unwrap_or(&normal);
+    let never: &[&[u8]] = match shell {
+        ShellKind::Bash => &[b"xtrace", b"verbose", b"exec", b"history", b"histexpand"],
+        ShellKind::Zsh => &[b"xtrace", b"verbose", b"exec"],
+    };
+    !never.contains(&normal.as_slice()) && !never.contains(&positive)
+}
+
+/// u46 r2/r3: one command of an aliases block (split quote-aware, so a value holding a newline stays whole) of the
+/// form the dump writes: `alias [--] NAME=VALUE` (bash `alias -p`), and zsh's `alias -L` forms with `-g`/`-s` and
+/// `$'…'` values. The words are read as data ([`shell_commands`]: quotes removed, any expansion, redirection or second
+/// command makes it unreadable) and rebuilt as `alias [-g |-s ]-- 'NAME'='VALUE'`; `None` for anything else.
+/// Defining an alias runs nothing; the value only expands inside a later command, after the restore guard.
+fn alias_command(shell: ShellKind, command: &[u8]) -> Option<Vec<u8>> {
+    let commands = shell_commands(command);
+    let [Some(words)] = commands.as_slice() else {
+        return None;
+    };
+    let (verb, mut args) = words.split_first()?;
+    if verb != b"alias" {
+        return None;
+    }
+    let mut kind: &[u8] = b"";
+    if shell == ShellKind::Zsh
+        && let Some((flag, rest)) = args.split_first()
+        && matches!(flag.as_slice(), b"-g" | b"-s")
+    {
+        kind = if flag == b"-g" { b"-g " } else { b"-s " };
+        args = rest;
+    }
+    if args.first().is_some_and(|arg| arg == b"--") {
+        args = &args[1..];
+    }
+    let [definition] = args else {
+        return None;
+    };
+    let eq = definition.iter().position(|&b| b == b'=')?;
+    let (name, value) = (&definition[..eq], &definition[eq + 1..]);
+    let plain_name = |b: &u8| b.is_ascii_graphic() && !b"'\"\\`$;&|<>()=".contains(b);
+    if name.is_empty() || !name.iter().all(plain_name) {
+        return None;
+    }
+    let mut out = b"alias ".to_vec();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(b"-- ");
+    push_single_quoted(&mut out, name);
+    out.push(b'=');
+    push_single_quoted(&mut out, value);
+    Some(out)
+}
+
+/// What the replay prints when it leaves a sandboxed command's settings out ([`ShellState::replay_script_for`]).
+pub(crate) const SETTINGS_WITHHELD_WARNING: &str = "warning: shell settings from a sandboxed command were not carried into this less-sandboxed command";
+
+/// u35: the script the wrapper evaluates to restore `snapshot` as confined as the spawn that wrote it (see
+/// [`replay_script_with`]).
+#[cfg(test)]
+pub(crate) fn replay_script(shell: ShellKind, snapshot: &str) -> Vec<u8> {
+    replay_script_with(shell, snapshot, snapshot, false)
+}
+
+/// Variables whose value follows the directory or the process, not the user's settings: a difference in them alone
+/// is not worth the withheld-settings warning.
+fn is_volatile_env_name(name: &[u8]) -> bool {
+    matches!(name, b"PWD" | b"OLDPWD" | b"SHLVL" | b"_")
+}
+
+/// u46 r3: what a replay restores from one state, every part read as data.
+struct Replayed {
+    env: Vec<EnvEntry>,
+    options: Vec<Vec<u8>>,
+    aliases: Vec<Vec<u8>>,
+    functions: Vec<u8>,
+}
+
+impl Replayed {
+    /// `snapshot`'s settings; the startup selectors of the env come from `trusted_env` ([`replayed_env_entries`]).
+    fn of(shell: ShellKind, snapshot: &str, trusted_env: &[u8], same_trust: bool) -> Replayed {
+        let blocks = snapshot_blocks(snapshot);
+        let block = |name: &str| -> &[u8] {
+            blocks
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, text)| text.as_slice())
+                .unwrap_or_default()
+        };
+        let option_blocks: &[&str] = match shell {
+            ShellKind::Bash => &["POSIX_OPTS_B64", "BASH_OPTS_B64"],
+            ShellKind::Zsh => &["ZSH_OPTS_B64"],
+        };
+        Replayed {
+            env: replayed_env_entries(block("ENV_VARS_B64"), trusted_env, same_trust),
+            options: option_blocks
+                .iter()
+                .flat_map(|name| block(name).split(|&b| b == b'\n'))
+                .filter(|line| is_replayed_option_line(shell, line))
+                .map(<[u8]>::to_vec)
+                .collect(),
+            aliases: env_block_commands(block("ALIASES_B64"))
+                .into_iter()
+                .filter_map(|command| alias_command(shell, command))
+                .collect(),
+            functions: block("FUNCTIONS_B64").trim_ascii().to_vec(),
+        }
+    }
+
+    /// True when `other` holds the same settings a user would notice missing: everything but the volatile variables.
+    fn same_settings(&self, other: &Replayed) -> bool {
+        let settled = |r: &Replayed| -> Vec<EnvEntry> {
+            r.env
+                .iter()
+                .filter(|(name, _)| !is_volatile_env_name(name))
+                .cloned()
+                .collect()
+        };
+        settled(self) == settled(other)
+            && self.options == other.options
+            && self.aliases == other.aliases
+            && self.functions == other.functions
+    }
+}
+
+/// The env block of `snapshot`, decoded (empty when it has none).
+fn env_block(snapshot: &str) -> Vec<u8> {
+    snapshot_blocks(snapshot)
+        .into_iter()
+        .find(|(name, _)| *name == "ENV_VARS_B64")
+        .map(|(_, text)| text)
+        .unwrap_or_default()
+}
+
+/// u35, u46 r2/r3: the script the wrapper evaluates to restore state, built from decoded blocks read as data so that
+/// the replay calls nothing a replayed definition can intercept (no `eval`, `command`, `base64` or `builtin` after the
+/// first definition): exports rebuilt from the parsed env, options in the dump's own forms minus tracing
+/// ([`is_replayed_option_line`]), then alias expansion off, the aliases rebuilt from their parsed words, and the
+/// function definitions last. Defining a function runs nothing (zsh `TRAP*` and hook functions, which do act on
+/// definition, are not dumped), and the restore guard runs right after. Text outside the dump's blocks, and blocks of
+/// other names, are not replayed.
+///
+/// `latest` is the current state, `trusted` the state an unconfined spawn last wrote (the same text when the latest
+/// producer was unconfined). `less_confined`: the next spawn is less confined than the one that wrote `latest`, so
+/// everything comes from `trusted` (the directory is not part of the script), with [`SETTINGS_WITHHELD_WARNING`]
+/// printed first when that leaves anything of `latest` out. Startup selectors in the env always come from `trusted`
+/// ([`is_startup_env_name`]).
+fn replay_script_with(
+    shell: ShellKind,
+    latest: &str,
+    trusted: &str,
+    less_confined: bool,
+) -> Vec<u8> {
+    let trusted_env = env_block(trusted);
+    let source = if less_confined { trusted } else { latest };
+    let replayed = Replayed::of(shell, source, &trusted_env, !less_confined);
+    let aliases_off: &[u8] = match shell {
+        ShellKind::Bash => b"builtin shopt -u expand_aliases",
+        ShellKind::Zsh => b"builtin unsetopt aliases",
     };
     let mut script = Vec::new();
     let mut push = |text: &[u8]| {
         script.extend_from_slice(text);
         script.push(b'\n');
     };
-    push(block("ENV_VARS_B64"));
-    for name in options {
-        for line in block(name).split(|&b| b == b'\n') {
-            if !dropped.iter().any(|d| line.starts_with(d)) {
-                push(line);
-            }
+    if less_confined && !Replayed::of(shell, latest, &trusted_env, true).same_settings(&replayed) {
+        // First, before any definition: nothing replayed can stand in for it yet.
+        let mut warn = b"builtin printf '%s\\n' ".to_vec();
+        push_single_quoted(&mut warn, SETTINGS_WITHHELD_WARNING.as_bytes());
+        push(&warn);
+    }
+    for (name, value) in &replayed.env {
+        let mut line = b"export ".to_vec();
+        line.extend_from_slice(name);
+        if let Some(value) = value {
+            line.push(b'=');
+            push_single_quoted(&mut line, value);
         }
+        push(&line);
+    }
+    for line in &replayed.options {
+        push(line);
     }
     push(aliases_off);
-    push(block("ALIASES_B64"));
-    push(block("FUNCTIONS_B64"));
+    for alias in &replayed.aliases {
+        push(alias);
+    }
+    push(&replayed.functions);
     // The replay's status is the wrapper's go-ahead; a reserved word, so no definition can stand in for it.
     push(b"[[ -n x ]]");
     script
@@ -784,9 +1485,19 @@ fn parse_dump(shell: ShellKind, raw: &str) -> Option<(PathBuf, String)> {
     let start_line = format!("{start}\n");
     let end_line = format!("{end}\n");
 
-    if !raw.starts_with(&start_line) || !raw.ends_with(&end_line) {
-        return None;
-    }
+    // r1h3: the shell's dump is the last complete frame (a command can write frames of its own into the channel
+    // before it): cut at the last end line, then at the last start line before it. Bytes after the last end line
+    // are not part of any frame.
+    let end_at = raw
+        .rmatch_indices(&end_line)
+        .map(|(at, _)| at)
+        .find(|&at| at == 0 || raw[..at].ends_with('\n'))?;
+    let frame = &raw[..end_at + end_line.len()];
+    let start_at = frame[..end_at]
+        .rmatch_indices(&start_line)
+        .map(|(at, _)| at)
+        .find(|&at| at == 0 || frame[..at].ends_with('\n'))?;
+    let raw = &frame[start_at..];
 
     // Strip markers
     let without_markers = &raw[start_line.len()..raw.len() - end_line.len()];
@@ -811,7 +1522,10 @@ fn parse_after_marker<'a>(output: &'a str, marker: &str) -> &'a str {
 
 /// Write the snapshot to the state-in pipe, then close the fd.
 /// Uses blocking I/O on a dedicated thread (pipes are not regular files).
-pub async fn write_snapshot_to_pipe(snapshot: impl AsRef<[u8]>, fd: OwnedFd) -> std::io::Result<()> {
+pub async fn write_snapshot_to_pipe(
+    snapshot: impl AsRef<[u8]>,
+    fd: OwnedFd,
+) -> std::io::Result<()> {
     let data = snapshot.as_ref().to_vec();
     tokio::task::spawn_blocking(move || {
         use std::io::Write;
@@ -830,10 +1544,26 @@ pub async fn write_snapshot_to_pipe(snapshot: impl AsRef<[u8]>, fd: OwnedFd) -> 
 /// Read the full dump output from the state-out pipe with a timeout.
 ///
 /// If a background process inherits fd 4, the pipe never closes and the reader
-/// hangs. The timeout (5s close timeout) prevents this from
-/// blocking the actor loop forever. On timeout, returns whatever was read so far
-/// (which is typically empty, so marker validation will fail and prior state is kept).
-pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
+/// hangs. The timeout (5s close timeout) prevents this from blocking the actor loop forever. It starts when the
+/// command is over (the shell process is gone, or the first dump byte arrived), not at spawn. On timeout, returns an
+/// empty string, so marker validation fails and prior state is kept. A reader whose pid is unknown (never
+/// `watch_child`ed) keeps a deadline counted from the call.
+pub async fn read_dump_from_pipe(pipe: DumpPipe) -> std::io::Result<String> {
+    // Ends a FIFO-backed reader's loop when this future ends (normal return, timeout or abort), so no blocking
+    // thread outlives its caller and the FIFO is always removed.
+    struct CancelOnDrop(Arc<AtomicBool>);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancel));
+    let DumpPipe {
+        fifo,
+        fd,
+        child_pid,
+    } = pipe;
     // Read until either of the END markers appears, *not* until EOF.
     //
     // When the user's command backgrounds a subprocess (`cmd &`), the bg
@@ -850,36 +1580,92 @@ pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
     //
     // We additionally cap on `DUMP_READ_TIMEOUT` so a shell that crashed
     // before emitting the END marker doesn't wedge the actor.
-    match tokio::time::timeout(
-        DUMP_READ_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            use std::io::Read;
-            let mut file = unsafe { std::fs::File::from_raw_fd(fd.as_raw_fd()) };
-            std::mem::forget(fd);
-            let mut buf = String::new();
-            let mut chunk = [0u8; 4096];
-            loop {
-                let n = file.read(&mut chunk)?;
-                if n == 0 {
-                    // EOF: every write-end holder closed fd 4 (the
-                    // expected path when no bg subprocess was spawned).
-                    break;
-                }
-                buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
-                // Either marker suffices; we accept whichever shell the
-                // child happens to be (bash vs zsh).
-                if buf.contains(BASH_STATE_END_MARKER) || buf.contains(ZSH_STATE_END_MARKER) {
-                    break;
-                }
+    match tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let raw = fd.as_raw_fd();
+        let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
+        std::mem::forget(fd);
+        // Declared after `file`, so it drops first: unlink, then close.
+        let fifo_guard = fifo;
+        let mut buf = String::new();
+        let mut chunk = [0u8; 4096];
+        // The dump timeout runs from the end of the command, so a long foreground command keeps its state.
+        let mut deadline = (child_pid == 0).then(|| Instant::now() + DUMP_READ_TIMEOUT);
+        loop {
+            // Wake every 100 ms to notice a cancel and the end of the command (a FIFO the parent holds open
+            // for writing too never reaches EOF, and a pipe a background program holds does not either).
+            if cancel.load(Ordering::Relaxed) {
+                break;
             }
-            drop(file);
-            Ok(buf)
-        }),
-    )
+            // Sampled before the poll: bytes written before the shell exited are then already readable.
+            let gone = child_gone(child_pid);
+            // r1h3: once a complete frame is in hand the reader watches for the shell to exit on a short tick (the
+            // shell exits right after writing its dump): a FIFO the parent holds open never reaches EOF, and neither
+            // does a pipe a background program still holds a copy of (u46 r2 L1: both channels).
+            let tick = if buf.ends_with(&format!("{BASH_STATE_END_MARKER}\n"))
+                || buf.ends_with(&format!("{ZSH_STATE_END_MARKER}\n"))
+            {
+                5
+            } else {
+                100
+            };
+            let readable = wait_readable(raw, tick);
+            // r1h3: the clock starts when the shell is gone, not at the first byte: a running command can write a
+            // forged frame into the channel, and that must not start (or shorten) the wait for the real dump.
+            if deadline.is_none() && gone {
+                deadline = Some(Instant::now() + DUMP_READ_TIMEOUT);
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok(None);
+            }
+            if gone && !readable {
+                // The shell is gone and everything it wrote has been read (a program that kept the channel
+                // open would otherwise hold this loop until the deadline).
+                break;
+            }
+            if !readable && fifo_guard.is_none() {
+                // A blocking pipe read would stall the loop: only read what is there.
+                continue;
+            }
+            let n = match file.read(&mut chunk) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if child_gone(child_pid) && fifo_guard.is_some() {
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            if n == 0 {
+                // EOF: every write-end holder closed fd 4 (the
+                // expected path when no bg subprocess was spawned).
+                break;
+            }
+            buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+            bound_dump_buffer(&mut buf);
+            // r1h3: with a known shell pid the dump is the LAST frame, written by the wrapper after the user
+            // command, so keep reading until the shell is gone or the channel reaches EOF: a command can write a
+            // complete frame of its own into the channel while it runs, and the first END marker is not proof
+            // of the shell's dump. Only a reader that does not know the pid (`child_pid == 0`) still stops at the
+            // first END marker, as it cannot tell when the command is over.
+            if child_pid == 0
+                && (buf.contains(BASH_STATE_END_MARKER) || buf.contains(ZSH_STATE_END_MARKER))
+            {
+                break;
+            }
+        }
+        drop(fifo_guard);
+        drop(file);
+        Ok(Some(buf))
+    })
     .await
+    .map_err(std::io::Error::other)?
     {
-        Ok(join_result) => join_result.map_err(std::io::Error::other)?,
-        Err(_timeout) => {
+        Ok(Some(buf)) => Ok(buf),
+        Err(e) => Err(e),
+        Ok(None) => {
             tracing::warn!(
                 "shell state dump read timed out after {}s (END marker never arrived)",
                 DUMP_READ_TIMEOUT.as_secs()
@@ -887,6 +1673,92 @@ pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
             Ok(String::new())
         }
     }
+}
+
+/// Most the dump reader keeps while it waits for the last frame (a real dump of a very large environment is far
+/// below this).
+const DUMP_BUFFER_CAP: usize = 32 * 1024 * 1024;
+
+/// Keep the reader's buffer to a tail: past [`DUMP_BUFFER_CAP`], drop everything before the last start marker (the
+/// frame in progress); with no marker in the buffer, drop it all (nothing in it can become a valid frame).
+fn bound_dump_buffer(buf: &mut String) {
+    if buf.len() <= DUMP_BUFFER_CAP {
+        return;
+    }
+    let last_start = [BASH_STATE_START_MARKER, ZSH_STATE_START_MARKER]
+        .iter()
+        .filter_map(|marker| buf.rfind(marker))
+        .max();
+    match last_start {
+        Some(at) if at > 0 => {
+            buf.drain(..at);
+        }
+        // One frame alone over the cap is not a dump this reader will install; with no marker nothing can
+        // become a valid frame.
+        _ => buf.clear(),
+    }
+}
+
+/// Block up to `ms` milliseconds until `fd` is readable (or hung up).
+fn wait_readable(fd: RawFd, ms: i32) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid `pollfd` that lives across the call.
+    unsafe { libc::poll(&mut pfd, 1, ms) > 0 }
+}
+
+/// True when the shell `pid` (non-zero, a child of this process) has ended; an unknown pid (0) is never gone.
+///
+/// u46 r2 (M2, L4): asked with `waitid(WNOWAIT)`, which leaves the child for its owner to reap: an exited child that
+/// is not reaped yet (a zombie, as after a timeout kill) counts as gone, which `kill(pid, 0)` cannot tell, and a pid
+/// that is no longer this process's child (reaped, then perhaps reused by an unrelated process) is gone as well.
+fn child_gone(pid: u32) -> bool {
+    let id = libc::id_t::from(pid);
+    if pid == 0 {
+        return false;
+    }
+    loop {
+        // SAFETY: `info` is a plain-data out parameter that lives across the call.
+        let (rc, info) = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let rc = libc::waitid(
+                libc::P_PID,
+                id,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            );
+            (rc, info)
+        };
+        if rc == 0 {
+            // WNOHANG: a child that is still running leaves `si_pid` zero.
+            if siginfo_pid(&info) != 0 {
+                return true;
+            }
+            break;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::ECHILD) => return true,
+            _ => break,
+        }
+    }
+    // SAFETY: signal 0 only checks that the process exists.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn siginfo_pid(info: &libc::siginfo_t) -> libc::pid_t {
+    // SAFETY: filled in by `waitid` for a child event (or zeroed).
+    unsafe { info.si_pid() }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn siginfo_pid(info: &libc::siginfo_t) -> libc::pid_t {
+    info.si_pid
 }
 
 // ============================================================================
@@ -897,53 +1769,39 @@ pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
 /// (zsh) block, decoded and read back. A name exported without a value is left out, and so is
 /// every command this does not read in full: nothing is guessed.
 pub fn snapshot_exports(snapshot: &str) -> Vec<(OsString, OsString)> {
-    let header = "fuigo_snap_ENV_VARS_B64=$(command base64 -d <<'FUIGO_SNAP_EOF_ENV_VARS_B64'";
-    let Some(payload) = snapshot.lines().skip_while(|line| *line != header).nth(1) else {
-        return Vec::new();
-    };
-    let Ok(script) = base64::engine::general_purpose::STANDARD.decode(payload.trim()) else {
-        return Vec::new();
-    };
-    shell_commands(&script)
+    let env = env_block(snapshot);
+    exports_of(replayed_env_entries(&env, &env, true))
+}
+
+fn exports_of(entries: Vec<EnvEntry>) -> Vec<(OsString, OsString)> {
+    entries
         .into_iter()
-        .flatten()
-        .flat_map(exported_assignments)
+        .filter_map(|(name, value)| Some((OsString::from_vec(name), OsString::from_vec(value?))))
         .collect()
 }
 
-/// `declare`/`typeset`/`export` assignments among a command's words. Arrays and tied parameters
-/// (`-a`, `-A`, `-T`) are not environment variables.
-fn exported_assignments(words: Vec<Vec<u8>>) -> Vec<(OsString, OsString)> {
-    let Some((verb, args)) = words.split_first() else {
-        return Vec::new();
-    };
-    if !matches!(verb.as_slice(), b"declare" | b"typeset" | b"export") {
-        return Vec::new();
+impl ShellState {
+    /// u46 r3: the variables the next command's replay exports when it runs as confined as the spawn that wrote this
+    /// state (what the env judge and the sandbox hook see): [`snapshot_exports`]. A less confined spawn replays the
+    /// trusted state's env instead, which was itself the latest state, and judged, when an unconfined spawn wrote it.
+    pub fn restored_exports(&self) -> Vec<(OsString, OsString)> {
+        snapshot_exports(&self.snapshot)
     }
-    let mut assignments = Vec::new();
-    for arg in args {
-        if arg.first() == Some(&b'-') {
-            if arg.iter().any(|b| matches!(b, b'a' | b'A' | b'T')) {
-                return Vec::new();
-            }
-            continue;
-        }
-        let Some(eq) = arg.iter().position(|&b| b == b'=') else {
-            continue;
-        };
-        let (name, value) = arg.split_at(eq);
-        let is_name = name.split_first().is_some_and(|(first, rest)| {
-            (first.is_ascii_alphabetic() || *first == b'_')
-                && rest.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
-        });
-        if is_name {
-            assignments.push((
-                OsString::from_vec(name.to_vec()),
-                OsString::from_vec(value.get(1..).unwrap_or_default().to_vec()),
-            ));
+
+    /// u46 r4: [`Self::restored_exports`] for a spawn running under `next`: when `next` is less confined than the
+    /// producer of this state, its replay exports the trusted state's env ([`Self::replay_script_for`]), so that is
+    /// what the env judge must read.
+    pub fn restored_exports_for(
+        &self,
+        next: &crate::sandbox_launch::SpawnConfinement,
+    ) -> Vec<(OsString, OsString)> {
+        if next.is_less_confined_than(&self.trust.producer) {
+            let trusted_env = env_block(self.trusted_snapshot());
+            exports_of(replayed_env_entries(&trusted_env, &trusted_env, false))
+        } else {
+            self.restored_exports()
         }
     }
-    assignments
 }
 
 /// `script` as shell commands (split at unquoted newlines and `;`), each a list of words with
@@ -1096,14 +1954,21 @@ fn ansi_c_quoted<'a>(mut rest: &'a [u8], word: &mut Vec<u8>) -> Option<(&'a [u8]
 }
 
 #[cfg(all(test, target_os = "linux"))]
+#[path = "shell_state_fifo_tests.rs"]
+mod fifo_tests;
+
+#[cfg(all(test, target_os = "linux"))]
 #[path = "shell_state_cli_facing_unchanged_tests.rs"]
 mod cli_facing_unchanged_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
-    use std::process::Stdio;
     use super::*;
+    use std::process::Stdio;
 
     /// P86: any configured credential name is spliced into the scrub as a literal pattern, so a
     /// hostile `env_key` cannot inject shell syntax and a non-ASCII (zsh-valid) name is still
@@ -1292,6 +2157,7 @@ mod tests {
             cwd: PathBuf::from("/old"),
             snapshot: String::new(),
             shell: ShellKind::Bash,
+            trust: Default::default(),
         };
 
         let dump = "__FUIGO_BASH_STATE_START__\n\
@@ -1310,6 +2176,7 @@ mod tests {
             cwd: PathBuf::from("/original"),
             snapshot: "old stuff".into(),
             shell: ShellKind::Bash,
+            trust: Default::default(),
         };
 
         assert!(!state.update_from_dump("garbage output\n"));
@@ -1334,8 +2201,8 @@ mod tests {
 
     /// The exports a snapshot replays read back through the quoting both shells print: bash's
     /// `declare -x NAME="…"` with its backslash escapes and a multi-line value, zsh's bare,
-    /// `'…'` and `$'…'` words. A name with no value, a tied parameter and a word needing an
-    /// expansion are left out rather than guessed.
+    /// `'…'` and `$'…'` words, and zsh's tied `export -T` (u46 r2: the replay exports it too). A name
+    /// with no value and a word needing an expansion are left out rather than guessed.
     #[test]
     fn snapshot_exports_read_back_both_shells_quoting() {
         let bash = "declare -x PYTHONUSERBASE=\"/opt/py user\"\n\
@@ -1358,6 +2225,7 @@ mod tests {
             ("QUOTED", "it's"),
             ("ANSI", "tab\there!"),
             ("EMPTY", ""),
+            ("PATHLIKE", "/a:/b"),
         ]
         .into_iter()
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
@@ -1405,7 +2273,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
         assert!(state.cwd.is_absolute());
         // The snapshot should contain at least some env var exports
         assert!(
@@ -1424,7 +2294,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         // Run "export FUIGO_TEST_VAR=hello" and capture the new state
         let prep = state
@@ -1490,17 +2362,48 @@ mod tests {
     }
 
     /// [`run_command`] with the shell binary replaced by `binary` (another bash version).
-    async fn run_command_in(state: &mut ShellState, command: &str, binary: Option<&str>) -> (i32, String) {
+    async fn run_command_in(
+        state: &mut ShellState,
+        command: &str,
+        binary: Option<&str>,
+    ) -> (i32, String) {
+        run_command_full(state, command, binary, None).await
+    }
+
+    /// [`run_command`] for a spawn running under `next` (u46 r2: the replay it gets).
+    async fn run_command_under(
+        state: &mut ShellState,
+        command: &str,
+        next: &crate::sandbox_launch::SpawnConfinement,
+    ) -> (i32, String) {
+        run_command_full(state, command, None, Some(next)).await
+    }
+
+    async fn run_command_full(
+        state: &mut ShellState,
+        command: &str,
+        binary: Option<&str>,
+        next: Option<&crate::sandbox_launch::SpawnConfinement>,
+    ) -> (i32, String) {
         use command_fds::CommandFdExt;
 
-        let prep = state
-            .prepare_command(
+        // A bash given by path is judged by its own version (3.2 gets the FIFO channel), not the resolved one's.
+        let prep = match binary {
+            Some(binary) => state.prepare_command_for(
                 command,
                 None,
                 crate::computer::local::SearchShadowConfig::default(),
                 None,
-            )
-            .unwrap();
+                probe_bash_major(binary),
+            ),
+            None => state.prepare_command(
+                command,
+                None,
+                crate::computer::local::SearchShadowConfig::default(),
+                None,
+            ),
+        }
+        .unwrap();
         let mut cmd = tokio::process::Command::new(binary.unwrap_or(&prep.binary));
         cmd.args(&prep.args)
             .current_dir(&prep.cwd)
@@ -1513,7 +2416,10 @@ mod tests {
         let child = cmd.spawn().unwrap();
         drop(cmd);
 
-        let snapshot = state.replay_script();
+        let snapshot = match next {
+            Some(next) => state.replay_script_for(next),
+            None => state.replay_script(),
+        };
         let write_handle =
             tokio::spawn(
                 async move { write_snapshot_to_pipe(&snapshot, prep.state_in_write).await },
@@ -1524,7 +2430,11 @@ mod tests {
         let output = child.wait_with_output().await.unwrap();
         write_handle.await.unwrap().unwrap();
         let dump = read_handle.await.unwrap().unwrap();
-        state.update_from_dump(&dump);
+        // As the terminal installs a dump: tagged with the spawn's confinement.
+        match next {
+            Some(next) => state.update_from_dump_by(&dump, next.clone()),
+            None => state.update_from_dump(&dump),
+        };
 
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1539,7 +2449,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
         let (_, stdout) = run_command(&mut state, "echo forged >&4").await;
         assert!(
             stdout.to_lowercase().contains("bad file descriptor"),
@@ -1556,22 +2468,26 @@ mod tests {
     #[tokio::test]
     async fn external_programs_cannot_reach_the_state_dump() {
         for (kind, available, start, end) in [
-            (ShellKind::Bash, bash_available(), BASH_STATE_START_MARKER, BASH_STATE_END_MARKER),
-            (ShellKind::Zsh, zsh_available(), ZSH_STATE_START_MARKER, ZSH_STATE_END_MARKER),
+            (
+                ShellKind::Bash,
+                bash_available(),
+                BASH_STATE_START_MARKER,
+                BASH_STATE_END_MARKER,
+            ),
+            (
+                ShellKind::Zsh,
+                zsh_available(),
+                ZSH_STATE_START_MARKER,
+                ZSH_STATE_END_MARKER,
+            ),
         ] {
             if !available || !bash_available() {
                 continue;
             }
             let cwd = std::env::current_dir().unwrap();
-            let mut state = ShellState::init(kind, &cwd, None, None, None).await.unwrap();
-            if kind == ShellKind::Bash {
-                // Bash 3 hands the saved copy of a descriptor closed around a compound command to the programs it
-                // runs; the accepted limit recorded at the wrapper.
-                let (_, major) = run_command(&mut state, "echo ${BASH_VERSINFO[0]}").await;
-                if major.trim() == "3" {
-                    continue;
-                }
-            }
+            let mut state = ShellState::init(kind, &cwd, None, None, None)
+                .await
+                .unwrap();
             // A separate bash process (`/bin/sh` may be dash, which cannot name a descriptor above 9).
             let bash = ShellKind::Bash.binary_path();
             let forge = format!(
@@ -1579,8 +2495,13 @@ mod tests {
                  (printf \"%s\\nexport L3_FORGED=1\\n%s\\n\" {start} {end} >&$i) 2>/dev/null; i=$((i+1)); done'"
             );
             run_command(&mut state, &forge).await;
-            let (_, stdout) = run_command(&mut state, "echo ${L3_KEPT:-lost} ${L3_FORGED:-clean}").await;
-            assert_eq!(stdout.trim(), "yes clean", "{kind:?}: an external program reached the dump pipe");
+            let (_, stdout) =
+                run_command(&mut state, "echo ${L3_KEPT:-lost} ${L3_FORGED:-clean}").await;
+            assert_eq!(
+                stdout.trim(),
+                "yes clean",
+                "{kind:?}: an external program reached the dump pipe"
+            );
         }
     }
 
@@ -1590,7 +2511,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         // cd to /tmp (macOS resolves to /private/tmp via symlink)
         let (code, _) = run_command(&mut state, "cd /tmp").await;
@@ -1613,7 +2536,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         // Export a variable
         let (code, _) = run_command(&mut state, "export MY_TEST_VAR=persistent_value").await;
@@ -1632,7 +2557,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         let (code, _) = run_command(&mut state, "export GPG_TTY=/fuigo-sentinel-tty").await;
         assert_eq!(code, 0);
@@ -1652,7 +2579,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         let (code, _) = run_command(&mut state, "export GPG_TTY=/fuigo-sentinel-tty").await;
         assert_eq!(code, 0);
@@ -1672,7 +2601,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         let prep = state
             .prepare_command(
@@ -1723,8 +2654,14 @@ mod tests {
             return;
         }
         let variants = [
-            ("alias", "alias run-help=man\nalias grep=\"grep --color=never\""),
-            ("function", "run-help() { echo hijacked-run-help; }\nalias grep=\"grep --color=never\""),
+            (
+                "alias",
+                "alias run-help=man\nalias grep=\"grep --color=never\"",
+            ),
+            (
+                "function",
+                "run-help() { echo hijacked-run-help; }\nalias grep=\"grep --color=never\"",
+            ),
             (
                 "function-then-alias",
                 "run-help() { echo hijacked-run-help; }\nalias run-help=man\nalias grep=\"grep --color=never\"",
@@ -1746,23 +2683,36 @@ mod tests {
                 .output()
                 .unwrap();
             let full = String::from_utf8_lossy(&out.stdout).into_owned();
-            let (cwd, snapshot) = parse_dump(ShellKind::Zsh, parse_after_marker(&full, INIT_STATE_MARKER))
-                .unwrap_or_else(|| panic!("[{name}] dump must parse, got: {full:?}"));
-            let mut state = ShellState { cwd, snapshot, shell: ShellKind::Zsh };
+            let (cwd, snapshot) =
+                parse_dump(ShellKind::Zsh, parse_after_marker(&full, INIT_STATE_MARKER))
+                    .unwrap_or_else(|| panic!("[{name}] dump must parse, got: {full:?}"));
+            let mut state = ShellState {
+                cwd,
+                snapshot,
+                shell: ShellKind::Zsh,
+                trust: Default::default(),
+            };
 
             // `grep` is aliased to `grep --color=never` in the startup file: the replayed alias is the user
             // environment, but the wrapper itself (and its `command grep` dump filters) must not
             // be affected, so the dump still round-trips and the command runs.
             let (code, stdout) = run_command(&mut state, "printf 'a\\nb\\n' | grep b").await;
-            assert_eq!(code, 0, "[{name}] command using grep must succeed, stdout={stdout:?}");
+            assert_eq!(
+                code, 0,
+                "[{name}] command using grep must succeed, stdout={stdout:?}"
+            );
             assert_eq!(stdout.trim(), "b", "[{name}] unexpected output: {stdout:?}");
 
             // State dumped after the run must still replay (functions + aliases survived).
             let (code, stdout) = run_command(&mut state, "echo still-alive").await;
-            assert_eq!(code, 0, "[{name}] second command must run, stdout={stdout:?}");
+            assert_eq!(
+                code, 0,
+                "[{name}] second command must run, stdout={stdout:?}"
+            );
             assert!(stdout.contains("still-alive"), "[{name}] got {stdout:?}");
             assert!(
-                !stdout.contains("parse error") && !stdout.contains("defining function based on alias"),
+                !stdout.contains("parse error")
+                    && !stdout.contains("defining function based on alias"),
                 "[{name}] replay must not hit alias-expansion errors: {stdout:?}"
             );
         }
@@ -1774,7 +2724,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         // Define a function
         let (code, _) = run_command(&mut state, "greet() { echo \"hello $1\"; }").await;
@@ -1802,7 +2754,9 @@ mod tests {
         std::fs::write(&probe, "echo \"SOURCED_ARGC=$#\"\n").unwrap();
 
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         let (code, stdout) = run_command(
             &mut state,
@@ -1827,7 +2781,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         // Turn on allexport; the option is captured by the dump and replayed
         // into every subsequent command's shell.
@@ -1862,7 +2818,9 @@ mod tests {
         std::fs::write(&probe, "echo \"SOURCED_ARGC=$#\"\n").unwrap();
 
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         let (code, stdout) = run_command(
             &mut state,
@@ -1883,7 +2841,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         // Define an alias
         let (code, _) = run_command(&mut state, "alias ll='ls -la'").await;
@@ -1910,7 +2870,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         let prep = state.prepare_command("true", None, shadows, None).unwrap();
         // Shadows enabled → the self-resolving find/grep functions are always
@@ -1949,7 +2911,9 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None, None)
+            .await
+            .unwrap();
 
         // Set up some state
         let (_, _) = run_command(&mut state, "export SURVIVE_TEST=yes").await;
@@ -1971,6 +2935,7 @@ mod tests {
             cwd: std::env::current_dir().unwrap(),
             snapshot: encoded_blocks(&[("FUNCTIONS_B64", script)]),
             shell,
+            trust: Default::default(),
         }
     }
 
@@ -1998,7 +2963,11 @@ mod tests {
         let mut state = raw_state(ShellKind::Bash, "set -o keyword\n");
         let (code, stdout) = run_command(&mut state, "echo FOO=bar").await;
         assert_eq!(code, 0, "{stdout:?}");
-        assert_eq!(stdout.trim(), "FOO=bar", "restored keyword option changed a plain argument");
+        assert_eq!(
+            stdout.trim(),
+            "FOO=bar",
+            "restored keyword option changed a plain argument"
+        );
     }
 
     /// u35: zsh `EQUALS` (`=name` becomes a path) is forced off, so a plain `=name` argument stays literal.
@@ -2010,7 +2979,11 @@ mod tests {
         let mut state = raw_state(ShellKind::Zsh, "builtin setopt equals magicequalsubst\n");
         let (code, stdout) = run_command(&mut state, "echo =ls").await;
         assert_eq!(code, 0, "{stdout:?}");
-        assert_eq!(stdout.trim(), "=ls", "restored EQUALS option changed a plain argument");
+        assert_eq!(
+            stdout.trim(),
+            "=ls",
+            "restored EQUALS option changed a plain argument"
+        );
     }
 
     /// u35: replayed functions and aliases named after safe-listed programs (or after the builtins the wrapper uses,
@@ -2031,9 +3004,15 @@ mod tests {
             "ls -d /\nwc -c /dev/null\nprintf '%s\\n' plain-ok\npython3.99 --version",
         )
         .await;
-        assert!(!stdout.contains("SHADOW"), "a replayed shadow ran: {stdout:?}");
+        assert!(
+            !stdout.contains("SHADOW"),
+            "a replayed shadow ran: {stdout:?}"
+        );
         assert!(stdout.lines().any(|l| l.trim() == "/"), "{stdout:?}");
-        assert!(stdout.contains("0 /dev/null") && stdout.contains("plain-ok"), "{stdout:?}");
+        assert!(
+            stdout.contains("0 /dev/null") && stdout.contains("plain-ok"),
+            "{stdout:?}"
+        );
         // The shadows are gone from the next snapshot as well.
         let (_, stdout) = run_command(&mut state, "ls -d /").await;
         assert_eq!(stdout.trim(), "/");
@@ -2051,10 +3030,20 @@ mod tests {
             "builtin() { echo SHADOW; }\nls() { echo SHADOW; }\nTRAPZERR() { echo SHADOW; }\n\
              alias wc='echo SHADOW'\nalias -g GLOBAL_WORD='; echo SHADOW'\nalias -s txt='echo SHADOW'\n",
         );
-        let (_, stdout) = run_command(&mut state, "ls -d /\nwc -c /dev/null\necho GLOBAL_WORD\nfalse").await;
-        assert!(!stdout.contains("SHADOW"), "a replayed shadow ran: {stdout:?}");
+        let (_, stdout) = run_command(
+            &mut state,
+            "ls -d /\nwc -c /dev/null\necho GLOBAL_WORD\nfalse",
+        )
+        .await;
+        assert!(
+            !stdout.contains("SHADOW"),
+            "a replayed shadow ran: {stdout:?}"
+        );
         assert!(stdout.lines().any(|l| l.trim() == "/"), "{stdout:?}");
-        assert!(stdout.contains("0 /dev/null") && stdout.contains("GLOBAL_WORD"), "{stdout:?}");
+        assert!(
+            stdout.contains("0 /dev/null") && stdout.contains("GLOBAL_WORD"),
+            "{stdout:?}"
+        );
     }
 
     /// u35: a shadow the guard cannot remove (a read-only function) refuses the command instead of running it.
@@ -2066,15 +3055,26 @@ mod tests {
         let mut state = raw_state(ShellKind::Bash, "ls() { echo SHADOW; }\nreadonly -f ls\n");
         let (code, stdout) = run_command(&mut state, "echo RAN; ls -d /").await;
         assert_ne!(code, 0);
-        assert!(!stdout.contains("RAN") && !stdout.contains("SHADOW"), "{stdout:?}");
+        assert!(
+            !stdout.contains("RAN") && !stdout.contains("SHADOW"),
+            "{stdout:?}"
+        );
     }
 
     /// g5a: every bash on this machine (the resolved one, `/bin/bash`, and any listed in `FUIGO_TEST_EXTRA_BASH`,
     /// colon-separated; on macOS `/bin/bash` is 3.2).
     fn bash_binaries() -> Vec<String> {
-        let mut found: Vec<String> = vec![ShellKind::Bash.binary_path().to_owned(), "/bin/bash".to_owned()];
+        let mut found: Vec<String> = vec![
+            ShellKind::Bash.binary_path().to_owned(),
+            "/bin/bash".to_owned(),
+        ];
         if let Ok(extra) = std::env::var("FUIGO_TEST_EXTRA_BASH") {
-            found.extend(extra.split(':').filter(|p| !p.is_empty()).map(str::to_owned));
+            found.extend(
+                extra
+                    .split(':')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_owned),
+            );
         }
         found.retain(|p| std::path::Path::new(p).exists());
         found.dedup();
@@ -2089,20 +3089,46 @@ mod tests {
             let mut state = raw_state(ShellKind::Bash, "");
             state.snapshot.clear();
             let (code, stdout) = run_command_in(&mut state, "echo plain-ok", Some(&bash)).await;
-            assert_eq!((code, stdout.trim()), (0, "plain-ok"), "{bash}: empty snapshot");
+            assert_eq!(
+                (code, stdout.trim()),
+                (0, "plain-ok"),
+                "{bash}: empty snapshot"
+            );
             // That bash's own dump replays: a function, an alias and an export persist.
             let define = "g5a_fn() { echo FN; }; alias g5a_al='echo AL'; export G5A=v";
-            assert_eq!(run_command_in(&mut state, define, Some(&bash)).await.0, 0, "{bash}");
-            let (code, stdout) = run_command_in(&mut state, "g5a_fn; g5a_al; echo \"$G5A\"", Some(&bash)).await;
-            assert_eq!((code, stdout.split_whitespace().collect::<Vec<_>>()), (0, vec!["FN", "AL", "v"]), "{bash}");
+            assert_eq!(
+                run_command_in(&mut state, define, Some(&bash)).await.0,
+                0,
+                "{bash}"
+            );
+            let (code, stdout) =
+                run_command_in(&mut state, "g5a_fn; g5a_al; echo \"$G5A\"", Some(&bash)).await;
+            assert_eq!(
+                (code, stdout.split_whitespace().collect::<Vec<_>>()),
+                (0, vec!["FN", "AL", "v"]),
+                "{bash}"
+            );
 
-            let mut state = raw_state(ShellKind::Bash, "function [ { echo SHADOW; }\nls() { echo SHADOW; }\n");
-            let (code, stdout) = run_command_in(&mut state, "[ -d / ] && echo DIR; ls -d /", Some(&bash)).await;
+            let mut state = raw_state(
+                ShellKind::Bash,
+                "function [ { echo SHADOW; }\nls() { echo SHADOW; }\n",
+            );
+            let (code, stdout) =
+                run_command_in(&mut state, "[ -d / ] && echo DIR; ls -d /", Some(&bash)).await;
             assert_eq!(code, 0, "{bash}: {stdout:?}");
-            assert!(!stdout.contains("SHADOW") && stdout.contains("DIR"), "{bash}: {stdout:?}");
-            assert!(stdout.lines().any(|l| l.trim() == "/"), "{bash}: {stdout:?}");
+            assert!(
+                !stdout.contains("SHADOW") && stdout.contains("DIR"),
+                "{bash}: {stdout:?}"
+            );
+            assert!(
+                stdout.lines().any(|l| l.trim() == "/"),
+                "{bash}: {stdout:?}"
+            );
 
-            let mut state = raw_state(ShellKind::Bash, "function [ { echo SHADOW; }\nreadonly -f '['\n");
+            let mut state = raw_state(
+                ShellKind::Bash,
+                "function [ { echo SHADOW; }\nreadonly -f '['\n",
+            );
             let (code, stdout) = run_command_in(&mut state, "echo RAN", Some(&bash)).await;
             assert_ne!(code, 0, "{bash}: {stdout:?}");
             assert!(!stdout.contains("RAN"), "{bash}: {stdout:?}");
@@ -2113,7 +3139,10 @@ mod tests {
     /// during the replay: it calls nothing after the first definition, and the guard then drops them.
     #[tokio::test]
     async fn u35_replay_calls_nothing_a_replayed_function_can_intercept() {
-        for (shell, available) in [(ShellKind::Bash, bash_available()), (ShellKind::Zsh, zsh_available())] {
+        for (shell, available) in [
+            (ShellKind::Bash, bash_available()),
+            (ShellKind::Zsh, zsh_available()),
+        ] {
             if !available {
                 continue;
             }
@@ -2130,7 +3159,10 @@ mod tests {
             let _ = std::fs::remove_file(&mark);
             let (code, stdout) = run_command(&mut state, "echo after").await;
             assert_eq!((code, stdout.trim()), (0, "after"), "{shell:?}");
-            assert!(!mark.exists(), "{shell:?}: a replayed eval/command function ran");
+            assert!(
+                !mark.exists(),
+                "{shell:?}: a replayed eval/command function ran"
+            );
         }
     }
 
@@ -2141,11 +3173,22 @@ mod tests {
         for bash in bash_binaries() {
             let mut state = raw_state(ShellKind::Bash, "");
             state.snapshot.clear();
-            let define = "alias g6_multi='echo one\necho two'; continue() { ls() { echo SHADOW; }; }";
-            assert_eq!(run_command_in(&mut state, define, Some(&bash)).await.0, 0, "{bash}");
+            let define =
+                "alias g6_multi='echo one\necho two'; continue() { ls() { echo SHADOW; }; }";
+            assert_eq!(
+                run_command_in(&mut state, define, Some(&bash)).await.0,
+                0,
+                "{bash}"
+            );
             let (_, stdout) = run_command_in(&mut state, "ls -d /", Some(&bash)).await;
-            assert!(!stdout.contains("SHADOW"), "{bash}: a replayed continue() ran in the guard: {stdout:?}");
-            assert!(stdout.lines().any(|l| l.trim() == "/"), "{bash}: {stdout:?}");
+            assert!(
+                !stdout.contains("SHADOW"),
+                "{bash}: a replayed continue() ran in the guard: {stdout:?}"
+            );
+            assert!(
+                stdout.lines().any(|l| l.trim() == "/"),
+                "{bash}: {stdout:?}"
+            );
         }
     }
 
@@ -2194,13 +3237,23 @@ mod tests {
             let mark = dir.path().join("mark");
             let mut state = raw_state(shell, "");
             state.snapshot.clear();
-            run_command(&mut state, &format!("{setup}export PS4='$(: >> {})+ '", mark.display())).await;
+            run_command(
+                &mut state,
+                &format!("{setup}export PS4='$(: >> {})+ '", mark.display()),
+            )
+            .await;
             assert!(!mark.exists(), "{shell:?}: PS4 expanded without xtrace");
             run_command(&mut state, "set -x").await;
-            assert!(!mark.exists(), "{shell:?}: set -x expanded the replayed PS4");
+            assert!(
+                !mark.exists(),
+                "{shell:?}: set -x expanded the replayed PS4"
+            );
             let (code, stdout) = run_command(&mut state, "echo after").await;
             assert_eq!((code, stdout.trim()), (0, "after"), "{shell:?}");
-            assert!(!mark.exists(), "{shell:?}: the replayed xtrace expanded PS4");
+            assert!(
+                !mark.exists(),
+                "{shell:?}: the replayed xtrace expanded PS4"
+            );
         }
     }
 
@@ -2211,11 +3264,16 @@ mod tests {
         if !zsh_available() {
             return;
         }
-        let mut state =
-            raw_state(ShellKind::Zsh, "unset functions\ntypeset -A functions\nls() { echo SHADOW; }\n");
+        let mut state = raw_state(
+            ShellKind::Zsh,
+            "unset functions\ntypeset -A functions\nls() { echo SHADOW; }\n",
+        );
         let (code, stdout) = run_command(&mut state, "echo RAN; ls -d /").await;
         assert_ne!(code, 0);
-        assert!(!stdout.contains("RAN") && !stdout.contains("SHADOW"), "{stdout:?}");
+        assert!(
+            !stdout.contains("RAN") && !stdout.contains("SHADOW"),
+            "{stdout:?}"
+        );
     }
 
     /// g5a (Fable r4): bash `histexpand` restored from the options block is forced off, so `!` in a plain word stays.
@@ -2238,17 +3296,30 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let target = dunce::canonicalize(dir.path()).unwrap().display().to_string();
+        let target = dunce::canonicalize(dir.path())
+            .unwrap()
+            .display()
+            .to_string();
         let mut state = raw_state(ShellKind::Zsh, "");
-        state.snapshot = encoded_blocks(&[("ZSH_OPTS_B64", "builtin setopt autocd 2>/dev/null || true\n")]);
+        state.snapshot = encoded_blocks(&[(
+            "ZSH_OPTS_B64",
+            "builtin setopt autocd 2>/dev/null || true\n",
+        )]);
         let (_, stdout) = run_command(&mut state, &format!("{target}\npwd -P")).await;
-        assert_ne!(stdout.lines().last().map(str::trim), Some(target.as_str()), "{stdout:?}");
+        assert_ne!(
+            stdout.lines().last().map(str::trim),
+            Some(target.as_str()),
+            "{stdout:?}"
+        );
     }
 
     /// g5a (Fable r4): a shadow an earlier command defined is dropped from the next command (both shells).
     #[tokio::test]
     async fn u35_shadow_from_an_earlier_command_is_dropped() {
-        for (shell, available) in [(ShellKind::Bash, bash_available()), (ShellKind::Zsh, zsh_available())] {
+        for (shell, available) in [
+            (ShellKind::Bash, bash_available()),
+            (ShellKind::Zsh, zsh_available()),
+        ] {
             if !available {
                 continue;
             }
@@ -2258,5 +3329,650 @@ mod tests {
             let (code, stdout) = run_command(&mut state, "ls -d /").await;
             assert_eq!((code, stdout.trim()), (0, "/"), "{shell:?}");
         }
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // u46 r2: state replay is data across a per-call trust boundary. The env block replays from its parsed exports,
+    // option and alias lines only in the dump's own forms, and functions (code) only into a spawn no less confined
+    // than the one that wrote them.
+    // -----------------------------------------------------------------------------------------------------------
+
+    fn available_shells() -> Vec<ShellKind> {
+        let mut shells = Vec::new();
+        if bash_available() {
+            shells.push(ShellKind::Bash);
+        }
+        if zsh_available() {
+            shells.push(ShellKind::Zsh);
+        }
+        shells
+    }
+
+    /// A hostile env block (as a forged frame would carry it): `eval`, a top-level command, `+=` appends to denied
+    /// names, a nameref onto a denied name. None of it runs or installs a denied variable; a plain export carries.
+    #[tokio::test]
+    async fn u46_hostile_env_block_replays_as_data_only() {
+        for shell in available_shells() {
+            let dir = tempfile::tempdir().unwrap();
+            let mark = dir.path().join("mark");
+            let env = format!(
+                "eval 'export SUDO_ASKPASS=/tmp/ask'\n\
+                 X=1; touch {mark}\n\
+                 export SSH_AUTH_SOCK+=/tmp/s\n\
+                 export http_proxy+=http://h\n\
+                 declare -x -n r=SUDO_ASKPASS\n\
+                 export r=/x\n\
+                 export KEPT='a b'\n",
+                mark = mark.display()
+            );
+            let mut state = ShellState {
+                cwd: std::env::current_dir().unwrap(),
+                snapshot: encoded_blocks(&[("ENV_VARS_B64", &env)]),
+                shell,
+                trust: Default::default(),
+            };
+            let (_, stdout) = run_command(
+                &mut state,
+                r#"printf 'ASK=%s SOCK=%s HP=%s KEPT=%s\n' "${SUDO_ASKPASS-unset}" "${SSH_AUTH_SOCK-unset}" "${http_proxy-unset}" "${KEPT-unset}""#,
+            )
+            .await;
+            for gone in ["/tmp/ask", "/tmp/s", "http://h", "ASK=/x"] {
+                assert!(
+                    !stdout.contains(gone),
+                    "{shell:?}: {gone} reached the command: {stdout:?}"
+                );
+            }
+            assert!(stdout.contains("KEPT=a b"), "{shell:?}: {stdout:?}");
+            assert!(!mark.exists(), "{shell:?}: a command in the env block ran");
+        }
+    }
+
+    /// Option and alias blocks keep only lines in the dump's own forms: a legit option and alias carry, anything
+    /// else (a command after an option, a second command on an alias line, a bare command) is dropped.
+    #[tokio::test]
+    async fn u46_hostile_option_and_alias_lines_are_dropped() {
+        for shell in available_shells() {
+            let dir = tempfile::tempdir().unwrap();
+            let mark = dir.path().join("mark");
+            let mark = mark.display();
+            let (options_block, options, probe) = match shell {
+                ShellKind::Bash => (
+                    "BASH_OPTS_B64",
+                    format!("shopt -s globstar\nshopt -s nullglob; touch {mark}\ntouch {mark}\n"),
+                    "shopt -q globstar && echo OPT=on; alias ll",
+                ),
+                ShellKind::Zsh => (
+                    "ZSH_OPTS_B64",
+                    format!(
+                        "builtin setopt globstarshort 2>/dev/null || true\n\
+                         builtin setopt nullglob 2>/dev/null || touch {mark}\ntouch {mark}\n"
+                    ),
+                    "[[ -o globstarshort ]] && echo OPT=on; alias ll",
+                ),
+            };
+            let aliases = format!(
+                "alias ll='ls -l'\nalias q='x'; touch {mark}\nalias z=$(touch {mark})\ntouch {mark}\n"
+            );
+            let mut state = ShellState {
+                cwd: std::env::current_dir().unwrap(),
+                snapshot: encoded_blocks(&[(options_block, &options), ("ALIASES_B64", &aliases)]),
+                shell,
+                trust: Default::default(),
+            };
+            let (_, stdout) = run_command(&mut state, probe).await;
+            assert!(
+                stdout.contains("OPT=on"),
+                "{shell:?}: option lost: {stdout:?}"
+            );
+            assert!(
+                stdout.contains("ls -l"),
+                "{shell:?}: alias lost: {stdout:?}"
+            );
+            assert!(
+                !std::path::Path::new(&mark.to_string()).exists(),
+                "{shell:?}: a hostile line ran"
+            );
+        }
+    }
+
+    fn sandboxed(grants: &[&str]) -> crate::sandbox_launch::SpawnConfinement {
+        crate::sandbox_launch::SpawnConfinement::of(Some(&crate::sandbox_launch::LaunchReceipt {
+            sandboxed: true,
+            backend: None,
+            grants: grants.iter().map(|g| (*g).to_owned()).collect(),
+        }))
+    }
+
+    /// A function an unconfined spawn wrote (the login capture's startup files), trusted into any spawn.
+    const RC_FN: &str = "u46rc() { echo rc-ran; }\n";
+
+    /// Functions, aliases and env written under `enforce` (here a forged functions block with a top-level command) do
+    /// not replay into a less confined spawn (`off`, or the re-run with a grant): the command is not run, the warning
+    /// is printed, the directory and the state an unconfined spawn wrote (its functions, aliases and env) carry. Into
+    /// an equally confined spawn they carry (the normal path is unchanged).
+    #[tokio::test]
+    async fn u46_functions_replay_only_into_an_equally_confined_spawn() {
+        let unconfined = crate::sandbox_launch::SpawnConfinement::default();
+        for shell in available_shells() {
+            for (label, next, carries) in [
+                ("off", unconfined.clone(), false),
+                ("grant re-run", sandboxed(&["g-1", "replay:x"]), false),
+                ("same mode", sandboxed(&[]), true),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let mark = dir.path().join("mark");
+                let functions = format!(
+                    "{RC_FN}touch {}\nu46fn() {{ echo fn-ran; }}\n",
+                    mark.display()
+                );
+                let mut state = ShellState {
+                    cwd: dir.path().to_path_buf(),
+                    snapshot: encoded_blocks(&[
+                        ("ENV_VARS_B64", "export KEPT='a b'\n"),
+                        ("ALIASES_B64", "alias u46al='echo al-ran'\n"),
+                        ("FUNCTIONS_B64", &functions),
+                    ]),
+                    shell,
+                    trust: ReplayTrust {
+                        producer: sandboxed(&[]),
+                        trusted_snapshot: Some(encoded_blocks(&[
+                            ("ENV_VARS_B64", "export RCV='rc v'\n"),
+                            ("ALIASES_B64", "alias u46rcal='echo from-rc-alias'\n"),
+                            ("FUNCTIONS_B64", RC_FN),
+                        ])),
+                    },
+                };
+                let (_, stdout) = run_command_under(
+                    &mut state,
+                    "u46rc; u46rcal; u46fn 2>/dev/null || echo no-fn; u46al 2>/dev/null || echo no-al; pwd; \
+                     echo \"KEPT=${KEPT-unset} RCV=${RCV-unset}\"",
+                    &next,
+                )
+                .await;
+                let ctx = format!("{shell:?} {label}: {stdout:?}");
+                assert_eq!(stdout.contains("fn-ran"), carries, "{ctx}");
+                assert_eq!(stdout.contains("al-ran"), carries, "{ctx}");
+                assert_eq!(stdout.contains("KEPT=a b"), carries, "{ctx}");
+                assert_eq!(stdout.contains("RCV=rc v"), !carries, "{ctx}");
+                assert_eq!(mark.exists(), carries, "{ctx}");
+                assert_eq!(
+                    stdout.contains(SETTINGS_WITHHELD_WARNING),
+                    !carries,
+                    "{ctx}"
+                );
+                assert!(stdout.contains("rc-ran"), "{ctx}: trusted function lost");
+                assert_eq!(stdout.contains("from-rc-alias"), !carries, "{ctx}");
+                let dir = dir.path().canonicalize().unwrap();
+                assert!(stdout.contains(&*dir.to_string_lossy()), "{ctx}");
+                // The warning is once per occurrence: the state the less confined spawn left is its own.
+                let (_, again) = run_command_under(&mut state, "true", &next).await;
+                assert!(
+                    !again.contains(SETTINGS_WITHHELD_WARNING),
+                    "{shell:?} {label}: {again:?}"
+                );
+            }
+        }
+    }
+
+    /// The trust rule itself: less confined is leaving the sandbox or holding a grant key the producer lacked.
+    #[test]
+    fn u46_spawn_confinement_order() {
+        let off = crate::sandbox_launch::SpawnConfinement::default();
+        assert!(off.is_less_confined_than(&sandboxed(&[])));
+        assert!(sandboxed(&["g"]).is_less_confined_than(&sandboxed(&[])));
+        assert!(sandboxed(&["h"]).is_less_confined_than(&sandboxed(&["g"])));
+        assert!(!sandboxed(&["g"]).is_less_confined_than(&sandboxed(&["g"])));
+        assert!(!sandboxed(&[]).is_less_confined_than(&sandboxed(&["g"])));
+        assert!(!sandboxed(&[]).is_less_confined_than(&off));
+        assert!(!off.is_less_confined_than(&off));
+    }
+
+    /// The env block reads back to the same data the replay exports: zsh's tied `export -T PATH path=( … )` is a
+    /// `PATH` export, attributes are dropped, and an integer attribute never evaluates its value.
+    #[test]
+    fn u46_env_replay_is_rebuilt_from_data() {
+        let block =
+            b"declare -x A=\"x y\"\ndeclare -ix N=\"a[$(touch /tmp/u46)]\"\ndeclare -x OLDPWD\n\
+export -T PATH path=( /a '/b c' )\nexport Q='it'\\''s'\n";
+        let replay = String::from_utf8(env_replay(block, b"")).unwrap();
+        assert_eq!(
+            replay,
+            "export A='x y'\nexport OLDPWD\nexport PATH='/a:/b c'\nexport Q='it'\\''s'\n"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // u46 r3: one trust rule for all replayed state (env, options, aliases, functions), startup selectors only from
+    // an unconfined spawn's state, tracing never replayed in any spelling, multiline aliases read whole.
+    // -----------------------------------------------------------------------------------------------------------
+
+    fn state_with(
+        shell: ShellKind,
+        blocks: &[(&str, &str)],
+        producer: crate::sandbox_launch::SpawnConfinement,
+    ) -> ShellState {
+        let confined = producer != crate::sandbox_launch::SpawnConfinement::default();
+        ShellState {
+            cwd: std::env::current_dir().unwrap(),
+            snapshot: encoded_blocks(blocks),
+            shell,
+            trust: ReplayTrust {
+                producer,
+                trusted_snapshot: confined.then(String::new),
+            },
+        }
+    }
+
+    /// Astra r3 C1: `PS4` with a command substitution plus tracing switched on in any spelling zsh (or bash) accepts
+    /// (`XTRACE`, `x_trace`, `unsetopt noxtrace`) never runs the substitution: not from a sandboxed command's state
+    /// into an unsandboxed spawn, not into an equally confined one, and not even from an unconfined state whose `PS4`
+    /// does carry (the option layer alone holds).
+    #[tokio::test]
+    async fn u46r3_tracing_options_never_replay_in_any_spelling() {
+        let off = crate::sandbox_launch::SpawnConfinement::default();
+        for shell in available_shells() {
+            for (label, producer, next) in [
+                ("sandbox->off", sandboxed(&[]), off.clone()),
+                ("sandbox->sandbox", sandboxed(&[]), sandboxed(&[])),
+                ("off->off", off.clone(), off.clone()),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let mark = dir.path().join("mark");
+                let env = format!("export PS4='$(touch {})'\n", mark.display());
+                let (block, options, probe) = match shell {
+                    ShellKind::Zsh => (
+                        "ZSH_OPTS_B64",
+                        "builtin setopt promptsubst 2>/dev/null || true\n\
+                         builtin setopt XTRACE 2>/dev/null || true\n\
+                         builtin setopt x_trace 2>/dev/null || true\n\
+                         builtin setopt X_TRACE 2>/dev/null || true\n\
+                         builtin unsetopt noxtrace 2>/dev/null || true\n\
+                         builtin unsetopt NO_XTRACE 2>/dev/null || true\n\
+                         builtin setopt verbose 2>/dev/null || true\n\
+                         builtin setopt xtrace 2>/dev/null || true\n\
+                         builtin setopt globstarshort 2>/dev/null || true\n",
+                        "[[ -o xtrace ]] && echo XT=on; [[ -o globstarshort ]] && echo OPT=on; true",
+                    ),
+                    ShellKind::Bash => (
+                        "POSIX_OPTS_B64",
+                        "set -o xtrace\nset -o verbose\nset -o XTRACE\nset -o noclobber\n",
+                        "[[ -o xtrace ]] && echo XT=on; [[ -o noclobber ]] && echo OPT=on; true",
+                    ),
+                };
+                let mut state =
+                    state_with(shell, &[("ENV_VARS_B64", &env), (block, options)], producer);
+                let (_, stdout) = run_command_under(&mut state, probe, &next).await;
+                let ctx = format!("{shell:?} {label}: {stdout:?}");
+                assert!(!mark.exists(), "{ctx}: PS4 substitution ran");
+                assert!(!stdout.contains("XT=on"), "{ctx}");
+                // Same trust: the ordinary option still carries.
+                if label != "sandbox->off" {
+                    assert!(stdout.contains("OPT=on"), "{ctx}");
+                }
+            }
+        }
+    }
+
+    /// The option filter itself: canonical names only, tracing never, whatever the spelling or negation.
+    #[test]
+    fn u46r3_option_lines_are_canonical_and_never_trace() {
+        let zsh = |name: &str| format!("builtin setopt {name} 2>/dev/null || true");
+        for keep in [
+            "globstarshort",
+            "nonomatch",
+            "promptsubst",
+            "notify",
+            "extendedglob",
+        ] {
+            assert!(
+                is_replayed_option_line(ShellKind::Zsh, zsh(keep).as_bytes()),
+                "{keep}"
+            );
+        }
+        for drop in [
+            "xtrace",
+            "XTRACE",
+            "x_trace",
+            "X_TRACE",
+            "noxtrace",
+            "NO_XTRACE",
+            "verbose",
+            "Verbose",
+            "no_verbose",
+        ] {
+            assert!(
+                !is_replayed_option_line(ShellKind::Zsh, zsh(drop).as_bytes()),
+                "{drop}"
+            );
+        }
+        for line in [
+            "builtin unsetopt noxtrace 2>/dev/null || true",
+            "builtin unsetopt nomatch 2>/dev/null || true",
+            "builtin setopt xtrace",
+        ] {
+            assert!(
+                !is_replayed_option_line(ShellKind::Zsh, line.as_bytes()),
+                "{line}"
+            );
+        }
+        for keep in [
+            "set -o noclobber",
+            "set +o emacs",
+            "shopt -s globstar",
+            "set -o interactive-comments",
+        ] {
+            assert!(
+                is_replayed_option_line(ShellKind::Bash, keep.as_bytes()),
+                "{keep}"
+            );
+        }
+        for drop in [
+            "set -o xtrace",
+            "set +o xtrace",
+            "set -o verbose",
+            "set -o XTRACE",
+            "set -o history",
+            "set -o histexpand",
+            "set -o noexec",
+            "shopt -s Globstar",
+        ] {
+            assert!(
+                !is_replayed_option_line(ShellKind::Bash, drop.as_bytes()),
+                "{drop}"
+            );
+        }
+    }
+
+    /// Astra r3 H1: an alias a sandboxed command left (`curl='touch …; curl'`) is not defined in a less sandboxed
+    /// spawn; into an equally confined one it carries.
+    #[tokio::test]
+    async fn u46r3_aliases_from_a_sandboxed_command_skip_a_less_sandboxed_one() {
+        let off = crate::sandbox_launch::SpawnConfinement::default();
+        for shell in available_shells() {
+            for (next, carries) in [(off.clone(), false), (sandboxed(&[]), true)] {
+                let dir = tempfile::tempdir().unwrap();
+                let mark = dir.path().join("mark");
+                let aliases = format!("alias curl='touch {}; true'\n", mark.display());
+                let mut state = state_with(shell, &[("ALIASES_B64", &aliases)], sandboxed(&[]));
+                let (_, stdout) =
+                    run_command_under(&mut state, "curl --version >/dev/null 2>&1; true", &next)
+                        .await;
+                let ctx = format!("{shell:?} carries={carries}: {stdout:?}");
+                assert_eq!(mark.exists(), carries, "{ctx}");
+                assert_eq!(
+                    stdout.contains(SETTINGS_WITHHELD_WARNING),
+                    !carries,
+                    "{ctx}"
+                );
+            }
+        }
+    }
+
+    /// Astra r3 H2 + r3tweak: `BASH_ENV` (and the other startup selectors) a sandboxed command exported reaches no
+    /// less confined spawn; an equally confined one gets it like any variable (no escalation); exported by an
+    /// unconfined spawn (the user's own) it carries everywhere.
+    #[tokio::test]
+    async fn u46r3_bash_env_from_a_sandboxed_command_reaches_only_equal_trust() {
+        let off = crate::sandbox_launch::SpawnConfinement::default();
+        for shell in available_shells() {
+            for (label, producer, next, carries) in [
+                ("sandbox->off", sandboxed(&[]), off.clone(), false),
+                ("sandbox->sandbox", sandboxed(&[]), sandboxed(&[]), true),
+                ("off->off", off.clone(), off.clone(), true),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let mark = dir.path().join("mark");
+                let script = dir.path().join("startup.sh");
+                std::fs::write(&script, format!("touch {}\n", mark.display())).unwrap();
+                let env = format!(
+                    "export BASH_ENV={0}\nexport ENV={0}\nexport LD_PRELOAD=/u46/none.so\nexport KEPT=k\n",
+                    script.display()
+                );
+                let mut state = state_with(shell, &[("ENV_VARS_B64", &env)], producer);
+                let (_, stdout) = run_command_under(
+                    &mut state,
+                    "echo \"BE=${BASH_ENV-unset} LP=${LD_PRELOAD-unset}\"; unset LD_PRELOAD; /bin/bash -c true",
+                    &next,
+                )
+                .await;
+                let ctx = format!("{shell:?} {label}: {stdout:?}");
+                assert_eq!(mark.exists(), carries, "{ctx}");
+                assert_eq!(stdout.contains("BE=unset"), !carries, "{ctx}");
+                assert_eq!(stdout.contains("LP=unset"), !carries, "{ctx}");
+            }
+        }
+    }
+
+    /// r3tweak: a variable a sandboxed command exports, such as `LD_LIBRARY_PATH`, reaches the next sandboxed command
+    /// (through real dumps), and not an unsandboxed or granted re-run.
+    #[tokio::test]
+    async fn u46r3tweak_sandboxed_loader_path_carries_to_the_next_sandboxed_command() {
+        let off = crate::sandbox_launch::SpawnConfinement::default();
+        for shell in available_shells() {
+            for (next, carries) in [(sandboxed(&[]), true), (off.clone(), false)] {
+                let mut state = raw_state(shell, "");
+                state.snapshot.clear();
+                run_command_under(
+                    &mut state,
+                    "export LD_LIBRARY_PATH=/opt/x BASH_ENV=./x",
+                    &sandboxed(&[]),
+                )
+                .await;
+                let (_, stdout) = run_command_under(
+                    &mut state,
+                    "echo \"LL=${LD_LIBRARY_PATH-unset} BE=${BASH_ENV-unset}\"",
+                    &next,
+                )
+                .await;
+                let ctx = format!("{shell:?} carries={carries}: {stdout:?}");
+                assert_eq!(stdout.contains("LL=/opt/x"), carries, "{ctx}");
+                assert_eq!(stdout.contains("BE=./x"), carries, "{ctx}");
+            }
+        }
+    }
+
+    /// Astra r3 H4: an alias whose value holds a newline (bash prints it across lines inside single quotes, zsh as
+    /// `$'…'`) carries to the next command at the same trust, through a real dump.
+    #[tokio::test]
+    async fn u46r3_multiline_alias_carries() {
+        for shell in available_shells() {
+            let mut state = raw_state(shell, "");
+            state.snapshot.clear();
+            let define = match shell {
+                ShellKind::Bash => "alias greet='echo one\necho two'",
+                ShellKind::Zsh => "alias greet=$'echo one\\necho two'",
+            };
+            run_command_under(&mut state, define, &sandboxed(&[])).await;
+            let (_, stdout) = run_command_under(&mut state, "greet", &sandboxed(&[])).await;
+            assert!(
+                stdout.contains("one") && stdout.contains("two"),
+                "{shell:?}: {stdout:?}"
+            );
+        }
+    }
+
+    /// The normal path is unchanged: through real dumps, at the same confinement, env values (spaces, quotes,
+    /// newlines, unicode, a changed `PATH`), aliases, functions and options carry, without a warning.
+    #[tokio::test]
+    async fn u46r3_same_trust_replay_keeps_everything() {
+        for shell in available_shells() {
+            for next in [
+                crate::sandbox_launch::SpawnConfinement::default(),
+                sandboxed(&[]),
+            ] {
+                let mut state = raw_state(shell, "");
+                state.snapshot.clear();
+                let option = match shell {
+                    ShellKind::Bash => "shopt -s globstar",
+                    ShellKind::Zsh => "setopt globstarshort",
+                };
+                let define = format!(
+                    "export SP='a b' QU=\"it's \\\"q\\\"\" NL=$'x\\ny' UNI='h\u{e9}llo \u{1f511}'; \
+                     export PATH=\"/u46/bin:$PATH\"; alias ll='echo ll-ran'; u46f() {{ echo f-ran; }}; {option}"
+                );
+                run_command_under(&mut state, &define, &next).await;
+                let probe = match shell {
+                    ShellKind::Bash => "shopt -q globstar && echo OPT=on",
+                    ShellKind::Zsh => "[[ -o globstarshort ]] && echo OPT=on",
+                };
+                let (_, stdout) = run_command_under(
+                    &mut state,
+                    &format!(
+                        "printf '[%s]' \"$SP\" \"$QU\" \"$NL\" \"$UNI\" \"${{PATH%%:*}}\"; echo; ll; u46f; {probe}"
+                    ),
+                    &next,
+                )
+                .await;
+                let ctx = format!("{shell:?} {next:?}: {stdout:?}");
+                assert!(
+                    stdout.contains("[a b][it's \"q\"][x\ny][h\u{e9}llo \u{1f511}][/u46/bin]"),
+                    "{ctx}"
+                );
+                for want in ["ll-ran", "f-ran", "OPT=on"] {
+                    assert!(stdout.contains(want), "{ctx}: {want}");
+                }
+                assert!(!stdout.contains(SETTINGS_WITHHELD_WARNING), "{ctx}");
+            }
+        }
+    }
+
+    /// u46 r4 L1: the env judge reads the env the spawn's replay exports: the trusted state's for a less confined spawn.
+    #[test]
+    fn u46r4_judged_exports_follow_the_replayed_block() {
+        let env = |text: &str| encoded_blocks(&[("ENV_VARS_B64", text)]);
+        for shell in [ShellKind::Bash, ShellKind::Zsh] {
+            let (latest, trusted) = match shell {
+                ShellKind::Bash => (
+                    "declare -x LATEST_ONLY=\"l\"\n",
+                    "declare -x BASH_ENV=\"t\"\n",
+                ),
+                ShellKind::Zsh => ("export LATEST_ONLY=l\n", "export BASH_ENV=t\n"),
+            };
+            let state = ShellState {
+                cwd: std::env::current_dir().unwrap(),
+                snapshot: env(latest),
+                shell,
+                trust: ReplayTrust {
+                    producer: sandboxed(&[]),
+                    trusted_snapshot: Some(env(trusted)),
+                },
+            };
+            let names = |next: &crate::sandbox_launch::SpawnConfinement| -> Vec<String> {
+                state
+                    .restored_exports_for(next)
+                    .into_iter()
+                    .map(|(n, _)| n.to_string_lossy().into_owned())
+                    .collect()
+            };
+            assert_eq!(names(&sandboxed(&[])), ["LATEST_ONLY"], "{shell:?}");
+            assert_eq!(
+                names(&crate::sandbox_launch::SpawnConfinement::default()),
+                ["BASH_ENV"],
+                "{shell:?}"
+            );
+        }
+    }
+
+    /// u46 r4 H2 (real zsh): Fuigo's own init option `extendedglob` is never replayed (an unquoted `^` stays a
+    /// literal in a fresh command), and an option plain `emulate` leaves alone (`nocaseglob`) carries from a command.
+    #[tokio::test]
+    async fn u46r4_zsh_init_option_is_not_replayed_and_user_options_carry() {
+        if !zsh_available() {
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None, None)
+            .await
+            .unwrap();
+        let next = crate::sandbox_launch::SpawnConfinement::default();
+        let (_, first) = run_command_under(
+            &mut state,
+            "[[ -o extendedglob ]] && echo EG=on; echo ^foo; setopt nocaseglob autopushd",
+            &next,
+        )
+        .await;
+        assert!(!first.contains("EG=on"), "{first:?}");
+        assert!(first.contains("^foo"), "{first:?}");
+        for _ in 0..2 {
+            let (_, again) = run_command_under(
+                &mut state,
+                "[[ -o extendedglob ]] && echo EG=on; echo ^foo; \
+                 [[ -o nocaseglob ]] && echo NCG=on; [[ -o autopushd ]] && echo APD=on; true",
+                &next,
+            )
+            .await;
+            assert!(!again.contains("EG=on"), "{again:?}");
+            assert!(again.contains("^foo"), "{again:?}");
+            assert!(
+                again.contains("NCG=on") && again.contains("APD=on"),
+                "{again:?}"
+            );
+        }
+    }
+
+    /// Fable r3 M3: `typeset -U PATH path` makes zsh dump `export -UT PATH path=( … )`; a changed `PATH` still carries.
+    #[tokio::test]
+    async fn u46r3_zsh_unique_tied_path_carries() {
+        if !zsh_available() {
+            return;
+        }
+        assert_eq!(
+            zsh_tied_export(b"export -UT PATH path=( /a '/b c' )"),
+            Some((b"PATH".to_vec(), Some(b"/a:/b c".to_vec())))
+        );
+        assert_eq!(zsh_tied_export(b"export -UTn PATH path=( /a )"), None);
+        let mut state = raw_state(ShellKind::Zsh, "");
+        state.snapshot.clear();
+        run_command(
+            &mut state,
+            "typeset -U PATH path; export PATH=\"/u46/bin:$PATH\"",
+        )
+        .await;
+        let (_, stdout) = run_command(&mut state, "echo \"P=${PATH%%:*}\"").await;
+        assert!(stdout.contains("P=/u46/bin"), "{stdout:?}");
+    }
+
+    /// Fable r3 H3: a sandboxed command's `PATH` change does not reach the granted re-run (the env falls back whole);
+    /// the next equally confined command keeps it.
+    #[tokio::test]
+    async fn u46r3_path_from_a_sandboxed_command_skips_the_granted_rerun() {
+        for shell in available_shells() {
+            let mut state = raw_state(shell, "");
+            state.snapshot.clear();
+            run_command(&mut state, "export PATH=\"/u46/login:$PATH\"").await;
+            run_command_under(&mut state, "export PATH=\"./evil:$PATH\"", &sandboxed(&[])).await;
+            let probe = "echo \"P=${PATH%%:*}\"";
+            let (_, rerun) =
+                run_command_under(&mut state, probe, &sandboxed(&["g-1", "replay:x"])).await;
+            assert!(rerun.contains("P=/u46/login"), "{shell:?}: {rerun:?}");
+            assert!(
+                rerun.contains(SETTINGS_WITHHELD_WARNING),
+                "{shell:?}: {rerun:?}"
+            );
+            let mut same = raw_state(shell, "");
+            same.snapshot.clear();
+            run_command_under(&mut same, "export PATH=\"./evil:$PATH\"", &sandboxed(&[])).await;
+            let (_, kept) = run_command_under(&mut same, probe, &sandboxed(&[])).await;
+            assert!(kept.contains("P=./evil"), "{shell:?}: {kept:?}");
+        }
+    }
+
+    /// Fable r3 M2: the env judge reads the same env block the replay does. A forged first block whose end line is
+    /// wrong is skipped by both; the later well-formed one is what is judged and what runs.
+    #[test]
+    fn u46r3_env_judge_and_replay_read_the_same_block() {
+        let good = base64::engine::general_purpose::STANDARD.encode("export SEEN=replayed\n");
+        let forged = base64::engine::general_purpose::STANDARD.encode("export SEEN=judged\n");
+        let snapshot = format!(
+            "fuigo_snap_ENV_VARS_B64=$(command base64 -d <<'FUIGO_SNAP_EOF_ENV_VARS_B64'\n{forged}\nNOT_THE_END\n)\n\
+             fuigo_snap_ENV_VARS_B64=$(command base64 -d <<'FUIGO_SNAP_EOF_ENV_VARS_B64'\n{good}\nFUIGO_SNAP_EOF_ENV_VARS_B64\n)\n"
+        );
+        let judged = snapshot_exports(&snapshot);
+        assert_eq!(judged, vec![("SEEN".into(), "replayed".into())]);
+        let replay = String::from_utf8(replay_script(ShellKind::Bash, &snapshot)).unwrap();
+        assert!(
+            replay.contains("export SEEN='replayed'") && !replay.contains("judged"),
+            "{replay}"
+        );
     }
 }

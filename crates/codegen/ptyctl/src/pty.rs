@@ -36,11 +36,19 @@ impl std::fmt::Debug for PtyConfig {
             env,
         } = self;
         f.debug_struct("PtyConfig")
-            .field("command", &command.first().map(|program| (program, format!("<{} args redacted>", command.len() - 1))))
+            .field(
+                "command",
+                &command
+                    .first()
+                    .map(|program| (program, format!("<{} args redacted>", command.len() - 1))),
+            )
             .field("cols", cols)
             .field("rows", rows)
             .field("cwd", cwd)
-            .field("env", &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "env",
+                &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -211,7 +219,8 @@ mod tests {
                 ("B\0AD".to_owned(), "x".to_owned()),
             ]),
         };
-        let handle = PtyHandle::spawn(&config).expect("a NUL in one variable must not fail the spawn");
+        let handle =
+            PtyHandle::spawn(&config).expect("a NUL in one variable must not fail the spawn");
         let (_master, mut child, _reader, _writer) = handle.into_parts();
         assert_eq!(child.wait().expect("wait"), 0);
     }

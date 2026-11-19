@@ -82,7 +82,11 @@ pub fn neutralize_buffer(buf: &mut Buffer) {
         }
         let clean = fuigo_tty_utils::scrub_unsafe_title_with(symbol, Some(' '));
         if clean != symbol {
-            let clean = if clean.is_empty() { " ".to_string() } else { clean };
+            let clean = if clean.is_empty() {
+                " ".to_string()
+            } else {
+                clean
+            };
             cell.set_symbol(&clean);
         }
     }
@@ -1800,7 +1804,10 @@ mod osc8_open_tests {
 
     #[test]
     fn a_clean_target_is_linked() {
-        assert_eq!(emitted("https://example.com/a"), "\x1b]8;id=3;https://example.com/a\x07");
+        assert_eq!(
+            emitted("https://example.com/a"),
+            "\x1b]8;id=3;https://example.com/a\x07"
+        );
     }
 
     #[test]
@@ -1843,11 +1850,12 @@ mod cell_neutralize_tests {
     }
 
     fn hidden(buf: &Buffer, y: u16) -> bool {
-        row(buf, y).chars().any(fuigo_tty_utils::is_unsafe_display_char)
+        row(buf, y)
+            .chars()
+            .any(fuigo_tty_utils::is_unsafe_display_char)
     }
 
-    const FLAG_ENGLAND: &str =
-        "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+    const FLAG_ENGLAND: &str = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
     const FAMILY: &str = "\u{1F469}\u{200D}\u{1F52C}";
 
     /// P181 (Grok round): ratatui paints U+2028 and a tag attached to a base character, so the cell buffer is the last
@@ -1857,7 +1865,10 @@ mod cell_neutralize_tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 4));
         buf.set_string(0, 0, "a\u{2028}b\u{2029}c", Style::default());
         buf.set_string(0, 1, "x\u{e0041}y\u{ad}z\u{202e}w", Style::default());
-        assert!(hidden(&buf, 0) && hidden(&buf, 1), "the buffer holds hidden characters before the scrub");
+        assert!(
+            hidden(&buf, 0) && hidden(&buf, 1),
+            "the buffer holds hidden characters before the scrub"
+        );
         buf.set_string(0, 2, format!("{FAMILY} {FLAG_ENGLAND}!"), Style::default());
         buf.set_string(0, 3, "plain text 好 \u{e9}", Style::default());
         let before = row(&buf, 2);
@@ -1867,7 +1878,11 @@ mod cell_neutralize_tests {
         // How many columns a soft hyphen takes depends on the width tables, so only the letters are compared
         assert_eq!(row(&buf, 0).replace(' ', ""), "abc");
         assert_eq!(row(&buf, 1).replace(' ', ""), "xyzw");
-        assert_eq!(row(&buf, 2), before, "joined emoji and a valid flag are kept");
+        assert_eq!(
+            row(&buf, 2),
+            before,
+            "joined emoji and a valid flag are kept"
+        );
         assert_eq!(row(&buf, 3), before3, "clean text is untouched");
     }
 
@@ -1875,13 +1890,20 @@ mod cell_neutralize_tests {
     fn a_frame_never_reaches_the_backend_with_a_hidden_character() {
         let mut term = terminal(30, 3);
         term.draw(|frame| {
-            frame.buffer_mut().set_string(0, 0, "a\u{2028}b", Style::default());
-            frame.buffer_mut().set_string(0, 1, "x\u{e0041}y", Style::default());
+            frame
+                .buffer_mut()
+                .set_string(0, 0, "a\u{2028}b", Style::default());
+            frame
+                .buffer_mut()
+                .set_string(0, 1, "x\u{e0041}y", Style::default());
         })
         .unwrap();
         let buf = term.backend().buffer();
         let all = format!("{}{}", row(buf, 0), row(buf, 1));
-        assert!(!all.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{all:?}");
+        assert!(
+            !all.chars().any(fuigo_tty_utils::is_unsafe_display_char),
+            "{all:?}"
+        );
         assert_eq!(all.replace(' ', ""), "abxy");
     }
 
@@ -1919,13 +1941,23 @@ mod cell_neutralize_tests {
         {
             // The frame borrows the terminal; end the borrow before flushing.
             let mut frame = term.get_frame();
-            frame.buffer_mut().set_string(0, 0, "a\u{2028}b\u{e0041}", Style::default());
-            frame.buffer_mut().set_string(0, 2, "link", Style::default());
+            frame
+                .buffer_mut()
+                .set_string(0, 0, "a\u{2028}b\u{e0041}", Style::default());
+            frame
+                .buffer_mut()
+                .set_string(0, 2, "link", Style::default());
         }
         term.flush_with_links().unwrap();
         let bytes = String::from_utf8_lossy(&shared.0.lock().unwrap()).into_owned();
-        assert!(bytes.contains("\x1b]8;"), "the linked frame took the link branch: {bytes:?}");
-        assert!(!bytes.contains('\u{2028}') && !bytes.contains('\u{e0041}'), "{bytes:?}");
+        assert!(
+            bytes.contains("\x1b]8;"),
+            "the linked frame took the link branch: {bytes:?}"
+        );
+        assert!(
+            !bytes.contains('\u{2028}') && !bytes.contains('\u{e0041}'),
+            "{bytes:?}"
+        );
     }
 
     #[test]
@@ -1935,11 +1967,17 @@ mod cell_neutralize_tests {
             buf.set_string(0, 0, "p\u{2028}q\u{e0041}", Style::default());
         })
         .unwrap();
-        let all: String = (0..3).map(|y| row(term.backend().buffer(), y)).collect::<Vec<_>>().join("|")
+        let all: String = (0..3)
+            .map(|y| row(term.backend().buffer(), y))
+            .collect::<Vec<_>>()
+            .join("|")
             + &(0..term.backend().scrollback().area.height)
                 .map(|y| row(term.backend().scrollback(), y))
                 .collect::<String>();
-        assert!(!all.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{all:?}");
+        assert!(
+            !all.chars().any(fuigo_tty_utils::is_unsafe_display_char),
+            "{all:?}"
+        );
         assert!(all.replace(' ', "").contains("pq"), "{all:?}");
     }
 }

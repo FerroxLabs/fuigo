@@ -242,7 +242,10 @@ mod tests {
         let img = DynamicImage::ImageRgba8(rgba);
         let (bytes, _w, _h, mime) =
             re_encode_under_limit(&img, &params(700_000, 1568, u64::MAX)).unwrap();
-        assert_eq!(mime, "image/png", "transparency must not be flattened into a JPEG");
+        assert_eq!(
+            mime, "image/png",
+            "transparency must not be flattened into a JPEG"
+        );
         assert!(bytes.len() <= 700_000);
         let out = image::load_from_memory(&bytes).unwrap();
         assert!(out.color().has_alpha(), "the alpha channel must survive");

@@ -25,7 +25,10 @@ pub(crate) struct EpochCache<T> {
 
 impl<T> EpochCache<T> {
     pub(crate) fn new() -> Self {
-        Self { built_at: None, value: None }
+        Self {
+            built_at: None,
+            value: None,
+        }
     }
 
     /// The cached value, rebuilt with `build` first when `epoch` differs from the one it was built at.

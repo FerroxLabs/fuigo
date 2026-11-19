@@ -6524,11 +6524,13 @@ fn up_onto_soft_row_closed_by_element_lands_before_the_element() {
     assert_eq!(0, cursor_row(&t, 8));
 }
 
-
 // ── 54.7: typing after a large paste, bounded work ──
 
 fn big_text(lines: usize) -> String {
-    (0..lines).map(|i| format!("line {i} lorem ipsum dolor sit amet consectetur adipiscing elit sed do")).collect::<Vec<_>>().join("\n")
+    (0..lines)
+        .map(|i| format!("line {i} lorem ipsum dolor sit amet consectetur adipiscing elit sed do"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Typing in a large buffer re-wraps the edited line, not the whole buffer.
@@ -6554,12 +6556,25 @@ fn typing_after_a_large_paste_rewraps_only_the_edited_line() {
         hgt += b.elapsed();
     }
     eprintln!("insert {ins:?} height {hgt:?}");
-    eprintln!("set_text {t1:?} set_cursor {t2:?} first wrap {t3:?} keystrokes {:?}", t0.elapsed());
+    eprintln!(
+        "set_text {t1:?} set_cursor {t2:?} first wrap {t3:?} keystrokes {:?}",
+        t0.elapsed()
+    );
     let scans = crate::editor::scan_counter::SCANS.with(|c| c.get());
-    assert_eq!(scans, 0, "typing walked the buffer from its start {scans} times");
+    assert_eq!(
+        scans, 0,
+        "typing walked the buffer from its start {scans} times"
+    );
     let wrapped = perf_counters::take(&perf_counters::WRAP_BYTES);
-    eprintln!("wrapped bytes for 60 keystrokes in {} bytes: {wrapped}", ta.text().len());
-    assert!(wrapped <= 60 * 4096, "60 keystrokes wrapped {wrapped} bytes of a {} byte buffer", ta.text().len());
+    eprintln!(
+        "wrapped bytes for 60 keystrokes in {} bytes: {wrapped}",
+        ta.text().len()
+    );
+    assert!(
+        wrapped <= 60 * 4096,
+        "60 keystrokes wrapped {wrapped} bytes of a {} byte buffer",
+        ta.text().len()
+    );
 }
 
 /// The incremental wrap must agree with wrapping the whole text, whatever the edit.
@@ -6567,7 +6582,19 @@ fn typing_after_a_large_paste_rewraps_only_the_edited_line() {
 fn incremental_wrap_matches_a_full_wrap_after_random_edits() {
     use rand::{Rng, SeedableRng};
     let mut rng = rand::rngs::StdRng::seed_from_u64(0x54_07);
-    let pieces = ["a", "bc", " ", "  ", "\n", "\n\n", "word ", "longerwordhere", "é", "😀", "x y z"];
+    let pieces = [
+        "a",
+        "bc",
+        " ",
+        "  ",
+        "\n",
+        "\n\n",
+        "word ",
+        "longerwordhere",
+        "é",
+        "😀",
+        "x y z",
+    ];
     for width in [1u16, 3, 7, 12, 30] {
         let mut ta = TextArea::new();
         ta.set_text("seed line one\n\nsecond  line  here\n");
@@ -6576,10 +6603,18 @@ fn incremental_wrap_matches_a_full_wrap_after_random_edits() {
             let len = ta.text().len();
             let mut a = rng.random_range(0..=len);
             let mut b = rng.random_range(0..=len);
-            while !ta.text().is_char_boundary(a) { a -= 1; }
-            while !ta.text().is_char_boundary(b) { b -= 1; }
-            if a > b { std::mem::swap(&mut a, &mut b); }
-            if rng.random_range(0..3) == 0 { b = a; }
+            while !ta.text().is_char_boundary(a) {
+                a -= 1;
+            }
+            while !ta.text().is_char_boundary(b) {
+                b -= 1;
+            }
+            if a > b {
+                std::mem::swap(&mut a, &mut b);
+            }
+            if rng.random_range(0..3) == 0 {
+                b = a;
+            }
             let piece = pieces[rng.random_range(0..pieces.len())];
             if rng.random_range(0..4) == 0 {
                 ta.replace_range(a..b, piece);
@@ -6592,7 +6627,12 @@ fn incremental_wrap_matches_a_full_wrap_after_random_edits() {
                 ta.text(),
                 Options::new(width as usize).wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
             );
-            assert_eq!(cached, fresh, "width {width} step {step} text {:?}", ta.text());
+            assert_eq!(
+                cached,
+                fresh,
+                "width {width} step {step} text {:?}",
+                ta.text()
+            );
         }
     }
 }
@@ -6612,7 +6652,10 @@ fn typing_words_after_a_large_paste_snapshots_the_text_once() {
     }
     let copied = perf_counters::take(&perf_counters::SNAPSHOT_BYTES);
     eprintln!("snapshot bytes for 40 words in {size} bytes: {copied}");
-    assert!(copied <= 3 * size, "40 words copied {copied} bytes of a {size} byte buffer");
+    assert!(
+        copied <= 3 * size,
+        "40 words copied {copied} bytes of a {size} byte buffer"
+    );
 }
 
 /// The undo history is bounded in bytes, not only in entries.
@@ -6622,7 +6665,13 @@ fn undo_history_is_bounded_in_bytes() {
     for i in 0..40 {
         ta.set_text(&format!("{i}{}", "a".repeat(1 << 20)));
     }
-    let retained: usize = ta.undo.stack.iter().chain(ta.undo.redo.iter()).map(|e| e.text.len()).sum();
+    let retained: usize = ta
+        .undo
+        .stack
+        .iter()
+        .chain(ta.undo.redo.iter())
+        .map(|e| e.text.len())
+        .sum();
     eprintln!("undo bytes retained after 40 one-MiB replacements: {retained}");
     assert!(retained <= 20 << 20, "undo history holds {retained} bytes");
     assert!(ta.can_undo(), "the newest step is still undoable");
@@ -6648,9 +6697,18 @@ fn typing_beside_a_huge_paste_chip_stays_bounded() {
     }
     let scans = crate::editor::scan_counter::SCANS.with(|c| c.get());
     let copied = perf_counters::take(&perf_counters::SNAPSHOT_BYTES);
-    eprintln!("150 keystrokes beside a {size} byte chip: {:?}, snapshot bytes {copied}", started.elapsed());
-    assert_eq!(scans, 0, "typing walked the buffer from its start {scans} times");
-    assert!(copied <= 3 * size, "copied {copied} bytes of a {size} byte buffer");
+    eprintln!(
+        "150 keystrokes beside a {size} byte chip: {:?}, snapshot bytes {copied}",
+        started.elapsed()
+    );
+    assert_eq!(
+        scans, 0,
+        "typing walked the buffer from its start {scans} times"
+    );
+    assert!(
+        copied <= 3 * size,
+        "copied {copied} bytes of a {size} byte buffer"
+    );
 }
 
 #[test]
@@ -6659,7 +6717,11 @@ fn text_revision_changes_on_text_edits_and_not_on_cursor_moves() {
     let r0 = t.text_revision();
     t.move_cursor_left();
     t.set_cursor(0);
-    assert_eq!(t.text_revision(), r0, "cursor moves leave the text marker alone");
+    assert_eq!(
+        t.text_revision(),
+        r0,
+        "cursor moves leave the text marker alone"
+    );
     t.insert_str("x");
     let r1 = t.text_revision();
     assert_ne!(r1, r0);

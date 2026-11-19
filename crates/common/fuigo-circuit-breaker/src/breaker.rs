@@ -297,7 +297,11 @@ impl CircuitBreaker {
     }
 
     fn claim_probe_slot(&self) -> bool {
-        let _gate = self.inner.probe_gate.lock().unwrap_or_else(|e| e.into_inner());
+        let _gate = self
+            .inner
+            .probe_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = self.elapsed_millis();
         let prev = self.inner.half_open_probes.fetch_add(1, Ordering::AcqRel);
         if prev < self.inner.config.half_open_max_probes {

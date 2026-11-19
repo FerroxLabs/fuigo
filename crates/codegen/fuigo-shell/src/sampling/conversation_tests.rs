@@ -232,7 +232,10 @@ fn fork_filter_keeps_the_withheld_bit_on_the_first_surviving_user_item() {
     ];
     fork_filter_chat(&mut items);
     assert_eq!(items.len(), 3, "the compacted prefix is dropped");
-    assert!(items[1].project_files_withheld(), "and its bit moves to the survivor");
+    assert!(
+        items[1].project_files_withheld(),
+        "and its bit moves to the survivor"
+    );
 }
 
 #[test]

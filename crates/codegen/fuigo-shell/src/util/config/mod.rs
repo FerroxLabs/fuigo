@@ -1,11 +1,14 @@
 // `McpOAuthConfig` / `McpOAuthConfigMap` are re-exported via `mcp` (see `mcp.rs`)
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+#[cfg(test)]
+pub(crate) mod admin_seam_test_support;
 mod announcements;
 mod campaigns;
 mod consent;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-#[cfg(test)]
-pub(crate) mod admin_seam_test_support;
 mod hints;
 mod load;
 mod mcp;
@@ -21,15 +24,18 @@ mod worktree;
 pub use announcements::*;
 pub use campaigns::{
     CampaignModelsDefault, campaign_driven_models_default, effective_config_for_remote_settings,
-    effective_config_from_layers, last_good_config_layers, load_effective_config, load_effective_config_with_campaign_free,
-    load_effective_config_disk_only, persist_models_default, remote_campaigns_from_settings,
-    set_remote_campaigns_from_settings, sync_campaign_fields,
+    effective_config_from_layers, last_good_config_layers, load_effective_config,
+    load_effective_config_disk_only, load_effective_config_with_campaign_free,
+    persist_models_default, remote_campaigns_from_settings, set_remote_campaigns_from_settings,
+    sync_campaign_fields,
 };
 pub use consent::*;
 pub use hints::*;
 pub use load::*;
 pub use mcp::*;
-pub(crate) use mcp_reenable::{McpDefinitionIndex, needs_definition_scan, reenableable_disabled_stubs};
+pub(crate) use mcp_reenable::{
+    McpDefinitionIndex, needs_definition_scan, reenableable_disabled_stubs,
+};
 pub use permissions::*;
 pub use persist::*;
 // These types live in `fuigo-config-types`; the re-export keeps `crate::util::config::{RemoteSettings, GoalRoleModel}` working

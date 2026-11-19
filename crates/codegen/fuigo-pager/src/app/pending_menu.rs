@@ -280,7 +280,11 @@ mod tests {
         let rows = pending_menu_rows(&s, true);
         assert!(rows.contains(&PendingMenuRow::SignOut(SubscriptionProvider::Xai)));
         assert_eq!(*rows.last().unwrap(), PendingMenuRow::Cancel);
-        assert!(!pending_menu_rows(&s, false).iter().any(|r| matches!(r, PendingMenuRow::SignOut(_))));
+        assert!(
+            !pending_menu_rows(&s, false)
+                .iter()
+                .any(|r| matches!(r, PendingMenuRow::SignOut(_)))
+        );
     }
 
     #[test]

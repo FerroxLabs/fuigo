@@ -5,8 +5,8 @@
 use super::p166_r8_sweep_tests::floor;
 use super::{ClassifierSecurityFinding, PermissionState, evaluate_bash};
 use crate::permission::exec_risk::{
-    COMMAND_VALUED_CONFIG_KEYS, HARMLESS_COMMAND_VALUES, command_valued_config, harmless_config_value, harmless_env_value,
-    is_git_exec_env_assignment,
+    COMMAND_VALUED_CONFIG_KEYS, HARMLESS_COMMAND_VALUES, command_valued_config,
+    harmless_config_value, harmless_env_value, is_git_exec_env_assignment,
 };
 
 fn exec(cmd: &str) -> bool {
@@ -44,15 +44,30 @@ fn p166_r13b_allowed_env_values_pass() {
     // `export NAME=value; git ...`: the allowlist leaves exactly the baseline (an unrelated `export` is judged the same).
     let baseline = exec("export FOO=1; git log");
     eprintln!("FP13B baseline `export FOO=1; git log` exec={baseline}");
-    for (name, value) in [("GIT_PAGER", "cat"), ("GIT_EDITOR", "true"), ("GIT_EDITOR", "nano"), ("GIT_SEQUENCE_EDITOR", "nano")] {
+    for (name, value) in [
+        ("GIT_PAGER", "cat"),
+        ("GIT_EDITOR", "true"),
+        ("GIT_EDITOR", "nano"),
+        ("GIT_SEQUENCE_EDITOR", "nano"),
+    ] {
         let cmd = format!("export {name}={value}; git log");
         assert_eq!(exec(&cmd), baseline, "{cmd}");
-        assert!(exec(&format!("export {name}=vim; git log")), "export {name}=vim must stay exec risk");
+        assert!(
+            exec(&format!("export {name}=vim; git log")),
+            "export {name}=vim must stay exec risk"
+        );
     }
-    for cmd in ["GIT_PAGER=cat git log", "GIT_EDITOR=true git commit --amend --no-edit", "GIT_SEQUENCE_EDITOR=nano git rebase -i HEAD~2"] {
+    for cmd in [
+        "GIT_PAGER=cat git log",
+        "GIT_EDITOR=true git commit --amend --no-edit",
+        "GIT_SEQUENCE_EDITOR=nano git rebase -i HEAD~2",
+    ] {
         assert!(!exec(cmd), "{cmd}");
     }
-    assert!(wrong.is_empty(), "allowlisted env values still exec risk: {wrong:#?}");
+    assert!(
+        wrong.is_empty(),
+        "allowlisted env values still exec risk: {wrong:#?}"
+    );
 }
 
 /// Near misses and other variables stay exec risk.
@@ -87,7 +102,10 @@ fn p166_r13b_env_near_misses_stay_blocked() {
         "export GIT_PAGER='cat -'; git log",
     ];
     let wrong: Vec<&&str> = rows.iter().filter(|cmd| !exec(cmd)).collect();
-    assert!(wrong.is_empty(), "near misses must stay exec risk: {wrong:#?}");
+    assert!(
+        wrong.is_empty(),
+        "near misses must stay exec risk: {wrong:#?}"
+    );
     assert!(!is_git_exec_env_assignment("GIT_PAGER=cat"));
     assert!(is_git_exec_env_assignment("GIT_PAGER=cat -"));
 }
@@ -145,7 +163,10 @@ fn p166_r13b_config_key_allowlist() {
         }
         assert!(command_valued_config(key, Some(value)), "{key}={value:?}");
     }
-    assert!(command_valued_config("core.editor", None), "no value known: fail closed");
+    assert!(
+        command_valued_config("core.editor", None),
+        "no value known: fail closed"
+    );
 }
 
 /// The `git config` SET path: the allowed value takes no protected floor; a near miss does.
@@ -193,7 +214,10 @@ fn p166_r13b_env_and_config_paths_share_one_table() {
             }
             for key in row.keys {
                 let concrete = key.replace('*', "x");
-                assert!(harmless_config_value(&concrete, value), "key {concrete}={value}");
+                assert!(
+                    harmless_config_value(&concrete, value),
+                    "key {concrete}={value}"
+                );
             }
         }
     }
@@ -208,7 +232,9 @@ fn p166_r13b_env_and_config_paths_share_one_table() {
                 "{concrete} must be command-valued without the allowlist"
             );
             assert!(
-                COMMAND_VALUED_CONFIG_KEYS.iter().any(|(pattern, _)| pattern == key),
+                COMMAND_VALUED_CONFIG_KEYS
+                    .iter()
+                    .any(|(pattern, _)| pattern == key),
                 "{key} must be in the command-valued key table"
             );
         }
@@ -231,6 +257,9 @@ fn p166_r13b_probe_listed_commands() {
     ] {
         let evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
         let floor = super::bash_protected_write_target(&evaluation, cwd, None);
-        eprintln!("FP13B {cmd} => floor={floor:?} findings={:?}", evaluation.assessment);
+        eprintln!(
+            "FP13B {cmd} => floor={floor:?} findings={:?}",
+            evaluation.assessment
+        );
     }
 }

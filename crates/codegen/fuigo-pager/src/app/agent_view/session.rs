@@ -638,7 +638,8 @@ impl AgentView {
             replayed_expiry_notices: Vec::new(),
         });
         self.loading_placeholder_id = Some(
-            self.scrollback.push_block(crate::scrollback::block::RenderBlock::system(label)),
+            self.scrollback
+                .push_block(crate::scrollback::block::RenderBlock::system(label)),
         );
         self.scrollback.begin_batch();
         self.begin_replay_window();

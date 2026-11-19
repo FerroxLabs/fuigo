@@ -514,9 +514,10 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         if let Some((session_is_worktree, view_is_worktree)) = inherits_worktree {
             agent.session.is_worktree = session_is_worktree;
             agent.is_worktree = view_is_worktree;
-            agent
-                .scrollback
-                .push_block(RenderBlock::system(format!("Running in worktree: {}", cwd.display())));
+            agent.scrollback.push_block(RenderBlock::system(format!(
+                "Running in worktree: {}",
+                cwd.display()
+            )));
         }
         let effective_chat = conversation_entry || app.chat_mode;
         agent.chat_kind = effective_chat;

@@ -86,14 +86,22 @@ fn script_shell_call(server: &MockInferenceServer, command: &str) -> Vec<Inferen
             "shell call (responses)",
             InferenceRequestMatcher::foreground(InferenceEndpoint::Responses),
             ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
-                "", "call-1", SHELL_TOOL, &arguments, "test-model",
+                "",
+                "call-1",
+                SHELL_TOOL,
+                &arguments,
+                "test-model",
             )),
         ),
         server.expect_response(
             "shell call (chat completions)",
             InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
             ScriptedResponse::sse(sse::chat_completions_reasoning_then_tool_call_events(
-                "", "call-1", SHELL_TOOL, &arguments, "test-model",
+                "",
+                "call-1",
+                SHELL_TOOL,
+                &arguments,
+                "test-model",
             )),
         ),
     ]
@@ -125,11 +133,27 @@ fn last_request_tail(server: &MockInferenceServer) -> String {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|tool| tool["function"]["name"].as_str().or(tool["name"].as_str()).map(str::to_owned))
+        .filter_map(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .or(tool["name"].as_str())
+                .map(str::to_owned)
+        })
         .collect();
-    let messages = body.get("messages").or(body.get("input")).cloned().unwrap_or_default();
+    let messages = body
+        .get("messages")
+        .or(body.get("input"))
+        .cloned()
+        .unwrap_or_default();
     let messages = messages.to_string();
-    let tail: String = messages.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: String = messages
+        .chars()
+        .rev()
+        .take(1500)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("tools: {tools:?}\nmessages tail: {tail}")
 }
 
@@ -150,7 +174,10 @@ fn assert_budget_denial(fx: &Fixture, result: &fuigo_test_support::HeadlessResul
         result.stderr
     );
     let doc: serde_json::Value = serde_json::from_str(result.stdout.trim()).unwrap_or_else(|e| {
-        panic!("stdout must stay exactly one JSON value ({e}): {}", result.stdout)
+        panic!(
+            "stdout must stay exactly one JSON value ({e}): {}",
+            result.stdout
+        )
     });
     assert_eq!(doc["permissionDenied"]["rule"], rule, "document: {doc}");
     assert_eq!(doc["permissionDenied"]["exitCode"], 3, "document: {doc}");
@@ -164,13 +191,22 @@ async fn a_tool_call_in_the_call_limits_final_slot_exits_three() {
     let _expect = script_shell_call(&fx.server, "touch must_not_exist.txt");
     let result = fx
         .run(
-            &["-p", "do the work", "--trust", "--yolo", "--output-format", "json"],
+            &[
+                "-p",
+                "do the work",
+                "--trust",
+                "--yolo",
+                "--output-format",
+                "json",
+            ],
             &[("FUIGO_MAX_MODEL_CALLS", "1")],
         )
         .await;
     assert_budget_denial(&fx, &result, "execution_model_call_limit");
     assert!(
-        !result.stderr.contains("Tool call rejected during finalization"),
+        !result
+            .stderr
+            .contains("Tool call rejected during finalization"),
         "the old internal error must not be what the user sees: {}",
         result.stderr
     );
@@ -189,7 +225,14 @@ async fn an_answer_in_the_call_limits_final_slot_exits_three() {
     let _expect = script_text(&fx.server, "the reserved answer");
     let result = fx
         .run(
-            &["-p", "do the work", "--trust", "--yolo", "--output-format", "json"],
+            &[
+                "-p",
+                "do the work",
+                "--trust",
+                "--yolo",
+                "--output-format",
+                "json",
+            ],
             &[("FUIGO_MAX_MODEL_CALLS", "1")],
         )
         .await;
@@ -204,7 +247,14 @@ async fn the_same_answer_with_calls_to_spare_exits_zero() {
     let _expect = script_text(&fx.server, "the ordinary answer");
     let result = fx
         .run(
-            &["-p", "do the work", "--trust", "--yolo", "--output-format", "json"],
+            &[
+                "-p",
+                "do the work",
+                "--trust",
+                "--yolo",
+                "--output-format",
+                "json",
+            ],
             &[("FUIGO_MAX_MODEL_CALLS", "50")],
         )
         .await;
@@ -215,7 +265,11 @@ async fn the_same_answer_with_calls_to_spare_exits_zero() {
         result.stdout,
         result.stderr
     );
-    assert!(!result.stderr.contains("execution_model_call_limit"), "{}", result.stderr);
+    assert!(
+        !result.stderr.contains("execution_model_call_limit"),
+        "{}",
+        result.stderr
+    );
 }
 
 /// A2 `s04_runtime_limit`: the runtime limit passes while the model request is in flight. The agent
@@ -239,7 +293,14 @@ async fn the_runtime_limit_passing_mid_request_exits_three() {
     ];
     let result = fx
         .run(
-            &["-p", "do the work", "--trust", "--yolo", "--output-format", "json"],
+            &[
+                "-p",
+                "do the work",
+                "--trust",
+                "--yolo",
+                "--output-format",
+                "json",
+            ],
             &[("FUIGO_MAX_RUNTIME_SECS", "8")],
         )
         .await;
@@ -263,7 +324,15 @@ async fn allow_bash_lets_the_shell_tool_run_headless() {
     let _then = script_text(&fx.server, "done");
     let result = fx
         .run(
-            &["-p", "do the work", "--trust", "--allow", "Bash", "--output-format", "json"],
+            &[
+                "-p",
+                "do the work",
+                "--trust",
+                "--allow",
+                "Bash",
+                "--output-format",
+                "json",
+            ],
             &[],
         )
         .await;
@@ -275,7 +344,11 @@ async fn allow_bash_lets_the_shell_tool_run_headless() {
         result.stderr,
         fx.server.request_log_summary()
     );
-    assert!(!result.stderr.contains("headless_never_approves"), "{}", result.stderr);
+    assert!(
+        !result.stderr.contains("headless_never_approves"),
+        "{}",
+        result.stderr
+    );
     assert!(
         fx.workspace_file("allowed.txt").exists(),
         "the allowed command must have run\nstdout:\n{}\nstderr:\n{}\nlast request:\n{}",
@@ -297,7 +370,15 @@ async fn a_redirect_allow_bash_cannot_cover_names_the_remedy_that_works() {
     let _then = script_text(&fx.server, "done");
     let result = fx
         .run(
-            &["-p", "do the work", "--trust", "--allow", "Bash", "--output-format", "json"],
+            &[
+                "-p",
+                "do the work",
+                "--trust",
+                "--allow",
+                "Bash",
+                "--output-format",
+                "json",
+            ],
             &[],
         )
         .await;
@@ -308,12 +389,21 @@ async fn a_redirect_allow_bash_cannot_cover_names_the_remedy_that_works() {
         result.stdout,
         result.stderr
     );
-    assert!(!fx.workspace_file("allowed.txt").exists(), "nothing approved the write");
+    assert!(
+        !fx.workspace_file("allowed.txt").exists(),
+        "nothing approved the write"
+    );
     assert_one_fuigo_line(&result.stderr);
     let doc: serde_json::Value = serde_json::from_str(result.stdout.trim()).unwrap_or_else(|e| {
-        panic!("stdout must stay exactly one JSON value ({e}): {}", result.stdout)
+        panic!(
+            "stdout must stay exactly one JSON value ({e}): {}",
+            result.stdout
+        )
     });
-    let remedy = doc["permissionDenied"]["remedy"].as_str().unwrap_or_default().to_owned();
+    let remedy = doc["permissionDenied"]["remedy"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     for text in [result.stderr.as_str(), remedy.as_str()] {
         assert!(
             text.contains("--always-approve") && text.contains("redirect"),
@@ -325,14 +415,22 @@ async fn a_redirect_allow_bash_cannot_cover_names_the_remedy_that_works() {
 
 /// Exactly one `fuigo:` line per refusal (it carries rule and remedy); a second line repeating it is the defect.
 fn assert_one_fuigo_line(stderr: &str) {
-    let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with("fuigo: ")).collect();
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("fuigo: "))
+        .collect();
     assert_eq!(
-        lines.iter().filter(|l| l.contains("headless_never_approves")).count(),
+        lines
+            .iter()
+            .filter(|l| l.contains("headless_never_approves"))
+            .count(),
         1,
         "one refusal line carrying the rule: {stderr}"
     );
     assert!(
-        !lines.iter().any(|l| l.contains("fuigo: blocked") || l.contains("Exiting 3")),
+        !lines
+            .iter()
+            .any(|l| l.contains("fuigo: blocked") || l.contains("Exiting 3")),
         "the refusal must not be repeated by a second line: {stderr}"
     );
 }
@@ -345,9 +443,18 @@ async fn a_dev_null_redirect_gets_the_ordinary_shell_remedy() {
     let _call = script_shell_call(&fx.server, "rm -rf ./victim 2>/dev/null");
     let _then = script_text(&fx.server, "done");
     let result = fx
-        .run(&["-p", "look around", "--trust", "--output-format", "json"], &[])
+        .run(
+            &["-p", "look around", "--trust", "--output-format", "json"],
+            &[],
+        )
         .await;
-    assert_eq!(result.status.code(), Some(3), "stdout:\n{}\nstderr:\n{}", result.stdout, result.stderr);
+    assert_eq!(
+        result.status.code(),
+        Some(3),
+        "stdout:\n{}\nstderr:\n{}",
+        result.stdout,
+        result.stderr
+    );
     assert_one_fuigo_line(&result.stderr);
     assert!(
         result.stderr.contains("--allow") && !result.stderr.contains("redirect"),
@@ -364,7 +471,14 @@ async fn the_same_redirect_under_always_approve_runs() {
     let _then = script_text(&fx.server, "done");
     let result = fx
         .run(
-            &["-p", "do the work", "--trust", "--always-approve", "--output-format", "json"],
+            &[
+                "-p",
+                "do the work",
+                "--trust",
+                "--always-approve",
+                "--output-format",
+                "json",
+            ],
             &[],
         )
         .await;

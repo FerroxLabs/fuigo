@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::command::backend::{CallId, wrap_for_mode};
-use crate::command::canonical::{ServedRoot, case_insensitive_regex_body, VolumeRule, resolved_spellings, with_volume_rule};
+use crate::command::canonical::{
+    ServedRoot, VolumeRule, case_insensitive_regex_body, resolved_spellings, with_volume_rule,
+};
 use crate::command::env::EnvGlobs;
 use crate::command::git_config::GitConfigEnv;
 use crate::command::grants::{Expiry, Grant, GrantDecision, GrantId, GrantScope, GrantSubject};
@@ -2283,11 +2285,19 @@ fn a_missing_floor_entry_in_a_write_root_also_denies_every_letter_case() {
         folded.contains(&format!("(deny file-write* file-link {missing} ")),
         "{folded}"
     );
-    assert!(folded.contains(&format!("(deny network-outbound (remote unix-socket {missing})")));
-    assert!(!folded.contains(&regex_of(&ws.join(".vscode"))), "exists on disk");
+    assert!(folded.contains(&format!(
+        "(deny network-outbound (remote unix-socket {missing})"
+    )));
+    assert!(
+        !folded.contains(&regex_of(&ws.join(".vscode"))),
+        "exists on disk"
+    );
     assert!(
         !folded.contains(&regex_of(&base.join("elsewhere/.fuigo"))),
         "outside every write root"
     );
-    assert!(!render(VolumeRule::Exact).contains(&missing), "byte-exact volume");
+    assert!(
+        !render(VolumeRule::Exact).contains(&missing),
+        "byte-exact volume"
+    );
 }

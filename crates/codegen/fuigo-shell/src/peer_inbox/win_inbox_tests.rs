@@ -9,7 +9,12 @@ fn hid(c: char) -> HostId {
 }
 
 fn row(c: char, pid: u32) -> HostRow {
-    HostRow { host_id: hid(c), pid, started: 100, dir: HostDir::Home }
+    HostRow {
+        host_id: hid(c),
+        pid,
+        started: 100,
+        dir: HostDir::Home,
+    }
 }
 
 fn setup() -> (tempfile::TempDir, Arc<CheckedDir>) {
@@ -30,7 +35,10 @@ fn stored(dir: &CheckedDir) -> Vec<HostRow> {
 #[tokio::test]
 async fn rows_of_other_hosts_come_from_the_locator_without_ours_and_capped() {
     let (_td, dir) = setup();
-    assert!(read_others(&dir, &hid('a'), 8).await.unwrap().is_empty(), "no file: no rows");
+    assert!(
+        read_others(&dir, &hid('a'), 8).await.unwrap().is_empty(),
+        "no file: no rows"
+    );
     put(&dir, &[row('a', 1), row('b', 2), row('c', 3)]);
     let rows = read_others(&dir, &hid('a'), 8).await.unwrap();
     assert_eq!(rows, vec![row('b', 2), row('c', 3)]);
@@ -48,17 +56,28 @@ fn our_row_is_added_then_removed_and_other_rows_are_never_touched() {
     remove_own_row(&dir, &hid('a'));
     assert_eq!(stored(&dir), vec![row('b', 2)], "idempotent");
     remove_own_row(&dir, &hid('b'));
-    assert!(read_locator(&dir, LOCATOR_NAME).unwrap().is_none(), "the last row takes the file with it");
+    assert!(
+        read_locator(&dir, LOCATOR_NAME).unwrap().is_none(),
+        "the last row takes the file with it"
+    );
 }
 
 #[test]
 fn a_full_locator_refuses_our_row_with_locator_full_and_changes_nothing() {
     let (_td, dir) = setup();
     let full: Vec<HostRow> = (0..fuigo_peer::locator_row::MAX_ROWS)
-        .map(|i| HostRow { host_id: HostId::new(&format!("{i:032x}")).unwrap(), pid: 1, started: 1, dir: HostDir::Home })
+        .map(|i| HostRow {
+            host_id: HostId::new(&format!("{i:032x}")).unwrap(),
+            pid: 1,
+            started: 1,
+            dir: HostDir::Home,
+        })
         .collect();
     put(&dir, &full);
-    assert_eq!(publish_row(&dir, row('a', 1)).err(), Some(Disabled::LocatorFull));
+    assert_eq!(
+        publish_row(&dir, row('a', 1)).err(),
+        Some(Disabled::LocatorFull)
+    );
     assert_eq!(stored(&dir), full);
 }
 
@@ -69,7 +88,10 @@ async fn a_rejected_locator_gives_no_rows_a_typed_reason_and_no_panic() {
     let r = read_others(&dir, &hid('a'), 8).await;
     assert!(matches!(r, Err(Disabled::Rejected(_))), "{r:?}");
     assert!(publish_row(&dir, row('a', 1)).is_err());
-    assert!(td.path().join(LOCATOR_NAME).is_dir(), "the directory is untouched");
+    assert!(
+        td.path().join(LOCATOR_NAME).is_dir(),
+        "the directory is untouched"
+    );
 }
 
 #[tokio::test]
@@ -102,22 +124,36 @@ fn stale_temp_files_are_swept_young_and_other_files_stay_and_the_count_is_bounde
     make_tmp(&td, &dir, ".tmp-1-young", Duration::from_secs(5));
     make_tmp(&td, &dir, "other-old", Duration::from_secs(60 * 60));
     let names = |td: &tempfile::TempDir| {
-        let mut v: Vec<String> =
-            std::fs::read_dir(td.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        let mut v: Vec<String> = std::fs::read_dir(td.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
         v.sort();
         v
     };
     // Bounded: at most 2 of the 3 old ones go.
     let n = super::super::win_locator::sweep_stale_temps(&dir, STALE_TEMP_AGE, 2).unwrap();
     assert_eq!(n, 2);
-    assert_eq!(names(&td).iter().filter(|n| n.starts_with(".tmp-1-") && *n != ".tmp-1-young").count(), 1);
-    let n = super::super::win_locator::sweep_stale_temps(&dir, STALE_TEMP_AGE, STALE_TEMP_MAX).unwrap();
+    assert_eq!(
+        names(&td)
+            .iter()
+            .filter(|n| n.starts_with(".tmp-1-") && *n != ".tmp-1-young")
+            .count(),
+        1
+    );
+    let n =
+        super::super::win_locator::sweep_stale_temps(&dir, STALE_TEMP_AGE, STALE_TEMP_MAX).unwrap();
     assert_eq!(n, 1);
     let left = names(&td);
     assert!(left.contains(&".tmp-1-young".to_owned()), "{left:?}");
     assert!(left.contains(&"other-old".to_owned()), "{left:?}");
     assert!(left.contains(&LOCATOR_NAME.to_owned()), "{left:?}");
-    assert!(!left.iter().any(|n| n.starts_with(".tmp-1-") && n != ".tmp-1-young"), "{left:?}");
+    assert!(
+        !left
+            .iter()
+            .any(|n| n.starts_with(".tmp-1-") && n != ".tmp-1-young"),
+        "{left:?}"
+    );
     assert_eq!(stored(&dir), vec![row('b', 2)], "the locator is untouched");
 }
 
@@ -126,7 +162,8 @@ fn an_upper_case_temp_prefix_is_swept_too_and_the_decision_uses_the_handle_times
     let (td, dir) = setup();
     make_tmp(&td, &dir, ".TMP-2-1", Duration::from_secs(60 * 60));
     make_tmp(&td, &dir, ".TMP-2-young", Duration::from_secs(5));
-    let n = super::super::win_locator::sweep_stale_temps(&dir, STALE_TEMP_AGE, STALE_TEMP_MAX).unwrap();
+    let n =
+        super::super::win_locator::sweep_stale_temps(&dir, STALE_TEMP_AGE, STALE_TEMP_MAX).unwrap();
     assert_eq!(n, 1);
     assert!(!td.path().join(".TMP-2-1").exists());
     assert!(td.path().join(".TMP-2-young").exists());
@@ -152,7 +189,12 @@ async fn a_start_cancelled_before_the_publish_runs_never_writes_a_row() {
     let (_td, dir) = setup();
     put(&dir, &[row('b', 2)]);
     let gate = Arc::new(PublishGate::default());
-    let guard = RowGuard { dir: dir.clone(), host_id: hid('a'), gate: gate.clone(), armed: true };
+    let guard = RowGuard {
+        dir: dir.clone(),
+        host_id: hid('a'),
+        gate: gate.clone(),
+        armed: true,
+    };
     drop(guard); // cancelled: the undo runs (queued on a blocking thread)
     assert!(gone_soon(&dir));
     // the publish that was queued behind it runs late and must do nothing
@@ -171,7 +213,12 @@ async fn a_start_cancelled_while_the_publish_runs_leaves_no_row() {
         // blocked on the gate until `held` is released, i.e. strictly after the cancel
         g2.publish(&d2, mine()).unwrap();
     });
-    let guard = RowGuard { dir: dir.clone(), host_id: hid('a'), gate: gate.clone(), armed: true };
+    let guard = RowGuard {
+        dir: dir.clone(),
+        host_id: hid('a'),
+        gate: gate.clone(),
+        armed: true,
+    };
     drop(guard);
     std::thread::sleep(Duration::from_millis(100));
     drop(held);
@@ -187,7 +234,12 @@ fn a_publish_that_finished_before_the_cancel_is_undone_in_order() {
     gate.publish(&dir, mine()).unwrap();
     assert!(stored(&dir).iter().any(|r| r.host_id == hid('a')));
     // outside any runtime: the guard removes the row synchronously
-    drop(RowGuard { dir: dir.clone(), host_id: hid('a'), gate, armed: true });
+    drop(RowGuard {
+        dir: dir.clone(),
+        host_id: hid('a'),
+        gate,
+        armed: true,
+    });
     assert!(stored(&dir).is_empty());
 }
 

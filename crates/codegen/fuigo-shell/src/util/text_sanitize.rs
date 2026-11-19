@@ -119,7 +119,11 @@ mod tests {
                 );
             }
         }
-        assert!(!crate::session::persistence::is_forbidden_title_char('\u{200D}'));
-        assert!(!crate::session::persistence::is_forbidden_title_char('\u{1F3F4}'));
+        assert!(!crate::session::persistence::is_forbidden_title_char(
+            '\u{200D}'
+        ));
+        assert!(!crate::session::persistence::is_forbidden_title_char(
+            '\u{1F3F4}'
+        ));
     }
 }

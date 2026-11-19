@@ -290,7 +290,9 @@ pub(super) fn drain_permission_queue_at_turn_end(agent: &mut AgentView) {
     let live: std::collections::HashSet<String> = agent
         .subagent_sessions
         .iter()
-        .filter(|(sid, info)| !info.finished && root.as_ref().is_none_or(|r| r.0.as_ref() != sid.as_str()))
+        .filter(|(sid, info)| {
+            !info.finished && root.as_ref().is_none_or(|r| r.0.as_ref() != sid.as_str())
+        })
         .map(|(sid, _)| sid.clone())
         .collect();
     let mut kept = std::collections::VecDeque::new();
@@ -494,7 +496,11 @@ mod turn_end_drain_tests {
             .iter()
             .map(|c| c.request.request.session_id.0.as_ref())
             .collect();
-        assert_eq!(kept, vec!["child-live"], "only the live subagent's card survives");
+        assert_eq!(
+            kept,
+            vec!["child-live"],
+            "only the live subagent's card survives"
+        );
     }
 
     #[test]

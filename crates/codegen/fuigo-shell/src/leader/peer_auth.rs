@@ -60,7 +60,9 @@ pub(super) fn missing_handle_result() -> Result<(), super::client::ClientError> 
 }
 
 /// Check the connected stream before anything is written to it. Unix: always `Ok` (unchanged behaviour).
-pub(super) fn verify_connected(stream: &super::transport::LeaderStream) -> Result<(), super::client::ClientError> {
+pub(super) fn verify_connected(
+    stream: &super::transport::LeaderStream,
+) -> Result<(), super::client::ClientError> {
     #[cfg(windows)]
     {
         let Some(handle) = stream.client_raw_handle() else {
@@ -98,22 +100,32 @@ pub(crate) mod win {
     use std::ffi::c_void;
     use std::io;
     use std::os::windows::io::RawHandle;
-    use windows::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, HLOCAL, LocalFree};
-    use windows::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+    use windows::Win32::Foundation::{
+        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, HLOCAL, LocalFree,
     };
-    use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+        SE_KERNEL_OBJECT,
+    };
+    use windows::Win32::Security::{
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    };
     use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     use windows::core::PCWSTR;
 
     // The SID and token helpers moved to `fuigo-win-acl` (the one file-ACL checker); same names here.
-    pub(crate) use fuigo_win_acl::sys::{Owned, code, own_sid, process_token_user_sid, sid_to_string, token_info_buf, token_user_sid};
+    pub(crate) use fuigo_win_acl::sys::{
+        Owned, code, own_sid, process_token_user_sid, sid_to_string, token_info_buf, token_user_sid,
+    };
 
     /// The user account of process `pid`, from its token. Opening uses the least access (`PROCESS_QUERY_LIMITED_INFORMATION`).
     pub(crate) fn peer_token_sid(pid: u32) -> Result<String, u32> {
         // SAFETY: plain Win32 call; the handle is owned by `Owned`.
-        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.map_err(|e| code(&e))?;
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .map_err(|e| code(&e))?;
         let process = Owned(process);
         process_token_user_sid(process.0)
     }
@@ -124,7 +136,16 @@ pub(crate) mod win {
         let mut sd = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `handle` is a live pipe handle; the owner SID points into `sd`, which is freed after the copy.
         let status = unsafe {
-            GetSecurityInfo(HANDLE(handle), SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, Some(&mut sd))
+            GetSecurityInfo(
+                HANDLE(handle),
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                Some(&mut sd),
+            )
         };
         if status.0 != 0 {
             return Err(status.0);
@@ -155,7 +176,15 @@ pub(crate) mod win {
             // SAFETY: `raw` is a live handle of this process; the duplicate is owned and closed in `Drop`.
             unsafe {
                 let me = GetCurrentProcess();
-                DuplicateHandle(me, HANDLE(raw), me, &mut out, 0, false, DUPLICATE_SAME_ACCESS)
+                DuplicateHandle(
+                    me,
+                    HANDLE(raw),
+                    me,
+                    &mut out,
+                    0,
+                    false,
+                    DUPLICATE_SAME_ACCESS,
+                )
             }
             .ok()?;
             Some(Self(out))
@@ -177,7 +206,11 @@ pub(crate) mod win {
         let ours = own_sid();
         let peer_token = server_pid(handle).and_then(peer_token_sid);
         let pipe_owner = object_owner_sid(handle);
-        PeerFacts { ours, peer_token, pipe_owner }
+        PeerFacts {
+            ours,
+            peer_token,
+            pipe_owner,
+        }
     }
 
     /// A security descriptor for the leader pipe: owner = this user, protected DACL with full access for this user and SYSTEM only.
@@ -188,7 +221,11 @@ pub(crate) mod win {
 
     impl PipeSecurity {
         pub(crate) fn for_current_user() -> io::Result<Self> {
-            let me = own_sid().map_err(|c| io::Error::other(format!("cannot read the current user account (Win32 error {c})")))?;
+            let me = own_sid().map_err(|c| {
+                io::Error::other(format!(
+                    "cannot read the current user account (Win32 error {c})"
+                ))
+            })?;
             Self::from_sddl(&format!("O:{me}D:P(A;;GA;;;SY)(A;;GA;;;{me})"))
         }
 
@@ -197,9 +234,19 @@ pub(crate) mod win {
             let mut sd = PSECURITY_DESCRIPTOR::default();
             // SAFETY: `wide` is NUL-terminated; `sd` receives a LocalAlloc'd descriptor freed in `Drop`.
             unsafe {
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(wide.as_ptr()), SDDL_REVISION_1, &mut sd, None)
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    PCWSTR(wide.as_ptr()),
+                    SDDL_REVISION_1,
+                    &mut sd,
+                    None,
+                )
             }
-            .map_err(|e| io::Error::other(format!("cannot build the pipe security descriptor (Win32 error {})", code(&e))))?;
+            .map_err(|e| {
+                io::Error::other(format!(
+                    "cannot build the pipe security descriptor (Win32 error {})",
+                    code(&e)
+                ))
+            })?;
             let attrs = SECURITY_ATTRIBUTES {
                 nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: sd.0,
@@ -244,9 +291,17 @@ mod decision_tests {
     const OTHER: &str = "S-1-5-21-1-2-3-1001";
     const SYSTEM: &str = "S-1-5-18";
 
-    fn facts(ours: Result<&str, u32>, token: Result<&str, u32>, owner: Result<&str, u32>) -> PeerFacts {
+    fn facts(
+        ours: Result<&str, u32>,
+        token: Result<&str, u32>,
+        owner: Result<&str, u32>,
+    ) -> PeerFacts {
         let s = |r: Result<&str, u32>| r.map(String::from);
-        PeerFacts { ours: s(ours), peer_token: s(token), pipe_owner: s(owner) }
+        PeerFacts {
+            ours: s(ours),
+            peer_token: s(token),
+            pipe_owner: s(owner),
+        }
     }
 
     #[test]
@@ -258,7 +313,10 @@ mod decision_tests {
 
     #[test]
     fn a_missing_client_handle_is_refused() {
-        assert!(matches!(missing_handle_result(), Err(crate::leader::client::ClientError::PeerRefused)));
+        assert!(matches!(
+            missing_handle_result(),
+            Err(crate::leader::client::ClientError::PeerRefused)
+        ));
     }
 
     #[test]
@@ -268,8 +326,14 @@ mod decision_tests {
 
     #[test]
     fn another_account_is_refused() {
-        assert_eq!(decide(&facts(Ok(ME), Ok(OTHER), Ok(OTHER))), Verdict::Refuse);
-        assert_eq!(decide(&facts(Ok(ME), Ok(SYSTEM), Ok(SYSTEM))), Verdict::Refuse);
+        assert_eq!(
+            decide(&facts(Ok(ME), Ok(OTHER), Ok(OTHER))),
+            Verdict::Refuse
+        );
+        assert_eq!(
+            decide(&facts(Ok(ME), Ok(SYSTEM), Ok(SYSTEM))),
+            Verdict::Refuse
+        );
     }
 
     #[test]
@@ -279,7 +343,11 @@ mod decision_tests {
 
     #[test]
     fn an_unreadable_token_falls_back_to_the_pipe_owner() {
-        assert_eq!(decide(&facts(Ok(ME), Err(5), Ok(ME))), Verdict::Accept, "elevated same-user leader");
+        assert_eq!(
+            decide(&facts(Ok(ME), Err(5), Ok(ME))),
+            Verdict::Accept,
+            "elevated same-user leader"
+        );
         assert_eq!(decide(&facts(Ok(ME), Err(5), Ok(OTHER))), Verdict::Refuse);
         assert_eq!(decide(&facts(Ok(ME), Err(5), Ok(SYSTEM))), Verdict::Refuse);
     }
@@ -298,7 +366,10 @@ mod decision_tests {
     #[test]
     fn the_refusal_text_is_plain_and_has_no_technical_detail() {
         let lower = PEER_REFUSED_MESSAGE.to_lowercase();
-        assert!(PEER_REFUSED_MESSAGE.contains("another user account") && PEER_REFUSED_MESSAGE.contains("started as administrator"));
+        assert!(
+            PEER_REFUSED_MESSAGE.contains("another user account")
+                && PEER_REFUSED_MESSAGE.contains("started as administrator")
+        );
         assert!(!lower.contains("pipe") && !lower.contains("sid") && !lower.contains("token"));
     }
 }

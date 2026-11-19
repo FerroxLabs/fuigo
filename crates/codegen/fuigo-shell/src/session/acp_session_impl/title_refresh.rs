@@ -28,7 +28,8 @@ impl SessionActor {
             return;
         }
         // P189: owed to unpark while the session parks
-        if crate::session::quiesce::owe(self.session_info.id.0.as_ref(), |o| o.title_refresh = true) {
+        if crate::session::quiesce::owe(self.session_info.id.0.as_ref(), |o| o.title_refresh = true)
+        {
             return;
         }
         // One refresh at a time: a whole-conversation title doesn't need the very latest turn
@@ -66,7 +67,10 @@ impl SessionActor {
             0
         };
         self.next_title_refresh_idx.set(idx);
-        session_summary::save_title_refresh_watermark(self.rebuild_spec.session_writer.as_ref(), idx);
+        session_summary::save_title_refresh_watermark(
+            self.rebuild_spec.session_writer.as_ref(),
+            idx,
+        );
     }
 
     /// Bumps the generation so a task that finishes after the abort neither persists its result nor consumes a checkpoint.
@@ -87,7 +91,9 @@ impl SessionActor {
     /// Only a stale attempt, one whose generation was bumped by an abort (prompt, rewind, shutdown), bails without consuming.
     /// The newer path then retries.
     async fn refresh_title(&self, generation: u64) {
-        let conversation = crate::session::model_facing_reads::title_refresh_conversation(&self.chat_state_handle).await;
+        let conversation =
+            crate::session::model_facing_reads::title_refresh_conversation(&self.chat_state_handle)
+                .await;
         let turns = session_recap::main_turn_count(&conversation);
 
         let idx = self.next_title_refresh_idx.get();
@@ -104,7 +110,10 @@ impl SessionActor {
         }
         self.next_title_refresh_idx.set(target_idx);
         // Persist the checkpoint (even on a failed attempt) so the freeze is durable and a failing model can't keep re-attempting after resume
-        session_summary::save_title_refresh_watermark(self.rebuild_spec.session_writer.as_ref(), target_idx);
+        session_summary::save_title_refresh_watermark(
+            self.rebuild_spec.session_writer.as_ref(),
+            target_idx,
+        );
         if let Some(title) = title {
             tracing::info!(turns, chars = title.len(), "session title refreshed");
             // The persistence actor overwrites an auto title but never a manual `/rename` (checked under the summary lock)
@@ -138,16 +147,18 @@ impl SessionActor {
         // Deliberately tool-free: unlike the turn summary, the request carries no tools
         // The model then can't spend the call on a tool invocation that would leave empty text and burn the checkpoint
         // (The conversation prefix still shares the parent prompt-cache key.)
-        let request = self.parent_cached_request(AuxCall {
-            items,
-            tools: Vec::new(),
-            hosted_tools: Vec::new(),
-            model: setup.model.clone(),
-            reasoning_effort: setup.reasoning_effort,
-            backend: setup.client.api_backend(),
-            conv_id: format!("title-refresh-{}", uuid::Uuid::new_v4()),
-            req_id: format!("fuigo-title-refresh-{}", uuid::Uuid::new_v4()),
-        }).with_purpose(fuigo_sampling_types::RequestPurpose::Title);
+        let request = self
+            .parent_cached_request(AuxCall {
+                items,
+                tools: Vec::new(),
+                hosted_tools: Vec::new(),
+                model: setup.model.clone(),
+                reasoning_effort: setup.reasoning_effort,
+                backend: setup.client.api_backend(),
+                conv_id: format!("title-refresh-{}", uuid::Uuid::new_v4()),
+                req_id: format!("fuigo-title-refresh-{}", uuid::Uuid::new_v4()),
+            })
+            .with_purpose(fuigo_sampling_types::RequestPurpose::Title);
 
         let response = match tokio::time::timeout(
             TITLE_REFRESH_MODEL_TIMEOUT,

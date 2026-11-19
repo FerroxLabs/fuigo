@@ -36,7 +36,11 @@ fn assert_no_unmarked_command(name: &str, src: &str) {
             continue;
         }
         let from = i.saturating_sub(8);
-        let marked = |p: &&str| p.contains("P189-unplaced:") || p.contains("P189-placed:") || p.contains("spawn_placed(");
+        let marked = |p: &&str| {
+            p.contains("P189-unplaced:")
+                || p.contains("P189-placed:")
+                || p.contains("spawn_placed(")
+        };
         assert!(
             lines[from..=i].iter().any(marked),
             "{name}:{}: `Command::new(`/`std::process::Command` without placement (`spawn_placed`) or \
@@ -50,11 +54,18 @@ fn assert_no_unmarked_command(name: &str, src: &str) {
 fn body<'a>(src: &'a str, sig: &str) -> &'a str {
     let start = src.find(sig).unwrap_or_else(|| panic!("missing `{sig}`"));
     let rest = &src[start + sig.len()..];
-    let end = ["\n    async fn ", "\n    fn ", "\n    pub async fn ", "\nfn ", "\npub fn ", "\nasync fn "]
-        .iter()
-        .filter_map(|m| rest.find(m))
-        .min()
-        .unwrap_or(rest.len());
+    let end = [
+        "\n    async fn ",
+        "\n    fn ",
+        "\n    pub async fn ",
+        "\nfn ",
+        "\npub fn ",
+        "\nasync fn ",
+    ]
+    .iter()
+    .filter_map(|m| rest.find(m))
+    .min()
+    .unwrap_or(rest.len());
     &rest[..end]
 }
 
@@ -63,8 +74,14 @@ fn body<'a>(src: &'a str, sig: &str) -> &'a str {
 /// `new_command` returns, before `configure` (and so before any other
 /// `pre_exec`), whatever the caller writes.
 fn assert_placed_first(what: &str, text: &str) {
-    assert!(text.contains("spawn_placed("), "{what}: not spawned through spawn_placed");
-    assert!(!text.contains("hook.place(") && !text.contains(".place(&mut"), "{what}: caller-side placement");
+    assert!(
+        text.contains("spawn_placed("),
+        "{what}: not spawned through spawn_placed"
+    );
+    assert!(
+        !text.contains("hook.place(") && !text.contains(".place(&mut"),
+        "{what}: caller-side placement"
+    );
 }
 
 #[test]
@@ -80,14 +97,26 @@ fn terminal_backend_and_hooks_have_no_unmarked_command_new() {
         ("terminal.rs", include_str!("terminal.rs")),
         ("shell_state.rs", include_str!("shell_state.rs")),
         ("static_shell.rs", include_str!("static_shell.rs")),
-        ("embedded_search_tools.rs", include_str!("embedded_search_tools.rs")),
+        (
+            "embedded_search_tools.rs",
+            include_str!("embedded_search_tools.rs"),
+        ),
         ("lifecycle.rs", include_str!("lifecycle.rs")),
         ("file_system.rs", include_str!("file_system.rs")),
         ("cgroup.rs", include_str!("cgroup.rs")),
         ("mod.rs", include_str!("mod.rs")),
-        ("hooks/runner/command.rs", include_str!("../../../../fuigo-hooks/src/runner/command.rs")),
-        ("hooks/runner/http.rs", include_str!("../../../../fuigo-hooks/src/runner/http.rs")),
-        ("hooks/runner/mod.rs", include_str!("../../../../fuigo-hooks/src/runner/mod.rs")),
+        (
+            "hooks/runner/command.rs",
+            include_str!("../../../../fuigo-hooks/src/runner/command.rs"),
+        ),
+        (
+            "hooks/runner/http.rs",
+            include_str!("../../../../fuigo-hooks/src/runner/http.rs"),
+        ),
+        (
+            "hooks/runner/mod.rs",
+            include_str!("../../../../fuigo-hooks/src/runner/mod.rs"),
+        ),
     ] {
         assert_no_unmarked_command(name, src);
     }
@@ -96,19 +125,31 @@ fn terminal_backend_and_hooks_have_no_unmarked_command_new() {
 #[test]
 fn command_guard_detects_an_unmarked_command() {
     let bad = std::panic::catch_unwind(|| {
-        assert_no_unmarked_command("x.rs", "fn f() {\n    let c = tokio::process::Command::new(\"x\");\n}\n");
+        assert_no_unmarked_command(
+            "x.rs",
+            "fn f() {\n    let c = tokio::process::Command::new(\"x\");\n}\n",
+        );
     });
     assert!(bad.is_err());
-    assert_no_unmarked_command("x.rs", "fn f() {\n    // P189-unplaced: helper\n    let c = std::process::Command::new(\"x\");\n}\n");
+    assert_no_unmarked_command(
+        "x.rs",
+        "fn f() {\n    // P189-unplaced: helper\n    let c = std::process::Command::new(\"x\");\n}\n",
+    );
 }
 
 #[test]
 fn placed_sites_place_first() {
     let t = include_str!("terminal.rs");
     assert_placed_first("spawn_static_command", body(t, "fn spawn_static_command("));
-    assert_placed_first("spawn_persistent_command", body(t, "fn spawn_persistent_command("));
+    assert_placed_first(
+        "spawn_persistent_command",
+        body(t, "fn spawn_persistent_command("),
+    );
     assert_placed_first("spawn_shell_command", body(t, "fn spawn_shell_command("));
-    assert_placed_first("ShellState::init", body(include_str!("shell_state.rs"), "pub async fn init("));
+    assert_placed_first(
+        "ShellState::init",
+        body(include_str!("shell_state.rs"), "pub async fn init("),
+    );
 }
 
 #[test]
@@ -155,7 +196,9 @@ fn assert_bare_new_command(line: &str) {
         );
         return;
     }
-    let at = line.find("|| tokio::process::Command::new(").expect("closure start");
+    let at = line
+        .find("|| tokio::process::Command::new(")
+        .expect("closure start");
     let expr = &line[at + 3..];
     // balanced parens: the expression ends where `Command::new(` closes, followed only by `,`/`;`/` ,`
     let open = expr.find('(').unwrap();
@@ -175,9 +218,15 @@ fn assert_bare_new_command(line: &str) {
         }
     }
     let end = end.expect("unbalanced");
-    assert!(!expr[..end].contains("pre_exec") && !expr[..end].contains('{'), "new_command is not a bare Command::new: {line}");
+    assert!(
+        !expr[..end].contains("pre_exec") && !expr[..end].contains('{'),
+        "new_command is not a bare Command::new: {line}"
+    );
     let tail = expr[end..].trim_start();
-    assert!(tail.starts_with(',') || tail.starts_with(';') || tail.is_empty(), "extra code after Command::new(..): {line}");
+    assert!(
+        tail.starts_with(',') || tail.starts_with(';') || tail.is_empty(),
+        "extra code after Command::new(..): {line}"
+    );
 }
 
 #[test]
@@ -193,7 +242,12 @@ fn new_command_closures_are_bare_command_new() {
             n += 1;
         }
     }
-    assert_eq!(n, 5, "the five spawn_placed sites; a new one needs this guard updated");
-    let bad = std::panic::catch_unwind(|| assert_bare_new_command("x(|| tokio::process::Command::new(p).pre_exec(f), c)"));
+    assert_eq!(
+        n, 5,
+        "the five spawn_placed sites; a new one needs this guard updated"
+    );
+    let bad = std::panic::catch_unwind(|| {
+        assert_bare_new_command("x(|| tokio::process::Command::new(p).pre_exec(f), c)")
+    });
     assert!(bad.is_err());
 }

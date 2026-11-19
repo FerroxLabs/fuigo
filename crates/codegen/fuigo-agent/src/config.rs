@@ -2,11 +2,6 @@
 use crate::error::AgentBuildError;
 use crate::prompt::context::TemplateOverride;
 use crate::prompt::user_message::UserMessageTemplate;
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
 use fuigo_tools::implementations::codex;
 use fuigo_tools::implementations::fuigo_build;
 use fuigo_tools::implementations::fuigo_build_concise;
@@ -15,6 +10,11 @@ use fuigo_tools::implementations::opencode;
 use fuigo_tools::implementations::search_tool;
 use fuigo_tools::implementations::use_tool;
 use fuigo_tools::registry::types::{ToolConfig, ToolServerConfig};
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
 /// Process-global registry of externally-provided toolset presets.
 ///
 /// Public presets are enumerated by [`preset_names`] / [`all_toolset_presets`] and resolvable via [`toolset_for_preset`].
@@ -1767,12 +1767,24 @@ mod tests {
         let base = dunce::canonicalize(tmp.path()).unwrap();
         let project = base.join("project");
         std::fs::create_dir_all(base.join("outside").join("mem")).unwrap();
-        std::fs::write(base.join("outside").join("mem").join("MEMORY.md"), "TOP SECRET").unwrap();
+        std::fs::write(
+            base.join("outside").join("mem").join("MEMORY.md"),
+            "TOP SECRET",
+        )
+        .unwrap();
         // File link: project memory.
         let mem = project.join(".fuigo").join("agent-memory").join("rev");
         std::fs::create_dir_all(&mem).unwrap();
-        std::os::unix::fs::symlink(base.join("outside").join("mem").join("MEMORY.md"), mem.join("MEMORY.md")).unwrap();
-        assert!(MemoryScope::Project.read_memory_md("rev", &project).is_none());
+        std::os::unix::fs::symlink(
+            base.join("outside").join("mem").join("MEMORY.md"),
+            mem.join("MEMORY.md"),
+        )
+        .unwrap();
+        assert!(
+            MemoryScope::Project
+                .read_memory_md("rev", &project)
+                .is_none()
+        );
         // Directory link: local memory.
         let local = project.join(".fuigo").join("agent-memory-local");
         std::fs::create_dir_all(&local).unwrap();
@@ -1782,7 +1794,9 @@ mod tests {
         std::fs::write(project.join("notes.md"), "own notes").unwrap();
         std::fs::remove_file(mem.join("MEMORY.md")).unwrap();
         std::os::unix::fs::symlink(project.join("notes.md"), mem.join("MEMORY.md")).unwrap();
-        let (_, content) = MemoryScope::Project.read_memory_md("rev", &project).unwrap();
+        let (_, content) = MemoryScope::Project
+            .read_memory_md("rev", &project)
+            .unwrap();
         assert_eq!(content, "own notes");
     }
 
@@ -1796,9 +1810,16 @@ mod tests {
         let project = base.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(base.join("outside")).unwrap();
-        assert!(MemoryScope::Project.memory_dir_contained("rev", &project), "not created yet: allowed");
+        assert!(
+            MemoryScope::Project.memory_dir_contained("rev", &project),
+            "not created yet: allowed"
+        );
         std::fs::create_dir_all(project.join(".fuigo")).unwrap();
-        std::os::unix::fs::symlink(base.join("outside"), project.join(".fuigo").join("agent-memory")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside"),
+            project.join(".fuigo").join("agent-memory"),
+        )
+        .unwrap();
         assert!(!MemoryScope::Project.memory_dir_contained("rev", &project));
         std::fs::create_dir_all(base.join("outside").join("rev")).unwrap();
         assert!(!MemoryScope::Project.memory_dir_contained("rev", &project));
@@ -1816,12 +1837,25 @@ mod tests {
         std::fs::create_dir_all(project.join("real")).unwrap();
         let leaf = project.join(".fuigo").join("agent-memory").join("rev");
         std::os::unix::fs::symlink(project.join("real"), &leaf).unwrap();
-        assert!(!MemoryScope::Project.memory_dir_contained("rev", &project), "leaf link");
+        assert!(
+            !MemoryScope::Project.memory_dir_contained("rev", &project),
+            "leaf link"
+        );
         std::fs::remove_file(&leaf).unwrap();
-        assert!(MemoryScope::Project.memory_dir_contained("rev", &project), "plain dir allowed");
+        assert!(
+            MemoryScope::Project.memory_dir_contained("rev", &project),
+            "plain dir allowed"
+        );
         std::fs::remove_dir(project.join(".fuigo").join("agent-memory")).unwrap();
-        std::os::unix::fs::symlink(project.join("real"), project.join(".fuigo").join("agent-memory")).unwrap();
-        assert!(!MemoryScope::Project.memory_dir_contained("rev", &project), "ancestor link");
+        std::os::unix::fs::symlink(
+            project.join("real"),
+            project.join(".fuigo").join("agent-memory"),
+        )
+        .unwrap();
+        assert!(
+            !MemoryScope::Project.memory_dir_contained("rev", &project),
+            "ancestor link"
+        );
     }
 
     /// Pins the `spawn_subagent` rename to the shared predicate.
@@ -2014,7 +2048,9 @@ mod tests {
             .expect("codex toolset advertises grep_files");
         assert_eq!(grep.id, ToolConfig::from(&fuigo_build::GrepTool).id);
         assert!(
-            !tools.iter().any(|t| t.id == ToolConfig::from(&codex::CodexGrepFilesTool).id),
+            !tools
+                .iter()
+                .any(|t| t.id == ToolConfig::from(&codex::CodexGrepFilesTool).id),
             "paths-only grep_files must not be advertised"
         );
     }

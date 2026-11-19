@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use fuigo_peer::limits::MAX_FRAME_BYTES;
 use fuigo_peer::{
-    Address, BoundedId, DeliveryOutcome, Envelope, Hello, HostId, NoticeKind, Op, ReasonText, Reply, SessionRow,
+    Address, BoundedId, DeliveryOutcome, Envelope, Hello, HostId, NoticeKind, Op, ReasonText,
+    Reply, SessionRow,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
@@ -94,10 +95,16 @@ pub(crate) trait InboxHost {
     /// One page of sessions and whether more follow.
     fn list(&self, page: u32) -> impl Future<Output = (Vec<SessionRow>, bool)> + Send;
     /// Deliver a validated envelope.
-    fn send(&self, to: Address, envelope: Envelope) -> impl Future<Output = DeliveryOutcome> + Send;
+    fn send(&self, to: Address, envelope: Envelope)
+    -> impl Future<Output = DeliveryOutcome> + Send;
     /// `send` with the wire's `watch` field (S9.1): also arm an idle watch; an EMPTY body with `watch` is a watch only. A host
     /// without watches answers `send`'s outcome (a plain send) or `unavailable` for a watch.
-    fn send_watched(&self, to: Address, envelope: Envelope, watch: bool) -> impl Future<Output = DeliveryOutcome> + Send;
+    fn send_watched(
+        &self,
+        to: Address,
+        envelope: Envelope,
+        watch: bool,
+    ) -> impl Future<Output = DeliveryOutcome> + Send;
     /// Record a delivery notice; the reply carries nothing.
     fn notice(&self, message_id: BoundedId, kind: NoticeKind) -> impl Future<Output = ()> + Send;
     /// Called once with the host id from the peer's hello, before any operation is read (8d: the consistency check
@@ -105,7 +112,10 @@ pub(crate) trait InboxHost {
     fn peer_hello(&self, _host: &HostId) {}
 }
 
-async fn write_msg<W: AsyncWrite + Unpin, T: serde::Serialize>(w: &mut W, msg: &T) -> Result<(), ConnError> {
+async fn write_msg<W: AsyncWrite + Unpin, T: serde::Serialize>(
+    w: &mut W,
+    msg: &T,
+) -> Result<(), ConnError> {
     let bytes = serde_json::to_vec(msg).map_err(|_| ConnError::Invalid)?;
     match timeout(WRITE_DEADLINE, write_frame_limited(w, &bytes, FRAME_CAP)).await {
         Ok(r) => Ok(r?),
@@ -130,7 +140,9 @@ async fn close<W: AsyncWrite + Unpin>(w: &mut W) {
 }
 
 fn unavailable(reason: &str) -> Result<Reply, ConnError> {
-    Ok(Reply::Unavailable { reason: ReasonText::new(reason).map_err(|_| ConnError::Invalid)? })
+    Ok(Reply::Unavailable {
+        reason: ReasonText::new(reason).map_err(|_| ConnError::Invalid)?,
+    })
 }
 
 /// Serve exactly one operation on `stream`, then close. The peer's version must be exactly ours, else it gets
@@ -150,7 +162,12 @@ where
     result
 }
 
-async fn serve_inner<R, W, H>(rd: &mut FrameReader<R>, wr: &mut W, our: Hello, host: &H) -> Result<(), ConnError>
+async fn serve_inner<R, W, H>(
+    rd: &mut FrameReader<R>,
+    wr: &mut W,
+    our: Hello,
+    host: &H,
+) -> Result<(), ConnError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -170,9 +187,19 @@ where
         Op::List { page } => {
             let (rows, more) = host.list(page).await;
             let reply = Reply::List { rows, more };
-            if reply.validate().is_ok() { reply } else { unavailable(REASON_HOST)? }
+            if reply.validate().is_ok() {
+                reply
+            } else {
+                unavailable(REASON_HOST)?
+            }
         }
-        Op::Send { to, envelope, watch } => Reply::Send { outcome: host.send_watched(to, envelope, watch).await },
+        Op::Send {
+            to,
+            envelope,
+            watch,
+        } => Reply::Send {
+            outcome: host.send_watched(to, envelope, watch).await,
+        },
         Op::Notice { message_id, kind } => {
             host.notice(message_id, kind).await;
             Reply::Notice {}
@@ -182,14 +209,24 @@ where
 }
 
 /// Client side: hello, check the version and that the server is `expect_host`, send `op`, read one reply, close.
-pub(crate) async fn exchange<S>(stream: S, our: Hello, expect_host: &HostId, op: Op) -> Result<Reply, ConnError>
+pub(crate) async fn exchange<S>(
+    stream: S,
+    our: Hello,
+    expect_host: &HostId,
+    op: Op,
+) -> Result<Reply, ConnError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     op.validate().map_err(|_| ConnError::Invalid)?;
     let (rd, mut wr) = tokio::io::split(stream);
     let mut rd = FrameReader::with_limit(rd, FRAME_CAP);
-    let result = match timeout(EXCHANGE_DEADLINE, exchange_inner(&mut rd, &mut wr, our, expect_host, op)).await {
+    let result = match timeout(
+        EXCHANGE_DEADLINE,
+        exchange_inner(&mut rd, &mut wr, our, expect_host, op),
+    )
+    .await
+    {
         Ok(r) => r,
         Err(_) => return Err(ConnError::ExchangeTimeout),
     };
@@ -226,7 +263,11 @@ where
             | (Op::Send { .. }, Reply::Send { .. })
             | (Op::Notice { .. }, Reply::Notice {})
     );
-    if kind_ok { Ok(reply) } else { Err(ConnError::UnexpectedReply) }
+    if kind_ok {
+        Ok(reply)
+    } else {
+        Err(ConnError::UnexpectedReply)
+    }
 }
 
 /// Client side, reaping probe (8d): hello each way and nothing more. Returns the peer's hello (the caller compares

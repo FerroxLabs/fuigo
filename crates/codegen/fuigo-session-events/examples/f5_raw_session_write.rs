@@ -4,7 +4,9 @@
 
 #[cfg(f5_raw_session_write)]
 fn raw_session_append(session_dir: &std::path::Path) {
-    let _ = std::fs::OpenOptions::new().append(true).open(session_dir.join("events.jsonl"));
+    let _ = std::fs::OpenOptions::new()
+        .append(true)
+        .open(session_dir.join("events.jsonl"));
 }
 
 fn main() {}

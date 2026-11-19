@@ -229,7 +229,10 @@ impl GitConfigEnv {
 
     /// The global config files git reads under this environment, and what could not be
     /// resolved (a relative value, read from each command's working directory).
-    fn global_configs(&self, user_home: Option<&Path>) -> (Vec<PathBuf>, Option<GitMetadataUnread>) {
+    fn global_configs(
+        &self,
+        user_home: Option<&Path>,
+    ) -> (Vec<PathBuf>, Option<GitMetadataUnread>) {
         let relative = |name: &str, value: &OsString| GitMetadataUnread::Unreadable {
             path: PathBuf::from(value),
             reason: format!(
@@ -649,7 +652,9 @@ fn hard_linked(entries: &[GitProtectedPath]) -> Vec<GitMetadataUnread> {
                             Err(error) => {
                                 out.push(GitMetadataUnread::Unreadable {
                                     path: dir.clone(),
-                                    reason: format!("cannot list it for hard-link aliases: {error}"),
+                                    reason: format!(
+                                        "cannot list it for hard-link aliases: {error}"
+                                    ),
                                 });
                                 continue;
                             }
@@ -865,7 +870,12 @@ impl GitScan {
 
     /// The submodules present under `git_dir/modules`: each git directory's entries and hooks
     /// paths, and the `.git` pointer of its checkout (re-pointing it redirects git there).
-    fn present_submodules(&mut self, git_dir: &Path, anchors: &[PathBuf], user_home: Option<&Path>) {
+    fn present_submodules(
+        &mut self,
+        git_dir: &Path,
+        anchors: &[PathBuf],
+        user_home: Option<&Path>,
+    ) {
         for module in self.submodule_git_dirs(&git_dir.join("modules")) {
             self.git_dir_entries(&module);
             self.hooks_path_entries(&module, anchors, user_home);
@@ -916,7 +926,12 @@ impl GitScan {
         hooks.worktree_config
     }
 
-    fn hooks_path_entries(&mut self, git_dir: &Path, anchors: &[PathBuf], user_home: Option<&Path>) {
+    fn hooks_path_entries(
+        &mut self,
+        git_dir: &Path,
+        anchors: &[PathBuf],
+        user_home: Option<&Path>,
+    ) {
         for config in ["config", WORKTREE_CONFIG] {
             self.hooks_path_in(&git_dir.join(config), anchors, user_home);
         }
@@ -958,14 +973,16 @@ impl GitScan {
 
     /// The directory a one-line pointer file names, resolved against `base`, when it exists as a
     /// directory: canonical, with every link on the way protected.
-    fn pointer_target(&mut self, file: &Path, base: &Path, prefix: Option<&str>) -> Option<PathBuf> {
+    fn pointer_target(
+        &mut self,
+        file: &Path,
+        base: &Path,
+        prefix: Option<&str>,
+    ) -> Option<PathBuf> {
         let text = self.read(file)?;
         // As git reads a pointer: the first line, only its trailing CR/LF dropped; a `.git`
         // file's `gitdir: ` prefix exactly (a space in a name is part of the name)
-        let line = text
-            .split('\n')
-            .next()?
-            .trim_end_matches(['\r', '\n']);
+        let line = text.split('\n').next()?.trim_end_matches(['\r', '\n']);
         // Git reads the bytes; the lossy spelling would miss the directory it uses
         if line.contains('\u{fffd}') {
             self.unread.push(GitMetadataUnread::NotUtf8 {
@@ -1017,7 +1034,8 @@ impl GitScan {
                     });
                     return out;
                 }
-                let is_git_dir = std::fs::metadata(child.join("HEAD")).is_ok_and(|meta| meta.is_file());
+                let is_git_dir =
+                    std::fs::metadata(child.join("HEAD")).is_ok_and(|meta| meta.is_file());
                 if is_git_dir {
                     pending.push_back(child.join("modules"));
                     out.push(child);
@@ -1386,7 +1404,11 @@ fn config_bool(value: Option<&str>) -> bool {
 
 /// An include's `path` as git resolves it: `~` and `~/…` under the user's home, an absolute path
 /// as is, a relative one beside the including file.
-fn include_path(value: &str, config: &Path, user_home: Option<&Path>) -> Result<PathBuf, &'static str> {
+fn include_path(
+    value: &str,
+    config: &Path,
+    user_home: Option<&Path>,
+) -> Result<PathBuf, &'static str> {
     match value.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => user_home
             .map(|home| home.join(rest.trim_start_matches('/')))
@@ -1506,7 +1528,10 @@ fn config_subsection(chars: &mut std::str::Chars<'_>) -> Option<String> {
     (chars.next()? == ']').then_some(subsection)
 }
 
-fn config_key_value(first: char, chars: &mut std::str::Chars<'_>) -> Option<(String, Option<String>)> {
+fn config_key_value(
+    first: char,
+    chars: &mut std::str::Chars<'_>,
+) -> Option<(String, Option<String>)> {
     let mut key = first.to_ascii_lowercase().to_string();
     let mut c = chars.next();
     while let Some(k) = c.filter(|k| k.is_ascii_alphanumeric() || *k == '-') {
@@ -1570,7 +1595,12 @@ pub(crate) fn resolve_git_write_deny(
     write_roots: &[PathBuf],
 ) -> anyhow::Result<Vec<GitProtectedPath>> {
     let home = fuigo_dirs::home_dir();
-    let got = git_entries_in(workspace, home.as_deref(), write_roots, &GitConfigEnv::from_host());
+    let got = git_entries_in(
+        workspace,
+        home.as_deref(),
+        write_roots,
+        &GitConfigEnv::from_host(),
+    );
     if !got.unread.is_empty() {
         let detail = got
             .unread

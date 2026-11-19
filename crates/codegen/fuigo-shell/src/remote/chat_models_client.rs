@@ -119,7 +119,9 @@ impl ChatModelsClient {
 
     /// The configured host, or the fail-closed error every request returns without one.
     fn base(&self) -> Result<&str, ChatModelsError> {
-        self.base_url.as_deref().ok_or(ChatModelsError::NotConfigured)
+        self.base_url
+            .as_deref()
+            .ok_or(ChatModelsError::NotConfigured)
     }
 
     /// Gated only on a valid grok.com bearer, not `is_fuigo_auth()` like workspaces/conversations.
@@ -185,10 +187,10 @@ mod tests {
         };
         // Alone in its process: install the issuer no other test happened to install here.
         crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
-        let (base, seen, handle) =
-            crate::remote::identity_tests::spawn_recording_mock("{}").await;
-            let base = front.front_service(&base);
-        let mut client = ChatModelsClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let base = front.front_service(&base);
+        let mut client =
+            ChatModelsClient::new(crate::remote::skills_client::tests::test_auth_manager());
         client.base_url = Some(base);
         let _ = client.list_modes("en").await;
         handle.abort();
@@ -271,7 +273,10 @@ mod tests {
         let client =
             ChatModelsClient::new(crate::remote::skills_client::tests::test_auth_manager());
         assert_eq!(client.base_url, None);
-        let err = client.list_modes("en").await.expect_err("no host, no request");
+        let err = client
+            .list_modes("en")
+            .await
+            .expect_err("no host, no request");
         let shown = err.to_string();
         assert!(matches!(err, ChatModelsError::NotConfigured), "{shown}");
         assert!(shown.contains("FUIGO_MODES_BASE_URL"), "{shown}");
@@ -283,13 +288,26 @@ mod tests {
     #[serial_test::serial]
     fn chat_models_client_env_chain_precedence_is_unchanged() {
         let am = crate::remote::skills_client::tests::test_auth_manager;
-        let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
-        assert_eq!(ChatModelsClient::new(am()).base_url.as_deref(), Some("https://web.example.test"));
-        let _conv =
-            fuigo_test_support::EnvGuard::set("FUIGO_CONVERSATIONS_BASE_URL", "https://conv.example.test");
-        assert_eq!(ChatModelsClient::new(am()).base_url.as_deref(), Some("https://conv.example.test"));
-        let _modes = fuigo_test_support::EnvGuard::set("FUIGO_MODES_BASE_URL", "https://modes.example.test");
-        assert_eq!(ChatModelsClient::new(am()).base_url.as_deref(), Some("https://modes.example.test"));
+        let _web =
+            fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://web.example.test");
+        assert_eq!(
+            ChatModelsClient::new(am()).base_url.as_deref(),
+            Some("https://web.example.test")
+        );
+        let _conv = fuigo_test_support::EnvGuard::set(
+            "FUIGO_CONVERSATIONS_BASE_URL",
+            "https://conv.example.test",
+        );
+        assert_eq!(
+            ChatModelsClient::new(am()).base_url.as_deref(),
+            Some("https://conv.example.test")
+        );
+        let _modes =
+            fuigo_test_support::EnvGuard::set("FUIGO_MODES_BASE_URL", "https://modes.example.test");
+        assert_eq!(
+            ChatModelsClient::new(am()).base_url.as_deref(),
+            Some("https://modes.example.test")
+        );
     }
 }
 

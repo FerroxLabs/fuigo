@@ -258,7 +258,10 @@ impl fuigo_tool_runtime::Tool for EditTool {
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Create parent directories for a file path if they don't exist.
-#[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "file tool write of a model/user-chosen path (user content); not inside a session folder"
+)]
 async fn ensure_parent_dirs(path: &std::path::Path) -> Result<(), fuigo_tool_runtime::ToolError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -282,7 +285,8 @@ async fn handle_new_file_creation(
     path: &std::path::Path,
 ) -> Result<SearchReplaceOutput, fuigo_tool_runtime::ToolError> {
     // Check if file already exists and is non-empty.
-    let read = crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await;
+    let read =
+        crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await;
     if let Err(e) = &read
         && let Some(msg) = crate::implementations::fuigo_build::read_file::source_too_large_message(
             e,
@@ -373,38 +377,41 @@ async fn handle_replacement(
     replace_all: bool,
 ) -> Result<SearchReplaceOutput, fuigo_tool_runtime::ToolError> {
     // Read current file content.
-    let bytes = match crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path).await {
-        Ok(bytes) => bytes,
-        Err(e)
-            if crate::implementations::fuigo_build::read_file::source_too_large_message(
-                &e,
-                &input.file_path,
-                "edit",
-            )
-            .is_some() =>
+    let bytes =
+        match crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), path)
+            .await
         {
-            return Ok(SearchReplaceOutput::InvalidInput(
-                crate::implementations::fuigo_build::read_file::source_too_large_message(
+            Ok(bytes) => bytes,
+            Err(e)
+                if crate::implementations::fuigo_build::read_file::source_too_large_message(
                     &e,
                     &input.file_path,
                     "edit",
                 )
-                .unwrap_or_default(),
-            ));
-        }
-        Err(_) if !path.exists() => {
-            return Ok(SearchReplaceOutput::FileNotFound(format!(
-                "File not found: {}. Please check the path and try again.",
-                input.file_path
-            )));
-        }
-        Err(e) => {
-            return Err(fuigo_tool_runtime::ToolError::execution(
-                fuigo_tool_protocol::ToolId::new("edit").expect("valid"),
-                e.to_string(),
-            ));
-        }
-    };
+                .is_some() =>
+            {
+                return Ok(SearchReplaceOutput::InvalidInput(
+                    crate::implementations::fuigo_build::read_file::source_too_large_message(
+                        &e,
+                        &input.file_path,
+                        "edit",
+                    )
+                    .unwrap_or_default(),
+                ));
+            }
+            Err(_) if !path.exists() => {
+                return Ok(SearchReplaceOutput::FileNotFound(format!(
+                    "File not found: {}. Please check the path and try again.",
+                    input.file_path
+                )));
+            }
+            Err(e) => {
+                return Err(fuigo_tool_runtime::ToolError::execution(
+                    fuigo_tool_protocol::ToolId::new("edit").expect("valid"),
+                    e.to_string(),
+                ));
+            }
+        };
     // Refuse non-UTF-8 content: a lossy decode plus a whole-file rewrite would replace every invalid byte in the
     // file, not only the edited region (audit S4-F5).
     let old_text = match String::from_utf8(bytes) {
@@ -539,7 +546,10 @@ async fn handle_replacement(
 // Tests
 // ───────────────────────────────────────────────────────────────────────────
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1207,7 +1217,10 @@ mod tests {
         let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
         builder.add_line(None, "secret/").unwrap();
         let mut resources = test_resources(repo.path());
-        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        resources.insert(crate::types::resources::GitignoreFilter::new(
+            builder.build().unwrap(),
+            canonical,
+        ));
         let result = fuigo_tool_runtime::Tool::run(
             &EditTool,
             test_ctx(resources.into_shared()),
@@ -1216,10 +1229,15 @@ mod tests {
         .await
         .unwrap();
         match result {
-            SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("ignored by .gitignore"), "{msg}")
+            }
             other => panic!("expected the gitignore refusal, got {other:?}"),
         }
-        assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOP SECRET\n");
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("key.txt")).unwrap(),
+            "TOP SECRET\n"
+        );
     }
 
     #[tokio::test]
@@ -1232,7 +1250,10 @@ mod tests {
         let result = fuigo_tool_runtime::Tool::run(&EditTool, test_ctx(shared), input)
             .await
             .unwrap();
-        assert!(matches!(result, SearchReplaceOutput::InvalidInput(_)), "{result:?}");
+        assert!(
+            matches!(result, SearchReplaceOutput::InvalidInput(_)),
+            "{result:?}"
+        );
         assert_eq!(std::fs::read(tmp.path().join("l.txt")).unwrap(), original);
     }
 }

@@ -9,13 +9,13 @@
 use crate::capability::{CapabilityMode, kind_allowed};
 use crate::config::SessionContextFactory;
 use crate::error::{WorkspaceError, WorkspaceResult};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 use fuigo_tools::registry::types::{
     FinalizedToolset, ToolConfig, ToolRegistryBuilder, ToolServerConfig,
 };
 use fuigo_tools::types::tool::ToolKind;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 /// Entry point for session creation: runs [`resolve_session_toolset_rebuild`] around a fresh factory-built terminal backend.
 /// The backend lives for the session; it is returned so the caller can store it on the session being created.
 /// Session-less resolves (the `__template__` catalog resolve in `connect_hub`) also use this entry and drop the returned backend with the toolset.
@@ -331,7 +331,10 @@ impl WorkspaceSessionContextFactory {
         }
     }
     /// Factory with auth: gen tools use the provider's live token.
-    pub fn with_auth(auth: fuigo_computer_hub_sdk::SharedAuthProvider, api_base_url: String) -> Self {
+    pub fn with_auth(
+        auth: fuigo_computer_hub_sdk::SharedAuthProvider,
+        api_base_url: String,
+    ) -> Self {
         Self {
             auth: Some(auth),
             api_base_url: Some(api_base_url),
@@ -346,7 +349,10 @@ impl WorkspaceSessionContextFactory {
         self
     }
     /// Route every shell spawn of the sessions this factory builds through `hook`.
-    pub fn with_sandbox_launch(mut self, hook: fuigo_tools::sandbox_launch::SandboxLaunchHook) -> Self {
+    pub fn with_sandbox_launch(
+        mut self,
+        hook: fuigo_tools::sandbox_launch::SandboxLaunchHook,
+    ) -> Self {
         self.sandbox_launch = Some(hook);
         self
     }
@@ -389,7 +395,8 @@ impl WorkspaceSessionContextFactory {
 /// P47: `Some(refusal)` when the session token may not go to the configured proxy base `url` (it is logged here).
 fn service_bearer_refused(url: &str) -> Option<String> {
     let refused =
-        fuigo_extra_ca::service_trust::session_may_reach_service(url, Some(url), |_| false).err()?;
+        fuigo_extra_ca::service_trust::session_may_reach_service(url, Some(url), |_| false)
+            .err()?;
     tracing::warn!(
         origin = %refused.origin,
         reason = refused.reason_label(),
@@ -576,16 +583,16 @@ fn default_web_search_model() -> String {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use crate::config::SessionContextFactory;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use tempfile::TempDir;
     use fuigo_tools::computer::local::{LocalFs, LocalTerminalBackend};
     use fuigo_tools::notification::ToolNotificationHandle;
     use fuigo_tools::registry::types::{
         SessionContext, ToolConfig, ToolRegistryBuilder, ToolServerConfig,
     };
     use fuigo_tools::types::tool::ToolKind;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
     /// Test factory: builds a `SessionContext` rooted at a per-test temp dir.
     pub struct TestSessionContextFactory {
         pub temp: TempDir,
@@ -727,10 +734,10 @@ mod tests {
     }
     use super::*;
     use crate::config::SessionContextFactory;
+    use fuigo_tools::types::tool::ToolKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use fuigo_tools::types::tool::ToolKind;
     fn factory_for_test() -> Arc<dyn SessionContextFactory> {
         Arc::new(test_support::TestSessionContextFactory::new())
     }

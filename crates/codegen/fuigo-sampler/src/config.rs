@@ -188,10 +188,16 @@ impl std::fmt::Debug for SamplerConfig {
         } = self;
         f.debug_struct("SamplerConfig")
             .field("subscription", subscription)
-            .field("subscription_resolver", &subscription_resolver.as_ref().map(|_| "<dyn>"))
+            .field(
+                "subscription_resolver",
+                &subscription_resolver.as_ref().map(|_| "<dyn>"),
+            )
             .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
             .field("base_url", &fuigo_auth::redact_url(base_url))
-            .field("flux_base_url", &flux_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field(
+                "flux_base_url",
+                &flux_base_url.as_deref().map(fuigo_auth::redact_url),
+            )
             .field("mtls_cert_dir", mtls_cert_dir)
             .field("model", model)
             .field("max_completion_tokens", max_completion_tokens)
@@ -199,9 +205,21 @@ impl std::fmt::Debug for SamplerConfig {
             .field("top_p", top_p)
             .field("api_backend", api_backend)
             .field("auth_scheme", auth_scheme)
-            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_headers",
+                &extra_headers
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("extra_response_includes", extra_response_includes)
-            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "query_params",
+                &query_params
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
             .field("max_request_bytes", max_request_bytes)
@@ -217,14 +235,23 @@ impl std::fmt::Debug for SamplerConfig {
             .field("deployment_id", deployment_id)
             .field("user_id", user_id)
             .field("client_version", client_version)
-            .field("attribution_callback", &attribution_callback.as_ref().map(|_| "<dyn>"))
-            .field("bearer_resolver", &bearer_resolver.as_ref().map(|_| "<dyn>"))
+            .field(
+                "attribution_callback",
+                &attribution_callback.as_ref().map(|_| "<dyn>"),
+            )
+            .field(
+                "bearer_resolver",
+                &bearer_resolver.as_ref().map(|_| "<dyn>"),
+            )
             .field("supports_backend_search", supports_backend_search)
             .field("programmatic_tool_calling", programmatic_tool_calling)
             .field("compactions_remaining", compactions_remaining)
             .field("compaction_at_tokens", compaction_at_tokens)
             .field("doom_loop_recovery", doom_loop_recovery)
-            .field("header_injector", &header_injector.as_ref().map(|_| "<dyn>"))
+            .field(
+                "header_injector",
+                &header_injector.as_ref().map(|_| "<dyn>"),
+            )
             .field("dispatch_gate", &dispatch_gate.as_ref().map(|_| "<dyn>"))
             .finish()
     }
@@ -368,12 +395,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }
@@ -384,19 +417,34 @@ mod p70_redacted_debug {
     fn sampler_config_debug_redacts_key_headers_and_query() {
         let cfg = SamplerConfig {
             api_key: Some("p70sk-FAKE-1b2c3d4e5f".into()),
-            extra_headers: [("Authorization".to_owned(), "Bearer p70hd-FAKE-9a8b7c".to_owned())].into_iter().collect(),
-            query_params: [("key".to_owned(), "p70qp-FAKE-5e6f7a".to_owned())].into_iter().collect(),
+            extra_headers: [(
+                "Authorization".to_owned(),
+                "Bearer p70hd-FAKE-9a8b7c".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            query_params: [("key".to_owned(), "p70qp-FAKE-5e6f7a".to_owned())]
+                .into_iter()
+                .collect(),
             model: "p70-model".into(),
             base_url: "https://p70.invalid/v1?key=p70bu-FAKE-3c4d5e".into(),
             ..SamplerConfig::default()
         };
         assert_redacted(
             &cfg,
-            &["p70sk-FAKE-1b2c3d4e5f", "p70hd-FAKE-9a8b7c", "p70qp-FAKE-5e6f7a", "p70bu-FAKE-3c4d5e"],
+            &[
+                "p70sk-FAKE-1b2c3d4e5f",
+                "p70hd-FAKE-9a8b7c",
+                "p70qp-FAKE-5e6f7a",
+                "p70bu-FAKE-3c4d5e",
+            ],
         );
         let client = crate::SamplingClient::new(cfg.clone()).expect("client");
         assert_redacted(&client, &["p70bu-FAKE-3c4d5e"]);
         let out = format!("{cfg:?}");
-        assert!(out.contains("Authorization") && out.contains("p70-model"), "non-secret fields still print: {out}");
+        assert!(
+            out.contains("Authorization") && out.contains("p70-model"),
+            "non-secret fields still print: {out}"
+        );
     }
 }

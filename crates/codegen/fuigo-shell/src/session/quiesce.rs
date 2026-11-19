@@ -90,14 +90,20 @@ impl OwedWork {
     /// F8: account one model switch that happened while parked. `leaving` is the identity (family, else model id)
     /// of the model being left and `arriving` that of the new one; `compacts` is whether this switch would
     /// compact if the session were running (a family switch over model-minted history).
-    pub(crate) fn note_model_switch(&mut self, compacts: bool, leaving: Option<String>, arriving: &str) {
+    pub(crate) fn note_model_switch(
+        &mut self,
+        compacts: bool,
+        leaving: Option<String>,
+        arriving: &str,
+    ) {
         match &self.family_switch_compact {
             // Back in the origin family: nothing is owed any more.
             Some(debt) if debt.origin_family == arriving => self.family_switch_compact = None,
             // Already owed: later switches keep the first origin.
             Some(_) => {}
             None if compacts => {
-                self.family_switch_compact = leaving.map(|origin_family| FamilyDebt { origin_family });
+                self.family_switch_compact =
+                    leaving.map(|origin_family| FamilyDebt { origin_family });
             }
             None => {}
         }
@@ -155,7 +161,9 @@ impl FoldedFires {
         self.bytes += text.len();
         self.texts.push_back(text);
         while self.texts.len() > MAX_FOLDED_FIRES || self.bytes > MAX_FOLDED_FIRE_BYTES {
-            let Some(old) = self.texts.pop_front() else { break };
+            let Some(old) = self.texts.pop_front() else {
+                break;
+            };
             self.bytes -= old.len();
             self.dropped += 1;
         }
@@ -165,7 +173,10 @@ impl FoldedFires {
     pub(crate) fn into_texts(self) -> Vec<String> {
         let mut out = Vec::with_capacity(self.texts.len() + 1);
         if self.dropped > 0 {
-            out.push(format!("({} earlier scheduled prompts were dropped)", self.dropped));
+            out.push(format!(
+                "({} earlier scheduled prompts were dropped)",
+                self.dropped
+            ));
         }
         out.extend(self.texts);
         out
@@ -371,7 +382,10 @@ pub(crate) fn begin_implicit_unpark(session_id: &str, expected_op: u64) -> Optio
                 // Astra r2 #8: the cancel generation moves in the SAME critical section as the transition, so a
                 // request held under the park is cancelled exactly when the park stops holding.
                 if before.phase == ParkPhase::Parked {
-                    *inner.cancel_generation.entry(session_id.to_owned()).or_default() += 1;
+                    *inner
+                        .cancel_generation
+                        .entry(session_id.to_owned())
+                        .or_default() += 1;
                 }
                 Some(before)
             }
@@ -460,7 +474,11 @@ pub(crate) fn note_implicit_unpark(root: &str) {
 
 /// `root`'s cancel generation (see [`note_implicit_unpark`]).
 pub(crate) fn cancel_generation(root: &str) -> u64 {
-    lock().cancel_generation.get(root).copied().unwrap_or_default()
+    lock()
+        .cancel_generation
+        .get(root)
+        .copied()
+        .unwrap_or_default()
 }
 
 /// Marks a `session/load` reply of a parked root in preparation.
@@ -551,7 +569,10 @@ pub(crate) fn park_op_fence(park: ParkOp) -> OpFence {
 
 /// [`park_op_fence`] from a session id and op.
 pub(crate) fn op_fence(session_id: &str, op: u64) -> OpFence {
-    park_op_fence(ParkOp { session: session_id.into(), op })
+    park_op_fence(ParkOp {
+        session: session_id.into(),
+        op,
+    })
 }
 
 /// The park entry set directly on `session_id` (not inherited from an ancestor).
@@ -816,6 +837,24 @@ impl Drop for SessionGuard {
     }
 }
 
+/// Every prompt gate governing a child's dispatch, starting with its own.
+pub(crate) fn ancestors_including_self(session_id: &str) -> Vec<String> {
+    let inner = lock();
+    let mut current = session_id;
+    let mut ids = vec![current.to_owned()];
+    for _ in 0..MAX_DEPTH {
+        let Some(parent) = inner.parents.get(current) else {
+            break;
+        };
+        if ids.contains(parent) {
+            break;
+        }
+        ids.push(parent.clone());
+        current = parent;
+    }
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,9 +876,15 @@ mod tests {
         let root = sid("root");
         assert!(!is_self_quiesced(&root));
         let op = begin_park(&root, ParkMode::Hold).expect("first park");
-        assert!(begin_park(&root, ParkMode::Stop).is_none(), "a second park is a no-op");
+        assert!(
+            begin_park(&root, ParkMode::Stop).is_none(),
+            "a second park is a no-op"
+        );
         assert!(is_self_quiesced(&root));
-        assert!(!is_parked(&root), "the running turn may still finish while parking");
+        assert!(
+            !is_parked(&root),
+            "the running turn may still finish while parking"
+        );
         assert!(complete_park(&root, op));
         assert!(is_parked(&root));
         let entry = unpark(&root).expect("was parked");
@@ -892,7 +937,10 @@ mod tests {
             let _child_guard = SessionGuard::new(&child, Some(&root));
             assert!(is_parked(&child));
         }
-        assert!(is_parked(&child), "a closed child left its parked root's hold");
+        assert!(
+            is_parked(&child),
+            "a closed child left its parked root's hold"
+        );
         assert_eq!(parked_root(&child).as_deref(), Some(root.as_str()));
     }
 
@@ -915,7 +963,10 @@ mod tests {
             tokio::spawn(async move { wait_model_allowed(&root).await })
         };
         tokio::task::yield_now().await;
-        assert!(!waiter.is_finished(), "a parked session must hold model calls");
+        assert!(
+            !waiter.is_finished(),
+            "a parked session must hold model calls"
+        );
         unpark(&root);
         tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
             .await
@@ -926,7 +977,10 @@ mod tests {
     #[test]
     fn owed_work_is_returned_by_unpark() {
         let root = sid("root");
-        assert!(!owe(&root, |o| o.title_refresh = true), "nothing to owe when not parked");
+        assert!(
+            !owe(&root, |o| o.title_refresh = true),
+            "nothing to owe when not parked"
+        );
         begin_park(&root, ParkMode::Stop);
         owe(&root, |o| o.turn_summary = Some("p-1".into()));
         owe(&root, |o| o.title_refresh = true);
@@ -945,8 +999,14 @@ mod tests {
         assert!(withdraw(&root, a).is_some());
         let b = begin_park(&root, ParkMode::Hold).expect("park b");
         assert_ne!(a, b);
-        assert!(!complete_park(&root, a), "a stale park completed its replacement");
-        assert!(withdraw(&root, a).is_none(), "a stale park withdrew its replacement");
+        assert!(
+            !complete_park(&root, a),
+            "a stale park completed its replacement"
+        );
+        assert!(
+            withdraw(&root, a).is_none(),
+            "a stale park withdrew its replacement"
+        );
         assert!(complete_park(&root, b));
         assert!(!ack_park(&root, a, 0));
         assert!(ack_park(&root, b, 3));
@@ -966,8 +1026,13 @@ mod tests {
         assert!(is_parked(&root), "the park is untouched");
         let fence = op_fence(&root, op);
         let mut ran = false;
-        assert!(fence(&mut || ran = true) && ran, "the fence runs for the current op");
-        assert!(!op_fence(&root, op + 1000)(&mut || panic!("a stale op must not run")));
+        assert!(
+            fence(&mut || ran = true) && ran,
+            "the fence runs for the current op"
+        );
+        assert!(!op_fence(&root, op + 1000)(&mut || panic!(
+            "a stale op must not run"
+        )));
         unpark(&root);
     }
 
@@ -980,14 +1045,25 @@ mod tests {
         complete_park(&root, op);
         let entry = begin_implicit_unpark(&root, op).expect("parked");
         assert_eq!(entry.op, op);
-        assert!(!is_parked(&root), "model calls and frames flow during the implicit unpark");
-        assert!(is_self_quiesced(&root), "no self-started turn may run ahead of the prompt");
-        assert!(unpark(&root).is_none(), "an explicit unpark leaves an implicit one to the prompt");
-        assert!(!owe(&root, |o| o.title_refresh = true), "nothing is owed once unparking");
+        assert!(
+            !is_parked(&root),
+            "model calls and frames flow during the implicit unpark"
+        );
+        assert!(
+            is_self_quiesced(&root),
+            "no self-started turn may run ahead of the prompt"
+        );
+        assert!(
+            unpark(&root).is_none(),
+            "an explicit unpark leaves an implicit one to the prompt"
+        );
+        assert!(
+            !owe(&root, |o| o.title_refresh = true),
+            "nothing is owed once unparking"
+        );
         finish_unpark_on_prompt(&root, "client-1");
         assert!(!is_self_quiesced(&root));
     }
-
 
     /// Astra r1 #12: a root's cancel record goes with the root.
     #[test]
@@ -999,7 +1075,10 @@ mod tests {
             assert_eq!(cancel_generation(&root), 1);
             assert!(lock().cancel_generation.contains_key(&root));
         }
-        assert!(!lock().cancel_generation.contains_key(&root), "the root's cancel record outlived it");
+        assert!(
+            !lock().cancel_generation.contains_key(&root),
+            "the root's cancel record outlived it"
+        );
     }
 
     /// F3: the owed-work recorder runs only for the park that still owns the entry.
@@ -1008,27 +1087,48 @@ mod tests {
         let root = sid("owed-op");
         let _r = SessionGuard::new(&root, None);
         let p = begin_park(&root, ParkMode::Hold).expect("park");
-        let park = ParkOp { session: root.as_str().into(), op: p };
+        let park = ParkOp {
+            session: root.as_str().into(),
+            op: p,
+        };
         assert!(with_current_owed(&park, |owed| owed.title_refresh = true));
         assert!(withdraw(&root, p).is_some());
         let q = begin_park(&root, ParkMode::Hold).expect("replacement");
-        assert!(!with_current_owed(&park, |owed| owed.title_refresh = true), "a stale op ran");
-        assert!(!entry(&root).expect("Q").owed.title_refresh, "P's debt leaked into Q");
+        assert!(
+            !with_current_owed(&park, |owed| owed.title_refresh = true),
+            "a stale op ran"
+        );
+        assert!(
+            !entry(&root).expect("Q").owed.title_refresh,
+            "P's debt leaked into Q"
+        );
         assert_ne!(p, q);
     }
-
 
     /// F8: A -> B -> A while parked owes nothing; A -> B -> C keeps the first origin and owes one compaction.
     #[test]
     fn a_reverted_family_switch_owes_nothing() {
         let mut owed = OwedWork::default();
         owed.note_model_switch(true, Some("a".into()), "b");
-        assert_eq!(owed.family_switch_compact, Some(FamilyDebt { origin_family: "a".into() }));
+        assert_eq!(
+            owed.family_switch_compact,
+            Some(FamilyDebt {
+                origin_family: "a".into()
+            })
+        );
         owed.note_model_switch(true, Some("b".into()), "a");
-        assert_eq!(owed.family_switch_compact, None, "the model is back in its origin family");
+        assert_eq!(
+            owed.family_switch_compact, None,
+            "the model is back in its origin family"
+        );
         owed.note_model_switch(true, Some("a".into()), "b");
         owed.note_model_switch(true, Some("b".into()), "c");
-        assert_eq!(owed.family_switch_compact, Some(FamilyDebt { origin_family: "a".into() }));
+        assert_eq!(
+            owed.family_switch_compact,
+            Some(FamilyDebt {
+                origin_family: "a".into()
+            })
+        );
     }
 
     /// F8: the debt stores no context window, so the compaction can only use the window current when it runs.
@@ -1038,9 +1138,13 @@ mod tests {
         owed.note_model_switch(true, Some("a".into()), "b");
         owed.note_model_switch(false, Some("b".into()), "b2");
         // The whole debt is the origin family: nothing about any window survives to be stale.
-        assert_eq!(owed.family_switch_compact, Some(FamilyDebt { origin_family: "a".into() }));
+        assert_eq!(
+            owed.family_switch_compact,
+            Some(FamilyDebt {
+                origin_family: "a".into()
+            })
+        );
     }
-
 
     /// Grok r4 #4/#8: a release for park P that runs while park Q holds hands its owed work (including the
     /// family debt) to Q; with no park, or with its own park op, it runs the work itself.
@@ -1050,14 +1154,26 @@ mod tests {
         let owed = || OwedWork {
             turn_summary: Some("p-1".into()),
             title_refresh: true,
-            family_switch_compact: Some(FamilyDebt { origin_family: "a".into() }),
+            family_switch_compact: Some(FamilyDebt {
+                origin_family: "a".into(),
+            }),
         };
-        assert!(hand_over_owed(&id, 1, owed()).is_err(), "no park: the release runs its own work");
+        assert!(
+            hand_over_owed(&id, 1, owed()).is_err(),
+            "no park: the release runs its own work"
+        );
         let q = begin_park(&id, ParkMode::Hold).expect("park Q");
-        assert!(hand_over_owed(&id, q, owed()).is_err(), "Q's own release is not stale");
+        assert!(
+            hand_over_owed(&id, q, owed()).is_err(),
+            "Q's own release is not stale"
+        );
         assert!(hand_over_owed(&id, q + 1000, owed()).is_ok());
         let entry = entry(&id).expect("Q");
-        assert_eq!(entry.owed, owed(), "the debt and the deferred work moved to Q");
+        assert_eq!(
+            entry.owed,
+            owed(),
+            "the debt and the deferred work moved to Q"
+        );
         unpark(&id);
     }
 
@@ -1079,14 +1195,25 @@ mod tests {
         let root = format!("p189a2-root-{}", uuid::Uuid::new_v4());
         let child = format!("p189a2-child-{}", uuid::Uuid::new_v4());
         let _guard = SessionGuard::new(&child, Some(&root));
-        assert!(!is_tree_holding(&child) && !is_ancestor_holding(&child) && !is_tree_holding(&root));
+        assert!(
+            !is_tree_holding(&child) && !is_ancestor_holding(&child) && !is_tree_holding(&root)
+        );
         let op = begin_park(&root, ParkMode::Hold).expect("park");
-        assert!(is_tree_holding(&root) && !is_ancestor_holding(&root), "Parking holds the root itself");
-        assert!(is_tree_holding(&child) && is_ancestor_holding(&child), "Parking root holds its child");
+        assert!(
+            is_tree_holding(&root) && !is_ancestor_holding(&root),
+            "Parking holds the root itself"
+        );
+        assert!(
+            is_tree_holding(&child) && is_ancestor_holding(&child),
+            "Parking root holds its child"
+        );
         assert!(complete_park(&root, op));
         assert!(is_ancestor_holding(&child));
         assert!(begin_implicit_unpark(&root, op).is_some());
-        assert!(!is_tree_holding(&root) && !is_ancestor_holding(&child), "Unparking holds nothing");
+        assert!(
+            !is_tree_holding(&root) && !is_ancestor_holding(&child),
+            "Unparking holds nothing"
+        );
         finish_unpark(&root, op);
         assert!(!is_ancestor_holding(&child));
     }
@@ -1096,7 +1223,9 @@ mod tests {
     fn a_session_that_never_parks_is_untouched_by_the_park_hooks() {
         let id = format!("p189a2-never-{}", uuid::Uuid::new_v4());
         finish_unpark_on_prompt(&id, "client-1");
-        assert!(!owe(&id, |_| panic!("owe ran for a session that is not parked")));
+        assert!(!owe(&id, |_| panic!(
+            "owe ran for a session that is not parked"
+        )));
         assert!(withdraw(&id, 1).is_none() && unpark(&id).is_none() && entry(&id).is_none());
         assert!(!is_self_quiesced(&id) && !is_parked(&id) && parked_root(&id).is_none());
         assert_eq!(cancel_generation(&id), 0);
@@ -1106,7 +1235,11 @@ mod tests {
         assert_eq!(last_turn_summary_prompt(&id).as_deref(), Some("prompt-1"));
         // The only state `note_turn_summary` leaves is cleared with the session.
         drop(SessionGuard::new(&id, None));
-        assert_eq!(last_turn_summary_prompt(&id), None, "SessionGuard drop must clear the summary record");
+        assert_eq!(
+            last_turn_summary_prompt(&id),
+            None,
+            "SessionGuard drop must clear the summary record"
+        );
     }
 
     /// Round 3 #3: a fire noted before the transition rides that release; one after it sees no holding park.
@@ -1118,7 +1251,10 @@ mod tests {
         assert!(fold_fire_if_holding(&id, "before".into()));
         let taken = begin_implicit_unpark(&id, op).expect("unpark");
         assert_eq!(taken.fires.into_texts(), vec!["before".to_owned()]);
-        assert!(!fold_fire_if_holding(&id, "after".into()), "a fire folded into an Unparking entry would be lost");
+        assert!(
+            !fold_fire_if_holding(&id, "after".into()),
+            "a fire folded into an Unparking entry would be lost"
+        );
         assert!(finish_unpark(&id, op));
         assert!(!fold_fire_if_holding(&id, "gone".into()));
     }
@@ -1131,14 +1267,22 @@ mod tests {
         assert!(fold_fire_if_holding(&id, "parking".into()));
         assert!(complete_park(&id, op));
         assert!(fold_fire_if_holding(&id, "parked".into()));
-        assert_eq!(unpark(&id).unwrap().fires.into_texts(), vec!["parking".to_owned(), "parked".to_owned()]);
+        assert_eq!(
+            unpark(&id).unwrap().fires.into_texts(),
+            vec!["parking".to_owned(), "parked".to_owned()]
+        );
         let op = begin_park(&id, ParkMode::Hold).unwrap();
         assert!(fold_fire_if_holding(&id, "stale".into()));
-        drop(SessionGuard { session_id: id.clone() });
+        drop(SessionGuard {
+            session_id: id.clone(),
+        });
         assert!(entry(&id).is_none());
         let again = begin_park(&id, ParkMode::Hold).unwrap();
         assert_ne!(op, again);
-        assert!(unpark(&id).unwrap().fires.into_texts().is_empty(), "a new park inherited an old session's fires");
+        assert!(
+            unpark(&id).unwrap().fires.into_texts().is_empty(),
+            "a new park inherited an old session's fires"
+        );
     }
 
     /// Round 3 #2: a child of a held root folds into the root's entry.
@@ -1146,11 +1290,17 @@ mod tests {
     fn a_child_fire_folds_into_the_holding_root() {
         let (root, child) = (sid("fold-root"), sid("fold-child"));
         let _link = SessionGuard::new(&child, Some(&root));
-        assert!(!fold_fire_if_holding(&child, "none".into()), "no park: normal path");
+        assert!(
+            !fold_fire_if_holding(&child, "none".into()),
+            "no park: normal path"
+        );
         let op = begin_park(&root, ParkMode::Hold).unwrap();
         assert!(complete_park(&root, op));
         assert!(fold_fire_if_holding(&child, "child job".into()));
-        assert_eq!(unpark(&root).unwrap().fires.into_texts(), vec!["child job".to_owned()]);
+        assert_eq!(
+            unpark(&root).unwrap().fires.into_texts(),
+            vec!["child job".to_owned()]
+        );
     }
 
     /// Round 3 #4: the folded fires are capped by count and by bytes; the newest are kept and one line says how
@@ -1165,7 +1315,10 @@ mod tests {
         assert_eq!(texts.len(), MAX_FOLDED_FIRES + 1);
         assert_eq!(texts[0], "(5 earlier scheduled prompts were dropped)");
         assert_eq!(texts[1], "fire 5");
-        assert_eq!(texts.last().unwrap(), &format!("fire {}", MAX_FOLDED_FIRES + 4));
+        assert_eq!(
+            texts.last().unwrap(),
+            &format!("fire {}", MAX_FOLDED_FIRES + 4)
+        );
 
         let mut fires = FoldedFires::default();
         let big = "x".repeat(MAX_FOLDED_FIRE_BYTES / 2 + 1);
@@ -1180,18 +1333,4 @@ mod tests {
         fires.push("é".repeat(MAX_FOLDED_FIRE_BYTES));
         assert!(fires.into_texts()[0].len() <= MAX_FOLDED_FIRE_BYTES);
     }
-}
-
-/// Every prompt gate governing a child's dispatch, starting with its own.
-pub(crate) fn ancestors_including_self(session_id: &str) -> Vec<String> {
-    let inner = lock();
-    let mut current = session_id;
-    let mut ids = vec![current.to_owned()];
-    for _ in 0..MAX_DEPTH {
-        let Some(parent) = inner.parents.get(current) else { break; };
-        if ids.contains(parent) { break; }
-        ids.push(parent.clone());
-        current = parent;
-    }
-    ids
 }

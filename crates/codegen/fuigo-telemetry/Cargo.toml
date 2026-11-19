@@ -26,7 +26,7 @@ tracing-subscriber = { workspace = true, features = [
     "time",
 ] }
 chrono = { workspace = true }
-git2 = { version = "0.20", default-features = false, features = [
+git2 = { version = "0.21", default-features = false, features = [
     "vendored-libgit2",
 ] }
 reqwest = { workspace = true }

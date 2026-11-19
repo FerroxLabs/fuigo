@@ -31,10 +31,7 @@ use tokio::time::Duration;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{info, warn};
 
-use fuigo_acp_lib::{
-    AcpAgentGatewaySender as GatewaySender,
-    AcpClientMessage,
-};
+use fuigo_acp_lib::{AcpAgentGatewaySender as GatewaySender, AcpClientMessage};
 
 use crate::agent::config::{Config as AgentConfig, ModelEntry};
 use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
@@ -124,9 +121,7 @@ pub(crate) struct WsQueryParams {
 /// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
 impl std::fmt::Debug for WsQueryParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            server_key,
-        } = self;
+        let Self { server_key } = self;
         f.debug_struct("WsQueryParams")
             .field("server_key", &server_key.as_ref().map(|_| "<redacted>"))
             .finish()
@@ -162,7 +157,11 @@ fn secret_matches(presented: &str, expected_secret: &str) -> bool {
     }
     let presented = Sha256::digest(presented.as_bytes());
     let expected = Sha256::digest(expected_secret.as_bytes());
-    presented.iter().zip(expected.iter()).fold(0u8, |differ, (a, b)| differ | (a ^ b)) == 0
+    presented
+        .iter()
+        .zip(expected.iter())
+        .fold(0u8, |differ, (a, b)| differ | (a ^ b))
+        == 0
 }
 
 /// The 401 for a failed handshake, sent after [`FAILED_AUTH_DELAY`].
@@ -579,9 +578,10 @@ fn setup_acp_connection(
     tokio::task::spawn_local(
         fuigo_acp_lib::AcpGatewayReceiver::<agent_client_protocol::AgentSide, _>::new(
             conn_gw_rx,
-            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold))
-            .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)
-            .run(),
+            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold),
+        )
+        .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)
+        .run(),
     );
 
     tokio::task::spawn_local(async move {

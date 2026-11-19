@@ -52,7 +52,9 @@ pub(crate) fn handle_mcp_elicit(
         if waiting && agent.pending_elicitation.is_none() {
             agent.pending_elicitation = Some((ext_req, ext.response_tx));
         } else {
-            agent.queued_elicitations.push_back((ext_req, ext.response_tx));
+            agent
+                .queued_elicitations
+                .push_back((ext_req, ext.response_tx));
         }
         return is_active;
     }

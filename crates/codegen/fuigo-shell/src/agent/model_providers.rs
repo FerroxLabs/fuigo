@@ -72,13 +72,28 @@ impl std::fmt::Debug for ModelProviderConfig {
         } = self;
         f.debug_struct("ModelProviderConfig")
             .field("base_url", &base_url.as_deref().map(fuigo_auth::redact_url))
-            .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field(
+                "api_base_url",
+                &api_base_url.as_deref().map(fuigo_auth::redact_url),
+            )
             .field("env_key", env_key)
             .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
             .field("api_backend", api_backend)
             .field("auth_scheme", auth_scheme)
-            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
-            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_headers",
+                &extra_headers
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "query_params",
+                &query_params
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("env_http_headers", env_http_headers)
             .field("auth_provider", auth_provider)
             .field("auth", auth)
@@ -1429,12 +1444,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }
@@ -1445,14 +1466,30 @@ mod p70_redacted_debug {
     fn shell_credential_configs_debug_redact() {
         let provider = ModelProviderConfig {
             api_key: Some("p70pk-FAKE-3a4b5c6d".into()),
-            extra_headers: [("x-api-key".to_owned(), "p70ph-FAKE-7e8f9a0b".to_owned())].into_iter().collect(),
-            query_params: [("key".to_owned(), "p70pq-FAKE-1c2d3e4f".to_owned())].into_iter().collect(),
+            extra_headers: [("x-api-key".to_owned(), "p70ph-FAKE-7e8f9a0b".to_owned())]
+                .into_iter()
+                .collect(),
+            query_params: [("key".to_owned(), "p70pq-FAKE-1c2d3e4f".to_owned())]
+                .into_iter()
+                .collect(),
             ..ModelProviderConfig::default()
         };
-        assert_redacted(&provider, &["p70pk-FAKE-3a4b5c6d", "p70ph-FAKE-7e8f9a0b", "p70pq-FAKE-1c2d3e4f"]);
+        assert_redacted(
+            &provider,
+            &[
+                "p70pk-FAKE-3a4b5c6d",
+                "p70ph-FAKE-7e8f9a0b",
+                "p70pq-FAKE-1c2d3e4f",
+            ],
+        );
         let over = crate::agent::config::ConfigModelOverride {
             api_key: Some("p70ok-FAKE-5a6b7c8d".into()),
-            extra_headers: [("authorization".to_owned(), "Bearer p70oh-FAKE-9e0f1a2b".to_owned())].into_iter().collect(),
+            extra_headers: [(
+                "authorization".to_owned(),
+                "Bearer p70oh-FAKE-9e0f1a2b".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
             ..Default::default()
         };
         assert_redacted(&over, &["p70ok-FAKE-5a6b7c8d", "p70oh-FAKE-9e0f1a2b"]);
@@ -1464,7 +1501,9 @@ mod p70_redacted_debug {
             trace_upload_credentials: Some("p70et-FAKE-9a0b1c2d".into()),
             gcs_service_account_key: Some("p70eg-FAKE-3e4f5a6b".into()),
             fuigo_internal_otlp_headers: Some("x=p70ei-FAKE-7c8d9e0f".into()),
-            models_base_url: Some("https://p70u:p70eu-FAKE-2d3e4f5a@p70.invalid/v1?k=p70eq-FAKE-6b7c8d9e".into()),
+            models_base_url: Some(
+                "https://p70u:p70eu-FAKE-2d3e4f5a@p70.invalid/v1?k=p70eq-FAKE-6b7c8d9e".into(),
+            ),
             ..Default::default()
         };
         assert_redacted(
@@ -1499,12 +1538,13 @@ mod p70_redacted_debug {
         };
         assert_redacted(&outcome, &["p70tk-FAKE-3d4e5f6a", "p70tr-FAKE-7b8c9d0e"]);
         // P70a (Astra r1): a pre-signed download URL is a bearer capability.
-        let download: crate::agent::session_registry_client::DownloadResponse = serde_json::from_value(serde_json::json!({
-            "downloadUrl": "https://storage.p70.invalid/o?X-Goog-Signature=p70dl-FAKE-9a0b1c2d",
-            "file": "p70.jsonl",
-            "turn": 1,
-        }))
-        .expect("download response");
+        let download: crate::agent::session_registry_client::DownloadResponse =
+            serde_json::from_value(serde_json::json!({
+                "downloadUrl": "https://storage.p70.invalid/o?X-Goog-Signature=p70dl-FAKE-9a0b1c2d",
+                "file": "p70.jsonl",
+                "turn": 1,
+            }))
+            .expect("download response");
         assert_redacted(&download, &["p70dl-FAKE-9a0b1c2d", "storage.p70.invalid"]);
         let base = crate::agent::config::ConfigModelOverride {
             base_url: Some("https://p70.invalid/v1?key=p70bq-FAKE-1e2f3a4b".into()),
@@ -1596,7 +1636,10 @@ mod context_window_tests {
             "#,
         )
         .unwrap();
-        assert_eq!(windows_of(&raw, "inherits"), (100_000, vec![100_000, 400_000]));
+        assert_eq!(
+            windows_of(&raw, "inherits"),
+            (100_000, vec![100_000, 400_000])
+        );
         assert_eq!(windows_of(&raw, "own-scalar"), (200_000, vec![]));
     }
 
@@ -1748,7 +1791,9 @@ mod context_window_tests {
 mod request_cap_tests {
     use std::num::NonZeroU64;
 
-    use crate::agent::config::{Config, resolve_credentials, resolve_model_list, sampling_config_for_model};
+    use crate::agent::config::{
+        Config, resolve_credentials, resolve_model_list, sampling_config_for_model,
+    };
 
     /// The request-body cap each configured model ends up sending to the sampler, by model key.
     fn caps(raw: &str) -> impl Fn(&str) -> Option<NonZeroU64> {
@@ -1757,8 +1802,15 @@ mod request_cap_tests {
         let resolved = resolve_model_list(&cfg, None);
         move |key: &str| {
             let model = resolved.get(key).expect("model should exist");
-            sampling_config_for_model(model, resolve_credentials(model, None), None, None, None, None)
-                .max_request_bytes
+            sampling_config_for_model(
+                model,
+                resolve_credentials(model, None),
+                None,
+                None,
+                None,
+                None,
+            )
+            .max_request_bytes
         }
     }
 

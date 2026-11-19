@@ -28,7 +28,11 @@ pub struct Config<'a> {
 impl<'a> Config<'a> {
     pub fn scopes_to_string(&self, sep: &str) -> String {
         match self.scopes {
-            Some(s) => s.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(sep),
+            Some(s) => s
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(sep),
             None => EMPTY.to_string(),
         }
     }
@@ -93,7 +97,11 @@ pub async fn project() -> Result<Project, error::Error> {
             if on_gce().await {
                 let project_id = google_cloud_metadata::project_id().await;
                 Ok(Project::FromMetadataServer(ProjectInfo {
-                    project_id: if project_id.is_empty() { None } else { Some(project_id) },
+                    project_id: if project_id.is_empty() {
+                        None
+                    } else {
+                        Some(project_id)
+                    },
                 }))
             } else {
                 Err(e)
@@ -120,7 +128,12 @@ pub async fn create_token_source_from_project(
     match project {
         Project::FromFile(file) => {
             if config.use_id_token {
-                id_token_source_from_credentials(&Default::default(), file, config.audience.unwrap_or_default()).await
+                id_token_source_from_credentials(
+                    &Default::default(),
+                    file,
+                    config.audience.unwrap_or_default(),
+                )
+                .await
             } else {
                 create_token_source_from_credentials(file, &config).await
             }
@@ -194,18 +207,21 @@ async fn credentials_from_json_with_params(
                     .service_account_impersonation
                     .clone()
                     .map(|v| v.token_lifetime_seconds);
-                let ts = crate::token_source::impersonate_token_source::ImpersonateTokenSource::new(
-                    url,
-                    vec![],
-                    scopes,
-                    lifetime,
-                    Box::new(ts),
-                )?;
+                let ts =
+                    crate::token_source::impersonate_token_source::ImpersonateTokenSource::new(
+                        url,
+                        vec![],
+                        scopes,
+                        lifetime,
+                        Box::new(ts),
+                    )?;
                 Ok(Box::new(ts))
             } else {
                 Ok(Box::new(ts))
             }
         }
-        _ => Err(error::Error::UnsupportedAccountType(credentials.tp.to_string())),
+        _ => Err(error::Error::UnsupportedAccountType(
+            credentials.tp.to_string(),
+        )),
     }
 }

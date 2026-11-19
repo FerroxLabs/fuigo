@@ -225,15 +225,25 @@ impl fuigo_tool_runtime::Tool for GlobTool {
 
         // P198 round 3: ripgrep prints an explicit file it is given, so a denied explicit path is refused before it runs.
         if input.path.as_deref().is_some_and(|p| !p.is_empty())
-            && crate::util::read_deny::explicit_search_path_denied(&cwd, &deny_read_globs, &search_dir).await
+            && crate::util::read_deny::explicit_search_path_denied(
+                &cwd,
+                &deny_read_globs,
+                &search_dir,
+            )
+            .await
         {
             return Ok(GlobOutput {
-                tool_output_for_prompt: format!("Error: {} is excluded by a read rule and cannot be searched.", search_dir.display()),
+                tool_output_for_prompt: format!(
+                    "Error: {} is excluded by a read rule and cannot be searched.",
+                    search_dir.display()
+                ),
                 count: 0,
                 total_count: 0,
                 truncated: false,
                 entries: Vec::new(),
-                cwd_for_display: display_cwd_or_cwd(&cwd, display_cwd.as_deref()).display().to_string(),
+                cwd_for_display: display_cwd_or_cwd(&cwd, display_cwd.as_deref())
+                    .display()
+                    .to_string(),
             });
         }
 
@@ -288,7 +298,8 @@ impl fuigo_tool_runtime::Tool for GlobTool {
         let mut stdout_buf = Vec::with_capacity(MAX_STDOUT_BYTES.min(65_536));
         let mut truncated_by_bytes = false;
         if filtering {
-            (stdout_buf, truncated_by_bytes) = read_filtered_capped(&mut child, &mut result_filter).await;
+            (stdout_buf, truncated_by_bytes) =
+                read_filtered_capped(&mut child, &mut result_filter).await;
         } else if let Some(mut stdout_pipe) = child.stdout.take() {
             let mut tmp = [0u8; 8192];
             loop {
@@ -411,7 +422,10 @@ impl fuigo_tool_runtime::Tool for GlobTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -959,7 +973,6 @@ mod tests {
         );
     }
 
-
     /// P198 r2: an empty rule list prints the same bytes as no rule object, and an absolute rule hides what it names.
     #[cfg(unix)]
     #[tokio::test]
@@ -974,7 +987,10 @@ mod tests {
                 fuigo_tool_runtime::Tool::run(
                     &GlobTool,
                     test_ctx(resources.into_shared()),
-                    GlobInput { pattern: "**/*.txt".to_string(), path: None },
+                    GlobInput {
+                        pattern: "**/*.txt".to_string(),
+                        path: None,
+                    },
                 )
                 .await
                 .unwrap()
@@ -990,16 +1006,26 @@ mod tests {
             crate::util::read_deny::fixture::sorted_lines(&empty)
         );
         let abs = run(Some(vec![format!("{}/secrets/**", t.proj.display())])).await;
-        assert!(!abs.contains("key_material.txt") && abs.contains("public.txt"), "{abs}");
+        assert!(
+            !abs.contains("key_material.txt") && abs.contains("public.txt"),
+            "{abs}"
+        );
     }
 
-    async fn glob_text(cwd: std::path::PathBuf, path: Option<String>, deny: Vec<String>) -> (String, usize) {
+    async fn glob_text(
+        cwd: std::path::PathBuf,
+        path: Option<String>,
+        deny: Vec<String>,
+    ) -> (String, usize) {
         let mut resources = test_resources(&cwd);
         resources.insert(crate::types::resources::DenyReadGlobs(deny));
         let out = fuigo_tool_runtime::Tool::run(
             &GlobTool,
             test_ctx(resources.into_shared()),
-            GlobInput { pattern: "**/*".to_string(), path },
+            GlobInput {
+                pattern: "**/*".to_string(),
+                path,
+            },
         )
         .await
         .unwrap();
@@ -1010,8 +1036,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn round4_contract() {
-        crate::util::read_deny::fixture::check_round4(|cwd, path, deny| async move { glob_text(cwd, path, deny).await.0 })
-            .await;
+        crate::util::read_deny::fixture::check_round4(|cwd, path, deny| async move {
+            glob_text(cwd, path, deny).await.0
+        })
+        .await;
     }
 
     /// P198 round 4: the byte cap counts what the filter KEPT: a flood of denied names must not push allowed names out.
@@ -1022,7 +1050,11 @@ mod tests {
         let dir = t.base.join("capped");
         std::fs::create_dir_all(dir.join("secrets")).unwrap();
         for i in 0..400 {
-            std::fs::write(dir.join(format!("secrets/{}-{i:04}.txt", "d".repeat(80))), "x").unwrap();
+            std::fs::write(
+                dir.join(format!("secrets/{}-{i:04}.txt", "d".repeat(80))),
+                "x",
+            )
+            .unwrap();
         }
         for i in 0..3 {
             std::fs::write(dir.join(format!("zz-ok{i}.txt")), "x").unwrap();
@@ -1031,7 +1063,10 @@ mod tests {
         let (out, total) = glob_text(dir.clone(), None, vec!["secrets/**".to_string()]).await;
         STDOUT_CAP_TEST.with(|c| c.set(0));
         for i in 0..3 {
-            assert!(out.contains(&format!("zz-ok{i}.txt")), "allowed name {i} lost to denied bytes: {out}");
+            assert!(
+                out.contains(&format!("zz-ok{i}.txt")),
+                "allowed name {i} lost to denied bytes: {out}"
+            );
         }
         assert_eq!(total, 3, "the total counts only allowed names: {out}");
     }
@@ -1040,8 +1075,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn results_are_post_filtered_by_the_policy_matcher() {
-        crate::util::read_deny::fixture::check_round3(|cwd, path, deny| async move { glob_text(cwd, path, deny).await.0 })
-            .await;
+        crate::util::read_deny::fixture::check_round3(|cwd, path, deny| async move {
+            glob_text(cwd, path, deny).await.0
+        })
+        .await;
         let t = crate::util::read_deny::fixture::tree();
         let (_, all) = glob_text(t.proj.clone(), None, Vec::new()).await;
         let (_, fewer) = glob_text(t.proj.clone(), None, vec!["secrets/**".to_string()]).await;
@@ -1054,10 +1091,20 @@ mod tests {
     async fn glob_of_a_denied_explicit_file_is_refused() {
         let t = crate::util::read_deny::fixture::tree();
         for path in ["secrets/key_material.txt", "keylink"] {
-            let (out, _) = glob_text(t.proj.clone(), Some(path.to_string()), vec!["secrets/**".to_string()]).await;
+            let (out, _) = glob_text(
+                t.proj.clone(),
+                Some(path.to_string()),
+                vec!["secrets/**".to_string()],
+            )
+            .await;
             assert!(out.contains("excluded by a read rule"), "{path}: {out}");
         }
-        let (out, _) = glob_text(t.proj.clone(), Some("public.txt".to_string()), vec!["secrets/**".to_string()]).await;
+        let (out, _) = glob_text(
+            t.proj.clone(),
+            Some("public.txt".to_string()),
+            vec!["secrets/**".to_string()],
+        )
+        .await;
         assert!(out.contains("public.txt"), "{out}");
     }
 }

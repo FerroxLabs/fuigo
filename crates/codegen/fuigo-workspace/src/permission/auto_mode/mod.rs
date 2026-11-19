@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tree_sitter::Node;
 
 use super::bash_command_splitting::{
-    PlainCommand, is_wrapper_command, try_parse_shell,
-    try_parse_word_only_commands_sequence, unwrap_wrappers,
+    PlainCommand, is_wrapper_command, try_parse_shell, try_parse_word_only_commands_sequence,
+    unwrap_wrappers,
 };
 use super::shell_access::{
     command_words_write_paths, command_write_paths_in_tree, is_safe_write_sink,
@@ -467,9 +467,10 @@ impl HeuristicPermissionClassifier {
             | AccessKind::MCPTool { .. }
             | AccessKind::AgentMessage { .. }
             | AccessKind::Tool(_) => ClassifierVerdict::Block,
-            AccessKind::Read(_) | AccessKind::Session | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => {
-                ClassifierVerdict::Allow
-            }
+            AccessKind::Read(_)
+            | AccessKind::Session
+            | AccessKind::Grep { .. }
+            | AccessKind::WebSearch(_) => ClassifierVerdict::Allow,
         }
     }
 }
@@ -663,7 +664,11 @@ fn classify_bash(cmd: &str) -> ClassifierVerdict {
     // Project code-runners (`cargo`/`make`/`pytest`/`python`/`node`, `npm test`/`run`, `uv run <routine>`) run project-controlled code BY DESIGN
     // This heuristic is a fail-closed FALLBACK; the real safety boundary is the LLM side-query and managed policy
     // A word kept as spelled (glob, over-cap brace expansion) is not a proven argv, so it cannot be routine.
-    if !cmds.is_empty() && cmds.iter().all(|c| !c.has_unresolved_word() && bash_command_is_routine(c.words())) {
+    if !cmds.is_empty()
+        && cmds
+            .iter()
+            .all(|c| !c.has_unresolved_word() && bash_command_is_routine(c.words()))
+    {
         return ClassifierVerdict::Allow;
     }
     ClassifierVerdict::Block
@@ -1100,7 +1105,8 @@ fn is_lone_wrapper(words: &[String]) -> bool {
 fn find_is_read_only(words: &[String]) -> bool {
     // `-rm` is bfs's `-delete` (Fuigo's `find` runs bfs).
     const ACTIONS: [&str; 10] = [
-        "-delete", "-rm", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls",
+        "-delete", "-rm", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
+        "-fls",
     ];
     !words.iter().any(|w| ACTIONS.contains(&w.as_str()))
 }
@@ -1144,7 +1150,10 @@ pub type SharedClassifier = Arc<dyn PermissionClassifier>;
 pub fn is_auto_mode_allowlisted_access(access: &AccessKind) -> bool {
     matches!(
         access,
-        AccessKind::Read(_) | AccessKind::Session | AccessKind::Grep { .. } | AccessKind::WebSearch(_)
+        AccessKind::Read(_)
+            | AccessKind::Session
+            | AccessKind::Grep { .. }
+            | AccessKind::WebSearch(_)
     )
 }
 
@@ -1780,7 +1789,14 @@ mod tests {
         }
         // g4 (Astra/Grok r3): bash keeps `\r`, `\u{a0}` and other non-blank whitespace in the program word, so these
         // are not the no-op; they go to the classifier.
-        for cmd in ["true\r", "true\u{a0}", "\u{a0}true", ":\r\n", "false\u{2003}", "\u{feff}true"] {
+        for cmd in [
+            "true\r",
+            "true\u{a0}",
+            "\u{a0}true",
+            ":\r\n",
+            "false\u{2003}",
+            "\u{feff}true",
+        ] {
             assert_eq!(
                 auto_mode_fast_path(&AccessKind::Bash(cmd.into()), "run_terminal_command", false),
                 AutoFastPath::Classify,
@@ -3097,7 +3113,10 @@ mod tests {
             );
         }
         // u35 r3 (plain-text gate): a `cd` is not plain text, so the model's verdict decides.
-        for cmd in ["cd crates && cargo build", "cd /repo && cat .gitignore | grep -n vendored"] {
+        for cmd in [
+            "cd crates && cargo build",
+            "cd /repo && cat .gitignore | grep -n vendored",
+        ] {
             assert_eq!(
                 v(block_all.clone(), cmd).await,
                 ClassifierVerdict::Block,
@@ -3194,7 +3213,11 @@ mod tests {
         };
         // u35 r3 (plain-text gate): directory changes are not plain programs.
         for cmd in ["cd /tmp/project", "pushd crates", "popd"] {
-            assert_eq!(v(cmd), ClassifierVerdict::Block, "`{cmd}` must go to the model");
+            assert_eq!(
+                v(cmd),
+                ClassifierVerdict::Block,
+                "`{cmd}` must go to the model"
+            );
         }
         for cmd in [
             "git blame src/main.rs",

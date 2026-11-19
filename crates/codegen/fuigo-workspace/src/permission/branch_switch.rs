@@ -44,7 +44,13 @@ pub(crate) struct TreeRef {
 
 impl TreeRef {
     pub(crate) fn new(rev: impl Into<String>, required: bool) -> Self {
-        Self { rev: rev.into(), required, guess_remote: false, na_if_absent: false, unborn_ok: false }
+        Self {
+            rev: rev.into(),
+            required,
+            guess_remote: false,
+            na_if_absent: false,
+            unborn_ok: false,
+        }
     }
 }
 
@@ -137,7 +143,10 @@ fn is_pseudo_rev(rev: &str) -> bool {
 pub(crate) enum ProbeResolution {
     /// No work tree to rewrite (`bare`), or not a repository / not told (`bare` false: undetermined).
     NoWorkTree { bare: bool },
-    WorkTree { root: PathBuf, listings: Vec<TreeListing> },
+    WorkTree {
+        root: PathBuf,
+        listings: Vec<TreeListing>,
+    },
 }
 
 /// Whether the floor must be KEPT: some tree involved tracks a protected name, or that cannot be determined.
@@ -145,7 +154,9 @@ pub(crate) fn plan_keeps_floor(plan: &BranchSwitchPlan, lister: &dyn TreeLister)
     match plan {
         BranchSwitchPlan::NotApplicable => false,
         BranchSwitchPlan::Undetermined => true,
-        BranchSwitchPlan::Probe(probes) => probes.iter().any(|probe| probe_keeps_floor(probe, lister)),
+        BranchSwitchPlan::Probe(probes) => {
+            probes.iter().any(|probe| probe_keeps_floor(probe, lister))
+        }
     }
 }
 
@@ -190,7 +201,10 @@ fn per_tree_listings(probe: &TreeProbe, lister: &dyn TreeLister) -> Vec<TreeList
             .iter()
             .map(|tree| scope.spawn(move || names_with_remote_guess(lister, &probe.cwd, tree)))
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or(TreeListing::Undetermined)).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(TreeListing::Undetermined))
+            .collect()
     })
 }
 
@@ -257,7 +271,16 @@ impl TreeLister for GitTreeLister {
         };
         // Replace refs: the real command may see a replaced object where this check (told to ignore replacements)
         // sees the original. When any replace ref exists, list both and judge the union.
-        match run_git(cwd, &["for-each-ref", "--count=1", "--format=%(refname)", "refs/replace/"], 4096) {
+        match run_git(
+            cwd,
+            &[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                "refs/replace/",
+            ],
+            4096,
+        ) {
             None => return TreeListing::Undetermined,
             Some(out) if out.is_empty() => {}
             Some(_) => match list_tree(cwd, rev, false) {
@@ -281,7 +304,11 @@ impl TreeLister for GitTreeLister {
             return RemoteMatch::Undetermined;
         }
         let pattern = format!("refs/remotes/*/{name}");
-        let Some(out) = run_git(cwd, &["for-each-ref", "--format=%(refname)", &pattern], 1024 * 1024) else {
+        let Some(out) = run_git(
+            cwd,
+            &["for-each-ref", "--format=%(refname)", &pattern],
+            1024 * 1024,
+        ) else {
             return RemoteMatch::Undetermined;
         };
         let Ok(text) = String::from_utf8(out) else {
@@ -289,7 +316,9 @@ impl TreeLister for GitTreeLister {
         };
         // `*` also matches `/`: keep only `refs/remotes/<remote>/<name>` with the remote one path component.
         let mut found = text.lines().filter(|line| {
-            line.strip_prefix("refs/remotes/").and_then(|rest| rest.split_once('/')).is_some_and(|(_, tail)| tail == name)
+            line.strip_prefix("refs/remotes/")
+                .and_then(|rest| rest.split_once('/'))
+                .is_some_and(|(_, tail)| tail == name)
         });
         match (found.next(), found.next()) {
             (None, _) => RemoteMatch::None,
@@ -310,14 +339,20 @@ impl GitTreeLister {
         let batch: Vec<usize> = (0..probe.trees.len())
             .filter(|&i| {
                 let rev = &probe.trees[i].rev;
-                !is_pseudo_rev(rev) && !rev.is_empty() && !rev.starts_with('-') && !rev.contains(['\n', '\r', '\0'])
+                !is_pseudo_rev(rev)
+                    && !rev.is_empty()
+                    && !rev.starts_with('-')
+                    && !rev.contains(['\n', '\r', '\0'])
             })
             .collect();
         let revs: Vec<&str> = batch.iter().map(|&i| probe.trees[i].rev.as_str()).collect();
         let (discovery, resolved) = std::thread::scope(|scope| {
             let a = scope.spawn(|| discover(cwd));
             let c = scope.spawn(|| resolve_revs(cwd, &revs, true));
-            (a.join().unwrap_or(Discovery::Unknown), c.join().unwrap_or_default())
+            (
+                a.join().unwrap_or(Discovery::Unknown),
+                c.join().unwrap_or_default(),
+            )
         });
         let (root, replaced) = match discovery {
             Discovery::Root { root, replaced } => (root, replaced),
@@ -325,10 +360,18 @@ impl GitTreeLister {
             Discovery::Unknown => return ProbeResolution::NoWorkTree { bare: false },
         };
         let unresolved = |revs: &[&str]| vec![Resolved::Unknown; revs.len()];
-        let mut views = vec![if resolved.len() == revs.len() { resolved } else { unresolved(&revs) }];
+        let mut views = vec![if resolved.len() == revs.len() {
+            resolved
+        } else {
+            unresolved(&revs)
+        }];
         if replaced {
             let second = resolve_revs(cwd, &revs, false);
-            views.push(if second.len() == revs.len() { second } else { unresolved(&revs) });
+            views.push(if second.len() == revs.len() {
+                second
+            } else {
+                unresolved(&revs)
+            });
         }
         // Jobs: the distinct (tree id, replacement view) pairs, plus the work tree when asked for.
         let mut jobs: Vec<(String, bool)> = Vec::new();
@@ -343,21 +386,41 @@ impl GitTreeLister {
             }
         }
         let pseudo: Vec<&str> = {
-            let mut v: Vec<&str> = probe.trees.iter().map(|t| t.rev.as_str()).filter(|r| is_pseudo_rev(r)).collect();
+            let mut v: Vec<&str> = probe
+                .trees
+                .iter()
+                .map(|t| t.rev.as_str())
+                .filter(|r| is_pseudo_rev(r))
+                .collect();
             v.dedup();
             v
         };
         let (tree_results, worktree) = std::thread::scope(|scope| {
-            let handles: Vec<_> = jobs.iter().map(|(sha, no_replace)| scope.spawn(move || list_tree_id(cwd, sha, *no_replace))).collect();
-            let w: Vec<_> = pseudo.iter().map(|rev| (*rev, scope.spawn(move || list_pseudo(cwd, rev)))).collect();
-            let results: Vec<TreeListing> = handles.into_iter().map(|h| h.join().unwrap_or(TreeListing::Undetermined)).collect();
-            let w: Vec<(&str, TreeListing)> = w.into_iter().map(|(r, h)| (r, h.join().unwrap_or(TreeListing::Undetermined))).collect();
+            let handles: Vec<_> = jobs
+                .iter()
+                .map(|(sha, no_replace)| scope.spawn(move || list_tree_id(cwd, sha, *no_replace)))
+                .collect();
+            let w: Vec<_> = pseudo
+                .iter()
+                .map(|rev| (*rev, scope.spawn(move || list_pseudo(cwd, rev))))
+                .collect();
+            let results: Vec<TreeListing> = handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or(TreeListing::Undetermined))
+                .collect();
+            let w: Vec<(&str, TreeListing)> = w
+                .into_iter()
+                .map(|(r, h)| (r, h.join().unwrap_or(TreeListing::Undetermined)))
+                .collect();
             (results, w)
         });
         let mut listings = Vec::with_capacity(probe.trees.len());
         for (i, tree) in probe.trees.iter().enumerate() {
             if is_pseudo_rev(&tree.rev) {
-                let found = worktree.iter().find(|(r, _)| *r == tree.rev.as_str()).map(|(_, l)| l.clone());
+                let found = worktree
+                    .iter()
+                    .find(|(r, _)| *r == tree.rev.as_str())
+                    .map(|(_, l)| l.clone());
                 listings.push(found.unwrap_or(TreeListing::Undetermined));
                 continue;
             }
@@ -389,8 +452,15 @@ enum Discovery {
 }
 
 fn discover(cwd: &Path) -> Discovery {
-    let args = ["rev-parse", "--is-bare-repository", "--show-toplevel", "--glob=refs/replace/*"];
-    let Some(done) = hardened_git_command(cwd, &args).and_then(|c| run_command(c, None, 1024 * 1024)) else {
+    let args = [
+        "rev-parse",
+        "--is-bare-repository",
+        "--show-toplevel",
+        "--glob=refs/replace/*",
+    ];
+    let Some(done) =
+        hardened_git_command(cwd, &args).and_then(|c| run_command(c, None, 1024 * 1024))
+    else {
         return Discovery::Unknown;
     };
     let Some(Ok(text)) = done.out.map(String::from_utf8) else {
@@ -405,9 +475,14 @@ fn discover(cwd: &Path) -> Discovery {
         (Some(0), Some("false"), Some(root)) if !root.is_empty() => {
             let rest: Vec<&str> = lines.collect();
             let replaced = !rest.is_empty();
-            let well_formed = rest.iter().all(|l| (l.len() == 40 || l.len() == 64) && l.bytes().all(|b| b.is_ascii_hexdigit()));
+            let well_formed = rest.iter().all(|l| {
+                (l.len() == 40 || l.len() == 64) && l.bytes().all(|b| b.is_ascii_hexdigit())
+            });
             if well_formed {
-                Discovery::Root { root: PathBuf::from(root), replaced }
+                Discovery::Root {
+                    root: PathBuf::from(root),
+                    replaced,
+                }
             } else {
                 Discovery::Unknown
             }
@@ -432,7 +507,9 @@ fn resolve_revs(cwd: &Path, revs: &[&str], no_replace: bool) -> Vec<Resolved> {
         if no_replace {
             args.insert(0, "--no-replace-objects");
         }
-        let Some(done) = hardened_git_command(cwd, &args).and_then(|c| run_command(c, Some(input), 1024 * 1024)) else {
+        let Some(done) =
+            hardened_git_command(cwd, &args).and_then(|c| run_command(c, Some(input), 1024 * 1024))
+        else {
             return Vec::new();
         };
         let Some(Ok(text)) = done.out.map(String::from_utf8) else {
@@ -446,7 +523,12 @@ fn resolve_revs(cwd: &Path, revs: &[&str], no_replace: bool) -> Vec<Resolved> {
             Some(128) if lines.len().is_multiple_of(2) && complete < rest.len() => {}
             _ => return Vec::new(),
         }
-        out.extend(rest.iter().take(complete).enumerate().map(|(i, rev)| classify(rev, lines[2 * i], lines[2 * i + 1])));
+        out.extend(
+            rest.iter()
+                .take(complete)
+                .enumerate()
+                .map(|(i, rev)| classify(rev, lines[2 * i], lines[2 * i + 1])),
+        );
         if complete < rest.len() {
             out.push(Resolved::NotPresent);
         }
@@ -455,7 +537,8 @@ fn resolve_revs(cwd: &Path, revs: &[&str], no_replace: bool) -> Vec<Resolved> {
 }
 
 fn classify(rev: &str, first: &str, second: &str) -> Resolved {
-    let is_hex_id = |s: &str| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let is_hex_id =
+        |s: &str| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit());
     // `<rev> missing`: the NAME does not resolve (an existing name whose object is gone prints the object id).
     if first == format!("{rev} missing") && !is_hex_id(rev) {
         return Resolved::NotPresent;
@@ -464,8 +547,16 @@ fn classify(rev: &str, first: &str, second: &str) -> Resolved {
     let named = matches!((parts.next(), parts.next(), parts.next(), parts.next()), (Some(id), Some(kind), Some(size), None)
         if is_hex_id(id) && matches!(kind, "commit" | "tag" | "tree") && size.bytes().all(|b| b.is_ascii_digit()));
     let mut parts = second.split(' ');
-    match (named, parts.next(), parts.next(), parts.next(), parts.next()) {
-        (true, Some(id), Some("tree"), Some(size), None) if is_hex_id(id) && size.bytes().all(|b| b.is_ascii_digit()) => {
+    match (
+        named,
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (true, Some(id), Some("tree"), Some(size), None)
+            if is_hex_id(id) && size.bytes().all(|b| b.is_ascii_digit()) =>
+        {
             Resolved::Tree(id.to_owned())
         }
         _ => Resolved::Unknown,
@@ -473,7 +564,12 @@ fn classify(rev: &str, first: &str, second: &str) -> Resolved {
 }
 
 /// One tree's listing from the views (first = `--no-replace-objects`, second = with replacements) and the job results.
-fn combine(views: &[Vec<Resolved>], position: usize, jobs: &[(String, bool)], results: &[TreeListing]) -> TreeListing {
+fn combine(
+    views: &[Vec<Resolved>],
+    position: usize,
+    jobs: &[(String, bool)],
+    results: &[TreeListing],
+) -> TreeListing {
     let first = &views[0][position];
     let mut all = Vec::new();
     for (view_index, view) in views.iter().enumerate() {
@@ -493,7 +589,11 @@ fn combine(views: &[Vec<Resolved>], position: usize, jobs: &[(String, bool)], re
             _ => return TreeListing::Undetermined,
         }
     }
-    if matches!(first, Resolved::NotPresent) { TreeListing::NotPresent } else { TreeListing::Listed(all) }
+    if matches!(first, Resolved::NotPresent) {
+        TreeListing::NotPresent
+    } else {
+        TreeListing::Listed(all)
+    }
 }
 
 /// Every path of a tree object (a tree id from a batch resolve, so no second resolve).
@@ -503,9 +603,13 @@ fn list_tree_id(cwd: &Path, sha: &str, no_replace: bool) -> TreeListing {
         args.insert(0, "--no-replace-objects");
     }
     match run_git_outcome(cwd, &args, MAX_LISTING_BYTES) {
-        GitRun::Output(listing) => {
-            TreeListing::Listed(listing.split(|b| *b == 0).filter(|name| !name.is_empty()).map(<[u8]>::to_vec).collect())
-        }
+        GitRun::Output(listing) => TreeListing::Listed(
+            listing
+                .split(|b| *b == 0)
+                .filter(|name| !name.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect(),
+        ),
         _ => TreeListing::Undetermined,
     }
 }
@@ -514,9 +618,22 @@ fn list_tree_id(cwd: &Path, sha: &str, no_replace: bool) -> TreeListing {
 /// untracked, not-ignored ones; `:untracked-all` every untracked file, ignored included.
 fn list_pseudo(cwd: &Path, rev: &str) -> TreeListing {
     let args: &[&str] = match rev {
-        UNTRACKED_REV => &["ls-files", "-z", "--others", "--exclude-standard", "--full-name"],
+        UNTRACKED_REV => &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+        ],
         UNTRACKED_ALL_REV => &["ls-files", "-z", "--others", "--full-name"],
-        _ => &["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--full-name"],
+        _ => &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+        ],
     };
     list_ls_files(cwd, args)
 }
@@ -524,19 +641,33 @@ fn list_pseudo(cwd: &Path, rev: &str) -> TreeListing {
 /// Index plus untracked, not-ignored files (paths relative to the repository root).
 fn list_ls_files(cwd: &Path, args: &[&str]) -> TreeListing {
     match run_git_outcome(cwd, args, MAX_LISTING_BYTES) {
-        GitRun::Output(listing) => {
-            TreeListing::Listed(listing.split(|b| *b == 0).filter(|name| !name.is_empty()).map(<[u8]>::to_vec).collect())
-        }
+        GitRun::Output(listing) => TreeListing::Listed(
+            listing
+                .split(|b| *b == 0)
+                .filter(|name| !name.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect(),
+        ),
         _ => TreeListing::Undetermined,
     }
 }
 
 /// `git config --type=bool --get-regexp` for the two submodule-recursion keys, with the user's global and system
 /// config visible (reading config executes nothing). True at any level, or any failure: `None`/`Some(true)`.
-pub(crate) fn submodule_recursion_with_home(cwd: &Path, home: Option<&std::ffi::OsStr>) -> Option<bool> {
-    let args = ["config", "--type=bool", "--get-regexp", r"^(submodule\.recurse|checkout\.recursesubmodules)$"];
+pub(crate) fn submodule_recursion_with_home(
+    cwd: &Path,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<bool> {
+    let args = [
+        "config",
+        "--type=bool",
+        "--get-regexp",
+        r"^(submodule\.recurse|checkout\.recursesubmodules)$",
+    ];
     let mut command = hardened_git_command(cwd, &args)?;
-    command.env_remove("GIT_CONFIG_NOSYSTEM").env_remove("GIT_CONFIG_GLOBAL");
+    command
+        .env_remove("GIT_CONFIG_NOSYSTEM")
+        .env_remove("GIT_CONFIG_GLOBAL");
     if let Some(home) = home {
         command.env("HOME", home);
     }
@@ -549,7 +680,10 @@ pub(crate) fn submodule_recursion_with_home(cwd: &Path, home: Option<&std::ffi::
         (Some(1), _) => Some(false),
         (Some(0), Some(out)) => {
             let text = String::from_utf8(out).ok()?;
-            Some(text.lines().any(|line| line.rsplit(' ').next() == Some("true")))
+            Some(
+                text.lines()
+                    .any(|line| line.rsplit(' ').next() == Some("true")),
+            )
         }
         _ => None,
     }
@@ -559,7 +693,14 @@ pub(crate) fn submodule_recursion_with_home(cwd: &Path, home: Option<&std::ffi::
 /// an unreadable tree, malformed output, `ls-tree` failing) is undetermined.
 fn list_tree(cwd: &Path, rev: &str, no_replace: bool) -> TreeListing {
     let list_args: Vec<&str> = if no_replace {
-        vec!["--no-replace-objects", "ls-tree", "-r", "--name-only", "-z", "--full-tree"]
+        vec![
+            "--no-replace-objects",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            "--full-tree",
+        ]
     } else {
         vec!["ls-tree", "-r", "--name-only", "-z", "--full-tree"]
     };
@@ -578,7 +719,14 @@ fn list_tree(cwd: &Path, rev: &str, no_replace: bool) -> TreeListing {
             // the forms that die such as `@{upstream}` with no upstream); a name that resolves but whose tree cannot
             // be read is a damaged or partial repository.
             let name_args: Vec<&str> = if no_replace {
-                vec!["--no-replace-objects", "rev-parse", "--verify", "--quiet", "--end-of-options", rev]
+                vec![
+                    "--no-replace-objects",
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    rev,
+                ]
             } else {
                 vec!["rev-parse", "--verify", "--quiet", "--end-of-options", rev]
             };
@@ -600,8 +748,11 @@ fn list_tree(cwd: &Path, rev: &str, no_replace: bool) -> TreeListing {
         return TreeListing::Undetermined;
     }
     // Only a real tree is listed (a damaged tree can make `rev^{tree}` answer an unrelated commit id).
-    let type_args: Vec<&str> =
-        if no_replace { vec!["--no-replace-objects", "cat-file", "-t", sha] } else { vec!["cat-file", "-t", sha] };
+    let type_args: Vec<&str> = if no_replace {
+        vec!["--no-replace-objects", "cat-file", "-t", sha]
+    } else {
+        vec!["cat-file", "-t", sha]
+    };
     match run_git_outcome(cwd, &type_args, 64) {
         GitRun::Output(kind) if kind.trim_ascii() == b"tree" => {}
         _ => return TreeListing::Undetermined,
@@ -609,9 +760,13 @@ fn list_tree(cwd: &Path, rev: &str, no_replace: bool) -> TreeListing {
     let mut args = list_args;
     args.push(sha);
     match run_git_outcome(cwd, &args, MAX_LISTING_BYTES) {
-        GitRun::Output(listing) => {
-            TreeListing::Listed(listing.split(|b| *b == 0).filter(|name| !name.is_empty()).map(<[u8]>::to_vec).collect())
-        }
+        GitRun::Output(listing) => TreeListing::Listed(
+            listing
+                .split(|b| *b == 0)
+                .filter(|name| !name.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect(),
+        ),
         _ => TreeListing::Undetermined,
     }
 }
@@ -693,9 +848,15 @@ pub(crate) fn hardened_git_command(cwd: &Path, args: &[&str]) -> Option<Command>
             "core.alternateRefsCommand=",
         ]);
     for protocol in DENIED_PROTOCOLS {
-        command.arg("-c").arg(format!("protocol.{protocol}.allow=never"));
+        command
+            .arg("-c")
+            .arg(format!("protocol.{protocol}.allow=never"));
     }
-    command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     Some(command)
 }
 
@@ -707,20 +868,31 @@ struct Finished {
 
 /// Every child spawned by the check, for the child-count regression test: (working directory, arguments).
 #[cfg(test)]
-pub(crate) static SPAWNED: std::sync::Mutex<Vec<(PathBuf, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
+pub(crate) static SPAWNED: std::sync::Mutex<Vec<(PathBuf, Vec<String>)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Spawn `command` (optionally feeding `stdin`), cap stdout at `cap` bytes, bound it by [`GIT_CHILD_TIMEOUT`].
 /// `None`: spawn failure or timeout.
 fn run_command(mut command: Command, stdin: Option<Vec<u8>>, cap: usize) -> Option<Finished> {
     #[cfg(test)]
     if let Ok(mut log) = SPAWNED.lock() {
-        let args = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        log.push((command.get_current_dir().map(Path::to_path_buf).unwrap_or_default(), args));
+        let args = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        log.push((
+            command
+                .get_current_dir()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            args,
+        ));
     }
     if stdin.is_some() {
         command.stdin(Stdio::piped());
     }
-    #[allow(clippy::disallowed_methods)] // bounded to GIT_CHILD_TIMEOUT; killed and waited on every path below
+    #[allow(clippy::disallowed_methods)]
+    // bounded to GIT_CHILD_TIMEOUT; killed and waited on every path below
     let Ok(mut child) = command.spawn() else {
         return None;
     };
@@ -751,14 +923,22 @@ fn run_command(mut command: Command, stdin: Option<Vec<u8>>, cap: usize) -> Opti
         let _ = child.kill();
     }
     let status = child.wait().ok()?;
-    Some(Finished { code: status.code(), out })
+    Some(Finished {
+        code: status.code(),
+        out,
+    })
 }
 
 /// Run [`hardened_git_command`] with stdout capped at `cap` bytes and wall-clock bounded by [`GIT_CHILD_TIMEOUT`].
 fn run_git_outcome(cwd: &Path, args: &[&str], cap: usize) -> GitRun {
     match hardened_git_command(cwd, args).and_then(|c| run_command(c, None, cap)) {
-        Some(Finished { code: Some(0), out: Some(data) }) => GitRun::Output(data),
-        Some(Finished { code: Some(code), .. }) if code != 0 => GitRun::Exit(code),
+        Some(Finished {
+            code: Some(0),
+            out: Some(data),
+        }) => GitRun::Output(data),
+        Some(Finished {
+            code: Some(code), ..
+        }) if code != 0 => GitRun::Exit(code),
         _ => GitRun::Bound,
     }
 }

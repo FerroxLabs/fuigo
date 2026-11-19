@@ -62,7 +62,14 @@ fn s1_6_quotes_and_angle_brackets_in_a_name_yield_one_wrapper_with_runtime_attri
     assert_single_wrapper(&out);
     assert_eq!(
         attribute_names(&out),
-        ["from", "from-ref", "from-name", "from-mode", "message-id", "hop"]
+        [
+            "from",
+            "from-ref",
+            "from-name",
+            "from-mode",
+            "message-id",
+            "hop"
+        ]
     );
     assert!(out.contains("from-mode=\"acceptEdits\""), "{out}");
     assert!(out.contains("hop=\"1\""), "{out}");
@@ -81,15 +88,27 @@ fn s1_6_every_attribute_value_is_escaped() {
     assert_single_wrapper(&out);
     assert_eq!(
         attribute_names(&out),
-        ["from", "from-ref", "from-name", "from-auto-title", "from-mode", "message-id", "hop"]
+        [
+            "from",
+            "from-ref",
+            "from-name",
+            "from-auto-title",
+            "from-mode",
+            "message-id",
+            "hop"
+        ]
     );
 }
 
 #[test]
 fn s1_6_controls_separators_and_bidi_are_neutralised_in_body_and_attributes() {
-    let nasty = "a\u{0}b\u{7}c\u{1b}[31md\r\u{85}e\u{2028}f\u{2029}g\u{202e}h\u{2066}i\u{200b}j\u{feff}k";
+    let nasty =
+        "a\u{0}b\u{7}c\u{1b}[31md\r\u{85}e\u{2028}f\u{2029}g\u{202e}h\u{2066}i\u{200b}j\u{feff}k";
     let out = wrap_peer_message(&test_envelope("m1", "lane a", nasty));
-    for c in nasty.chars().filter(|c| !c.is_ascii_alphanumeric() && *c != '[') {
+    for c in nasty
+        .chars()
+        .filter(|c| !c.is_ascii_alphanumeric() && *c != '[')
+    {
         assert!(!out.contains(c), "raw {c:?} reached the model: {out:?}");
     }
     assert!(out.contains("&#x202E;") && out.contains("&#x2028;") && out.contains("&#x1B;"));
@@ -135,8 +154,15 @@ fn s1_6_a_body_at_the_cap_is_one_wrapper_and_one_byte_over_is_refused_by_validat
     assert!(e.validate().is_ok());
     let out = wrap_peer_message(&e);
     assert_single_wrapper(&out);
-    assert_eq!(out.matches("&lt;").count(), fuigo_peer::limits::MAX_BODY_BYTES);
-    let over = test_envelope("m1", "lane a", &"a".repeat(fuigo_peer::limits::MAX_BODY_BYTES + 1));
+    assert_eq!(
+        out.matches("&lt;").count(),
+        fuigo_peer::limits::MAX_BODY_BYTES
+    );
+    let over = test_envelope(
+        "m1",
+        "lane a",
+        &"a".repeat(fuigo_peer::limits::MAX_BODY_BYTES + 1),
+    );
     assert!(over.validate().is_err());
 }
 
@@ -175,7 +201,9 @@ fn r2_no_attribute_value_can_carry_quote_angle_ampersand_or_newline() {
         for (i, _) in value.match_indices('&') {
             let tail = &value[i..];
             assert!(
-                ["&amp;", "&lt;", "&gt;", "&quot;", "&#39;", "&#x"].iter().any(|p| tail.starts_with(p)),
+                ["&amp;", "&lt;", "&gt;", "&quot;", "&#39;", "&#x"]
+                    .iter()
+                    .any(|p| tail.starts_with(p)),
                 "bare & in {value:?}"
             );
         }
@@ -191,10 +219,50 @@ fn r2_no_attribute_value_can_carry_quote_angle_ampersand_or_newline() {
 fn xs_p8f_flag_resolution_pin_then_env_then_config_then_default_off() {
     use fuigo_config_types::FeatureSources as S;
     assert!(!super::resolve_peer_messaging(S::default()), "default off");
-    assert!(!super::resolve_peer_messaging(S { config: Some(true), pin: Some(false), ..S::default() }), "config on, managed off => off");
-    assert!(!super::resolve_peer_messaging(S { env: Some(true), pin: Some(false), ..S::default() }), "managed off beats env on");
-    assert!(super::resolve_peer_messaging(S { env: Some(true), ..S::default() }), "env on works");
-    assert!(super::resolve_peer_messaging(S { config: Some(true), ..S::default() }), "config on");
-    assert!(super::resolve_peer_messaging(S { config: Some(false), pin: Some(true), ..S::default() }), "managed on");
-    assert!(!super::resolve_peer_messaging(S { config: Some(true), env: Some(false), ..S::default() }), "env off beats config on");
+    assert!(
+        !super::resolve_peer_messaging(S {
+            config: Some(true),
+            pin: Some(false),
+            ..S::default()
+        }),
+        "config on, managed off => off"
+    );
+    assert!(
+        !super::resolve_peer_messaging(S {
+            env: Some(true),
+            pin: Some(false),
+            ..S::default()
+        }),
+        "managed off beats env on"
+    );
+    assert!(
+        super::resolve_peer_messaging(S {
+            env: Some(true),
+            ..S::default()
+        }),
+        "env on works"
+    );
+    assert!(
+        super::resolve_peer_messaging(S {
+            config: Some(true),
+            ..S::default()
+        }),
+        "config on"
+    );
+    assert!(
+        super::resolve_peer_messaging(S {
+            config: Some(false),
+            pin: Some(true),
+            ..S::default()
+        }),
+        "managed on"
+    );
+    assert!(
+        !super::resolve_peer_messaging(S {
+            config: Some(true),
+            env: Some(false),
+            ..S::default()
+        }),
+        "env off beats config on"
+    );
 }

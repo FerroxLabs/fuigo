@@ -278,7 +278,10 @@ impl fuigo_tool_runtime::Tool for SearchTool {
 
         if input.scope == types::SearchScope::Native {
             return Ok(ToolOutput::Text(
-                tool_index.discover_native(&input.query, input.limit.unwrap_or(3) as usize).to_string().into(),
+                tool_index
+                    .discover_native(&input.query, input.limit.unwrap_or(3) as usize)
+                    .to_string()
+                    .into(),
             ));
         }
 

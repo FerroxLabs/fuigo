@@ -2,11 +2,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use tokio::sync::{mpsc, oneshot};
 use fuigo_sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, SamplingConfig, TokenUsage,
     ToolSpec, TraceContext,
 };
+use tokio::sync::{mpsc, oneshot};
 
 use crate::commands::{ChatStateCommand, RepairHistoryBlocked, StrictAppendAck, StrictAppendError};
 use crate::types::{
@@ -76,7 +76,10 @@ impl ChatStateHandle {
     /// actor's acknowledgement. If the last tool-calling assistant item still has an open call, the marker is stored before it
     /// (memory and disk), so no synthetic "cancelled" result is made for the call and the call/result run stays contiguous.
     pub async fn push_state_marker_and_ack(&self, item: ConversationItem) -> Option<()> {
-        self.query("PushStateMarkerAndAck", |reply| ChatStateCommand::PushStateMarkerAndAck { item, reply }).await
+        self.query("PushStateMarkerAndAck", |reply| {
+            ChatStateCommand::PushStateMarkerAndAck { item, reply }
+        })
+        .await
     }
 
     /// Strictly append one working-directory switch and await persistence.
@@ -273,9 +276,14 @@ impl ChatStateHandle {
         self.send_replace(items, true);
     }
 
-    pub async fn compaction_snapshot(&self) -> std::io::Result<(u64, usize, Vec<ConversationItem>)> {
-        self.query("GetCompactionSnapshot", |reply| ChatStateCommand::GetCompactionSnapshot { reply })
-            .await.ok_or_else(|| std::io::Error::other("chat-state actor unavailable"))
+    pub async fn compaction_snapshot(
+        &self,
+    ) -> std::io::Result<(u64, usize, Vec<ConversationItem>)> {
+        self.query("GetCompactionSnapshot", |reply| {
+            ChatStateCommand::GetCompactionSnapshot { reply }
+        })
+        .await
+        .ok_or_else(|| std::io::Error::other("chat-state actor unavailable"))
     }
 
     pub async fn commit_compaction(
@@ -283,11 +291,21 @@ impl ChatStateHandle {
         epoch: u64,
         items: Vec<ConversationItem>,
         cancel: tokio_util::sync::CancellationToken,
-        commit: impl std::future::Future<Output = Result<(), crate::commands::CompactionCommitError>> + Send + 'static,
+        commit: impl std::future::Future<Output = Result<(), crate::commands::CompactionCommitError>>
+        + Send
+        + 'static,
     ) -> std::io::Result<()> {
-        self.query("CommitCompaction", |reply| ChatStateCommand::CommitCompaction {
-            epoch, items, cancel, commit: Box::pin(commit), reply,
-        }).await.unwrap_or_else(|| Err(std::io::Error::other("compaction acknowledgement lost")))
+        self.query("CommitCompaction", |reply| {
+            ChatStateCommand::CommitCompaction {
+                epoch,
+                items,
+                cancel,
+                commit: Box::pin(commit),
+                reply,
+            }
+        })
+        .await
+        .unwrap_or_else(|| Err(std::io::Error::other("compaction acknowledgement lost")))
     }
 
     fn send_replace(&self, items: Vec<ConversationItem>, is_compaction: bool) {

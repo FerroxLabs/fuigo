@@ -722,10 +722,10 @@ fn copy_file_to_worktree(source: &Path, worktree: &Path, rel_path: &str) -> Resu
 mod tests {
     use super::*;
     use crate::git::index::copy_git_index;
+    use fuigo_test_utils::git::{git_commit_all, init_git_repo};
     use std::path::PathBuf;
     use std::process::Command;
     use tempfile::TempDir;
-    use fuigo_test_utils::git::{git_commit_all, init_git_repo};
 
     /// Helper: create a git worktree from a source repo
     fn create_linked_worktree(source: &Path, name: &str) -> PathBuf {

@@ -112,8 +112,16 @@ impl std::fmt::Debug for DeviceCode {
             expires_in,
         } = self;
         f.debug_struct("DeviceCode")
-            .field("verification_uri", &fuigo_auth::redact_url(verification_uri))
-            .field("verification_uri_complete", &verification_uri_complete.as_deref().map(fuigo_auth::redact_url))
+            .field(
+                "verification_uri",
+                &fuigo_auth::redact_url(verification_uri),
+            )
+            .field(
+                "verification_uri_complete",
+                &verification_uri_complete
+                    .as_deref()
+                    .map(fuigo_auth::redact_url),
+            )
             .field("user_code", user_code)
             .field("device_code", &"<redacted>")
             .field("interval", interval)
@@ -417,7 +425,9 @@ async fn prompt_and_poll(
     fuigo_tty_utils::cli_eprintln!();
 
     if !open_browser_detached(display_uri).await {
-        fuigo_tty_utils::cli_eprintln!("  (Could not open browser automatically — open the URL above manually.)");
+        fuigo_tty_utils::cli_eprintln!(
+            "  (Could not open browser automatically — open the URL above manually.)"
+        );
         fuigo_tty_utils::cli_eprintln!();
     }
 
@@ -432,7 +442,9 @@ async fn prompt_and_poll(
     fuigo_tty_utils::cli_eprintln!();
     // Fuigo's own grey: the styling bytes are trusted literals around fixed text (the line filter passes no escape).
     fuigo_tty_utils::cli_eprint_trusted!("\x1b[90m");
-    fuigo_tty_utils::cli_eprint!("Only continue with a code you requested. Don't share it with anyone.");
+    fuigo_tty_utils::cli_eprint!(
+        "Only continue with a code you requested. Don't share it with anyone."
+    );
     fuigo_tty_utils::cli_eprint_trusted!("\x1b[0m\n");
     fuigo_tty_utils::cli_eprintln!();
     fuigo_tty_utils::cli_eprintln!("Waiting for authorization...");
@@ -796,7 +808,10 @@ pub(crate) mod tests {
         .await;
         handle.abort();
         let seen = seen.lock().unwrap().clone();
-        assert!(!seen.is_empty(), "the poll made no request, so this proves nothing");
+        assert!(
+            !seen.is_empty(),
+            "the poll made no request, so this proves nothing"
+        );
         for headers in &seen {
             for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
                 assert!(!headers.contains_key(name), "device-token poll sent {name}");
@@ -892,7 +907,13 @@ pub(crate) mod tests {
             };
             let auth = tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(build_auth(&tokens, "http://localhost:22255", "client-id", &auth_manager, None))
+                .block_on(build_auth(
+                    &tokens,
+                    "http://localhost:22255",
+                    "client-id",
+                    &auth_manager,
+                    None,
+                ))
                 .unwrap();
             assert!(auth.expires_at.is_none());
         }
@@ -1201,15 +1222,24 @@ mod p70a_redacted_debug {
     #[test]
     fn device_code_debug_redacts_the_code_and_uri_credentials() {
         let code = DeviceCode {
-            verification_uri: "https://u:p70vu-FAKE-1a2b3c4d@login.p70.invalid/device?k=p70vq-FAKE-5e6f7a8b".into(),
-            verification_uri_complete: Some("https://login.p70.invalid/device?user_code=P70U-CODE&k=p70vc-FAKE-9c0d1e2f".into()),
+            verification_uri:
+                "https://u:p70vu-FAKE-1a2b3c4d@login.p70.invalid/device?k=p70vq-FAKE-5e6f7a8b"
+                    .into(),
+            verification_uri_complete: Some(
+                "https://login.p70.invalid/device?user_code=P70U-CODE&k=p70vc-FAKE-9c0d1e2f".into(),
+            ),
             user_code: "P70U-CODE".into(),
             device_code: "p70dc-FAKE-3a4b5c6d".into(),
             interval: 5,
             expires_in: 600,
         };
         for out in [format!("{code:?}"), format!("{code:#?}")] {
-            assert!(out.contains("<redacted>") && out.contains("login.p70.invalid") && out.contains("P70U-CODE"), "control: {out}");
+            assert!(
+                out.contains("<redacted>")
+                    && out.contains("login.p70.invalid")
+                    && out.contains("P70U-CODE"),
+                "control: {out}"
+            );
             for secret in ["p70vu-FAKE", "p70vq-FAKE", "p70vc-FAKE", "p70dc-FAKE"] {
                 assert!(!out.contains(secret), "Debug holds {secret}: {out}");
             }
@@ -1242,7 +1272,10 @@ mod s1_f1_device_clamps {
         assert_eq!(device_poll_interval(i32::MIN).as_secs(), 1);
         assert_eq!(device_poll_interval(5).as_secs(), 5);
         assert_eq!(device_poll_window(i64::MAX).as_secs(), 1800);
-        assert_eq!(device_poll_window(-5).as_secs(), MIN_DEVICE_CODE_EXPIRY_FALLBACK_SECS as u64);
+        assert_eq!(
+            device_poll_window(-5).as_secs(),
+            MIN_DEVICE_CODE_EXPIRY_FALLBACK_SECS as u64
+        );
         let _ = tokio::time::Instant::now() + device_poll_window(i64::MAX);
     }
 }

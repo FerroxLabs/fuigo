@@ -282,12 +282,74 @@ upload, not a compromised base: signing or pinning the digest is a separate step
 
 ---
 
+## Preflight: run it before any dry run
+
+**Run preflight before any dry run.** A dry run is hours of build matrix; in 1.0.45 one shellcheck info in
+`scripts/release/test-release-scripts.sh` failed the run at "assemble and publish" -> "Check versions", after
+everything else had built. The preflight runs the cheap checks of that job (and of the build jobs' script tests)
+in about 20 minutes:
+
+- GitHub: Actions -> preflight -> Run workflow, or push the candidate to a `release/*` branch
+  (`.github/workflows/preflight.yml`). It publishes and signs nothing.
+- Locally, no GitHub needed: `scripts/release/preflight-local.sh [--compile-check] [--require-shellcheck]`.
+  The same script runs in the workflow, and `pr-ci-replay.sh` (the pre-squash replay) calls it.
+
+It covers the npm layout and provenance tests, `test-release-scripts.sh`, the version check, the same-version
+reinstall test, the signed-binary and Linux-floor checker tests, shellcheck, that every action in `release.yml`
+is pinned to a commit SHA, and the **leak guard**. The workflow adds a linux-x64 `cargo check --profile
+release-dist -p fuigo-pager-bin` (type-check only; a full LTO link does not fit 20 minutes).
+
+**Leak guard** (`scripts/release/check-token-leaks.py`, also run by `public-squash.sh` on the release tree):
+fails on an unsplit vendor-shaped token in tracked source (`sk_live_`, `rk_live_`, `shpat_`, `ghp_`, `gho_`,
+`github_pat_`, `xoxb-`, `AKIA`, `AIza`, `glpat-`, `npm_`, `sk-ant-`, ...). Fake fixtures must be split, for
+example `concat!("sk_", "live_...")`, so push protection never sees a token. Lines that predate the guard are
+listed by hash in `scripts/release/token-leak-baseline.txt`; editing one puts it back under the guard.
+
+---
+
+## Benchmark gate
+
+Protects the edge: a release fails when it solves more than 2 fewer tasks than the previous one; a rise in cost per
+solved task is reported as a warning (see Verdict below). The gate
+runs a fixed 12-task subset of the 2026-10-13 hardbench suite (`scripts/bench/subset12.txt`, with the reasoning for the
+choice in its header) on the Docker host, N=2 repeats per arm, same model (`claude-sonnet-5-5`, effort medium), same
+provider key and same limits for both arms; the arms differ only by the fuigo binary.
+
+```sh
+# On hetzner-dsm, once: stage the hardbench subset (tasks/, deps/, harness-1028/) under $HB_ROOT and build the deps
+HB_ROOT=/root/hardbench scripts/bench/stage-deps.sh <any gate image>
+# Per release (about 3 h, about 10 USD; provider key from the environment only, never argv):
+FUIGO_API_KEY=... HB_ROOT=/root/hardbench scripts/bench/run-gate.sh <candidate> <baseline>
+#   <candidate>/<baseline>: npm:<version> or the path of a linux-x64 fuigo-native binary
+```
+
+Verdict (`verdict.md` / `verdict.json` in the run dir; exit 0 PASS, 1 FAIL, 2 INCOMPLETE): FAIL when candidate solved
+tasks drop by more than 2 against the baseline. A rise in cost per solved task is reported as a warning, not a
+failure: the same binary measured a 21% spread between runs, so a cost rule would fail at random. A task counts
+as solved when both repeats pass. Blocked or unrun attempts make the gate INCOMPLETE, never a pass. Rerunning until
+green is not allowed: record every run; a FAIL is investigated, not retried. The same-binary variance run (baseline =
+candidate) is the noise floor and is recorded in the lane notes.
+
+---
+
 ## Pre-release checklist
 
 - [ ] `cargo test --workspace` — see `HANDOFF.md` §11 for the known-inherited
       failures and the required `RUST_MIN_STACK=16777216`
+- [ ] **benchmark gate** PASS (`scripts/bench/run-gate.sh <candidate> <previous release>`, see "Benchmark gate"
+      below); attach `verdict.md` to the release PR
 - [ ] `python3 tools/acp-probe.py --key …` against the **release** binary, not
       just the debug one
+- [ ] fuzz the parsers: `scripts/fuzz/run-all.sh 60` on the build box (needs nightly + cargo-fuzz; see the script header);
+      no crash artifacts, and every input in `fuzz/regressions/` still replays clean. The sanitizer target follows the
+      safety contract (header of `fuzz/fuzz_targets/sanitizer.rs`): BLOCKING = a panic; a secret still visible (known
+      shape, URL userinfo, a credential the independent `url`-crate oracle or the assignment oracle finds); super-linear
+      time (the 10 s `-timeout`, output over `4 * input + 256`); a regression against the frozen 1.0.45 redactor (gated
+      by `cargo test -p fuigo-secrets` and one `SANITIZER_DIFFERENTIAL_INPUTS=100000` run, not the fuzz target). NOT
+      blocking = idempotence (`redact(redact(x)) != redact(x)`): each case prints `IDEMPOTENCE_WARN <hex16> <function>`
+      and the summary reports the count per target; record it in the release notes. It fails safe: the callers that
+      re-scrub treat a second pass that still changes the text as "still secret" (fuigo-telemetry `sentry.rs` replaces
+      the group or breadcrumbs with the marker, fuigo-memory `safety.rs` refuses a text that gains a marker)
 - [ ] `fuigo --version` prints the intended version with no channel suffix
       (a `[alpha]` suffix means `derive_channel` found a stable pointer ahead of
       you — check the update channel pointers)

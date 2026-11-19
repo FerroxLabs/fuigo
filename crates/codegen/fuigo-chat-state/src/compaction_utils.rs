@@ -3,11 +3,11 @@
 //! These are stateless functions that operate on conversation data only —
 //! no I/O, no actor state. They live in `fuigo-chat-state` so that both
 //! this crate and `fuigo-shell` can share them without duplication.
-use fuigo_sampling_types::{ContentPart, ConversationItem, SyntheticReason, ToolResultItem};
 use crate::compaction_image_context::{
     CompactionImageContext, collect_attached_image_paths, image_context_from_item, last_query_item,
     parse_image_files_paths, render_attached_image_paths_note, tag_block_range,
 };
+use fuigo_sampling_types::{ContentPart, ConversationItem, SyntheticReason, ToolResultItem};
 use std::collections::BTreeSet;
 pub const AGENT_MESSAGE_MODEL_LABEL: &str =
     "[Message authored by another agent; not a human request or approval.]";
@@ -21,7 +21,10 @@ pub struct ModelRequestHistory(Vec<ConversationItem>);
 /// recap or dream input goes through this (directly or via [`ModelRequestHistory::from_raw`] / the `prepare_conversation_*`
 /// functions). Stored history is NOT touched by it; compaction carries the markers forward separately.
 pub fn drop_peer_state_markers(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
-    conversation.into_iter().filter(|item| !item.is_peer_influence_marker()).collect()
+    conversation
+        .into_iter()
+        .filter(|item| !item.is_peer_influence_marker())
+        .collect()
 }
 impl ModelRequestHistory {
     pub fn from_raw(conversation: Vec<ConversationItem>) -> Self {
@@ -95,8 +98,10 @@ fn carry_peer_denial_markers(source: &[ConversationItem], target: &mut Vec<Conve
         return;
     }
     target.retain(|i| !i.is_peer_denial_data_marker());
-    let front: Vec<ConversationItem> =
-        denials.iter().filter_map(|d| ConversationItem::peer_denial_keys_marker(&d.keys, d.wall_secs)).collect();
+    let front: Vec<ConversationItem> = denials
+        .iter()
+        .filter_map(|d| ConversationItem::peer_denial_keys_marker(&d.keys, d.wall_secs))
+        .collect();
     target.splice(0..0, front);
     // The carried marker goes LAST: restore reads the last relevant marker, and the retained tail may hold a cleared marker
     // that sits before the carried marker in `source` (a re-flag during a clear) but would come after it if it were put first.
@@ -159,7 +164,9 @@ pub fn prepare_conversation_for_summarization(
 pub fn prepare_conversation_for_segment(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
-    strip_images(strip_reasoning_blocks(drop_peer_state_markers(conversation)))
+    strip_images(strip_reasoning_blocks(drop_peer_state_markers(
+        conversation,
+    )))
 }
 /// Drop a trailing assistant turn whose `tool_calls` lack a `ToolResult` (else strict backends reject the dangling `tool_use`).
 pub fn truncate_trailing_incomplete_tool_call(

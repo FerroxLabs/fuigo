@@ -37,7 +37,8 @@ fn push_start_failed_status(
         tools: None,
     };
     if let Ok(raw) = serde_json::value::to_raw_value(&payload) {
-        gateway.forward_fire_and_forget(acp::ExtNotification::new(SERVER_STATUS_METHOD, raw.into()));
+        gateway
+            .forward_fire_and_forget(acp::ExtNotification::new(SERVER_STATUS_METHOD, raw.into()));
     }
 }
 
@@ -110,7 +111,9 @@ mod stale_generation_init_tests {
                 let _ = ext_methods(&mut gateway_rx).await;
 
                 // The stale caller: its generation is not the current one
-                let finished = actor.complete_empty_mcp_init(generation.wrapping_sub(1)).await;
+                let finished = actor
+                    .complete_empty_mcp_init(generation.wrapping_sub(1))
+                    .await;
                 assert!(!finished, "a stale generation must not finish init");
                 let methods = ext_methods(&mut gateway_rx).await;
                 assert!(
@@ -136,7 +139,8 @@ mod stale_generation_init_tests {
     /// must then neither announce nor wake waiters.
     /// The refresh is suspended deterministically by holding the managed-MCP state lock it takes first.
     #[tokio::test]
-    async fn completion_superseded_during_the_snapshot_refresh_neither_notifies_nor_wakes_waiters() {
+    async fn completion_superseded_during_the_snapshot_refresh_neither_notifies_nor_wakes_waiters()
+    {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -739,23 +743,23 @@ impl SessionActor {
                     // Bounded inside `get_tool_registrations`; see the note on the retry_auth_required path.
                     let registrations =
                         match arc.get_tool_registrations(self.mcp_state.clone()).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            tracing::debug!(
-                                server = server_name.as_str(),
-                                %e,
-                                "retry_unreachable: handshake still failing"
-                            );
-                            self.settle_failed_unreachable_attempt(
-                                &server_name,
-                                token,
-                                &e,
-                                Some(arc.clone()),
-                            )
-                            .await;
-                            continue;
-                        }
-                    };
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::debug!(
+                                    server = server_name.as_str(),
+                                    %e,
+                                    "retry_unreachable: handshake still failing"
+                                );
+                                self.settle_failed_unreachable_attempt(
+                                    &server_name,
+                                    token,
+                                    &e,
+                                    Some(arc.clone()),
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
                     let _ = arc
                         .arm_liveness_watcher(fuigo_mcp::liveness::DEFAULT_POLL_INTERVAL)
                         .await;
@@ -1694,7 +1698,10 @@ impl SessionActor {
                             &self.notifications.gateway,
                             session_id,
                             &sname,
-                            Some(&fuigo_tools::util::truncate_str_with_marker(&e.to_string(), 200)),
+                            Some(&fuigo_tools::util::truncate_str_with_marker(
+                                &e.to_string(),
+                                200,
+                            )),
                             e.failure_kind(),
                         );
                     }
@@ -1705,7 +1712,8 @@ impl SessionActor {
                     } else if sname != "unknown" {
                         spawn_other_failures.push((
                             sname.clone(),
-                            fuigo_tools::util::truncate_str_with_marker(&e.to_string(), 200).into_owned(),
+                            fuigo_tools::util::truncate_str_with_marker(&e.to_string(), 200)
+                                .into_owned(),
                         ));
                     }
                     let cfg = mcp_server_configs
@@ -2092,7 +2100,14 @@ impl SessionActor {
                                 total_tools_registered += tool_count;
                                 mcp_state.mark_server_ready(&server_name);
                             }
-                            Err((server_name, ref e, needs_auth, failure_kind, elapsed, timeout_sec)) => {
+                            Err((
+                                server_name,
+                                ref e,
+                                needs_auth,
+                                failure_kind,
+                                elapsed,
+                                timeout_sec,
+                            )) => {
                                 let error_cat = if needs_auth {
                                     fuigo_session_events::McpErrorCategory::AuthRequired
                                 } else {
@@ -2163,8 +2178,11 @@ impl SessionActor {
                                 // `needs_auth` for the sign-in flow but still gets its (sixth-reason) line.
                                 if failure_kind != fuigo_mcp::servers::McpFailureKind::NeedsAuth {
                                     let push_detail = detail.clone().unwrap_or_else(|| {
-                                        fuigo_tools::util::truncate_str_with_marker(&e.to_string(), 200)
-                                            .into_owned()
+                                        fuigo_tools::util::truncate_str_with_marker(
+                                            &e.to_string(),
+                                            200,
+                                        )
+                                        .into_owned()
                                     });
                                     push_start_failed_status(
                                         &gateway,

@@ -53,7 +53,7 @@ To block specific files (e.g. `.env` or credential paths) on top of a profile, d
 
 The launch-folder boundary takes precedence over writable ancestors such as `/tmp` and over custom `read_write` entries. Keep Fuigo state and writable scratch directories outside the launch folder: if they are inside it, they are read-only too. Fuigo warns at startup when its sessions directory resolves inside that boundary and continues starting. Temp permissions otherwise match `strict`: `/tmp`, `/var/tmp`, an existing `$TMPDIR`, and existing macOS `/private/tmp`, `/private/var/tmp`, `/private/var/folders` directories. Existing profiles retain their behavior; in particular, legacy `read-only` omits a workspace grant but does not subtract the workspace from overlapping temp grants.
 
-Linux uses a final read-only bubblewrap mount plus Landlock, and verifies the mount before reporting successful sandbox application. macOS uses specific Seatbelt write-deny actions. Seatbelt generation is covered by tests on Linux; this addition still needs a live macOS enforcement run. Windows continues with its existing warning that sandboxing is unavailable.
+Linux uses a final read-only bubblewrap mount plus Landlock, and verifies the mount before reporting successful sandbox application. macOS uses specific Seatbelt write-deny actions. Seatbelt generation is covered by tests on Linux; this addition still needs a live macOS enforcement run. Windows continues with its existing warning that sandboxing is unavailable (the sandbox is optional and off by default; for one, run Fuigo inside WSL2).
 
 ### Direct global hook write protection
 
@@ -230,15 +230,17 @@ Profile resolution order for a **new** session:
 | -------- | --------- | ---------------------- |
 | Linux    | Landlock  | Kernel 5.13 or later   |
 | macOS    | Seatbelt  | macOS (all versions)   |
-| Windows  | None      | Not available          |
+| Windows  | None      | Not available (use WSL2 with bubblewrap) |
 
-The sandbox is available on Linux and macOS only. On Windows no sandbox can exist, so a configured profile other than `off` is not applied: Fuigo still starts and runs, and prints this warning on stderr at every start (also in headless runs, before the first model request, and before a `fuigo wrap` command starts), shows it as a notice when a session starts (the TUI and ACP clients receive it as a config notice; in headless `plain` output the stderr line is shown once), and lists it as a `Sandbox warning` line in the `/status` view:
+The sandbox is available on Linux and macOS only, and it is optional and off by default on every platform. Fuigo has no native Windows sandbox. Users who want one can run Fuigo inside WSL2 with bubblewrap installed (`sudo apt install bubblewrap` in the WSL2 distribution); there it is the Linux sandbox described above. On Windows itself no sandbox can exist, so a configured profile other than `off` is not applied: Fuigo still starts and runs, and prints this warning on stderr at every start (also in headless runs, before the first model request, and before a `fuigo wrap` command starts), shows it as a notice when a session starts (the TUI and ACP clients receive it as a config notice; in headless `plain` output the stderr line is shown once), and lists it as a `Sandbox warning` line in the `/status` view:
 
 ```text
-warning: Sandbox profile workspace is set but sandboxing is not available on Windows: commands and file tools run unsandboxed.
+warning: Sandbox profile workspace is set but sandboxing is not available on Windows: commands and file tools run unsandboxed. The sandbox is optional and off by default. To use one, run Fuigo inside WSL2 with bubblewrap installed (sudo apt install bubblewrap).
 ```
 
 With profile `off` or no profile, nothing is shown. For `fuigo wrap`, the warning follows the profile in your configuration; a `--sandbox` option on the command line is not consulted.
+
+On Linux, Fuigo launches `bwrap` from `/usr/bin`, `/bin` or `/usr/local/bin`, in that order. Only when none is installed there does it use a `bwrap` found on `PATH`, and then it warns once on stderr. A candidate whose file or directory your user, your group or others can write is skipped with a warning that names the path (it could be replaced by something the sandbox is meant to confine), and the next candidate is tried. A safe candidate is always preferred; if every candidate is writable, Fuigo still uses the first one (it warns, it does not refuse) and shows a loud warning through the usual channels (stderr, session notice, `/status`, welcome screen): it can be replaced by a user-level program, so reinstall bubblewrap from your system packages. The launcher that was chosen is written to the debug log once per process and shown as a `Sandbox launcher (bwrap)` line in `/status`.
 
 On Linux and macOS, if the sandbox cannot be applied (e.g., unsupported kernel, missing entitlements), Fuigo continues without enforcement only for the `off` and `devbox` profiles, and records that in its log. For every other profile (`workspace` and the other built-in enforcing profiles, and any **custom profile**), Fuigo refuses to start rather than run with its protections missing. A custom profile that cannot be applied (unknown profile, malformed `sandbox.toml`, or, on Linux, `bubblewrap` unavailable for a non-empty `deny`) is refused the same way.
 

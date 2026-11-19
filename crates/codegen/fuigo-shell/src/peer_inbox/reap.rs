@@ -28,7 +28,9 @@ pub(super) fn is_our_socket(dir: &CheckedDir, name: &str) -> bool {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     let r = unsafe { libc::fstatat(dir.raw(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
     // SAFETY: geteuid cannot fail.
-    r == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFSOCK && st.st_uid == unsafe { libc::geteuid() }
+    r == 0
+        && (st.st_mode & libc::S_IFMT) == libc::S_IFSOCK
+        && st.st_uid == unsafe { libc::geteuid() }
 }
 
 /// The permission bits of `<dir>/<name>` (no-follow), or `None` if it is missing.
@@ -58,7 +60,10 @@ pub(super) fn identity_of(dir: &CheckedDir, name: &str) -> Option<(u64, u64)> {
     // SAFETY: as above.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     let r = unsafe { libc::fstatat(dir.raw(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
-    #[allow(clippy::unnecessary_cast, reason = "dev_t and ino_t widths differ per platform")]
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "dev_t and ino_t widths differ per platform"
+    )]
     (r == 0).then_some((st.st_dev as u64, st.st_ino as u64))
 }
 
@@ -72,7 +77,9 @@ pub(super) fn unlink_if_identity(dir: &CheckedDir, name: &str, bound: Option<(u6
 }
 
 pub(super) fn sock_name(host: &HostId) -> String {
-    socket_path(std::path::Path::new(""), host).to_string_lossy().into_owned()
+    socket_path(std::path::Path::new(""), host)
+        .to_string_lossy()
+        .into_owned()
 }
 
 pub(super) use super::rows::{decode_rows, encode_rows};
@@ -91,13 +98,16 @@ pub(crate) const MAX_PROBES: usize = 8;
 pub(crate) const PROBE_CAP: Duration = Duration::from_secs(3);
 
 async fn capped_hello(loc: &Locations, our: &HostId, row: &HostRow) -> TryResult {
-    tokio::time::timeout(PROBE_CAP, try_hello(loc, our, &row.host_id, row.dir)).await.unwrap_or(TryResult::Timeout)
+    tokio::time::timeout(PROBE_CAP, try_hello(loc, our, &row.host_id, row.dir))
+        .await
+        .unwrap_or(TryResult::Timeout)
 }
 
 /// Is the runtime peers directory of THIS home (the one a `runtime` row's host used) ours to open, with the S3.3
 /// checks? Then "no such file" in it is evidence about that very directory. Never creates anything.
 fn runtime_dir_verified(loc: &Locations) -> bool {
-    loc.runtime_home().is_some_and(|r| CheckedDir::open(&r).is_ok())
+    loc.runtime_home()
+        .is_some_and(|r| CheckedDir::open(&r).is_ok())
 }
 
 /// Judge every row but ours with at most two tries `gap` apart, and remove the ones `reap_decision` condemns.
@@ -117,11 +127,16 @@ pub(crate) async fn reap_pass(
     let bytes = tokio::task::spawn_blocking(move || read_locator(&d, LOCATOR_NAME))
         .await
         .map_err(|_| Disabled::Io(libc::EIO))??;
-    let rows: Vec<HostRow> = decode_rows(bytes.as_deref()).into_iter().filter(|r| &r.host_id != our).collect();
+    let rows: Vec<HostRow> = decode_rows(bytes.as_deref())
+        .into_iter()
+        .filter(|r| &r.host_id != our)
+        .collect();
     let same_runtime_dir = {
         let l = loc.clone();
         rows.iter().any(|r| r.dir == HostDir::Runtime)
-            && tokio::task::spawn_blocking(move || runtime_dir_verified(&l)).await.unwrap_or(false)
+            && tokio::task::spawn_blocking(move || runtime_dir_verified(&l))
+                .await
+                .unwrap_or(false)
     };
     let mut report = ReapReport::default();
     let firsts: Vec<(HostRow, TryResult)> = futures::stream::iter(rows)
@@ -134,11 +149,12 @@ pub(crate) async fn reap_pass(
         .await;
     // A hello that names the row's own host cannot condemn it (`reap_decision` needs a different id twice), and
     // `reap_decision` keeps the row for every other first result whatever the second says: only the rest get a second try.
-    let (candidates, kept_now): (Vec<_>, Vec<_>) = firsts.into_iter().partition(|(row, first)| match first {
-        TryResult::Refused | TryResult::NoSuchFile => true,
-        TryResult::Hello(h) => h != &row.host_id,
-        _ => false,
-    });
+    let (candidates, kept_now): (Vec<_>, Vec<_>) =
+        firsts.into_iter().partition(|(row, first)| match first {
+            TryResult::Refused | TryResult::NoSuchFile => true,
+            TryResult::Hello(h) => h != &row.host_id,
+            _ => false,
+        });
     report.kept += kept_now.len();
     if !candidates.is_empty() {
         tokio::time::sleep(gap).await;
@@ -148,7 +164,8 @@ pub(crate) async fn reap_pass(
     let mut seconds = futures::stream::iter(candidates)
         .map(|(row, first)| async move {
             let second = capped_hello(loc, our, &row).await;
-            let condemned = reap_decision(row.dir, &row.host_id, &first, &second, same_runtime_dir) == Reap::Reap;
+            let condemned = reap_decision(row.dir, &row.host_id, &first, &second, same_runtime_dir)
+                == Reap::Reap;
             (row, condemned)
         })
         .buffer_unordered(MAX_PROBES)
@@ -176,12 +193,22 @@ pub(crate) async fn reap_pass(
 }
 
 /// Under the lock: remove `row` only if it is still present unchanged, and unlink its socket if it is ours.
-pub(super) async fn remove_row(loc: &Locations, home_dir: &Arc<CheckedDir>, row: &HostRow) -> Result<bool, Disabled> {
-    Ok(!remove_rows(loc, home_dir, std::slice::from_ref(row)).await?.is_empty())
+pub(super) async fn remove_row(
+    loc: &Locations,
+    home_dir: &Arc<CheckedDir>,
+    row: &HostRow,
+) -> Result<bool, Disabled> {
+    Ok(!remove_rows(loc, home_dir, std::slice::from_ref(row))
+        .await?
+        .is_empty())
 }
 
 /// [`remove_row`] for several rows under one lock acquisition. Returns the host ids actually removed.
-pub(super) async fn remove_rows(loc: &Locations, home_dir: &Arc<CheckedDir>, victims: &[HostRow]) -> Result<Vec<HostId>, Disabled> {
+pub(super) async fn remove_rows(
+    loc: &Locations,
+    home_dir: &Arc<CheckedDir>,
+    victims: &[HostRow],
+) -> Result<Vec<HostId>, Disabled> {
     let (d, victims, runtime_home) = (home_dir.clone(), victims.to_vec(), loc.runtime_home());
     tokio::task::spawn_blocking(move || {
         let mut removed = Vec::new();
@@ -199,7 +226,9 @@ pub(super) async fn remove_rows(loc: &Locations, home_dir: &Arc<CheckedDir>, vic
                             unlink_if_our_socket(&d, &name);
                         }
                         HostDir::Runtime => {
-                            if let Some(rt) = runtime_home.as_ref().and_then(|r| CheckedDir::open(r).ok()) {
+                            if let Some(rt) =
+                                runtime_home.as_ref().and_then(|r| CheckedDir::open(r).ok())
+                            {
                                 unlink_if_our_socket(&rt, &name);
                             }
                         }

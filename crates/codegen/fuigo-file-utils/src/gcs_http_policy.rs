@@ -49,9 +49,7 @@ fn configure(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
         }
         attempt.follow()
     });
-    let mut builder = builder
-        .tls_backend_rustls()
-        .redirect(policy);
+    let mut builder = builder.tls_backend_rustls().redirect(policy);
     for der in fuigo_extra_ca::extra_root_ders() {
         match reqwest::Certificate::from_der(der) {
             Ok(cert) => builder = builder.add_root_certificate(cert),
@@ -94,14 +92,21 @@ mod tests {
                 .env_remove("FUIGO_ALLOW_UPSTREAM_HOSTS")
                 .status().unwrap();
             assert!(status.success());
-            assert_eq!(proxy.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(
+                proxy.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
             return;
         }
         use gcloud_storage::client::google_cloud_auth::http_transport::{self, RequestPolicyExt};
         install_auth_policy().unwrap();
         let http = http_transport::client(std::time::Duration::from_secs(3)).unwrap();
-        let error = http.post("https://api.x.ai/token").body("fake-refresh")
-            .send_guarded().await.unwrap_err();
+        let error = http
+            .post("https://api.x.ai/token")
+            .body("fake-refresh")
+            .send_guarded()
+            .await
+            .unwrap_err();
         assert!(matches!(error, http_transport::Error::Denied));
 
         let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -109,17 +114,33 @@ mod tests {
         let location = format!("http://{}/token", target.local_addr().unwrap());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let router = axum::Router::new().route("/token", axum::routing::post(move || {
-            let location = location.clone();
-            async move { (axum::http::StatusCode::TEMPORARY_REDIRECT, [(axum::http::header::LOCATION, location)]) }
-        }));
+        let router = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let location = location.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, location)],
+                    )
+                }
+            }),
+        );
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let result = http.post(format!("http://{address}/token")).body("fake-refresh")
-            .send_guarded().await;
+        let result = http
+            .post(format!("http://{address}/token"))
+            .body("fake-refresh")
+            .send_guarded()
+            .await;
         server.abort();
         let _ = server.await;
-        assert!(matches!(result.unwrap_err(), http_transport::Error::Http(error) if error.is_redirect()));
-        assert_eq!(target.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert!(
+            matches!(result.unwrap_err(), http_transport::Error::Http(error) if error.is_redirect())
+        );
+        assert_eq!(
+            target.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
     #[allow(clippy::disallowed_methods)] // non-forwarding local proxy observer
     #[tokio::test]

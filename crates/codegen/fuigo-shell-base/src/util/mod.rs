@@ -1043,7 +1043,10 @@ mod tests {
             "https://localhost/",
         ] {
             let set = TrustedApiOrigins::new([origin.to_string()]);
-            assert!(!set.is_trusted_fuigo_https_url(origin), "{origin} was admitted");
+            assert!(
+                !set.is_trusted_fuigo_https_url(origin),
+                "{origin} was admitted"
+            );
         }
         let set = TrustedApiOrigins::new(["https://gw.example/".to_string()]);
         assert!(set.is_trusted_fuigo_https_url("https://gw.example/v1"));

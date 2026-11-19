@@ -340,7 +340,10 @@ impl PidFile {
         // tracing is not initialized this early; in daemonized mode stderr is already redirected to the log file, so eprintln! is the log channel
         fuigo_tty_utils::cli_eprintln!("taking over from predecessor workspace-server (pid {pid})");
         if let Err(e) = predecessor.signal(false) {
-            fuigo_tty_utils::cli_eprintln!("failed to signal predecessor (pid {pid}): {}", fuigo_tty_utils::untrusted(e));
+            fuigo_tty_utils::cli_eprintln!(
+                "failed to signal predecessor (pid {pid}): {}",
+                fuigo_tty_utils::untrusted(e)
+            );
         }
         if let Some(guard) = Self::poll_acquire(path, grace)? {
             return Ok(Some(guard));
@@ -350,7 +353,10 @@ impl PidFile {
             "predecessor (pid {pid}) did not release the pidfile lock in time; killing it"
         );
         if let Err(e) = predecessor.signal(true) {
-            fuigo_tty_utils::cli_eprintln!("failed to kill predecessor (pid {pid}): {}", fuigo_tty_utils::untrusted(e));
+            fuigo_tty_utils::cli_eprintln!(
+                "failed to kill predecessor (pid {pid}): {}",
+                fuigo_tty_utils::untrusted(e)
+            );
         }
         if let Some(guard) = Self::poll_acquire(path, TAKEOVER_KILL_GRACE)? {
             return Ok(Some(guard));

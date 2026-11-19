@@ -68,7 +68,8 @@ impl SandboxClient {
             "sandbox",
         )?;
         // P43: identity only to a FluxRouter-operated destination.
-        let identity = super::account_identity_headers(&self.base_url, &auth.user_id, auth.email.as_deref());
+        let identity =
+            super::account_identity_headers(&self.base_url, &auth.user_id, auth.email.as_deref());
         let builder = builder
             .header("Authorization", format!("Bearer {}", &auth.key))
             .header("X-XAI-Token-Auth", FuigoComConfig::default().token_header)
@@ -225,10 +226,12 @@ mod identity_tests {
         };
         // Alone in its process: install the issuer no other test happened to install here.
         crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
-        let (base, seen, handle) =
-            crate::remote::identity_tests::spawn_recording_mock("{}").await;
-            let base = front.front_service(&base);
-        let client = SandboxClient::new(base, crate::remote::skills_client::tests::test_auth_manager());
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let base = front.front_service(&base);
+        let client = SandboxClient::new(
+            base,
+            crate::remote::skills_client::tests::test_auth_manager(),
+        );
         let _ = client
             .list_environments(&SandboxListEnvironmentsRequest::default())
             .await;

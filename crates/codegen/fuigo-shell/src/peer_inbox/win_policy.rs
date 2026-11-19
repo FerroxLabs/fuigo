@@ -10,8 +10,8 @@ use fuigo_peer::HostId;
 #[allow(unused_imports)] // the locator fns are used on Windows only
 // Moved to `fuigo-win-acl` (one file rule for the peer locator and the bearer token file); same names here.
 pub(crate) use fuigo_win_acl::{
-    AceSummary, DaclSummary, RawAce, SID_ADMINISTRATORS, SID_SYSTEM, dacl_summary_from_binary, is_sid_text, locator_dacl_ok,
-    locator_owner_ok, owner_only_sddl,
+    AceSummary, DaclSummary, RawAce, SID_ADMINISTRATORS, SID_SYSTEM, dacl_summary_from_binary,
+    is_sid_text, locator_dacl_ok, locator_owner_ok, owner_only_sddl,
 };
 use sha2::{Digest, Sha256};
 
@@ -106,7 +106,9 @@ pub(crate) fn dacl_owner_only(d: &DaclSummary, ours: &str) -> bool {
 /// fixed order, so a SYSTEM client reports `ClientSystemOrService` and not `DifferentAccount`.
 pub(crate) fn win_peer_verdict(facts: &PipePeerFacts, ours: &OurIdentity) -> Verdict {
     use Refusal::*;
-    let Ok(me) = &ours.user_sid else { return Verdict::Refuse(OurIdentityUnknown) };
+    let Ok(me) = &ours.user_sid else {
+        return Verdict::Refuse(OurIdentityUnknown);
+    };
     if !is_sid_text(me) {
         return Verdict::Refuse(OurIdentityUnknown);
     }
@@ -119,7 +121,9 @@ pub(crate) fn win_peer_verdict(facts: &PipePeerFacts, ours: &OurIdentity) -> Ver
     if !matches!(&facts.pipe_dacl, Ok(d) if dacl_owner_only(d, me)) {
         return Verdict::Refuse(PipeDaclNotOwnerOnly);
     }
-    let Ok(user) = &facts.client_user else { return Verdict::Refuse(ClientUnreadable) };
+    let Ok(user) = &facts.client_user else {
+        return Verdict::Refuse(ClientUnreadable);
+    };
     if !is_sid_text(user) {
         return Verdict::Refuse(ClientUnreadable);
     }
@@ -143,7 +147,11 @@ pub(crate) fn win_peer_verdict(facts: &PipePeerFacts, ours: &OurIdentity) -> Ver
         Ok(_) => {}
         Err(_) => return Verdict::Refuse(ClientLevelUnknown),
     }
-    if user == me { Verdict::Accept } else { Verdict::Refuse(DifferentAccount) }
+    if user == me {
+        Verdict::Accept
+    } else {
+        Verdict::Refuse(DifferentAccount)
+    }
 }
 
 /// What the client learns about the server it connected to.
@@ -185,9 +193,14 @@ pub(crate) enum ServerRefusal {
 
 /// The S3.8 client-side rule: the server's token AND the pipe's owner must both be our user. Unlike the leader's
 /// `peer_auth::decide`, an unreadable server token is NOT rescued by a matching owner.
-pub(crate) fn win_server_verdict(facts: &ServerFacts, ours: &OurIdentity) -> Result<(), ServerRefusal> {
+pub(crate) fn win_server_verdict(
+    facts: &ServerFacts,
+    ours: &OurIdentity,
+) -> Result<(), ServerRefusal> {
     use ServerRefusal::*;
-    let Ok(me) = &ours.user_sid else { return Err(OurIdentityUnknown) };
+    let Ok(me) = &ours.user_sid else {
+        return Err(OurIdentityUnknown);
+    };
     if !is_sid_text(me) {
         return Err(OurIdentityUnknown);
     }
@@ -195,8 +208,12 @@ pub(crate) fn win_server_verdict(facts: &ServerFacts, ours: &OurIdentity) -> Res
         Ok(true) => {}
         _ => return Err(NotAPipe),
     }
-    let Ok(server) = &facts.server_user else { return Err(ServerUnreadable) };
-    let Ok(owner) = &facts.pipe_owner else { return Err(OwnerUnreadable) };
+    let Ok(server) = &facts.server_user else {
+        return Err(ServerUnreadable);
+    };
+    let Ok(owner) = &facts.pipe_owner else {
+        return Err(OwnerUnreadable);
+    };
     if server != me {
         return Err(ServerNotUs);
     }
@@ -210,7 +227,9 @@ pub(crate) fn win_server_verdict(facts: &ServerFacts, ours: &OurIdentity) -> Res
 pub(crate) fn sids_are_system_or_service(user: &str, groups: &[String]) -> bool {
     matches!(user, "S-1-5-18" | "S-1-5-19" | "S-1-5-20")
         || user.starts_with("S-1-5-80-")
-        || groups.iter().any(|g| g == "S-1-5-6" || g == "S-1-5-18" || g.starts_with("S-1-5-80-"))
+        || groups
+            .iter()
+            .any(|g| g == "S-1-5-6" || g == "S-1-5-18" || g.starts_with("S-1-5-80-"))
 }
 
 pub(crate) fn sids_are_anonymous(user: &str, groups: &[String]) -> bool {
@@ -317,11 +336,21 @@ impl WinUnavailable {
         match self {
             Self::FeatureOff => "peer messaging is unavailable: the feature is off",
             Self::NotWindows => "peer messaging is unavailable: unsupported platform",
-            Self::IdentityUnreadable => "peer messaging is unavailable: this user account could not be read",
-            Self::NetworkLogon => "peer messaging is unavailable in a remote (network) logon session",
-            Self::NameInUse => "peer messaging is unavailable: the inbox pipe name is already in use",
-            Self::CreateFailed(_) => "peer messaging is unavailable: the inbox pipe could not be created",
-            Self::ReadbackFailed => "peer messaging is unavailable: the inbox pipe failed its safety checks",
+            Self::IdentityUnreadable => {
+                "peer messaging is unavailable: this user account could not be read"
+            }
+            Self::NetworkLogon => {
+                "peer messaging is unavailable in a remote (network) logon session"
+            }
+            Self::NameInUse => {
+                "peer messaging is unavailable: the inbox pipe name is already in use"
+            }
+            Self::CreateFailed(_) => {
+                "peer messaging is unavailable: the inbox pipe could not be created"
+            }
+            Self::ReadbackFailed => {
+                "peer messaging is unavailable: the inbox pipe failed its safety checks"
+            }
         }
     }
 }
@@ -335,15 +364,25 @@ mod tests {
     const SYSTEM: &str = "S-1-5-18";
 
     fn us() -> OurIdentity {
-        OurIdentity { user_sid: Ok(ME.into()) }
+        OurIdentity {
+            user_sid: Ok(ME.into()),
+        }
     }
 
     fn ace(kind: &str, flags: &str, rights: &str, who: &str) -> AceSummary {
-        AceSummary { kind: kind.into(), flags: flags.into(), rights: rights.into(), trustee: who.into() }
+        AceSummary {
+            kind: kind.into(),
+            flags: flags.into(),
+            rights: rights.into(),
+            trustee: who.into(),
+        }
     }
 
     fn good_dacl() -> DaclSummary {
-        DaclSummary { flags: "P".into(), aces: vec![ace("A", "", "GA", ME)] }
+        DaclSummary {
+            flags: "P".into(),
+            aces: vec![ace("A", "", "GA", ME)],
+        }
     }
 
     fn good() -> PipePeerFacts {
@@ -366,7 +405,11 @@ mod tests {
     #[test]
     fn same_user_accepts() {
         assert_eq!(win_peer_verdict(&good(), &us()), Verdict::Accept);
-        for l in [ImpLevel::Identification, ImpLevel::Impersonation, ImpLevel::Delegation] {
+        for l in [
+            ImpLevel::Identification,
+            ImpLevel::Impersonation,
+            ImpLevel::Delegation,
+        ] {
             let mut f = good();
             f.client_level = Ok(l);
             assert_eq!(win_peer_verdict(&f, &us()), Verdict::Accept);
@@ -437,7 +480,10 @@ mod tests {
         f.pipe_dacl = Err(5);
         refused(&f, Refusal::PipeDaclNotOwnerOnly);
         let o = OurIdentity { user_sid: Err(5) };
-        assert_eq!(win_peer_verdict(&good(), &o), Verdict::Refuse(Refusal::OurIdentityUnknown));
+        assert_eq!(
+            win_peer_verdict(&good(), &o),
+            Verdict::Refuse(Refusal::OurIdentityUnknown)
+        );
     }
 
     #[test]
@@ -445,8 +491,13 @@ mod tests {
         let mut f = good();
         f.client_user = Ok("not a sid".into());
         refused(&f, Refusal::ClientUnreadable);
-        let o = OurIdentity { user_sid: Ok("x".into()) };
-        assert_eq!(win_peer_verdict(&good(), &o), Verdict::Refuse(Refusal::OurIdentityUnknown));
+        let o = OurIdentity {
+            user_sid: Ok("x".into()),
+        };
+        assert_eq!(
+            win_peer_verdict(&good(), &o),
+            Verdict::Refuse(Refusal::OurIdentityUnknown)
+        );
     }
 
     #[test]
@@ -470,29 +521,83 @@ mod tests {
         let a = |k: &str, f: &str, r: &str, w: &str| ace(k, f, r, w);
         let cases = [
             // empty DACL
-            DaclSummary { flags: "P".into(), aces: vec![] },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![],
+            },
             // not protected / auto-inherited
-            DaclSummary { flags: String::new(), aces: good_dacl().aces },
-            DaclSummary { flags: "PAI".into(), aces: good_dacl().aces },
-            DaclSummary { flags: "AI".into(), aces: good_dacl().aces },
+            DaclSummary {
+                flags: String::new(),
+                aces: good_dacl().aces,
+            },
+            DaclSummary {
+                flags: "PAI".into(),
+                aces: good_dacl().aces,
+            },
+            DaclSummary {
+                flags: "AI".into(),
+                aces: good_dacl().aces,
+            },
             // extra or other trustees
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "", "GA", ME), a("A", "", "GA", SYSTEM)] },
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "", "GA", ME), a("A", "", "GA", "WD")] },
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "", "GA", SYSTEM)] },
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "", "GA", "WD")] },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "", "GA", ME), a("A", "", "GA", SYSTEM)],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "", "GA", ME), a("A", "", "GA", "WD")],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "", "GA", SYSTEM)],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "", "GA", "WD")],
+            },
             // inherited / inheriting ACEs
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "OICI", "GA", ME)] },
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "ID", "GA", ME)] },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "OICI", "GA", ME)],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "ID", "GA", ME)],
+            },
             // deny and object ACEs
-            DaclSummary { flags: "P".into(), aces: vec![a("D", "", "GA", ME)] },
-            DaclSummary { flags: "P".into(), aces: vec![a("OA", "", "GA", ME)] },
-            DaclSummary { flags: "P".into(), aces: vec![a("D", "", "GA", ME), a("A", "", "GA", ME)] },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("D", "", "GA", ME)],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("OA", "", "GA", ME)],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("D", "", "GA", ME), a("A", "", "GA", ME)],
+            },
             // wrong access mask for our own SID: broader or different than what start set
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "", "GRGW", ME)] },
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "", "GR", ME)] },
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "", "FAWO", ME)] },
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "", "0x1f01ff0", ME)] },
-            DaclSummary { flags: "P".into(), aces: vec![a("A", "", "", ME)] },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "", "GRGW", ME)],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "", "GR", ME)],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "", "FAWO", ME)],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "", "0x1f01ff0", ME)],
+            },
+            DaclSummary {
+                flags: "P".into(),
+                aces: vec![a("A", "", "", ME)],
+            },
         ];
         for d in cases {
             assert!(!dacl_owner_only(&d, ME), "{d:?}");
@@ -505,7 +610,10 @@ mod tests {
     #[test]
     fn the_masks_start_sets_pass() {
         for r in ["GA", "FA", "0x10000000", "0x1F01FF", "0x1f01ff"] {
-            let d = DaclSummary { flags: "P".into(), aces: vec![ace("A", "", r, ME)] };
+            let d = DaclSummary {
+                flags: "P".into(),
+                aces: vec![ace("A", "", r, ME)],
+            };
             assert!(dacl_owner_only(&d, ME), "{r}");
         }
     }
@@ -515,9 +623,12 @@ mod tests {
         // SDDL renders a NULL DACL as `D:NO_ACCESS_CONTROL`: not a protected owner-only list, and it does not parse.
         assert!(parse_owner_dacl_sddl("O:S-1-5-21-1-2-3-1001D:NO_ACCESS_CONTROL").is_err());
         // A deny ACE and an inherited ACE parse and then fail the check.
-        let (_, d) = parse_owner_dacl_sddl("O:S-1-5-21-1-2-3-1001D:P(D;;GA;;;S-1-5-21-1-2-3-1001)").unwrap();
+        let (_, d) =
+            parse_owner_dacl_sddl("O:S-1-5-21-1-2-3-1001D:P(D;;GA;;;S-1-5-21-1-2-3-1001)").unwrap();
         assert!(!dacl_owner_only(&d, "S-1-5-21-1-2-3-1001"));
-        let (_, d) = parse_owner_dacl_sddl("O:S-1-5-21-1-2-3-1001D:(A;ID;FA;;;S-1-5-21-1-2-3-1001)").unwrap();
+        let (_, d) =
+            parse_owner_dacl_sddl("O:S-1-5-21-1-2-3-1001D:(A;ID;FA;;;S-1-5-21-1-2-3-1001)")
+                .unwrap();
         assert!(!dacl_owner_only(&d, "S-1-5-21-1-2-3-1001"));
     }
 
@@ -534,7 +645,10 @@ mod tests {
         let prod = owner_only_sddl(ME).unwrap();
         assert!(!prod.contains("AU") && !prod.contains("SY") && !prod.contains("WD"));
         // In a release build even a request yields nothing.
-        assert_eq!(evidence_open_sddl(ME, true).is_some(), cfg!(debug_assertions));
+        assert_eq!(
+            evidence_open_sddl(ME, true).is_some(),
+            cfg!(debug_assertions)
+        );
         assert!(evidence_open_sddl("bad", true).is_none());
     }
 
@@ -554,18 +668,48 @@ mod tests {
             server_user: s.map(String::from),
             pipe_owner: o.map(String::from),
         };
-        assert_eq!(win_server_verdict(&sf(Ok(true), Ok(ME), Ok(ME)), &us()), Ok(()));
-        assert_eq!(win_server_verdict(&sf(Ok(true), Ok(OTHER), Ok(OTHER)), &us()), Err(ServerRefusal::ServerNotUs));
-        assert_eq!(win_server_verdict(&sf(Ok(true), Ok(ME), Ok(OTHER)), &us()), Err(ServerRefusal::OwnerNotUs));
-        assert_eq!(win_server_verdict(&sf(Ok(true), Ok(OTHER), Ok(ME)), &us()), Err(ServerRefusal::ServerNotUs));
-        assert_eq!(win_server_verdict(&sf(Ok(true), Ok(SYSTEM), Ok(SYSTEM)), &us()), Err(ServerRefusal::ServerNotUs));
+        assert_eq!(
+            win_server_verdict(&sf(Ok(true), Ok(ME), Ok(ME)), &us()),
+            Ok(())
+        );
+        assert_eq!(
+            win_server_verdict(&sf(Ok(true), Ok(OTHER), Ok(OTHER)), &us()),
+            Err(ServerRefusal::ServerNotUs)
+        );
+        assert_eq!(
+            win_server_verdict(&sf(Ok(true), Ok(ME), Ok(OTHER)), &us()),
+            Err(ServerRefusal::OwnerNotUs)
+        );
+        assert_eq!(
+            win_server_verdict(&sf(Ok(true), Ok(OTHER), Ok(ME)), &us()),
+            Err(ServerRefusal::ServerNotUs)
+        );
+        assert_eq!(
+            win_server_verdict(&sf(Ok(true), Ok(SYSTEM), Ok(SYSTEM)), &us()),
+            Err(ServerRefusal::ServerNotUs)
+        );
         // The leader's fallback (unreadable token, matching owner) is NOT used.
-        assert_eq!(win_server_verdict(&sf(Ok(true), Err(5), Ok(ME)), &us()), Err(ServerRefusal::ServerUnreadable));
-        assert_eq!(win_server_verdict(&sf(Ok(true), Ok(ME), Err(5)), &us()), Err(ServerRefusal::OwnerUnreadable));
-        assert_eq!(win_server_verdict(&sf(Ok(false), Ok(ME), Ok(ME)), &us()), Err(ServerRefusal::NotAPipe));
-        assert_eq!(win_server_verdict(&sf(Err(6), Ok(ME), Ok(ME)), &us()), Err(ServerRefusal::NotAPipe));
+        assert_eq!(
+            win_server_verdict(&sf(Ok(true), Err(5), Ok(ME)), &us()),
+            Err(ServerRefusal::ServerUnreadable)
+        );
+        assert_eq!(
+            win_server_verdict(&sf(Ok(true), Ok(ME), Err(5)), &us()),
+            Err(ServerRefusal::OwnerUnreadable)
+        );
+        assert_eq!(
+            win_server_verdict(&sf(Ok(false), Ok(ME), Ok(ME)), &us()),
+            Err(ServerRefusal::NotAPipe)
+        );
+        assert_eq!(
+            win_server_verdict(&sf(Err(6), Ok(ME), Ok(ME)), &us()),
+            Err(ServerRefusal::NotAPipe)
+        );
         let none = OurIdentity { user_sid: Err(5) };
-        assert_eq!(win_server_verdict(&sf(Ok(true), Ok(ME), Ok(ME)), &none), Err(ServerRefusal::OurIdentityUnknown));
+        assert_eq!(
+            win_server_verdict(&sf(Ok(true), Ok(ME), Ok(ME)), &none),
+            Err(ServerRefusal::OurIdentityUnknown)
+        );
     }
 
     #[test]
@@ -576,7 +720,10 @@ mod tests {
         assert!(sids_are_system_or_service("S-1-5-20", &[]));
         assert!(sids_are_system_or_service("S-1-5-80-1-2-3-4-5", &[]));
         assert!(sids_are_system_or_service(ME, &g(&["S-1-1-0", "S-1-5-6"])));
-        assert!(!sids_are_system_or_service(ME, &g(&["S-1-1-0", "S-1-5-32-545"])));
+        assert!(!sids_are_system_or_service(
+            ME,
+            &g(&["S-1-1-0", "S-1-5-32-545"])
+        ));
         assert!(sids_are_anonymous("S-1-5-7", &[]));
         assert!(!sids_are_anonymous(ME, &g(&["S-1-1-0"])));
         assert!(sids_are_network(&g(&["S-1-5-2"])));
@@ -596,13 +743,26 @@ mod tests {
         // after the prefix: 32 hex, a dash, 32 hex; nothing else
         let tail = &n[PIPE_PREFIX.len()..];
         assert_eq!(tail.len(), 32 + 1 + 32);
-        assert!(tail.bytes().all(|b| b == b'-' || b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(
+            tail.bytes()
+                .all(|b| b == b'-' || b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
     }
 
     #[test]
     fn no_input_makes_a_name_outside_the_prefix() {
         let host = HostId::new(&"0f".repeat(16)).unwrap();
-        for sid in ["", "..", r"\\.\pipe\evil", "S-1-5-1\\..\\x", "S-1-5-18/../..", "S-1-5-\0", "\u{0}", "S-1-5-1\n", "  "] {
+        for sid in [
+            "",
+            "..",
+            r"\\.\pipe\evil",
+            "S-1-5-1\\..\\x",
+            "S-1-5-18/../..",
+            "S-1-5-\0",
+            "\u{0}",
+            "S-1-5-1\n",
+            "  ",
+        ] {
             if let Ok(n) = pipe_name(&host, sid) {
                 assert!(n.starts_with(PIPE_PREFIX));
                 assert!(!n[PIPE_PREFIX.len()..].contains(['\\', '/', '.', '\0']));
@@ -617,11 +777,19 @@ mod tests {
     fn binary_summary_for_builtin_administrator_passes() {
         // The built-in Administrator (RID 500): SDDL text would say `LA`; the binary path gives the full SID.
         let admin = "S-1-5-21-1111111111-2222222222-3333333333-500";
-        let raw = vec![RawAce { ace_type: 0, flags: 0, mask: 0x1f_01ff, trustee_sid: admin.to_owned() }];
+        let raw = vec![RawAce {
+            ace_type: 0,
+            flags: 0,
+            mask: 0x1f_01ff,
+            trustee_sid: admin.to_owned(),
+        }];
         let d = dacl_summary_from_binary(true, &raw);
         assert!(dacl_owner_only(&d, admin));
         // Not protected, inherited flag, deny type, wrong mask, wrong trustee, extra ACE: all refuse.
-        assert!(!dacl_owner_only(&dacl_summary_from_binary(false, &raw), admin));
+        assert!(!dacl_owner_only(
+            &dacl_summary_from_binary(false, &raw),
+            admin
+        ));
         let mut r = raw.clone();
         r[0].flags = 0x10;
         assert!(!dacl_owner_only(&dacl_summary_from_binary(true, &r), admin));
@@ -637,7 +805,10 @@ mod tests {
         r = raw.clone();
         r.push(raw[0].clone());
         assert!(!dacl_owner_only(&dacl_summary_from_binary(true, &r), admin));
-        assert!(!dacl_owner_only(&dacl_summary_from_binary(true, &[]), admin));
+        assert!(!dacl_owner_only(
+            &dacl_summary_from_binary(true, &[]),
+            admin
+        ));
     }
 
     #[test]
@@ -658,7 +829,16 @@ mod tests {
 
     #[test]
     fn sddl_parse_rejects_malformed_and_reads_extra_aces() {
-        for bad in ["", "D:P", "O:x", "O:S-1-5-18", "O:S-1-5-18D:P(A;;GA;;;S-1-5-18", "O:S-1-5-18D:P(A;;GA;;S-1-5-18)", "O:S-1-5-18D:P(A;;GA;;;S-1-5-18)junk", "O:S-1-5-18D:p"] {
+        for bad in [
+            "",
+            "D:P",
+            "O:x",
+            "O:S-1-5-18",
+            "O:S-1-5-18D:P(A;;GA;;;S-1-5-18",
+            "O:S-1-5-18D:P(A;;GA;;S-1-5-18)",
+            "O:S-1-5-18D:P(A;;GA;;;S-1-5-18)junk",
+            "O:S-1-5-18D:p",
+        ] {
             assert!(parse_owner_dacl_sddl(bad).is_err(), "{bad:?}");
         }
         let (_, d) = parse_owner_dacl_sddl("O:S-1-5-18D:PAI(A;;FA;;;SY)(A;OICI;FA;;;BA)").unwrap();
@@ -680,7 +860,10 @@ mod tests {
             WinUnavailable::CreateFailed(5),
             WinUnavailable::ReadbackFailed,
         ] {
-            assert!(r.reason_text().starts_with("peer messaging is unavailable: "));
+            assert!(
+                r.reason_text()
+                    .starts_with("peer messaging is unavailable: ")
+            );
         }
     }
 }
@@ -717,7 +900,8 @@ pub(crate) mod rights {
         | GENERIC_WRITE
         | GENERIC_ALL;
     /// What lets a stranger replace or re-own an EXISTING directory below an ancestor (creating a new sibling is fine).
-    pub(crate) const ANCESTOR_REPLACE: u32 = FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | GENERIC_ALL | GENERIC_WRITE;
+    pub(crate) const ANCESTOR_REPLACE: u32 =
+        FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER | GENERIC_ALL | GENERIC_WRITE;
 }
 
 /// ACE flag: the ACE does not apply to the object it is on, only to children.
@@ -740,7 +924,10 @@ pub(crate) enum DirRole {
 pub(crate) enum DirDacl<'a> {
     /// No DACL at all: everyone has full access.
     Null,
-    Aces { protected: bool, aces: &'a [RawAce] },
+    Aces {
+        protected: bool,
+        aces: &'a [RawAce],
+    },
 }
 
 /// Deny-like ACE types (plain 1, object 6, callback 10, callback object 12): they never make a directory safer, so
@@ -782,7 +969,8 @@ pub(crate) fn dir_dacl_acceptable(role: DirRole, dacl: &DirDacl<'_>, ours: &str)
                     return false;
                 }
             } else if !inherit_only
-                && (a.mask & rights::FILE_ALL_ACCESS == rights::FILE_ALL_ACCESS || a.mask & rights::GENERIC_ALL != 0)
+                && (a.mask & rights::FILE_ALL_ACCESS == rights::FILE_ALL_ACCESS
+                    || a.mask & rights::GENERIC_ALL != 0)
             {
                 we_have_full = true;
             }
@@ -801,7 +989,11 @@ pub(crate) fn dir_dacl_acceptable(role: DirRole, dacl: &DirDacl<'_>, ours: &str)
 
 /// Owner rule: we own it, or BUILTIN\Administrators does while our token is elevated with that group enabled
 /// (files and directories created by an elevated administrator are owned by the Administrators group by default).
-pub(crate) fn owner_acceptable(is_us: bool, is_administrators: bool, administrators_usable: bool) -> bool {
+pub(crate) fn owner_acceptable(
+    is_us: bool,
+    is_administrators: bool,
+    administrators_usable: bool,
+) -> bool {
     is_us || (is_administrators && administrators_usable)
 }
 
@@ -830,11 +1022,18 @@ pub(crate) fn dir_kind_from_attrs(attrs: u32) -> DirKind {
 }
 
 fn is_reserved_device(comp: &str) -> bool {
-    let stem = comp.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
-        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.len() == 4
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+    let stem = comp
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.len() == 4
+        && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
 
 /// Judge the home path text and return the chain of directories to inspect, drive root first and the home last
@@ -869,7 +1068,9 @@ pub(crate) fn parse_home_path(s: &str) -> Result<Vec<String>, Disabled> {
             || comp.len() > 255
             || comp.ends_with('.')
             || comp.ends_with(' ')
-            || comp.chars().any(|c| c.is_control() || "<>:\"|?*".contains(c))
+            || comp
+                .chars()
+                .any(|c| c.is_control() || "<>:\"|?*".contains(c))
             || is_reserved_device(comp);
         if bad {
             return Err(Disabled::HomePathNotNormal);
@@ -892,10 +1093,23 @@ pub(crate) fn raw_aces_from_summary(d: &DaclSummary) -> Option<(bool, Vec<RawAce
     }
     let mut out = Vec::with_capacity(d.aces.len());
     for a in &d.aces {
-        let ace_type = if a.kind == "A" { 0 } else { u8::try_from(hex(&a.kind)?).ok()? };
-        let flags = if a.flags.is_empty() { 0 } else { u8::try_from(hex(&a.flags)?).ok()? };
+        let ace_type = if a.kind == "A" {
+            0
+        } else {
+            u8::try_from(hex(&a.kind)?).ok()?
+        };
+        let flags = if a.flags.is_empty() {
+            0
+        } else {
+            u8::try_from(hex(&a.flags)?).ok()?
+        };
         let mask = hex(&a.rights)?;
-        out.push(RawAce { ace_type, flags, mask, trustee_sid: a.trustee.clone() });
+        out.push(RawAce {
+            ace_type,
+            flags,
+            mask,
+            trustee_sid: a.trustee.clone(),
+        });
     }
     Some((d.flags == "P", out))
 }
@@ -914,23 +1128,52 @@ mod dir_tests {
     const MODIFY: u32 = 0x13_01bf;
 
     fn a(flags: u8, mask: u32, sid: &str) -> RawAce {
-        RawAce { ace_type: 0, flags, mask, trustee_sid: sid.to_owned() }
+        RawAce {
+            ace_type: 0,
+            flags,
+            mask,
+            trustee_sid: sid.to_owned(),
+        }
     }
     fn ok(role: DirRole, aces: &[RawAce]) -> bool {
-        dir_dacl_acceptable(role, &DirDacl::Aces { protected: true, aces }, ME)
+        dir_dacl_acceptable(
+            role,
+            &DirDacl::Aces {
+                protected: true,
+                aces,
+            },
+            ME,
+        )
     }
     const HOME: DirRole = DirRole::Home;
 
     #[test]
     fn writer_rule_allows_us_system_administrators() {
-        let aces = [a(0x3, FA, ME), a(0x3, FA, SID_SYSTEM), a(0x3, FA, SID_ADMINISTRATORS)];
+        let aces = [
+            a(0x3, FA, ME),
+            a(0x3, FA, SID_SYSTEM),
+            a(0x3, FA, SID_ADMINISTRATORS),
+        ];
         assert!(ok(HOME, &aces));
     }
 
     #[test]
     fn writer_rule_refuses_each_write_right_for_a_stranger() {
         for who in [USERS, AUTH_USERS, EVERYONE, OTHER] {
-            for bit in [0x2u32, 0x4, 0x10, 0x40, 0x100, 0x1_0000, 0x4_0000, 0x8_0000, 0x4000_0000, 0x1000_0000, FA, MODIFY] {
+            for bit in [
+                0x2u32,
+                0x4,
+                0x10,
+                0x40,
+                0x100,
+                0x1_0000,
+                0x4_0000,
+                0x8_0000,
+                0x4000_0000,
+                0x1000_0000,
+                FA,
+                MODIFY,
+            ] {
                 assert!(!ok(HOME, &[a(0, FA, ME), a(0, bit, who)]), "{who} {bit:#x}");
             }
         }
@@ -938,11 +1181,26 @@ mod dir_tests {
 
     #[test]
     fn writer_rule_allows_read_only_strangers_and_ignores_deny_and_inherit_only() {
-        assert!(ok(HOME, &[a(0, FA, ME), a(0, RX, USERS), a(0, RX, EVERYONE)]));
+        assert!(ok(
+            HOME,
+            &[a(0, FA, ME), a(0, RX, USERS), a(0, RX, EVERYONE)]
+        ));
         // inherit-only (for example CREATOR OWNER or a child-only Modify) does not apply to the object itself
-        assert!(ok(HOME, &[a(0, FA, ME), a(0x0b, MODIFY, AUTH_USERS), a(0x0b, FA, "S-1-3-0")]));
+        assert!(ok(
+            HOME,
+            &[
+                a(0, FA, ME),
+                a(0x0b, MODIFY, AUTH_USERS),
+                a(0x0b, FA, "S-1-3-0")
+            ]
+        ));
         // a deny ACE never makes it safer, and never makes it worse
-        let deny = RawAce { ace_type: 1, flags: 0, mask: FA, trustee_sid: USERS.to_owned() };
+        let deny = RawAce {
+            ace_type: 1,
+            flags: 0,
+            mask: FA,
+            trustee_sid: USERS.to_owned(),
+        };
         assert!(ok(HOME, &[a(0, FA, ME), deny.clone()]));
         // ... but it also does not cancel an allow
         assert!(!ok(HOME, &[a(0, MODIFY, USERS), deny]));
@@ -952,16 +1210,33 @@ mod dir_tests {
     fn writer_rule_null_dacl_unknown_types_and_bad_input() {
         assert!(!dir_dacl_acceptable(HOME, &DirDacl::Null, ME));
         for t in [2u8, 3, 4, 5, 7, 8, 9, 11, 13, 0x11, 0x40] {
-            let weird = RawAce { ace_type: t, flags: 0, mask: 0, trustee_sid: String::new() };
+            let weird = RawAce {
+                ace_type: t,
+                flags: 0,
+                mask: 0,
+                trustee_sid: String::new(),
+            };
             assert!(!ok(HOME, &[a(0, FA, ME), weird]), "type {t}");
         }
         for t in [6u8, 10, 12] {
-            let deny = RawAce { ace_type: t, flags: 0, mask: 0, trustee_sid: String::new() };
+            let deny = RawAce {
+                ace_type: t,
+                flags: 0,
+                mask: 0,
+                trustee_sid: String::new(),
+            };
             assert!(ok(HOME, &[a(0, FA, ME), deny]), "deny type {t}");
         }
         // unreadable trustee (empty text) with a write right is a stranger
         assert!(!ok(HOME, &[a(0, MODIFY, "")]));
-        assert!(!dir_dacl_acceptable(HOME, &DirDacl::Aces { protected: true, aces: &[] }, ""));
+        assert!(!dir_dacl_acceptable(
+            HOME,
+            &DirDacl::Aces {
+                protected: true,
+                aces: &[]
+            },
+            ""
+        ));
         // an empty DACL grants nobody anything: acceptable for home
         assert!(ok(HOME, &[]));
     }
@@ -970,7 +1245,14 @@ mod dir_tests {
     fn peers_rule_is_strict() {
         let p = DirRole::Peers;
         assert!(ok(p, &[a(0x3, FA, ME)]));
-        assert!(!dir_dacl_acceptable(p, &DirDacl::Aces { protected: false, aces: &[a(0x3, FA, ME)] }, ME));
+        assert!(!dir_dacl_acceptable(
+            p,
+            &DirDacl::Aces {
+                protected: false,
+                aces: &[a(0x3, FA, ME)]
+            },
+            ME
+        ));
         // SYSTEM and Administrators are NOT allowed in peers, not even read-only, not even inherit-only
         assert!(!ok(p, &[a(0x3, FA, ME), a(0, RX, SID_SYSTEM)]));
         assert!(!ok(p, &[a(0x3, FA, ME), a(0, FA, SID_ADMINISTRATORS)]));
@@ -1001,7 +1283,11 @@ mod dir_tests {
         ]
     }
     fn profile() -> Vec<RawAce> {
-        vec![a(0x13, FA, SID_ADMINISTRATORS), a(0x13, FA, SID_SYSTEM), a(0x13, FA, ME)]
+        vec![
+            a(0x13, FA, SID_ADMINISTRATORS),
+            a(0x13, FA, SID_SYSTEM),
+            a(0x13, FA, ME),
+        ]
     }
 
     #[test]
@@ -1022,17 +1308,57 @@ mod dir_tests {
         let mut gp_delete_other = c_root();
         gp_delete_other.push(a(0, 0x1_0000, OTHER)); // DELETE for any stranger on a grandparent
         let table: Vec<(&str, DirRole, Vec<RawAce>, bool)> = vec![
-            ("grandparent with DELETE for a stranger", anc(false), gp_delete_other, false),
-            ("grandparent with inherit-only DELETE is ignored", anc(false), gp_io_delete, true),
+            (
+                "grandparent with DELETE for a stranger",
+                anc(false),
+                gp_delete_other,
+                false,
+            ),
+            (
+                "grandparent with inherit-only DELETE is ignored",
+                anc(false),
+                gp_io_delete,
+                true,
+            ),
             ("C:\\ default", anc(false), c_root(), true),
             ("C:\\Users default", anc(false), c_users(), true),
-            ("C:\\Users\\me default, direct parent", anc(true), profile(), true),
-            ("C:\\ with DELETE_CHILD for Users", anc(false), more_c, false),
-            ("C:\\Users with DELETE for Users (not direct parent): now refused", anc(false), users_delete.clone(), false),
+            (
+                "C:\\Users\\me default, direct parent",
+                anc(true),
+                profile(),
+                true,
+            ),
+            (
+                "C:\\ with DELETE_CHILD for Users",
+                anc(false),
+                more_c,
+                false,
+            ),
+            (
+                "C:\\Users with DELETE for Users (not direct parent): now refused",
+                anc(false),
+                users_delete.clone(),
+                false,
+            ),
             ("same, direct parent", anc(true), users_delete, false),
-            ("profile with DELETE for another user, direct parent", anc(true), profile_delete, false),
-            ("profile with WRITE_DAC for Authenticated Users", anc(true), profile_dac, false),
-            ("C:\\Users with GENERIC_WRITE for Everyone", anc(false), users_gw, false),
+            (
+                "profile with DELETE for another user, direct parent",
+                anc(true),
+                profile_delete,
+                false,
+            ),
+            (
+                "profile with WRITE_DAC for Authenticated Users",
+                anc(true),
+                profile_dac,
+                false,
+            ),
+            (
+                "C:\\Users with GENERIC_WRITE for Everyone",
+                anc(false),
+                users_gw,
+                false,
+            ),
         ];
         for (name, role, aces, want) in table {
             assert_eq!(ok(role, &aces), want, "{name}");
@@ -1043,22 +1369,54 @@ mod dir_tests {
     #[test]
     fn path_rules() {
         let chain = parse_home_path(r"C:\Users\me\.fuigo").unwrap();
-        assert_eq!(chain, vec![r"C:\", r"C:\Users", r"C:\Users\me", r"C:\Users\me\.fuigo"]);
-        assert_eq!(parse_home_path("c:/Users/me/.fuigo/").unwrap().last().unwrap(), r"C:\Users\me\.fuigo");
-        for s in [r"\\server\share\x", r"\\.\C:\x", r"\\?\C:\Users\me", r"//server/share/x", r"\??\C:\x"] {
+        assert_eq!(
+            chain,
+            vec![r"C:\", r"C:\Users", r"C:\Users\me", r"C:\Users\me\.fuigo"]
+        );
+        assert_eq!(
+            parse_home_path("c:/Users/me/.fuigo/")
+                .unwrap()
+                .last()
+                .unwrap(),
+            r"C:\Users\me\.fuigo"
+        );
+        for s in [
+            r"\\server\share\x",
+            r"\\.\C:\x",
+            r"\\?\C:\Users\me",
+            r"//server/share/x",
+            r"\??\C:\x",
+        ] {
             assert_eq!(parse_home_path(s), Err(Disabled::HomePathNotNormal), "{s}");
         }
         for s in ["", "me", r"Users\me", r"\Users\me", "C:me", "C:", r"..\x"] {
             assert_eq!(parse_home_path(s), Err(Disabled::HomeNotAbsolute), "{s}");
         }
         for s in [
-            r"C:\Users\..\me", r"C:\Users\.\me", r"C:\a\\b", r"C:\a\b:stream", r"C:\a\b*", r"C:\a\b.", r"C:\a\b ",
-            r"C:\a\CON", r"C:\a\nul.txt", r"C:\a\LPT1", "C:\\", "C:\\a\\b\0",
+            r"C:\Users\..\me",
+            r"C:\Users\.\me",
+            r"C:\a\\b",
+            r"C:\a\b:stream",
+            r"C:\a\b*",
+            r"C:\a\b.",
+            r"C:\a\b ",
+            r"C:\a\CON",
+            r"C:\a\nul.txt",
+            r"C:\a\LPT1",
+            "C:\\",
+            "C:\\a\\b\0",
         ] {
-            assert_eq!(parse_home_path(s), Err(Disabled::HomePathNotNormal), "{s:?}");
+            assert_eq!(
+                parse_home_path(s),
+                Err(Disabled::HomePathNotNormal),
+                "{s:?}"
+            );
         }
         assert!(parse_home_path(r"C:\a\COM10").is_ok());
-        assert_eq!(parse_home_path(&format!("C:\\{}", "a".repeat(300))), Err(Disabled::HomePathNotNormal));
+        assert_eq!(
+            parse_home_path(&format!("C:\\{}", "a".repeat(300))),
+            Err(Disabled::HomePathNotNormal)
+        );
     }
 
     #[test]
@@ -1077,7 +1435,15 @@ mod dir_tests {
 
     #[test]
     fn summary_round_trip() {
-        let raw = vec![a(0x13, FA, ME), RawAce { ace_type: 5, flags: 0, mask: 0, trustee_sid: String::new() }];
+        let raw = vec![
+            a(0x13, FA, ME),
+            RawAce {
+                ace_type: 5,
+                flags: 0,
+                mask: 0,
+                trustee_sid: String::new(),
+            },
+        ];
         let (prot, back) = raw_aces_from_summary(&dacl_summary_from_binary(true, &raw)).unwrap();
         assert!(prot);
         assert_eq!(back, raw);

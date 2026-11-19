@@ -61,9 +61,11 @@ impl Filter for EventFilter {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct InternalEventFilter;
 
+#[cfg(test)]
 impl Filter for InternalEventFilter {
     fn eval(&self, _: &InternalEvent) -> bool {
         true

@@ -49,7 +49,10 @@ enum Sink {
 /// The tightening is best effort (P134): on a filesystem without Unix modes (vfat, exFAT, some FUSE and SMB mounts)
 /// `fchmod` answers EPERM, ENOTSUP or EINVAL, and 1.0.20 wrote the log there. A refusal is logged once per process and
 /// the log is still opened.
-#[allow(clippy::disallowed_methods, reason = "EventWriter::open_at only (Sink::File): events.jsonl in a directory that is not a session folder (workspace tree, tests); a session folder log goes through SessionAppend (EventWriter::open)")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "EventWriter::open_at only (Sink::File): events.jsonl in a directory that is not a session folder (workspace tree, tests); a session folder log goes through SessionAppend (EventWriter::open)"
+)]
 fn open_owner_only(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Result<File> {
     #[cfg(unix)]
     {
@@ -123,7 +126,10 @@ impl EventWriter {
 
     /// Open `dir/events.jsonl` where `dir` is **not** a session folder: the workspace daemon's own tree
     /// (`<fuigo_home>/workspace/sessions/`), and tests. A session folder is opened with [`EventWriter::open`].
-    #[allow(clippy::disallowed_methods, reason = "EventWriter::open_at: events.jsonl in a directory that is not a session folder (<fuigo_home>/workspace/sessions/, tests); session folders use EventWriter::open(&SessionWriter) (design F5 5.4.2)")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "EventWriter::open_at: events.jsonl in a directory that is not a session folder (<fuigo_home>/workspace/sessions/, tests); session folders use EventWriter::open(&SessionWriter) (design F5 5.4.2)"
+    )]
     pub fn open_at(dir: &Path) -> Self {
         let path = dir.join(EVENTS_FILE);
         let file = open_owner_only(std::fs::OpenOptions::new().create(true).append(true), &path)
@@ -191,7 +197,9 @@ fn encode_line(entry: &EventEntry) -> serde_json::Result<Vec<u8>> {
         serde_json::to_vec(entry)?
     } else {
         let mut value = serde_json::to_value(entry)?;
-        let tag = value.as_object_mut().and_then(|fields| fields.remove("type"));
+        let tag = value
+            .as_object_mut()
+            .and_then(|fields| fields.remove("type"));
         sent_credentials::scrub_json_strings(&mut value);
         let body = serde_json::to_vec(&value)?;
         let body = sent_credentials::scrub_bytes(&body).unwrap_or(body);
@@ -233,7 +241,10 @@ impl std::fmt::Debug for EventWriter {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     /// P134: a filesystem that refuses `fchmod` must not stop the event log from opening.
@@ -259,7 +270,10 @@ mod tests {
     /// variant is gone, design F5 §5.4.2).
     fn append_event_checked_at(dir: &Path, event: Event) -> std::io::Result<()> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = format!("events-test-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let id = format!(
+            "events-test-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let writer = SessionWriter::try_claim(id, dir).expect("claim");
         append_event_checked(&writer, event)
     }
@@ -367,7 +381,10 @@ mod tests {
                 .output()
                 .unwrap();
             let text = String::from_utf8_lossy(&output.stdout).into_owned();
-            assert!(output.status.success(), "isolated P113 probe failed: {text}");
+            assert!(
+                output.status.success(),
+                "isolated P113 probe failed: {text}"
+            );
             assert!(text.contains("test result: ok. 1 passed"), "{text}");
             return;
         }
@@ -385,7 +402,10 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join(EVENTS_FILE)).unwrap();
         let event: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
         assert_eq!(event["type"], "turn_ended", "{text}");
-        assert_eq!(event["cancellation_context"]["note"], "<redacted>", "{text}");
+        assert_eq!(
+            event["cancellation_context"]["note"], "<redacted>",
+            "{text}"
+        );
         assert!(event["ts"].is_string(), "{text}");
     }
 
@@ -522,7 +542,11 @@ mod tests {
         assert_eq!(mode(), 0o600, "EventWriter::open tightens an existing file");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         append_event_checked_at(dir.path(), event()).unwrap();
-        assert_eq!(mode(), 0o600, "append_event_checked tightens an existing file");
+        assert_eq!(
+            mode(),
+            0o600,
+            "append_event_checked tightens an existing file"
+        );
         std::fs::remove_file(&path).unwrap();
         append_event_checked_at(dir.path(), event()).unwrap();
         assert_eq!(mode(), 0o600, "a new file is created owner-only");
@@ -539,7 +563,10 @@ mod tests {
         let writer = SessionWriter::try_claim(id, &folder).unwrap();
         let events = EventWriter::open(&writer);
         drop(writer);
-        assert!(!SessionWriter::is_free(id), "the EventWriter holds the writer");
+        assert!(
+            !SessionWriter::is_free(id),
+            "the EventWriter holds the writer"
+        );
 
         let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
@@ -552,10 +579,16 @@ mod tests {
         });
         reached_rx.recv().unwrap();
         drop(events);
-        assert!(!SessionWriter::is_free(id), "a clone in a running task still holds the writer");
+        assert!(
+            !SessionWriter::is_free(id),
+            "a clone in a running task still holds the writer"
+        );
         release_tx.send(()).unwrap();
         task.join().unwrap();
-        assert!(SessionWriter::is_free(id), "the last clone's drop frees the writer");
+        assert!(
+            SessionWriter::is_free(id),
+            "the last clone's drop frees the writer"
+        );
 
         let text = std::fs::read_to_string(folder.join(EVENTS_FILE)).unwrap();
         assert_eq!(text.lines().count(), 2, "{text}");
@@ -575,8 +608,15 @@ mod tests {
         append_event_checked(&writer, Event::FirstToken).unwrap();
         let text = std::fs::read_to_string(folder.join(EVENTS_FILE)).unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2, "the torn line is ended, not swallowed: {text}");
-        assert!(serde_json::from_str::<serde_json::Value>(lines[1]).is_ok(), "{text}");
+        assert_eq!(
+            lines.len(),
+            2,
+            "the torn line is ended, not swallowed: {text}"
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(lines[1]).is_ok(),
+            "{text}"
+        );
 
         writer.delete_tree_sync().unwrap();
         assert!(append_event_checked(&writer, Event::FirstToken).is_err());

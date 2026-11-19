@@ -186,7 +186,10 @@ mod tests {
         )
         .unwrap()
         .expect("a warning");
-        assert!(warning.starts_with("mode not preserved for a/b.txt:"), "{warning}");
+        assert!(
+            warning.starts_with("mode not preserved for a/b.txt:"),
+            "{warning}"
+        );
     }
 
     #[test]

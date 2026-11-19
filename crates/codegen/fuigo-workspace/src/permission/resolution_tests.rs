@@ -35,7 +35,10 @@ fn isolated_home() -> IsolatedHome {
         .set("HOME", home.path())
         .set("USERPROFILE", home.path())
         .set("FUIGO_HOME", &fuigo_home);
-    IsolatedHome { _env: env, _home: home }
+    IsolatedHome {
+        _env: env,
+        _home: home,
+    }
 }
 
 /// Only `Deny` rules on read-capable tools (Read/Grep/Any) become grep excludes; write-only denies and non-deny actions are left out.
@@ -1506,7 +1509,10 @@ fn unmatchable_deny_url_shapes_warn() {
     let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "deniedMcpServers");
     // P169: an unmatchable deny entry fails the whole deny key closed (the source locks down) instead of being kept.
     assert_eq!(entries.len(), 0);
-    assert!(logs.contains("unenforceable deniedMcpServers entry"), "{logs:?}");
+    assert!(
+        logs.contains("unenforceable deniedMcpServers entry"),
+        "{logs:?}"
+    );
     assert!(
         logs.contains("has no host"),
         "host-less deny must warn, got: {logs:?}"
@@ -3971,7 +3977,10 @@ async fn base_mode_table_managed_default_mode() {
         (DefaultPermissionMode::Plan, M::Default),
         (DefaultPermissionMode::Auto, M::Default),
         (DefaultPermissionMode::DontAsk, M::DontAsk),
-        (DefaultPermissionMode::BypassPermissions, M::BypassPermissions),
+        (
+            DefaultPermissionMode::BypassPermissions,
+            M::BypassPermissions,
+        ),
     ];
     for (mode, expected) in table {
         let tmp = tempfile::tempdir().unwrap();
@@ -4054,10 +4063,11 @@ fn user_allow_edit_rule_is_default_not_accept_edits() {
     .unwrap();
     let (cfg, _, _) =
         resolve_claude_settings_inner(tmp.path(), true, None, UserDefaultModeLoad::Apply).unwrap();
-    assert!(cfg
-        .rules
-        .iter()
-        .any(|r| r.action == RuleAction::Allow && r.tool == ToolFilter::Edit));
+    assert!(
+        cfg.rules
+            .iter()
+            .any(|r| r.action == RuleAction::Allow && r.tool == ToolFilter::Edit)
+    );
     assert_eq!(cfg.base_mode(), M::Default);
 
     std::fs::write(
@@ -4154,7 +4164,11 @@ fn user_config_lock_ignores_every_other_source() {
     std::fs::write(&keyed, "[ui]\ndisable_bypass_permissions_mode = true\n").unwrap();
     let project = elsewhere.path().join(".fuigo");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("config.toml"), "[ui]\ndisable_bypass_permissions_mode = true\n").unwrap();
+    std::fs::write(
+        project.join("config.toml"),
+        "[ui]\ndisable_bypass_permissions_mode = true\n",
+    )
+    .unwrap();
 
     // Missing file.
     {
@@ -4166,7 +4180,11 @@ fn user_config_lock_ignores_every_other_source() {
         .unwrap();
         let _cfg = crate::TestEnvGuard::set("FUIGO_CONFIG", &keyed);
         let _cfg_path = crate::TestEnvGuard::set("FUIGO_CONFIG_PATH", &keyed);
-        assert_eq!(user_config_lock(), None, "only the user's own config.toml locks");
+        assert_eq!(
+            user_config_lock(),
+            None,
+            "only the user's own config.toml locks"
+        );
     }
     // Blank file.
     {
@@ -4214,14 +4232,15 @@ fn user_config_lock_warns_once_on_garbage() {
         .with_max_level(tracing::Level::WARN)
         .with_ansi(false)
         .finish();
-    let (first, second) = tracing::subscriber::with_default(subscriber, || {
-        (user_config_lock(), user_config_lock())
-    });
+    let (first, second) =
+        tracing::subscriber::with_default(subscriber, || (user_config_lock(), user_config_lock()));
     assert_eq!((first, second), (None, None));
     let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     let path = home.path().join("config.toml").display().to_string();
     assert_eq!(
-        out.lines().filter(|l| l.contains("WARN") && l.contains(&path)).count(),
+        out.lines()
+            .filter(|l| l.contains("WARN") && l.contains(&path))
+            .count(),
         1,
         "exactly one warning naming the file: {out}"
     );
@@ -4241,9 +4260,17 @@ async fn launch_policy_rules_merge_and_stay_isolated() {
     let tmp = tempfile::tempdir().unwrap();
     // Every other tier carries `[permission]`: the launch sub-policy must hold the launch file's rules only.
     std::fs::create_dir_all(tmp.path().join(".fuigo")).unwrap();
-    std::fs::write(tmp.path().join(".fuigo/config.toml"), "[permission]\nallow = [\"Bash\", \"Read\"]\ndeny = [\"Edit(/etc/**)\"]\n").unwrap();
+    std::fs::write(
+        tmp.path().join(".fuigo/config.toml"),
+        "[permission]\nallow = [\"Bash\", \"Read\"]\ndeny = [\"Edit(/etc/**)\"]\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
-    std::fs::write(tmp.path().join(".claude/settings.json"), r#"{"permissions":{"allow":["WebFetch"],"ask":["Grep"]}}"#).unwrap();
+    std::fs::write(
+        tmp.path().join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["WebFetch"],"ask":["Grep"]}}"#,
+    )
+    .unwrap();
     let launch_rules = vec![
         parse_permission_rule("Bash(rm *)", RuleAction::Ask).unwrap(),
         parse_permission_rule("Edit", RuleAction::Allow).unwrap(),
@@ -4251,30 +4278,72 @@ async fn launch_policy_rules_merge_and_stay_isolated() {
     ];
     let policy = LaunchPolicy::for_test("/launch/policy.toml", launch_rules.clone());
     let mut tagged = Vec::new();
-    tag_with_source(&mut tagged, policy.rules.clone(), policy.source(LaunchScope::Process));
+    tag_with_source(
+        &mut tagged,
+        policy.rules.clone(),
+        policy.source(LaunchScope::Process),
+    );
     let resolved = resolve_permissions_with_provenance_inner(
         tmp.path(),
-        ResolveInputs { launch_rules: tagged.clone(), ..inputs(None) },
+        ResolveInputs {
+            launch_rules: tagged.clone(),
+            ..inputs(None)
+        },
     )
     .await
     .unwrap();
-    let launch_texts: Vec<String> = resolved.config.launch_rules.iter().map(|r| format!("{r:?}")).collect();
-    assert_eq!(launch_texts, launch_rules.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>());
-    assert!(resolved.sources.iter().any(|s| s.to_string() == "/launch/policy.toml (launch policy)"));
+    let launch_texts: Vec<String> = resolved
+        .config
+        .launch_rules
+        .iter()
+        .map(|r| format!("{r:?}"))
+        .collect();
+    assert_eq!(
+        launch_texts,
+        launch_rules
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        resolved
+            .sources
+            .iter()
+            .any(|s| s.to_string() == "/launch/policy.toml (launch policy)")
+    );
     let compiled = CompiledPolicy::new(resolved.config.clone());
     assert!(compiled.has_launch_policy());
     // Launch ask beats the owner's Bash allow; the owner's deny beats the launch allow.
-    assert_eq!(compiled.evaluate(&AccessKind::Bash("rm -rf x".into())), Some(Decision::Ask));
-    assert!(matches!(compiled.evaluate(&AccessKind::Edit("/etc/hosts".into())), Some(Decision::Reject(_))));
+    assert_eq!(
+        compiled.evaluate(&AccessKind::Bash("rm -rf x".into())),
+        Some(Decision::Ask)
+    );
+    assert!(matches!(
+        compiled.evaluate(&AccessKind::Edit("/etc/hosts".into())),
+        Some(Decision::Reject(_))
+    ));
     // A launch allow removes a default prompt.
-    assert_eq!(compiled.evaluate(&AccessKind::Edit(tmp.path().join("a").to_string_lossy().into_owned())), Some(Decision::Allow));
+    assert_eq!(
+        compiled.evaluate(&AccessKind::Edit(
+            tmp.path().join("a").to_string_lossy().into_owned()
+        )),
+        Some(Decision::Allow)
+    );
     // Under the always-approve pin the catch-all launch allow is dropped (non-admin), the others stay.
-    let pinned = resolve_permissions_with_provenance_inner(tmp.path(), ResolveInputs { launch_rules: tagged, ..inputs(Some(PIN)) })
-        .await
-        .unwrap();
+    let pinned = resolve_permissions_with_provenance_inner(
+        tmp.path(),
+        ResolveInputs {
+            launch_rules: tagged,
+            ..inputs(Some(PIN))
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(pinned.config.launch_rules.len(), 2);
     // Unset: no launch rules, no launch sub-policy.
-    let unset = resolve_permissions_with_provenance_inner(tmp.path(), inputs(None)).await.unwrap();
+    let unset = resolve_permissions_with_provenance_inner(tmp.path(), inputs(None))
+        .await
+        .unwrap();
     assert!(unset.config.launch_rules.is_empty());
     assert!(!CompiledPolicy::new(unset.config).has_launch_policy());
 }

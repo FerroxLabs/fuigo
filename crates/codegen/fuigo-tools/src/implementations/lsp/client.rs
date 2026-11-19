@@ -424,8 +424,14 @@ fn p113_parent_env(test_name: &str) -> bool {
         String::from_utf8_lossy(&output.stderr)
     )
     .replace("fake-p113-", "[redacted]-");
-    assert!(output.status.success(), "isolated P113 probe failed: {diagnostics}");
-    assert!(diagnostics.contains("test result: ok. 1 passed"), "the P113 child must run exactly one test: {diagnostics}");
+    assert!(
+        output.status.success(),
+        "isolated P113 probe failed: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("test result: ok. 1 passed"),
+        "the P113 child must run exactly one test: {diagnostics}"
+    );
     true
 }
 
@@ -439,7 +445,9 @@ async fn p113_lsp_servers_never_see_fuigo_internal_secrets() {
     }
     let dir = tempfile::tempdir().unwrap();
     for explicit in [false, true] {
-        let marker = dir.path().join(if explicit { "explicit" } else { "default" });
+        let marker = dir
+            .path()
+            .join(if explicit { "explicit" } else { "default" });
         let check = p113_child_check(explicit);
         let script = format!("{check} && /bin/sh -c '{check}' && printf 1 > \"$P113_MARKER\"");
         let mut env = std::collections::HashMap::from([(

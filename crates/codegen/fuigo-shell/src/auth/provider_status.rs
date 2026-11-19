@@ -31,9 +31,14 @@ pub fn tail_mask(key: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FluxState {
     /// A key saved by Fuigo in `auth.json`.
-    Saved { masked: String },
+    Saved {
+        masked: String,
+    },
     /// A key in the environment (`env_var` is the variable NAME).
-    Env { env_var: String, masked: String },
+    Env {
+        env_var: String,
+        masked: String,
+    },
     NotSet,
 }
 
@@ -106,7 +111,9 @@ impl ProviderStatus {
     ) -> Self {
         let found = key_discovery::discover_with(&lookup);
         let saved = crate::auth::read_api_key(home).filter(|k| !k.trim().is_empty());
-        let flux_env = found.iter().find(|d| d.provider.applies_to_configured_endpoint);
+        let flux_env = found
+            .iter()
+            .find(|d| d.provider.applies_to_configured_endpoint);
         let flux = match (saved, flux_env) {
             (Some(key), _) => FluxState::Saved {
                 masked: tail_mask(&key),
@@ -194,7 +201,9 @@ impl ProviderStatus {
         let who = identity.map_or_else(String::new, |name| format!(" as {name}"));
         let label = provider.label();
         if !catalogue_fetched
-            && self.subscription(provider).is_none_or(|s| s.model_ids.is_empty())
+            && self
+                .subscription(provider)
+                .is_none_or(|s| s.model_ids.is_empty())
         {
             return format!(
                 "Signed in to {label}{who}. Its model list could not be fetched just now; \
@@ -221,7 +230,9 @@ impl ProviderStatus {
         let default = explicit_default
             .map(str::to_owned)
             .unwrap_or_else(|| crate::models::default_model().to_string());
-        format!("Signed in to Flux Router with key {masked}. Default model: {default}. Run `fuigo`.")
+        format!(
+            "Signed in to Flux Router with key {masked}. Default model: {default}. Run `fuigo`."
+        )
     }
 
     /// Every connection, Flux pinned first (and "Recommended") even when not set.
@@ -229,9 +240,10 @@ impl ProviderStatus {
         let mut out = Vec::new();
         let (ready, state) = match &self.flux {
             FluxState::Saved { masked } => (true, format!("ready: key {masked}")),
-            FluxState::Env { env_var, masked } => {
-                (true, format!("ready: {env_var} {masked} in your environment"))
-            }
+            FluxState::Env { env_var, masked } => (
+                true,
+                format!("ready: {env_var} {masked} in your environment"),
+            ),
             FluxState::NotSet => (
                 false,
                 format!("Not set: one key, every model. Get a key at {FLUX_SIGNUP}"),
@@ -264,7 +276,12 @@ impl ProviderStatus {
             let (ready, state) = match self.env_keys.iter().find(|k| k.provider_id == p.id) {
                 Some(k) if !k.model_ids.is_empty() => (
                     true,
-                    format!("ready: {} {}, {} models listed", k.env_var, k.masked, k.model_ids.len()),
+                    format!(
+                        "ready: {} {}, {} models listed",
+                        k.env_var,
+                        k.masked,
+                        k.model_ids.len()
+                    ),
                 ),
                 Some(k) => (true, format!("ready: {} {}", k.env_var, k.masked)),
                 None => (false, format!("not set: export {}", env_var_hint(p))),
@@ -291,10 +308,11 @@ impl ProviderStatus {
             }
             FluxState::NotSet => "Flux Router: one key, every model (recommended)".to_string(),
         };
-        let sub_label = |provider: SubscriptionProvider, base: &str| match self.subscription(provider) {
-            Some(_) => format!("{base}  signed in"),
-            None => base.to_string(),
-        };
+        let sub_label =
+            |provider: SubscriptionProvider, base: &str| match self.subscription(provider) {
+                Some(_) => format!("{base}  signed in"),
+                None => base.to_string(),
+            };
         let mut rows = vec![
             PickerRow {
                 choice: PickerChoice::Flux,
@@ -302,7 +320,10 @@ impl ProviderStatus {
             },
             PickerRow {
                 choice: PickerChoice::Chatgpt,
-                label: sub_label(SubscriptionProvider::Chatgpt, "ChatGPT subscription (Plus/Pro)"),
+                label: sub_label(
+                    SubscriptionProvider::Chatgpt,
+                    "ChatGPT subscription (Plus/Pro)",
+                ),
             },
             PickerRow {
                 choice: PickerChoice::Xai,
@@ -380,7 +401,10 @@ impl ProviderStatus {
                 ConnectionId::Key(id) => id.to_string(),
             };
             let badge = c.badge.map(|b| format!(" [{b}]")).unwrap_or_default();
-            out.push_str(&format!("  {:<22} {}{}\n      {}\n", slug, c.name, badge, c.state));
+            out.push_str(&format!(
+                "  {:<22} {}{}\n      {}\n",
+                slug, c.name, badge, c.state
+            ));
         }
         out
     }
@@ -430,7 +454,10 @@ pub fn route_of(
         };
     }
     if let Some(var) = env_key {
-        if let Some(p) = key_discovery::PROVIDERS.iter().find(|p| p.env_vars.contains(&var)) {
+        if let Some(p) = key_discovery::PROVIDERS
+            .iter()
+            .find(|p| p.env_vars.contains(&var))
+        {
             if p.applies_to_configured_endpoint {
                 return Route {
                     kind: RouteKind::Flux,
@@ -473,7 +500,11 @@ impl crate::agent::config::ModelEntry {
 }
 
 fn env_var_hint(p: &Provider) -> String {
-    p.env_vars.first().copied().unwrap_or("the provider key").to_string()
+    p.env_vars
+        .first()
+        .copied()
+        .unwrap_or("the provider key")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -529,8 +560,7 @@ mod tests {
     #[test]
     fn env_flux_key_row_reads_use_from_your_environment_masked() {
         let dir = tempfile::tempdir().unwrap();
-        let status =
-            ProviderStatus::collect(dir.path(), env(&[("FLUX_API_KEY", FLUX_KEY)]), false);
+        let status = ProviderStatus::collect(dir.path(), env(&[("FLUX_API_KEY", FLUX_KEY)]), false);
         let rows = status.picker_rows(false);
         assert_eq!(
             rows[0].label,
@@ -559,7 +589,11 @@ mod tests {
         assert_eq!(rows.last().unwrap().label, "Cancel");
         // "Enterprise" is only ever the SSO row.
         for r in plain.picker_rows(false) {
-            assert!(!r.label.to_lowercase().contains("enterprise"), "{}", r.label);
+            assert!(
+                !r.label.to_lowercase().contains("enterprise"),
+                "{}",
+                r.label
+            );
         }
         assert!(!plain.picker_text().to_lowercase().contains("enterprise"));
         assert!(!plain.status_text().to_lowercase().contains("enterprise"));
@@ -569,15 +603,34 @@ mod tests {
     #[tokio::test]
     async fn the_modal_offers_to_sign_out_of_each_signed_in_subscription_and_first_run_does_not() {
         let dir = tempfile::tempdir().unwrap();
-        test_sign_in(dir.path(), SubscriptionProvider::Xai, "grok-acct", &["grok-4.7"]).await;
+        test_sign_in(
+            dir.path(),
+            SubscriptionProvider::Xai,
+            "grok-acct",
+            &["grok-4.7"],
+        )
+        .await;
         let status = ProviderStatus::collect(dir.path(), none, false);
         let modal = status.picker_rows(true);
         let labels: Vec<&str> = modal.iter().map(|r| r.label.as_str()).collect();
-        assert!(labels.contains(&"Sign out of Grok subscription"), "{labels:?}");
-        assert!(!labels.contains(&"Sign out of ChatGPT subscription"), "{labels:?}");
-        assert_eq!(modal.last().unwrap().choice, PickerChoice::Exit, "Cancel stays last");
         assert!(
-            !status.picker_rows(false).iter().any(|r| matches!(r.choice, PickerChoice::SignOut(_))),
+            labels.contains(&"Sign out of Grok subscription"),
+            "{labels:?}"
+        );
+        assert!(
+            !labels.contains(&"Sign out of ChatGPT subscription"),
+            "{labels:?}"
+        );
+        assert_eq!(
+            modal.last().unwrap().choice,
+            PickerChoice::Exit,
+            "Cancel stays last"
+        );
+        assert!(
+            !status
+                .picker_rows(false)
+                .iter()
+                .any(|r| matches!(r.choice, PickerChoice::SignOut(_))),
             "first run has nothing to sign out of"
         );
         assert!(!status.picker_text().contains("Sign out"));
@@ -586,7 +639,13 @@ mod tests {
     #[tokio::test]
     async fn signed_in_state_never_shows_the_opaque_account_id_anywhere() {
         let dir = tempfile::tempdir().unwrap();
-        test_sign_in(dir.path(), SubscriptionProvider::Xai, "grok-acct-7", &["grok-4.7"]).await;
+        test_sign_in(
+            dir.path(),
+            SubscriptionProvider::Xai,
+            "grok-acct-7",
+            &["grok-4.7"],
+        )
+        .await;
         let status = ProviderStatus::collect(dir.path(), none, false);
         let rows = status.picker_rows(true);
         assert!(rows[2].label.ends_with("signed in"), "{}", rows[2].label);
@@ -594,8 +653,14 @@ mod tests {
         assert!(!rows[1].label.contains("signed in"));
         for text in [status.status_text(), status.provider_list_text()] {
             assert!(text.contains("signed in"), "{text}");
-            assert!(!text.contains("grok-acct-7") && !text.contains("signed in as"), "{text}");
-            assert!(text.contains("not signed in: /login"), "ChatGPT row must say how to fix");
+            assert!(
+                !text.contains("grok-acct-7") && !text.contains("signed in as"),
+                "{text}"
+            );
+            assert!(
+                text.contains("not signed in: /login"),
+                "ChatGPT row must say how to fix"
+            );
         }
         assert!(status.provider_list_text().contains("grok-subscription"));
         assert!(status.provider_list_text().contains("chatgpt-subscription"));
@@ -607,7 +672,10 @@ mod tests {
         let status =
             ProviderStatus::collect(dir.path(), env(&[("OPENAI_API_KEY", OPENAI_KEY)]), false);
         let text = status.provider_list_text();
-        assert!(text.contains("ready: OPENAI_API_KEY \u{2022}\u{2022}\u{2022}\u{2022}9876"), "{text}");
+        assert!(
+            text.contains("ready: OPENAI_API_KEY \u{2022}\u{2022}\u{2022}\u{2022}9876"),
+            "{text}"
+        );
         assert!(text.contains("not set: export ANTHROPIC_API_KEY"), "{text}");
         assert!(!text.contains(OPENAI_KEY));
     }
@@ -615,7 +683,13 @@ mod tests {
     #[tokio::test]
     async fn implicit_default_is_the_best_subscription_model_when_flux_is_not_set_up() {
         let dir = tempfile::tempdir().unwrap();
-        test_sign_in(dir.path(), SubscriptionProvider::Xai, "a", &["grok-4.7", "grok-3"]).await;
+        test_sign_in(
+            dir.path(),
+            SubscriptionProvider::Xai,
+            "a",
+            &["grok-4.7", "grok-3"],
+        )
+        .await;
         let only = ProviderStatus::collect(dir.path(), none, false);
         assert_eq!(only.implicit_default_key().as_deref(), Some("xai/grok-4.7"));
         // Flux outranks a subscription: the built-in (Flux) default stands.
@@ -628,7 +702,10 @@ mod tests {
         assert_eq!(two.implicit_default_key().as_deref(), Some("chatgpt/gpt-5"));
         // Nothing signed in.
         let empty = tempfile::tempdir().unwrap();
-        assert_eq!(ProviderStatus::collect(empty.path(), none, false).implicit_default_key(), None);
+        assert_eq!(
+            ProviderStatus::collect(empty.path(), none, false).implicit_default_key(),
+            None
+        );
     }
 
     /// With nothing but a provider key whose models are listed, the first of those models is the
@@ -639,20 +716,34 @@ mod tests {
         let key = [("OPENAI_API_KEY", "sk-test-openai-key-0123456789")];
         let unlisted = ProviderStatus::collect(dir.path(), env(&key), false);
         assert_eq!(unlisted.implicit_default_key(), None, "no list fetched yet");
-        crate::auth::key_models::write_cached_model_ids(dir.path(), "openai", &["gpt-5".into(), "gpt-4o".into()]).unwrap();
+        crate::auth::key_models::write_cached_model_ids(
+            dir.path(),
+            "openai",
+            &["gpt-5".into(), "gpt-4o".into()],
+        )
+        .unwrap();
         let listed = ProviderStatus::collect(dir.path(), env(&key), false);
-        assert_eq!(listed.implicit_default_key().as_deref(), Some("openai-key/gpt-5"));
+        assert_eq!(
+            listed.implicit_default_key().as_deref(),
+            Some("openai-key/gpt-5")
+        );
         let state = listed
             .connections()
             .into_iter()
             .find(|c| c.name == "OpenAI API key")
             .map(|c| c.state)
             .expect("the OpenAI row");
-        assert!(state.starts_with("ready: OPENAI_API_KEY") && state.ends_with("2 models listed"), "{state}");
+        assert!(
+            state.starts_with("ready: OPENAI_API_KEY") && state.ends_with("2 models listed"),
+            "{state}"
+        );
         // A Flux key keeps the built-in default.
         let both = ProviderStatus::collect(
             dir.path(),
-            env(&[("OPENAI_API_KEY", "sk-test-openai-key-0123456789"), ("FLUX_API_KEY", FLUX_KEY)]),
+            env(&[
+                ("OPENAI_API_KEY", "sk-test-openai-key-0123456789"),
+                ("FLUX_API_KEY", FLUX_KEY),
+            ]),
             false,
         );
         assert_eq!(both.implicit_default_key(), None);
@@ -661,9 +752,16 @@ mod tests {
     #[tokio::test]
     async fn login_summary_shows_a_display_identity_or_none_and_never_the_account_id() {
         let dir = tempfile::tempdir().unwrap();
-        test_sign_in(dir.path(), SubscriptionProvider::Xai, "acct-9", &["grok-4.7"]).await;
+        test_sign_in(
+            dir.path(),
+            SubscriptionProvider::Xai,
+            "acct-9",
+            &["grok-4.7"],
+        )
+        .await;
         let status = ProviderStatus::collect(dir.path(), none, false);
-        let none_line = status.login_summary(SubscriptionProvider::Xai, None, true, None, "Run `fuigo`.");
+        let none_line =
+            status.login_summary(SubscriptionProvider::Xai, None, true, None, "Run `fuigo`.");
         assert_eq!(
             none_line,
             "Signed in to Grok subscription. Default model: xai/grok-4.7. Run `fuigo`."
@@ -681,17 +779,35 @@ mod tests {
         );
         // The model list not fetched: same rule.
         let unfetched = ProviderStatus::collect(dir.path(), none, false);
-        let line = unfetched.login_summary(SubscriptionProvider::Chatgpt, None, false, None, "Run `fuigo`.");
-        assert!(line.starts_with("Signed in to ChatGPT subscription. Its model list"), "{line}");
+        let line = unfetched.login_summary(
+            SubscriptionProvider::Chatgpt,
+            None,
+            false,
+            None,
+            "Run `fuigo`.",
+        );
+        assert!(
+            line.starts_with("Signed in to ChatGPT subscription. Its model list"),
+            "{line}"
+        );
         for line in [none_line, named, line] {
-            assert!(!line.contains("acct-9") && !line.contains("your account"), "{line}");
+            assert!(
+                !line.contains("acct-9") && !line.contains("your account"),
+                "{line}"
+            );
         }
     }
 
     #[tokio::test]
     async fn login_summary_words_a_kept_default_differently_from_a_set_one() {
         let dir = tempfile::tempdir().unwrap();
-        test_sign_in(dir.path(), SubscriptionProvider::Xai, "acct-9", &["grok-4.7"]).await;
+        test_sign_in(
+            dir.path(),
+            SubscriptionProvider::Xai,
+            "acct-9",
+            &["grok-4.7"],
+        )
+        .await;
         let status = ProviderStatus::collect(dir.path(), none, false);
         // A default from another provider stays, and the line says so.
         let kept = status.login_summary(
@@ -708,19 +824,32 @@ mod tests {
         );
         assert!(!kept.contains("Default model:"), "{kept}");
         // A default already on this provider is simply the default.
-        let own = status.login_summary(SubscriptionProvider::Xai, Some("xai/grok-4.7"), true, None, "Run `fuigo`.");
+        let own = status.login_summary(
+            SubscriptionProvider::Xai,
+            Some("xai/grok-4.7"),
+            true,
+            None,
+            "Run `fuigo`.",
+        );
         assert!(own.contains("Default model: xai/grok-4.7."), "{own}");
         // No explicit default: the sign-in set it.
         let set = status.login_summary(SubscriptionProvider::Xai, None, true, None, "Run `fuigo`.");
         assert!(set.contains("Default model: xai/grok-4.7."), "{set}");
-        assert!(!set.contains("stays") && !kept.contains("models --provider") && !kept.contains("config.toml"));
+        assert!(
+            !set.contains("stays")
+                && !kept.contains("models --provider")
+                && !kept.contains("config.toml")
+        );
     }
 
     #[test]
     fn picker_text_lists_every_option_with_its_command_and_no_oidc_error() {
         let dir = tempfile::tempdir().unwrap();
         let text = ProviderStatus::collect(dir.path(), none, false).picker_text();
-        assert!(text.starts_with("Choose how Fuigo reaches a model."), "{text}");
+        assert!(
+            text.starts_with("Choose how Fuigo reaches a model."),
+            "{text}"
+        );
         for cmd in [
             "fuigo login --provider flux",
             "fuigo login --provider chatgpt",

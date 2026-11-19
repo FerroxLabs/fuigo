@@ -48,10 +48,7 @@ fn s3a_non_flux_gemini_resource_exhausted_keeps_retry() {
     assert!(e.is_retryable());
     assert!(!e.is_terminal_refusal());
     assert!(!e.is_retry_vetoed());
-    assert_eq!(
-        e.upstream().classify(&e.to_string()).action,
-        Action::Pass
-    );
+    assert_eq!(e.upstream().classify(&e.to_string()).action, Action::Pass);
 }
 #[test]
 fn s3b_non_flux_anthropic_lowercase_rate_limit_honors_wait() {

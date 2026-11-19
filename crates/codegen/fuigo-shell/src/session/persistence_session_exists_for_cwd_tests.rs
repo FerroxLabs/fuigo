@@ -140,7 +140,8 @@ fn batch_resolver_loads_one_view_and_keeps_only_persisted_sessions() {
         std::collections::HashSet::from(["persisted".into()])
     );
     assert_eq!(
-        batch_loads, 1,
+        batch_loads,
+        1,
         "the batch resolver must load exactly one storage view for {} ids, not one per id",
         ids.len()
     );

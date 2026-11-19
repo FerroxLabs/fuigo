@@ -16,11 +16,11 @@ dirs = "6"
 # Non-UNC canonicalization so Windows path comparisons stay comparable.
 dunce = { workspace = true }
 # Branch lookup for session summaries.
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 # Per-workspace store-directory hashing for the optional peer-editor scanner.
 md5 = { workspace = true, optional = true }
 # Read-only/query-only access to the foreign SQLite stores.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde_json = { workspace = true }
 # Session ids are UUIDs; only parsing is used, no generation.
 uuid = { workspace = true }

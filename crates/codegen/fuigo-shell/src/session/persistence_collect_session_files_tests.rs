@@ -219,7 +219,11 @@ fn mcp_stderr_logs_in_the_archive_keep_both_ends_of_an_oversized_log() {
     let cap = archive_logs::MAX_ARCHIVED_LOG_BYTES as usize;
     let logs = home.path().join("logs").join("mcp");
     fs::create_dir_all(&logs).unwrap();
-    fs::write(logs.join("big.log"), [vec![b'h'; cap], vec![b't'; cap]].concat()).unwrap();
+    fs::write(
+        logs.join("big.log"),
+        [vec![b'h'; cap], vec![b't'; cap]].concat(),
+    )
+    .unwrap();
     fs::write(logs.join("small.log"), b"ok").unwrap();
 
     let mut files = Vec::new();
@@ -254,7 +258,12 @@ fn a_log_that_shrinks_between_the_size_check_and_the_tail_read_is_not_dropped() 
     fs::write(&path, vec![b'x'; cap * 2]).unwrap();
     let file = fs::File::open(&path).unwrap();
     let data = archive_logs::read_log_with_hook(file, || {
-        fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(100).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(100)
+            .unwrap();
     })
     .expect("a shrunk log is still read");
     assert_eq!(data, vec![b'x'; 100]);
@@ -268,7 +277,12 @@ fn a_log_that_shrinks_to_just_under_the_cap_is_not_kept_twice() {
     fs::write(&path, vec![b'x'; cap * 2]).unwrap();
     let file = fs::File::open(&path).unwrap();
     let data = archive_logs::read_log_with_hook(file, || {
-        fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(cap as u64 - 10).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(cap as u64 - 10)
+            .unwrap();
     })
     .unwrap();
     assert_eq!(data.len(), cap - 10, "the current content once, no marker");
@@ -315,7 +329,10 @@ fn a_trim_never_splits_a_utf8_codepoint() {
     let path = dir.path().join("utf8.log");
     fs::write(&path, &text).unwrap();
     let data = archive_logs::read_log_for_archive(fs::File::open(&path).unwrap()).unwrap();
-    assert!(std::str::from_utf8(&data).is_ok(), "the archived log is still valid UTF-8");
+    assert!(
+        std::str::from_utf8(&data).is_ok(),
+        "the archived log is still valid UTF-8"
+    );
     assert!(data.len() <= cap + archive_logs::TRIM_MARKER.len());
 }
 
@@ -354,7 +371,10 @@ fn logs_with_equal_mtimes_are_admitted_in_a_stable_order() {
     for _ in 0..5 {
         assert_eq!(kept(), first, "the same logs are left out every time");
     }
-    assert!(!first.contains(&"terminal/16.log".to_string()), "ties go by name: the last name is left out");
+    assert!(
+        !first.contains(&"terminal/16.log".to_string()),
+        "ties go by name: the last name is left out"
+    );
 }
 
 #[test]

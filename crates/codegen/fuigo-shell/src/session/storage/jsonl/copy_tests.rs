@@ -115,7 +115,10 @@ async fn copy_session_data_fork_truncates_live_branch_inclusive() {
         .unwrap();
     assert_eq!(result.updates_copied, 4);
     assert_eq!(result.chat_messages_copied, 4);
-    let loaded = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap();
+    let loaded = adapter
+        .load_session(&target_info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
     let last = loaded.updates.last().unwrap();
     assert!(
         matches!(
@@ -223,7 +226,10 @@ async fn copy_session_data_skips_torn_updates_lines() {
         .await
         .unwrap();
     assert_eq!(result.updates_copied, 3, "P0 + A0 + P1, torn lines dropped");
-    let loaded = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap();
+    let loaded = adapter
+        .load_session(&target_info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
     assert_eq!(loaded.updates.len(), 3);
 
     let target_info = Info {
@@ -693,7 +699,10 @@ async fn checkpoint_record_with_non_checkpoint_path_is_not_copied() {
 
     assert_eq!(result.compaction_checkpoints_copied, 0);
     // The target updates must keep the transformed record (session id rewritten to the fork), not the source file's raw bytes
-    let loaded = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap();
+    let loaded = adapter
+        .load_session(&target_info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
     assert_eq!(loaded.updates.len(), 1);
     match &loaded.updates[0] {
         SessionUpdate::Fuigo(notification) => {
@@ -851,7 +860,10 @@ async fn copy_session_data_basic() {
     assert_eq!(result.updates_copied, 1);
     assert!(result.plan_state_copied);
 
-    let loaded = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap();
+    let loaded = adapter
+        .load_session(&target_info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
     assert_eq!(loaded.summary.info.id, target_info.id);
     assert_eq!(loaded.summary.info.cwd, "/target/workspace");
     assert_eq!(loaded.summary.session_kind.as_deref(), Some("fork"));
@@ -908,7 +920,10 @@ async fn copy_session_data_without_plan() {
     assert_eq!(result.updates_copied, 0);
     assert!(!result.plan_state_copied);
 
-    let loaded = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap();
+    let loaded = adapter
+        .load_session(&target_info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
     assert!(loaded.plan_state.is_none());
 }
 
@@ -960,7 +975,10 @@ async fn copy_session_data_transforms_fuigo_updates() {
         .await
         .unwrap();
 
-    let loaded = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap();
+    let loaded = adapter
+        .load_session(&target_info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
     match &loaded.updates[0] {
         SessionUpdate::Fuigo(notification) => {
             assert_eq!(
@@ -1024,7 +1042,10 @@ async fn copy_session_data_with_model_override() {
         .await
         .unwrap();
 
-    let loaded = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap();
+    let loaded = adapter
+        .load_session(&target_info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
     assert_eq!(loaded.summary.current_model_id.0.as_ref(), "grok-3");
     assert_eq!(
         loaded.summary.parent_session_id,
@@ -1103,7 +1124,10 @@ async fn copy_fork_provenance_persisted_in_summary() {
         .await
         .unwrap();
 
-    let data = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap();
+    let data = adapter
+        .load_session(&target_info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap();
     assert_eq!(data.summary.session_kind.as_deref(), Some("subagent_fork"));
     assert_eq!(data.summary.fork_context_source.as_deref(), Some("forked"));
     assert_eq!(
@@ -1777,8 +1801,8 @@ async fn compaction_at(
     projection: Vec<ConversationItem>,
 ) -> SessionUpdate {
     use crate::extensions::notification::{
-        CompactionCheckpointFile, CompactionCheckpointInfo, SessionNotification as FuigoSessionNotification,
-        SessionUpdate as FuigoSessionUpdateType,
+        CompactionCheckpointFile, CompactionCheckpointInfo,
+        SessionNotification as FuigoSessionNotification, SessionUpdate as FuigoSessionUpdateType,
     };
     adapter
         .write_compaction_checkpoint(
@@ -1830,7 +1854,11 @@ async fn p88_source(
     info
 }
 
-async fn p88_fork_chat(adapter: &JsonlStorageAdapter, source: &Info, target: usize) -> serde_json::Value {
+async fn p88_fork_chat(
+    adapter: &JsonlStorageAdapter,
+    source: &Info,
+    target: usize,
+) -> serde_json::Value {
     let target_info = Info {
         id: acp::SessionId::new(format!("{}-fork-{target}", source.id.0)),
         cwd: "/src".to_string(),
@@ -1846,7 +1874,14 @@ async fn p88_fork_chat(adapter: &JsonlStorageAdapter, source: &Info, target: usi
         )
         .await
         .unwrap();
-    serde_json::to_value(adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history).unwrap()
+    serde_json::to_value(
+        adapter
+            .load_session(&target_info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap()
+            .chat_history,
+    )
+    .unwrap()
 }
 
 /// P88: a compaction that a rewind abandoned does not survive the copy's cut, so a fork of the live branch truncates
@@ -1860,14 +1895,20 @@ async fn fork_after_a_rewound_away_compaction_keeps_the_live_branch_tools() {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let abandoned = compaction_at(
         &adapter,
         &info,
         "abandoned",
         3,
         None,
-        vec![ConversationItem::system("sys"), ConversationItem::user("summary of the abandoned branch")],
+        vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("summary of the abandoned branch"),
+        ],
     )
     .await;
     let chat = vec![
@@ -1918,9 +1959,18 @@ async fn fork_cut_between_compactions_starts_from_the_compaction_the_cut_keeps()
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let early = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0")];
-    let late = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0 to P2")];
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let early = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0"),
+    ];
+    let late = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0 to P2"),
+    ];
     let early_marker = compaction_at(&adapter, &info, "early", 1, None, early.clone()).await;
     let late_marker = compaction_at(&adapter, &info, "late", 3, None, late.clone()).await;
     let mut chat = late;
@@ -1964,9 +2014,18 @@ async fn fork_cut_between_compactions_is_refused_when_the_kept_checkpoint_is_mis
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let early = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0")];
-    let late = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0 to P2")];
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let early = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0"),
+    ];
+    let late = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0 to P2"),
+    ];
     let early_marker = compaction_at(&adapter, &info, "early", 1, None, early).await;
     let late_marker = compaction_at(&adapter, &info, "late", 3, None, late.clone()).await;
     let mut chat = late;
@@ -1989,7 +2048,12 @@ async fn fork_cut_between_compactions_is_refused_when_the_kept_checkpoint_is_mis
         chat,
     )
     .await;
-    std::fs::remove_file(adapter.session_dir(&source).join("compaction_checkpoints/early.json")).unwrap();
+    std::fs::remove_file(
+        adapter
+            .session_dir(&source)
+            .join("compaction_checkpoints/early.json"),
+    )
+    .unwrap();
 
     let target_info = Info {
         id: acp::SessionId::new(format!("{sid}-fork-1")),
@@ -2007,10 +2071,16 @@ async fn fork_cut_between_compactions_is_refused_when_the_kept_checkpoint_is_mis
         .await;
     let error = match result {
         Ok(_) => {
-            let chat = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history;
+            let chat = adapter
+                .load_session(&target_info, crate::session::storage::Access::Reader)
+                .await
+                .unwrap()
+                .chat_history;
             panic!(
                 "the fork must be refused; it was made with history {:?}",
-                chat.iter().map(ConversationItem::text_content).collect::<Vec<_>>()
+                chat.iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>()
             );
         }
         Err(error) => error,
@@ -2037,8 +2107,14 @@ async fn fork_before_the_compaction_the_history_starts_from_is_refused() {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0 to P2")];
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let projection = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0 to P2"),
+    ];
     let marker = compaction_at(&adapter, &info, "late", 3, None, projection.clone()).await;
     let mut chat = projection;
     chat.extend([chat_user("P3", 3), ConversationItem::assistant("A3")]);
@@ -2075,15 +2151,27 @@ async fn fork_before_the_compaction_the_history_starts_from_is_refused() {
         .await;
     match result {
         Ok(_) => {
-            let chat = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history;
+            let chat = adapter
+                .load_session(&target_info, crate::session::storage::Access::Reader)
+                .await
+                .unwrap()
+                .chat_history;
             panic!(
                 "the fork must be refused; it was made with history {:?}",
-                chat.iter().map(ConversationItem::text_content).collect::<Vec<_>>()
+                chat.iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>()
             );
         }
-        Err(error) => assert!(error.to_string().contains("Cannot fork at prompt #0"), "{error}"),
+        Err(error) => assert!(
+            error.to_string().contains("Cannot fork at prompt #0"),
+            "{error}"
+        ),
     }
-    assert!(!adapter.session_dir(&target_info).exists(), "a refused fork creates nothing");
+    assert!(
+        !adapter.session_dir(&target_info).exists(),
+        "a refused fork creates nothing"
+    );
 }
 
 /// P111 (Astra r2): compactions at 2 and 4, then a rewind to 3 abandons the second. The source's history starts from
@@ -2098,9 +2186,18 @@ async fn fork_before_the_surviving_compaction_after_a_rewind_is_refused() {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let first = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0 and P1")];
-    let second = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0 to P3")];
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let first = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0 and P1"),
+    ];
+    let second = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0 to P3"),
+    ];
     let first_marker = compaction_at(&adapter, &info, "first", 2, None, first.clone()).await;
     let second_marker = compaction_at(&adapter, &info, "second", 4, None, second).await;
     let mut chat = first;
@@ -2140,15 +2237,27 @@ async fn fork_before_the_surviving_compaction_after_a_rewind_is_refused() {
         .await;
     match result {
         Ok(_) => {
-            let chat = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history;
+            let chat = adapter
+                .load_session(&target_info, crate::session::storage::Access::Reader)
+                .await
+                .unwrap()
+                .chat_history;
             panic!(
                 "the fork must be refused; it was made with history {:?}",
-                chat.iter().map(ConversationItem::text_content).collect::<Vec<_>>()
+                chat.iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>()
             );
         }
-        Err(error) => assert!(error.to_string().contains("Cannot fork at prompt #0"), "{error}"),
+        Err(error) => assert!(
+            error.to_string().contains("Cannot fork at prompt #0"),
+            "{error}"
+        ),
     }
-    assert!(!adapter.session_dir(&target_info).exists(), "a refused fork creates nothing");
+    assert!(
+        !adapter.session_dir(&target_info).exists(),
+        "a refused fork creates nothing"
+    );
 }
 
 /// P111 (Astra r2): P88's rewound-away-compaction fork, with the abandoned compaction's checkpoint file gone. That
@@ -2162,14 +2271,20 @@ async fn an_unreadable_abandoned_checkpoint_does_not_block_a_fork() {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let abandoned = compaction_at(
         &adapter,
         &info,
         "abandoned",
         3,
         None,
-        vec![ConversationItem::system("sys"), ConversationItem::user("summary of the abandoned branch")],
+        vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("summary of the abandoned branch"),
+        ],
     )
     .await;
     let chat = vec![
@@ -2197,7 +2312,12 @@ async fn an_unreadable_abandoned_checkpoint_does_not_block_a_fork() {
         chat.clone(),
     )
     .await;
-    std::fs::remove_file(adapter.session_dir(&source).join("compaction_checkpoints/abandoned.json")).unwrap();
+    std::fs::remove_file(
+        adapter
+            .session_dir(&source)
+            .join("compaction_checkpoints/abandoned.json"),
+    )
+    .unwrap();
     let forked = p88_fork_chat(&adapter, &source, 1).await;
     assert_eq!(forked, serde_json::to_value(chat).unwrap());
 }
@@ -2209,11 +2329,21 @@ fn the_fork_staging_directory_is_private() {
     use std::os::unix::fs::PermissionsExt;
     let parent = TempDir::new().unwrap();
     let staging = super::private_staging_dir(parent.path()).unwrap();
-    let mode = std::fs::metadata(staging.dir.path()).unwrap().permissions().mode() & 0o777;
-    assert!(staging.dir.path().join(".lock").is_file(), "the lock file has its name once it is locked");
+    let mode = std::fs::metadata(staging.dir.path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert!(
+        staging.dir.path().join(".lock").is_file(),
+        "the lock file has its name once it is locked"
+    );
     assert!(!staging.dir.path().join(".lock.init").exists());
     let lock = std::fs::File::open(staging.dir.path().join(".lock")).unwrap();
-    assert!(fs2::FileExt::try_lock_exclusive(&lock).is_err(), "a live staging directory's lock is held");
+    assert!(
+        fs2::FileExt::try_lock_exclusive(&lock).is_err(),
+        "a live staging directory's lock is held"
+    );
     assert_eq!(mode, 0o700, "staging directory mode {mode:o}");
 }
 
@@ -2228,11 +2358,17 @@ async fn copy_into_an_existing_session_is_refused_and_writes_nothing() {
         id: acp::SessionId::new("p111-copy-source"),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&source, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&source, default_model_id())
+        .await
+        .unwrap();
     let source = p88_source(
         &adapter,
         "p111-copy-source",
-        vec![fork_user_chunk("p111-copy-source", "P0", 0), fork_agent_chunk("p111-copy-source", "A0")],
+        vec![
+            fork_user_chunk("p111-copy-source", "P0", 0),
+            fork_agent_chunk("p111-copy-source", "A0"),
+        ],
         vec![chat_user("P0", 0), ConversationItem::assistant("A0")],
     )
     .await;
@@ -2240,11 +2376,17 @@ async fn copy_into_an_existing_session_is_refused_and_writes_nothing() {
         id: acp::SessionId::new("p111-copy-existing"),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&existing, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&existing, default_model_id())
+        .await
+        .unwrap();
     let existing = p88_source(
         &adapter,
         "p111-copy-existing",
-        vec![fork_user_chunk("p111-copy-existing", "MINE", 0), fork_agent_chunk("p111-copy-existing", "KEEP")],
+        vec![
+            fork_user_chunk("p111-copy-existing", "MINE", 0),
+            fork_agent_chunk("p111-copy-existing", "KEEP"),
+        ],
         vec![chat_user("MINE", 0), ConversationItem::assistant("KEEP")],
     )
     .await;
@@ -2254,7 +2396,12 @@ async fn copy_into_an_existing_session_is_refused_and_writes_nothing() {
             .unwrap()
             .map(|entry| entry.unwrap())
             .filter(|entry| entry.file_type().unwrap().is_file())
-            .map(|entry| (entry.file_name().to_string_lossy().into_owned(), std::fs::read(entry.path()).unwrap()))
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
             .collect();
         files.sort();
         files
@@ -2275,7 +2422,11 @@ async fn copy_into_an_existing_session_is_refused_and_writes_nothing() {
         let error = result.expect_err("a copy onto an existing session must be refused");
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error}");
         assert!(error.to_string().contains("already exists"), "{error}");
-        assert_eq!(snapshot(), before, "the existing session is untouched ({target_prompt_index:?})");
+        assert_eq!(
+            snapshot(),
+            before,
+            "the existing session is untouched ({target_prompt_index:?})"
+        );
     }
 }
 
@@ -2291,23 +2442,43 @@ async fn fork_of_an_unmarked_compacted_history_without_its_checkpoint_is_refused
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0 to P4")];
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let projection = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0 to P4"),
+    ];
     let marker = compaction_at(&adapter, &info, "only", 5, None, projection.clone()).await;
     let mut chat = projection;
     for i in 5..8 {
-        chat.extend([ConversationItem::user(format!("P{i}")), ConversationItem::assistant(format!("A{i}"))]);
+        chat.extend([
+            ConversationItem::user(format!("P{i}")),
+            ConversationItem::assistant(format!("A{i}")),
+        ]);
     }
     let mut updates = Vec::new();
     for i in 0..5 {
-        updates.extend([fork_user_chunk(sid, &format!("P{i}"), i), fork_agent_chunk(sid, &format!("A{i}"))]);
+        updates.extend([
+            fork_user_chunk(sid, &format!("P{i}"), i),
+            fork_agent_chunk(sid, &format!("A{i}")),
+        ]);
     }
     updates.push(marker);
     for i in 5..8 {
-        updates.extend([fork_user_chunk(sid, &format!("P{i}"), i), fork_agent_chunk(sid, &format!("A{i}"))]);
+        updates.extend([
+            fork_user_chunk(sid, &format!("P{i}"), i),
+            fork_agent_chunk(sid, &format!("A{i}")),
+        ]);
     }
     let source = p88_source(&adapter, sid, updates, chat).await;
-    std::fs::remove_file(adapter.session_dir(&source).join("compaction_checkpoints/only.json")).unwrap();
+    std::fs::remove_file(
+        adapter
+            .session_dir(&source)
+            .join("compaction_checkpoints/only.json"),
+    )
+    .unwrap();
     let target_info = Info {
         id: acp::SessionId::new(format!("{sid}-fork-5")),
         cwd: "/src".to_string(),
@@ -2324,15 +2495,27 @@ async fn fork_of_an_unmarked_compacted_history_without_its_checkpoint_is_refused
         .await;
     match result {
         Ok(_) => {
-            let chat = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history;
+            let chat = adapter
+                .load_session(&target_info, crate::session::storage::Access::Reader)
+                .await
+                .unwrap()
+                .chat_history;
             panic!(
                 "the fork must be refused; it was made with history {:?}",
-                chat.iter().map(ConversationItem::text_content).collect::<Vec<_>>()
+                chat.iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>()
             );
         }
-        Err(error) => assert!(error.to_string().contains("Cannot fork at prompt #5"), "{error}"),
+        Err(error) => assert!(
+            error.to_string().contains("Cannot fork at prompt #5"),
+            "{error}"
+        ),
     }
-    assert!(!adapter.session_dir(&target_info).exists(), "a refused fork creates nothing");
+    assert!(
+        !adapter.session_dir(&target_info).exists(),
+        "a refused fork creates nothing"
+    );
 }
 
 /// P132 (P114 follow-up): a refused fork must not leave an empty `<encoded-cwd>` directory behind when the fork itself
@@ -2343,10 +2526,20 @@ async fn a_refused_fork_removes_the_cwd_directory_only_when_it_created_it() {
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let sid = "p132-refused-fork";
     let (source, _) = mixed_marker_source(&adapter, sid, &[8]).await;
-    for (n, (cwd, precreate)) in [("/p132-new-cwd", false), ("/p132-existing-cwd", true)].into_iter().enumerate() {
-        let target_info = Info { id: acp::SessionId::new(format!("{sid}-fork-{n}")), cwd: cwd.to_string() };
+    for (n, (cwd, precreate)) in [("/p132-new-cwd", false), ("/p132-existing-cwd", true)]
+        .into_iter()
+        .enumerate()
+    {
+        let target_info = Info {
+            id: acp::SessionId::new(format!("{sid}-fork-{n}")),
+            cwd: cwd.to_string(),
+        };
         let cwd_dir = crate::util::fuigo_home::sessions_cwd_dir_in(temp_dir.path(), cwd);
-        assert_eq!(adapter.session_dir(&target_info).parent().unwrap(), cwd_dir, "the target's cwd directory");
+        assert_eq!(
+            adapter.session_dir(&target_info).parent().unwrap(),
+            cwd_dir,
+            "the target's cwd directory"
+        );
         if precreate {
             std::fs::create_dir_all(&cwd_dir).unwrap();
         }
@@ -2354,12 +2547,23 @@ async fn a_refused_fork_removes_the_cwd_directory_only_when_it_created_it() {
             .copy_session_data(
                 &source,
                 &target_info,
-                CopySessionOptions { target_prompt_index: Some(5), ..Default::default() },
+                CopySessionOptions {
+                    target_prompt_index: Some(5),
+                    ..Default::default()
+                },
             )
             .await;
         let error = result.expect_err("the unmarked compacted history must refuse the fork");
-        assert!(error.to_string().contains("Cannot fork at prompt #5"), "{error}");
-        assert_eq!(cwd_dir.exists(), precreate, "{n}: left behind: {:?}", std::fs::read_dir(&cwd_dir).ok().map(|d| d.count()));
+        assert!(
+            error.to_string().contains("Cannot fork at prompt #5"),
+            "{error}"
+        );
+        assert_eq!(
+            cwd_dir.exists(),
+            precreate,
+            "{n}: left behind: {:?}",
+            std::fs::read_dir(&cwd_dir).ok().map(|d| d.count())
+        );
     }
 }
 
@@ -2369,8 +2573,14 @@ async fn a_refused_fork_removes_the_cwd_directory_only_when_it_created_it() {
 fn claim_cwd_dir_claims_only_what_it_creates() {
     let temp_dir = TempDir::new().unwrap();
     let fresh = temp_dir.path().join("sessions/a");
-    assert!(super::claim_cwd_dir(&fresh, true).unwrap(), "made by this call");
-    assert!(!super::claim_cwd_dir(&fresh, true).unwrap(), "already there: not ours");
+    assert!(
+        super::claim_cwd_dir(&fresh, true).unwrap(),
+        "made by this call"
+    );
+    assert!(
+        !super::claim_cwd_dir(&fresh, true).unwrap(),
+        "already there: not ours"
+    );
     // A caller-owned explicit directory's ancestors keep their permissions.
     #[cfg(unix)]
     {
@@ -2379,7 +2589,11 @@ fn claim_cwd_dir_claims_only_what_it_creates() {
         std::fs::create_dir(&shared).unwrap();
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(super::claim_cwd_dir(&shared.join("cache"), false).unwrap());
-        assert_eq!(std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777, 0o755, "ancestor untouched");
+        assert_eq!(
+            std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "ancestor untouched"
+        );
     }
 }
 
@@ -2394,8 +2608,14 @@ async fn mixed_marker_source(
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0 to P4")];
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let projection = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0 to P4"),
+    ];
     let marker = compaction_at(adapter, &info, "only", 5, None, projection.clone()).await;
     let mut chat = projection.clone();
     for i in 5..9 {
@@ -2408,14 +2628,25 @@ async fn mixed_marker_source(
     }
     let mut updates = Vec::new();
     for i in 0..5 {
-        updates.extend([fork_user_chunk(sid, &format!("P{i}"), i), fork_agent_chunk(sid, &format!("A{i}"))]);
+        updates.extend([
+            fork_user_chunk(sid, &format!("P{i}"), i),
+            fork_agent_chunk(sid, &format!("A{i}")),
+        ]);
     }
     updates.push(marker);
     for i in 5..9 {
-        updates.extend([fork_user_chunk(sid, &format!("P{i}"), i), fork_agent_chunk(sid, &format!("A{i}"))]);
+        updates.extend([
+            fork_user_chunk(sid, &format!("P{i}"), i),
+            fork_agent_chunk(sid, &format!("A{i}")),
+        ]);
     }
     let source = p88_source(adapter, sid, updates, chat).await;
-    std::fs::remove_file(adapter.session_dir(&source).join("compaction_checkpoints/only.json")).unwrap();
+    std::fs::remove_file(
+        adapter
+            .session_dir(&source)
+            .join("compaction_checkpoints/only.json"),
+    )
+    .unwrap();
     (source, projection)
 }
 
@@ -2437,15 +2668,29 @@ async fn assert_fork_refused(adapter: &JsonlStorageAdapter, source: &Info, targe
         .await;
     match result {
         Ok(_) => {
-            let chat = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history;
+            let chat = adapter
+                .load_session(&target_info, crate::session::storage::Access::Reader)
+                .await
+                .unwrap()
+                .chat_history;
             panic!(
                 "the fork at P{target} must be refused; it was made with history {:?}",
-                chat.iter().map(ConversationItem::text_content).collect::<Vec<_>>()
+                chat.iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>()
             );
         }
-        Err(error) => assert!(error.to_string().contains(&format!("Cannot fork at prompt #{target}")), "{error}"),
+        Err(error) => assert!(
+            error
+                .to_string()
+                .contains(&format!("Cannot fork at prompt #{target}")),
+            "{error}"
+        ),
     }
-    assert!(!adapter.session_dir(&target_info).exists(), "a refused fork creates nothing");
+    assert!(
+        !adapter.session_dir(&target_info).exists(),
+        "a refused fork creates nothing"
+    );
 }
 
 /// P111 (Astra r4 #1): unmarked P5..P7 (written before prompt markers), then a marked P8 written after an upgrade, and
@@ -2470,7 +2715,10 @@ async fn fork_of_a_mixed_history_right_before_the_first_marker_truncates_exactly
     let forked = p88_fork_chat(&adapter, &source, 7).await;
     let mut expected = projection;
     for i in 5..8 {
-        expected.extend([ConversationItem::user(format!("P{i}")), ConversationItem::assistant(format!("A{i}"))]);
+        expected.extend([
+            ConversationItem::user(format!("P{i}")),
+            ConversationItem::assistant(format!("A{i}")),
+        ]);
     }
     assert_eq!(forked, serde_json::to_value(expected).unwrap());
 }
@@ -2496,8 +2744,14 @@ async fn fork_after_the_only_compaction_truncates_when_its_checkpoint_is_missing
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0")];
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let projection = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0"),
+    ];
     let marker = compaction_at(&adapter, &info, "only", 1, None, projection.clone()).await;
     let mut chat = projection.clone();
     chat.extend([
@@ -2521,7 +2775,12 @@ async fn fork_after_the_only_compaction_truncates_when_its_checkpoint_is_missing
         chat,
     )
     .await;
-    std::fs::remove_file(adapter.session_dir(&source).join("compaction_checkpoints/only.json")).unwrap();
+    std::fs::remove_file(
+        adapter
+            .session_dir(&source)
+            .join("compaction_checkpoints/only.json"),
+    )
+    .unwrap();
 
     let forked = p88_fork_chat(&adapter, &source, 1).await;
     let mut expected = projection;
@@ -2540,18 +2799,27 @@ async fn fork_after_a_legacy_checkpoint_keeps_the_tools() {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let marker = compaction_at(
         &adapter,
         &info,
         "legacy",
         1,
         None,
-        vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0")],
+        vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("summary of P0"),
+        ],
     )
     .await;
-    let path = adapter.session_dir(&info).join("compaction_checkpoints/legacy.json");
-    let mut file: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let path = adapter
+        .session_dir(&info)
+        .join("compaction_checkpoints/legacy.json");
+    let mut file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let object = file.as_object_mut().unwrap();
     object.remove("resolved_prefix_len");
     object.remove("inherited_prefix_len");
@@ -2593,16 +2861,31 @@ async fn fork_after_a_legacy_checkpoint_keeps_the_tools() {
 fn the_copy_coherence_check_accepts_appends_and_refuses_replacements() {
     let dir = TempDir::new().unwrap();
     let chat = dir.path().join("chat_history.jsonl");
-    assert!(super::chat_file_still_starts_with(&chat, super::chat_file_fingerprint(&chat).unwrap().as_ref()).unwrap());
+    assert!(
+        super::chat_file_still_starts_with(
+            &chat,
+            super::chat_file_fingerprint(&chat).unwrap().as_ref()
+        )
+        .unwrap()
+    );
     std::fs::write(&chat, b"{\"a\":1}\n").unwrap();
     let seen = super::chat_file_fingerprint(&chat).unwrap();
     assert!(super::chat_file_still_starts_with(&chat, seen.as_ref()).unwrap());
     std::fs::write(&chat, b"{\"a\":1}\n{\"b\":2}\n").unwrap();
-    assert!(super::chat_file_still_starts_with(&chat, seen.as_ref()).unwrap(), "appended: coherent");
+    assert!(
+        super::chat_file_still_starts_with(&chat, seen.as_ref()).unwrap(),
+        "appended: coherent"
+    );
     std::fs::write(&chat, b"{\"c\":3}\n{\"b\":2}\n").unwrap();
-    assert!(!super::chat_file_still_starts_with(&chat, seen.as_ref()).unwrap(), "replaced: refused");
+    assert!(
+        !super::chat_file_still_starts_with(&chat, seen.as_ref()).unwrap(),
+        "replaced: refused"
+    );
     std::fs::remove_file(&chat).unwrap();
-    assert!(!super::chat_file_still_starts_with(&chat, seen.as_ref()).unwrap(), "removed: refused");
+    assert!(
+        !super::chat_file_still_starts_with(&chat, seen.as_ref()).unwrap(),
+        "removed: refused"
+    );
 }
 
 /// P111 (Astra r7 #2): the source commits a compaction (checkpoint, then marker) after the copy read its chat history
@@ -2619,12 +2902,21 @@ async fn a_compaction_committed_mid_copy_refuses_the_copy() {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let mut updates = Vec::new();
     let mut chat = vec![ConversationItem::system("sys")];
     for i in 0..3 {
-        updates.extend([fork_user_chunk(sid, &format!("P{i}"), i), fork_agent_chunk(sid, &format!("A{i}"))]);
-        chat.extend([chat_user(&format!("P{i}"), i), ConversationItem::assistant(format!("A{i}"))]);
+        updates.extend([
+            fork_user_chunk(sid, &format!("P{i}"), i),
+            fork_agent_chunk(sid, &format!("A{i}")),
+        ]);
+        chat.extend([
+            chat_user(&format!("P{i}"), i),
+            ConversationItem::assistant(format!("A{i}")),
+        ]);
     }
     let source = p88_source(&adapter, sid, updates, chat).await;
     let marker = compaction_at(
@@ -2633,17 +2925,25 @@ async fn a_compaction_committed_mid_copy_refuses_the_copy() {
         "mid-copy",
         3,
         None,
-        vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0 to P2")],
+        vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("summary of P0 to P2"),
+        ],
     )
     .await;
-    let marker_line = serde_json::to_string(&crate::session::storage::SessionUpdateEnvelope::from_update(&marker).unwrap())
-        .unwrap()
+    let marker_line = serde_json::to_string(
+        &crate::session::storage::SessionUpdateEnvelope::from_update(&marker).unwrap(),
+    )
+    .unwrap()
         + "\n";
     let source_updates = adapter.updates_file(&source);
     super::AFTER_SOURCE_CHAT_READ.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().append(true).open(&source_updates).unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&source_updates)
+                .unwrap();
             file.write_all(marker_line.as_bytes()).unwrap();
         }));
     });
@@ -2651,19 +2951,29 @@ async fn a_compaction_committed_mid_copy_refuses_the_copy() {
         id: acp::SessionId::new(format!("{sid}-fork")),
         cwd: "/src".to_string(),
     };
-    let result = adapter.copy_session_data_sync(&source, &target_info, CopySessionOptions::default());
+    let result =
+        adapter.copy_session_data_sync(&source, &target_info, CopySessionOptions::default());
     super::AFTER_SOURCE_CHAT_READ.with(|hook| assert!(hook.borrow().is_none(), "the seam ran"));
     match result {
         Ok(_) => {
-            let chat = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history;
+            let chat = adapter
+                .load_session(&target_info, crate::session::storage::Access::Reader)
+                .await
+                .unwrap()
+                .chat_history;
             panic!(
                 "the copy must be refused; it was made with history {:?}",
-                chat.iter().map(ConversationItem::text_content).collect::<Vec<_>>()
+                chat.iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>()
             );
         }
         Err(error) => assert!(error.to_string().contains("try again"), "{error}"),
     }
-    assert!(!adapter.session_dir(&target_info).exists(), "a refused copy creates nothing");
+    assert!(
+        !adapter.session_dir(&target_info).exists(),
+        "a refused copy creates nothing"
+    );
 }
 
 /// P111 (Astra r8 #1): the source's compaction committed (checkpoint, witness, marker) before the copy started, and its
@@ -2680,7 +2990,10 @@ async fn a_prefix_preserving_compaction_rewrite_landing_mid_copy_never_gives_the
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let source = p88_source(
         &adapter,
         sid,
@@ -2688,42 +3001,79 @@ async fn a_prefix_preserving_compaction_rewrite_landing_mid_copy_never_gives_the
         vec![],
     )
     .await;
-    let old = vec![ConversationItem::system("sys"), chat_user("P0", 0), ConversationItem::assistant("A0")];
+    let old = vec![
+        ConversationItem::system("sys"),
+        chat_user("P0", 0),
+        ConversationItem::assistant("A0"),
+    ];
     let chat_path = adapter.chat_file(&source);
-    std::fs::write(&chat_path, crate::session::storage::to_jsonl_bytes(&old).unwrap()).unwrap();
+    std::fs::write(
+        &chat_path,
+        crate::session::storage::to_jsonl_bytes(&old).unwrap(),
+    )
+    .unwrap();
     let mut projection = old.clone();
     projection.push(ConversationItem::user("summary of P0"));
     let marker = compaction_at(&adapter, &source, "keeps-all", 1, None, projection.clone()).await;
-    let checkpoint: crate::extensions::notification::CompactionCheckpointFile = serde_json::from_slice(
-        &std::fs::read(adapter.session_dir(&source).join("compaction_checkpoints/keeps-all.json")).unwrap(),
+    let checkpoint: crate::extensions::notification::CompactionCheckpointFile =
+        serde_json::from_slice(
+            &std::fs::read(
+                adapter
+                    .session_dir(&source)
+                    .join("compaction_checkpoints/keeps-all.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    super::super::compaction_witness::write_compaction_witness_sync(
+        &adapter.owner(&source).unwrap(),
+        &adapter.session_dir(&source),
+        &checkpoint,
     )
     .unwrap();
-    super::super::compaction_witness::write_compaction_witness_sync(&adapter.owner(&source).unwrap(), &adapter.session_dir(&source), &checkpoint).unwrap();
     adapter.append_update(&source, &marker).await.unwrap();
     let rewrite = crate::session::storage::to_jsonl_bytes(&projection).unwrap();
-    assert!(rewrite.starts_with(&std::fs::read(&chat_path).unwrap()), "the rewrite keeps the history it started from");
+    assert!(
+        rewrite.starts_with(&std::fs::read(&chat_path).unwrap()),
+        "the rewrite keeps the history it started from"
+    );
     let rewrite_path = chat_path.clone();
     super::AFTER_SOURCE_CHAT_READ.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || std::fs::write(&rewrite_path, &rewrite).unwrap()));
+        *hook.borrow_mut() = Some(Box::new(move || {
+            std::fs::write(&rewrite_path, &rewrite).unwrap()
+        }));
     });
     let target_info = Info {
         id: acp::SessionId::new(format!("{sid}-fork")),
         cwd: "/src".to_string(),
     };
-    let result = adapter.copy_session_data_sync(&source, &target_info, CopySessionOptions::default());
+    let result =
+        adapter.copy_session_data_sync(&source, &target_info, CopySessionOptions::default());
     super::AFTER_SOURCE_CHAT_READ.with(|hook| assert!(hook.borrow().is_none(), "the seam ran"));
     match result {
         Ok(_) => {
-            let chat = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history;
+            let chat = adapter
+                .load_session(&target_info, crate::session::storage::Access::Reader)
+                .await
+                .unwrap()
+                .chat_history;
             assert_eq!(
-                chat.iter().map(ConversationItem::text_content).collect::<Vec<_>>(),
-                projection.iter().map(ConversationItem::text_content).collect::<Vec<_>>(),
+                chat.iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>(),
+                projection
+                    .iter()
+                    .map(ConversationItem::text_content)
+                    .collect::<Vec<_>>(),
                 "the child must resume the compacted history"
             );
         }
         Err(error) => {
             assert!(error.to_string().contains("try again"), "{error}");
-            assert!(!adapter.session_dir(&target_info).exists(), "a refused copy creates nothing");
+            assert!(
+                !adapter.session_dir(&target_info).exists(),
+                "a refused copy creates nothing"
+            );
         }
     }
 }
@@ -2741,29 +3091,56 @@ async fn an_unmarked_history_fork_refusal_offers_only_the_whole_session_fork() {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
-    let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0 to P4")];
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let projection = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("summary of P0 to P4"),
+    ];
     let marker = compaction_at(&adapter, &info, "only", 5, None, projection.clone()).await;
     let mut chat = projection;
     for i in 5..8 {
-        chat.extend([ConversationItem::user(format!("P{i}")), ConversationItem::assistant(format!("A{i}"))]);
+        chat.extend([
+            ConversationItem::user(format!("P{i}")),
+            ConversationItem::assistant(format!("A{i}")),
+        ]);
     }
     let mut updates = Vec::new();
     for i in 0..5 {
-        updates.extend([fork_user_chunk(sid, &format!("P{i}"), i), fork_agent_chunk(sid, &format!("A{i}"))]);
+        updates.extend([
+            fork_user_chunk(sid, &format!("P{i}"), i),
+            fork_agent_chunk(sid, &format!("A{i}")),
+        ]);
     }
     updates.push(marker);
     for i in 5..8 {
-        updates.extend([fork_user_chunk(sid, &format!("P{i}"), i), fork_agent_chunk(sid, &format!("A{i}"))]);
+        updates.extend([
+            fork_user_chunk(sid, &format!("P{i}"), i),
+            fork_agent_chunk(sid, &format!("A{i}")),
+        ]);
     }
     let source = p88_source(&adapter, sid, updates, chat).await;
-    std::fs::remove_file(adapter.session_dir(&source).join("compaction_checkpoints/only.json")).unwrap();
+    std::fs::remove_file(
+        adapter
+            .session_dir(&source)
+            .join("compaction_checkpoints/only.json"),
+    )
+    .unwrap();
     let target = |suffix: &str| Info {
         id: acp::SessionId::new(format!("{sid}-{suffix}")),
         cwd: "/src".to_string(),
     };
     let error = adapter
-        .copy_session_data(&source, &target("at-6"), CopySessionOptions { target_prompt_index: Some(6), ..Default::default() })
+        .copy_session_data(
+            &source,
+            &target("at-6"),
+            CopySessionOptions {
+                target_prompt_index: Some(6),
+                ..Default::default()
+            },
+        )
         .await
         .expect_err("the cut cannot be proven, so the fork is refused");
     let message = error.to_string();
@@ -2773,7 +3150,10 @@ async fn an_unmarked_history_fork_refusal_offers_only_the_whole_session_fork() {
         !message.contains("after the latest compaction"),
         "prompt #6 is already after the latest compaction; that advice cannot help: {message}"
     );
-    assert!(message.contains("Fork the whole session instead"), "offers what works: {message}");
+    assert!(
+        message.contains("Fork the whole session instead"),
+        "offers what works: {message}"
+    );
     adapter
         .copy_session_data(&source, &target("whole"), CopySessionOptions::default())
         .await
@@ -2795,8 +3175,13 @@ fn a_fork_does_not_need_the_system_temp_dir() {
         for name in ["TMPDIR", "TMP", "TEMP"] {
             unsafe { std::env::set_var(name, &missing_tmp) };
         }
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        runtime.block_on(forks_with_an_unusable_temp_dir(std::path::PathBuf::from(root)));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(forks_with_an_unusable_temp_dir(std::path::PathBuf::from(
+            root,
+        )));
         return;
     }
     let scratch = TempDir::new().unwrap();
@@ -2804,7 +3189,9 @@ fn a_fork_does_not_need_the_system_temp_dir() {
     std::fs::create_dir_all(&root).unwrap();
     let name = format!(
         "{}::a_fork_does_not_need_the_system_temp_dir",
-        module_path!().split_once("::").map_or(module_path!(), |(_, rest)| rest)
+        module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, rest)| rest)
     );
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
@@ -2813,19 +3200,31 @@ fn a_fork_does_not_need_the_system_temp_dir() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "the forks failed without a usable TMPDIR:\n{stdout}\n{stderr}");
-    assert!(stdout.contains("1 passed"), "the child ran the scenario:\n{stdout}");
+    assert!(
+        output.status.success(),
+        "the forks failed without a usable TMPDIR:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "the child ran the scenario:\n{stdout}"
+    );
 }
 
 async fn forks_with_an_unusable_temp_dir(root: std::path::PathBuf) {
-    assert!(!std::env::temp_dir().exists(), "the child's temp dir is missing");
+    assert!(
+        !std::env::temp_dir().exists(),
+        "the child's temp dir is missing"
+    );
     let adapter = JsonlStorageAdapter::with_root(root.clone());
     let sid = "p114-no-tmp";
     let info = Info {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let source = p88_source(
         &adapter,
         sid,
@@ -2835,7 +3234,12 @@ async fn forks_with_an_unusable_temp_dir(root: std::path::PathBuf) {
             fork_user_chunk(sid, "P1", 1),
             fork_agent_chunk(sid, "A1"),
         ],
-        vec![chat_user("P0", 0), ConversationItem::assistant("A0"), chat_user("P1", 1), ConversationItem::assistant("A1")],
+        vec![
+            chat_user("P0", 0),
+            ConversationItem::assistant("A0"),
+            chat_user("P1", 1),
+            ConversationItem::assistant("A1"),
+        ],
     )
     .await;
     for (suffix, target_prompt_index) in [("whole", None), ("at-0", Some(0))] {
@@ -2844,19 +3248,34 @@ async fn forks_with_an_unusable_temp_dir(root: std::path::PathBuf) {
             cwd: "/src".to_string(),
         };
         adapter
-            .copy_session_data(&source, &target, CopySessionOptions { target_prompt_index, ..Default::default() })
+            .copy_session_data(
+                &source,
+                &target,
+                CopySessionOptions {
+                    target_prompt_index,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap_or_else(|error| panic!("fork {suffix} failed: {error}"));
         let updates = std::fs::read_to_string(adapter.updates_file_path(&target).unwrap()).unwrap();
         assert!(updates.contains("P0"), "fork {suffix} has its transcript");
-        assert_eq!(updates.contains("P1"), target_prompt_index.is_none(), "fork {suffix} is cut at its prompt");
+        assert_eq!(
+            updates.contains("P1"),
+            target_prompt_index.is_none(),
+            "fork {suffix} is cut at its prompt"
+        );
     }
     let mut pending = vec![root.clone()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).unwrap() {
             let entry = entry.unwrap();
             let name = entry.file_name().to_string_lossy().into_owned();
-            assert!(!name.contains("fork-staging") && !name.starts_with("fuigo-fork-"), "staging left behind: {}", entry.path().display());
+            assert!(
+                !name.contains("fork-staging") && !name.starts_with("fuigo-fork-"),
+                "staging left behind: {}",
+                entry.path().display()
+            );
             if entry.file_type().unwrap().is_dir() {
                 pending.push(entry.path());
             }
@@ -2875,17 +3294,36 @@ async fn fork_staging_is_hidden_from_listings_and_swept_only_when_dead() {
         id: acp::SessionId::new("p114-staging-listed"),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let target = Info {
         id: acp::SessionId::new("p114-staging-target"),
         cwd: "/src".to_string(),
     };
     let live = adapter.fork_staging_dir(&target).unwrap();
     let parent = live.dir.path().parent().unwrap().to_path_buf();
-    assert_eq!(parent, adapter.session_dir(&target).parent().unwrap(), "staged next to the target");
-    let listed: Vec<String> = adapter.list_sessions(None).await.unwrap().into_iter().map(|s| s.info.id.0.to_string()).collect();
-    assert!(!listed.iter().any(|id| id.starts_with('.')), "a staging directory is not a session: {listed:?}");
-    assert!(listed.iter().any(|id| id == "p114-staging-listed"), "the listing still works: {listed:?}");
+    assert_eq!(
+        parent,
+        adapter.session_dir(&target).parent().unwrap(),
+        "staged next to the target"
+    );
+    let listed: Vec<String> = adapter
+        .list_sessions(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.info.id.0.to_string())
+        .collect();
+    assert!(
+        !listed.iter().any(|id| id.starts_with('.')),
+        "a staging directory is not a session: {listed:?}"
+    );
+    assert!(
+        listed.iter().any(|id| id == "p114-staging-listed"),
+        "the listing still works: {listed:?}"
+    );
 
     let long_ago = filetime::FileTime::from_unix_time(0, 0);
     filetime::set_file_mtime(live.dir.path(), long_ago).unwrap();
@@ -2901,10 +3339,19 @@ async fn fork_staging_is_hidden_from_listings_and_swept_only_when_dead() {
     filetime::set_file_mtime(&unlocked, long_ago).unwrap();
 
     super::remove_stale_fork_staging(&parent);
-    assert!(live.dir.path().exists(), "a live copy's staging directory is kept, however old");
+    assert!(
+        live.dir.path().exists(),
+        "a live copy's staging directory is kept, however old"
+    );
     assert!(!dead.exists(), "an old one whose lock is free is removed");
-    assert!(young.exists(), "a young one is kept (its copy may not have locked it yet)");
-    assert!(unlocked.exists(), "one without a lock file is kept: no evidence its copy is gone (Astra r2 #4)");
+    assert!(
+        young.exists(),
+        "a young one is kept (its copy may not have locked it yet)"
+    );
+    assert!(
+        unlocked.exists(),
+        "one without a lock file is kept: no evidence its copy is gone (Astra r2 #4)"
+    );
 }
 
 /// Texts of the transcript lines (`updates.jsonl`) and of the chat history of `info`, for "is this turn in it" checks.
@@ -2929,7 +3376,10 @@ fn p123_append_line(path: &std::path::Path, line: &str) {
 }
 
 fn p123_update_line(update: &SessionUpdate) -> String {
-    serde_json::to_string(&crate::session::storage::SessionUpdateEnvelope::from_update(update).unwrap()).unwrap()
+    serde_json::to_string(
+        &crate::session::storage::SessionUpdateEnvelope::from_update(update).unwrap(),
+    )
+    .unwrap()
 }
 
 /// P123 (K17, Astra P111 r7 #2b / r9): a turn appended to a live source after the copy took its snapshot is in neither
@@ -2946,7 +3396,10 @@ async fn a_turn_appended_mid_copy_is_in_neither_the_transcript_nor_the_history()
             id: acp::SessionId::new(sid.as_str()),
             cwd: "/src".to_string(),
         };
-        adapter.init_session(&info, default_model_id()).await.unwrap();
+        adapter
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
         let source = p88_source(
             &adapter,
             &sid,
@@ -2956,23 +3409,38 @@ async fn a_turn_appended_mid_copy_is_in_neither_the_transcript_nor_the_history()
                 fork_user_chunk(&sid, "P1", 1),
                 fork_agent_chunk(&sid, "A1"),
             ],
-            vec![chat_user("P0", 0), ConversationItem::assistant("A0"), chat_user("P1", 1), ConversationItem::assistant("A1")],
+            vec![
+                chat_user("P0", 0),
+                ConversationItem::assistant("A0"),
+                chat_user("P1", 1),
+                ConversationItem::assistant("A1"),
+            ],
         )
         .await;
         // The late turn: for the whole copy a new prompt; for the cut at prompt 1 more of prompt 1's own turn.
-        let (late_updates, late_chat): (Vec<SessionUpdate>, Vec<ConversationItem>) = match target_prompt_index {
-            None => (
-                vec![fork_user_chunk(&sid, "P2-LATE", 2), fork_agent_chunk(&sid, "A2-LATE")],
-                vec![chat_user("P2-LATE", 2), ConversationItem::assistant("A2-LATE")],
-            ),
-            Some(_) => (
-                vec![fork_agent_chunk(&sid, "A1-LATE")],
-                vec![ConversationItem::assistant("A1-LATE")],
-            ),
-        };
+        let (late_updates, late_chat): (Vec<SessionUpdate>, Vec<ConversationItem>) =
+            match target_prompt_index {
+                None => (
+                    vec![
+                        fork_user_chunk(&sid, "P2-LATE", 2),
+                        fork_agent_chunk(&sid, "A2-LATE"),
+                    ],
+                    vec![
+                        chat_user("P2-LATE", 2),
+                        ConversationItem::assistant("A2-LATE"),
+                    ],
+                ),
+                Some(_) => (
+                    vec![fork_agent_chunk(&sid, "A1-LATE")],
+                    vec![ConversationItem::assistant("A1-LATE")],
+                ),
+            };
         let (updates_path, chat_path) = (adapter.updates_file(&source), adapter.chat_file(&source));
         let late_update_lines: Vec<String> = late_updates.iter().map(p123_update_line).collect();
-        let late_chat_lines: Vec<String> = late_chat.iter().map(|item| serde_json::to_string(item).unwrap()).collect();
+        let late_chat_lines: Vec<String> = late_chat
+            .iter()
+            .map(|item| serde_json::to_string(item).unwrap())
+            .collect();
         super::AFTER_SOURCE_CHAT_READ.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 for line in &late_update_lines {
@@ -2988,18 +3456,33 @@ async fn a_turn_appended_mid_copy_is_in_neither_the_transcript_nor_the_history()
             cwd: "/src".to_string(),
         };
         adapter
-            .copy_session_data_sync(&source, &target_info, CopySessionOptions { target_prompt_index, ..Default::default() })
+            .copy_session_data_sync(
+                &source,
+                &target_info,
+                CopySessionOptions {
+                    target_prompt_index,
+                    ..Default::default()
+                },
+            )
             .unwrap_or_else(|error| panic!("{suffix}: the copy failed: {error}"));
-        super::AFTER_SOURCE_CHAT_READ.with(|hook| assert!(hook.borrow().is_none(), "{suffix}: the seam ran"));
+        super::AFTER_SOURCE_CHAT_READ
+            .with(|hook| assert!(hook.borrow().is_none(), "{suffix}: the seam ran"));
         let (transcript, chat) = p123_child_texts(&adapter, &target_info).await;
-        let late = if target_prompt_index.is_none() { "P2-LATE" } else { "A1-LATE" };
+        let late = if target_prompt_index.is_none() {
+            "P2-LATE"
+        } else {
+            "A1-LATE"
+        };
         let in_transcript = transcript.contains(late);
         let in_history = chat.iter().any(|text| text.contains(late));
         assert_eq!(
             in_transcript, in_history,
             "{suffix}: the late turn is in the child's transcript ({in_transcript}) but its history says ({in_history}); it must be in both or neither"
         );
-        assert!(!in_transcript, "{suffix}: the snapshot is taken before the late turn, so it is in neither");
+        assert!(
+            !in_transcript,
+            "{suffix}: the snapshot is taken before the late turn, so it is in neither"
+        );
     }
 }
 
@@ -3016,7 +3499,10 @@ async fn the_copy_snapshot_waits_for_an_append_in_progress() {
             id: acp::SessionId::new(sid.as_str()),
             cwd: "/src".to_string(),
         };
-        adapter.init_session(&info, default_model_id()).await.unwrap();
+        adapter
+            .init_session(&info, default_model_id())
+            .await
+            .unwrap();
         let source = p88_source(
             &adapter,
             &sid,
@@ -3026,12 +3512,22 @@ async fn the_copy_snapshot_waits_for_an_append_in_progress() {
         .await;
         let lock_target = adapter.session_dir(&source).join(locked);
         let (lock_file, held) = if locked == "snapshot.lock" {
-            let held = crate::session::storage::snapshot_lock::acquire_blocking(&lock_target, &lock_target).unwrap().unwrap();
+            let held = crate::session::storage::snapshot_lock::acquire_blocking(
+                &lock_target,
+                &lock_target,
+            )
+            .unwrap()
+            .unwrap();
             (lock_target.clone(), held)
         } else {
-            (lock_target.with_extension("jsonl.lock"), JsonlStorageAdapter::lock_append_by_path(&lock_target).unwrap())
+            (
+                lock_target.with_extension("jsonl.lock"),
+                JsonlStorageAdapter::lock_append_by_path(&lock_target).unwrap(),
+            )
         };
-        crate::session::storage::snapshot_lock::CONTENDED.lock().remove(&lock_file);
+        crate::session::storage::snapshot_lock::CONTENDED
+            .lock()
+            .remove(&lock_file);
         let target_info = Info {
             id: acp::SessionId::new(format!("{sid}-fork")),
             cwd: "/src".to_string(),
@@ -3042,20 +3538,40 @@ async fn the_copy_snapshot_waits_for_an_append_in_progress() {
             copier.copy_session_data_sync(&copy_source, &copy_target, CopySessionOptions::default())
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !crate::session::storage::snapshot_lock::CONTENDED.lock().contains(&lock_file) {
-            assert!(std::time::Instant::now() < deadline, "{locked}: the copy never reached the held lock");
-            assert!(!copy.is_finished(), "{locked}: the copy finished without waiting for the lock held on the source");
+        while !crate::session::storage::snapshot_lock::CONTENDED
+            .lock()
+            .contains(&lock_file)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{locked}: the copy never reached the held lock"
+            );
+            assert!(
+                !copy.is_finished(),
+                "{locked}: the copy finished without waiting for the lock held on the source"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(!copy.is_finished(), "{locked}: the copy went ahead while an append to the source was in progress");
-        assert!(!adapter.session_dir(&target_info).exists(), "{locked}: nothing is created while the snapshot waits");
+        assert!(
+            !copy.is_finished(),
+            "{locked}: the copy went ahead while an append to the source was in progress"
+        );
+        assert!(
+            !adapter.session_dir(&target_info).exists(),
+            "{locked}: nothing is created while the snapshot waits"
+        );
         drop(held);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !copy.is_finished() {
-            assert!(std::time::Instant::now() < deadline, "{locked}: the copy never finished after the lock was released");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{locked}: the copy never finished after the lock was released"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        copy.join().unwrap().unwrap_or_else(|error| panic!("{locked}: the copy failed: {error}"));
+        copy.join()
+            .unwrap()
+            .unwrap_or_else(|error| panic!("{locked}: the copy failed: {error}"));
     }
 }
 
@@ -3070,7 +3586,10 @@ async fn a_subagent_context_copy_does_not_wait_for_the_transcript_lock() {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let source = p88_source(
         &adapter,
         sid,
@@ -3132,7 +3651,10 @@ async fn p123_torn_source(adapter: &JsonlStorageAdapter, sid: &str) -> Info {
         id: acp::SessionId::new(sid),
         cwd: "/src".to_string(),
     };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let source = p88_source(
         adapter,
         sid,
@@ -3189,12 +3711,31 @@ async fn a_fork_of_a_damaged_session_gets_a_repaired_history() {
             cwd: "/src".to_string(),
         };
         adapter
-            .copy_session_data(&source, &target_info, CopySessionOptions { target_prompt_index, ..Default::default() })
+            .copy_session_data(
+                &source,
+                &target_info,
+                CopySessionOptions {
+                    target_prompt_index,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
-        let child = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history;
-        assert_eq!(p123_orphaned_results(&child), Vec::<String>::new(), "{suffix}: the child inherited an orphaned tool result");
-        assert_eq!(std::fs::read(adapter.chat_file(&source)).unwrap(), before, "{suffix}: the source file is left as it was");
+        let child = adapter
+            .load_session(&target_info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap()
+            .chat_history;
+        assert_eq!(
+            p123_orphaned_results(&child),
+            Vec::<String>::new(),
+            "{suffix}: the child inherited an orphaned tool result"
+        );
+        assert_eq!(
+            std::fs::read(adapter.chat_file(&source)).unwrap(),
+            before,
+            "{suffix}: the source file is left as it was"
+        );
     }
 }
 
@@ -3223,8 +3764,16 @@ async fn a_fork_of_a_session_scrubbed_by_an_earlier_load_gets_a_repaired_history
         .copy_session_data(&source, &target_info, CopySessionOptions::default())
         .await
         .unwrap();
-    let child = adapter.load_session(&target_info, crate::session::storage::Access::Reader).await.unwrap().chat_history;
-    assert_eq!(p123_orphaned_results(&child), Vec::<String>::new(), "the child inherited an orphaned tool result");
+    let child = adapter
+        .load_session(&target_info, crate::session::storage::Access::Reader)
+        .await
+        .unwrap()
+        .chat_history;
+    assert_eq!(
+        p123_orphaned_results(&child),
+        Vec::<String>::new(),
+        "the child inherited an orphaned tool result"
+    );
 }
 
 /// P123 (K14): resuming a subagent reads its history through `load_chat_history_from_dir`, which must hand back a
@@ -3234,8 +3783,14 @@ async fn a_subagent_resume_reads_a_repaired_history() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let source = p123_torn_source(&adapter, "p123-resume").await;
-    let history = adapter.load_chat_history_from_dir(&adapter.session_dir(&source), None).unwrap();
-    assert_eq!(p123_orphaned_results(&history), Vec::<String>::new(), "the resume history carries an orphaned tool result");
+    let history = adapter
+        .load_chat_history_from_dir(&adapter.session_dir(&source), None)
+        .unwrap();
+    assert_eq!(
+        p123_orphaned_results(&history),
+        Vec::<String>::new(),
+        "the resume history carries an orphaned tool result"
+    );
 }
 
 /// P123 (Astra r3 N3): a fork that is suspended must hold the source's writers only for the two stats. The snapshot
@@ -3245,8 +3800,14 @@ async fn the_snapshot_releases_its_locks_before_it_reads_the_history() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let sid = "p123-n3";
-    let info = Info { id: acp::SessionId::new(sid), cwd: "/src".to_string() };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let info = Info {
+        id: acp::SessionId::new(sid),
+        cwd: "/src".to_string(),
+    };
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let source = p88_source(
         &adapter,
         sid,
@@ -3260,7 +3821,13 @@ async fn the_snapshot_releases_its_locks_before_it_reads_the_history() {
     super::AFTER_SNAPSHOT_LOCKS_RELEASED.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
             let can = |path: std::path::PathBuf| {
-                let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path).unwrap();
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(path)
+                    .unwrap();
                 fs2::FileExt::try_lock_exclusive(&file).is_ok()
             };
             seen.set((
@@ -3270,10 +3837,20 @@ async fn the_snapshot_releases_its_locks_before_it_reads_the_history() {
             ));
         }));
     });
-    let target = Info { id: acp::SessionId::new(format!("{sid}-fork")), cwd: "/src".to_string() };
-    adapter.copy_session_data_sync(&source, &target, CopySessionOptions::default()).unwrap();
-    super::AFTER_SNAPSHOT_LOCKS_RELEASED.with(|hook| assert!(hook.borrow().is_none(), "the seam ran"));
-    assert_eq!(free.get(), (true, true, true), "the snapshot still held a lock while it read the history");
+    let target = Info {
+        id: acp::SessionId::new(format!("{sid}-fork")),
+        cwd: "/src".to_string(),
+    };
+    adapter
+        .copy_session_data_sync(&source, &target, CopySessionOptions::default())
+        .unwrap();
+    super::AFTER_SNAPSHOT_LOCKS_RELEASED
+        .with(|hook| assert!(hook.borrow().is_none(), "the seam ran"));
+    assert_eq!(
+        free.get(),
+        (true, true, true),
+        "the snapshot still held a lock while it read the history"
+    );
 }
 
 /// Lock hygiene (R-lock-hygiene): the append lock a fork snapshot takes is free once released, even while a copy of its
@@ -3284,13 +3861,22 @@ fn a_released_append_lock_is_free_although_a_copy_of_its_descriptor_lives_on() {
     let file = dir.path().join("chat_history.jsonl");
     // The sidecar exists, as the source's writer made it; with no source writer here the fork opens it read-only.
     std::fs::File::create(file.with_extension("jsonl.lock")).unwrap();
-    let held = super::lock_append_for_snapshot(None, &file).unwrap().unwrap();
+    let held = super::lock_append_for_snapshot(None, &file)
+        .unwrap()
+        .unwrap();
     let inherited = held.try_clone().unwrap();
     drop(held);
-    let lock = std::fs::OpenOptions::new().read(true).write(true).open(file.with_extension("jsonl.lock")).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(file.with_extension("jsonl.lock"))
+        .unwrap();
     let free = fs2::FileExt::try_lock_exclusive(&lock).is_ok();
     drop(inherited);
-    assert!(free, "the released append lock stayed held by an inherited descriptor");
+    assert!(
+        free,
+        "the released append lock stayed held by an inherited descriptor"
+    );
 }
 
 /// Lock hygiene follow-up 2 (R-lock-hygiene): the lock `lock_append` takes is free once its holder is dropped without
@@ -3304,10 +3890,17 @@ fn a_dropped_lock_append_guard_is_free_although_a_copy_of_its_descriptor_lives_o
     let held = JsonlStorageAdapter::lock_append_by_path(&file).unwrap();
     let inherited = held.try_clone().unwrap();
     drop(held);
-    let lock = std::fs::OpenOptions::new().read(true).write(true).open(file.with_extension("jsonl.lock")).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(file.with_extension("jsonl.lock"))
+        .unwrap();
     let free = fs2::FileExt::try_lock_exclusive(&lock).is_ok();
     drop(inherited);
-    assert!(free, "the dropped append lock stayed held by an inherited descriptor");
+    assert!(
+        free,
+        "the dropped append lock stayed held by an inherited descriptor"
+    );
 }
 
 /// F5-C3 (design F5 §5.2, §5.5): every write into a fork target is the target writer's. A target folder another process
@@ -3317,9 +3910,18 @@ fn a_dropped_lock_append_guard_is_free_although_a_copy_of_its_descriptor_lives_o
 async fn c3_a_fork_into_a_target_held_elsewhere_writes_nothing() {
     let temp_dir = tempfile::TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    let source = Info { id: acp::SessionId::new(format!("c3-src-{}", std::process::id())), cwd: "/tmp/c3-fork".into() };
-    adapter.init_session(&source, default_model_id()).await.unwrap();
-    let target = Info { id: acp::SessionId::new(format!("c3-dst-{}", std::process::id())), cwd: source.cwd.clone() };
+    let source = Info {
+        id: acp::SessionId::new(format!("c3-src-{}", std::process::id())),
+        cwd: "/tmp/c3-fork".into(),
+    };
+    adapter
+        .init_session(&source, default_model_id())
+        .await
+        .unwrap();
+    let target = Info {
+        id: acp::SessionId::new(format!("c3-dst-{}", std::process::id())),
+        cwd: source.cwd.clone(),
+    };
     let target_dir = adapter.session_dir(&target);
     std::fs::create_dir_all(&target_dir).unwrap();
     let other_process = std::fs::OpenOptions::new()
@@ -3329,20 +3931,33 @@ async fn c3_a_fork_into_a_target_held_elsewhere_writes_nothing() {
         .truncate(false)
         .open(target_dir.join(fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE))
         .unwrap();
-    other_process.try_lock().expect("the other process takes the target");
+    other_process
+        .try_lock()
+        .expect("the other process takes the target");
     let error = adapter
         .copy_session_data(&source, &target, CopySessionOptions::default())
         .await
         .expect_err("a fork into a folder open elsewhere must be refused");
-    assert_eq!(fuigo_session_writer::refusal(&error), Some(fuigo_session_writer::Refusal::HeldElsewhere), "{error}");
+    assert_eq!(
+        fuigo_session_writer::refusal(&error),
+        Some(fuigo_session_writer::Refusal::HeldElsewhere),
+        "{error}"
+    );
     let left: Vec<String> = std::fs::read_dir(&target_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(left, vec![fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE.to_string()], "the fork wrote into a held folder");
+    assert_eq!(
+        left,
+        vec![fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE.to_string()],
+        "the fork wrote into a held folder"
+    );
     other_process.unlock().unwrap();
     drop(other_process);
-    adapter.copy_session_data(&source, &target, CopySessionOptions::default()).await.expect("free once the other lets go");
+    adapter
+        .copy_session_data(&source, &target, CopySessionOptions::default())
+        .await
+        .expect("free once the other lets go");
     assert!(target_dir.join("summary.json").is_file());
 }
 
@@ -3354,8 +3969,14 @@ async fn f5b5_a_fork_locks_a_source_open_here_through_its_writer() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let sid = format!("f5b5-resident-{}", uuid::Uuid::now_v7());
-    let info = Info { id: acp::SessionId::new(sid.as_str()), cwd: "/src".to_string() };
-    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let info = Info {
+        id: acp::SessionId::new(sid.as_str()),
+        cwd: "/src".to_string(),
+    };
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let source = p88_source(
         &adapter,
         &sid,
@@ -3364,16 +3985,25 @@ async fn f5b5_a_fork_locks_a_source_open_here_through_its_writer() {
     )
     .await;
     let dir = adapter.session_dir(&source);
-    let sidecars = ["snapshot.lock", "chat_history.jsonl.lock", "updates.jsonl.lock"];
+    let sidecars = [
+        "snapshot.lock",
+        "chat_history.jsonl.lock",
+        "updates.jsonl.lock",
+    ];
     for name in sidecars {
         let _ = std::fs::remove_file(dir.join(name));
     }
     // The session is open here in another adapter: its writer holds the id.
-    let resident = fuigo_session_writer::SessionWriter::try_claim(sid.clone(), &dir).expect("the source is open here");
+    let resident = fuigo_session_writer::SessionWriter::try_claim(sid.clone(), &dir)
+        .expect("the source is open here");
     let marks = temp_dir.path().join("f5-marks");
     fuigo_session_writer::trace::set_test_trace_dir(Some(marks.clone()));
-    let target_info = Info { id: acp::SessionId::new(format!("{sid}-fork")), cwd: "/src".to_string() };
-    let copied = adapter.copy_session_data_sync(&source, &target_info, CopySessionOptions::default());
+    let target_info = Info {
+        id: acp::SessionId::new(format!("{sid}-fork")),
+        cwd: "/src".to_string(),
+    };
+    let copied =
+        adapter.copy_session_data_sync(&source, &target_info, CopySessionOptions::default());
     fuigo_session_writer::trace::set_test_trace_dir(None);
     copied.expect("the fork copies");
     let prefix = format!("b.{}.", resident.generation());
@@ -3383,7 +4013,8 @@ async fn f5b5_a_fork_locks_a_source_open_here_through_its_writer() {
                 .flatten()
                 .filter_map(|entry| {
                     let name = entry.file_name().to_string_lossy().into_owned();
-                    name.starts_with(&prefix).then(|| name.rsplit('.').next().unwrap_or_default().to_string())
+                    name.starts_with(&prefix)
+                        .then(|| name.rsplit('.').next().unwrap_or_default().to_string())
                 })
                 .collect()
         })
@@ -3408,14 +4039,24 @@ async fn f5b5_a_fork_locks_a_source_open_here_through_its_writer() {
 #[tokio::test]
 async fn r1h2_a_fork_of_a_source_held_elsewhere_without_its_sidecars_is_refused() {
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let source = Info { id: acp::SessionId::new(format!("r1h2-src-{}", std::process::id())), cwd: "/tmp/r1h2-fork".into() };
+    let source = Info {
+        id: acp::SessionId::new(format!("r1h2-src-{}", std::process::id())),
+        cwd: "/tmp/r1h2-fork".into(),
+    };
     {
         let maker = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-        maker.init_session(&source, default_model_id()).await.unwrap();
+        maker
+            .init_session(&source, default_model_id())
+            .await
+            .unwrap();
     }
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let source_dir = adapter.session_dir(&source);
-    for name in ["snapshot.lock", "chat_history.jsonl.lock", "updates.jsonl.lock"] {
+    for name in [
+        "snapshot.lock",
+        "chat_history.jsonl.lock",
+        "updates.jsonl.lock",
+    ] {
         let _ = std::fs::remove_file(source_dir.join(name));
     }
     let other_process = std::fs::OpenOptions::new()
@@ -3425,15 +4066,35 @@ async fn r1h2_a_fork_of_a_source_held_elsewhere_without_its_sidecars_is_refused(
         .truncate(false)
         .open(source_dir.join(fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE))
         .unwrap();
-    other_process.try_lock().expect("the other process holds the source");
-    let target = Info { id: acp::SessionId::new(format!("r1h2-dst-{}", std::process::id())), cwd: source.cwd.clone() };
-    let result = adapter.copy_session_data(&source, &target, CopySessionOptions::default()).await;
+    other_process
+        .try_lock()
+        .expect("the other process holds the source");
+    let target = Info {
+        id: acp::SessionId::new(format!("r1h2-dst-{}", std::process::id())),
+        cwd: source.cwd.clone(),
+    };
+    let result = adapter
+        .copy_session_data(&source, &target, CopySessionOptions::default())
+        .await;
     let target_dir = adapter.session_dir(&target);
-    let made = std::fs::read_dir(&target_dir).map(|d| d.count()).unwrap_or(0);
+    let made = std::fs::read_dir(&target_dir)
+        .map(|d| d.count())
+        .unwrap_or(0);
     other_process.unlock().unwrap();
-    let error = result.expect_err("a fork of a held source without its sidecars must be refused, not copied unlocked");
-    assert_eq!(error.kind(), std::io::ErrorKind::Interrupted, "retryable: {error}");
-    assert_eq!(made, 0, "the refused fork created files in {}", target_dir.display());
+    let error = result.expect_err(
+        "a fork of a held source without its sidecars must be refused, not copied unlocked",
+    );
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted,
+        "retryable: {error}"
+    );
+    assert_eq!(
+        made,
+        0,
+        "the refused fork created files in {}",
+        target_dir.display()
+    );
 }
 
 /// Review r1 H4: a summary change (rename) of a session open in this process runs as that session's live writer, and
@@ -3442,7 +4103,10 @@ async fn r1h2_a_fork_of_a_source_held_elsewhere_without_its_sidecars_is_refused(
 async fn r1h4_a_rename_runs_as_the_session_writer_resident_or_dormant() {
     use fuigo_session_writer::{SessionWriter, seams};
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let info = Info { id: acp::SessionId::new(format!("r1h4-{}", std::process::id())), cwd: "/tmp/r1h4".into() };
+    let info = Info {
+        id: acp::SessionId::new(format!("r1h4-{}", std::process::id())),
+        cwd: "/tmp/r1h4".into(),
+    };
     {
         let maker = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
         maker.init_session(&info, default_model_id()).await.unwrap();
@@ -3450,11 +4114,16 @@ async fn r1h4_a_rename_runs_as_the_session_writer_resident_or_dormant() {
     let id = info.id.to_string();
     let dir = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf()).session_dir(&info);
     for resident in [true, false] {
-        let live = resident.then(|| SessionWriter::try_claim(id.clone(), dir.clone()).expect("the live writer"));
+        let live = resident
+            .then(|| SessionWriter::try_claim(id.clone(), dir.clone()).expect("the live writer"));
         let gate = seams::arm(&format!("summary:{id}"));
         let rename = tokio::spawn({
             let (root, info) = (temp_dir.path().to_path_buf(), info.clone());
-            async move { JsonlStorageAdapter::with_root(root).update_session_title(&info, format!("r1h4 {resident}")).await }
+            async move {
+                JsonlStorageAdapter::with_root(root)
+                    .update_session_title(&info, format!("r1h4 {resident}"))
+                    .await
+            }
         });
         let reached = tokio::task::spawn_blocking({
             let gate = gate.clone();
@@ -3465,10 +4134,19 @@ async fn r1h4_a_rename_runs_as_the_session_writer_resident_or_dormant() {
         let held_during = !SessionWriter::is_free(&id);
         gate.open();
         rename.await.unwrap().expect("the rename succeeds");
-        assert!(reached, "resident={resident}: the rename did not run as a session writer");
-        assert!(held_during, "resident={resident}: no writer held the session during the rename");
+        assert!(
+            reached,
+            "resident={resident}: the rename did not run as a session writer"
+        );
+        assert!(
+            held_during,
+            "resident={resident}: no writer held the session during the rename"
+        );
         drop(live);
-        assert!(SessionWriter::is_free(&id), "resident={resident}: the rename's writer was kept");
+        assert!(
+            SessionWriter::is_free(&id),
+            "resident={resident}: the rename's writer was kept"
+        );
         let text = std::fs::read_to_string(dir.join("summary.json")).unwrap();
         assert!(text.contains(&format!("r1h4 {resident}")), "{text}");
     }

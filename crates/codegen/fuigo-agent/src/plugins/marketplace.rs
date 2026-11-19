@@ -23,16 +23,17 @@ pub fn resolve(git_root: &Path) -> Vec<ResolvedMarketplace> {
     let Ok(repo_root) = fuigo_dirs::contained::PinnedRoot::pin(git_root) else {
         return vec![];
     };
-    let json: serde_json::Value = match fuigo_dirs::contained::read_contained(&settings_path, &repo_root) {
-        Ok(c) => match serde_json::from_str(&c) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "malformed .claude/settings.json");
-                return vec![];
-            }
-        },
-        Err(_) => return vec![],
-    };
+    let json: serde_json::Value =
+        match fuigo_dirs::contained::read_contained(&settings_path, &repo_root) {
+            Ok(c) => match serde_json::from_str(&c) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "malformed .claude/settings.json");
+                    return vec![];
+                }
+            },
+            Err(_) => return vec![],
+        };
 
     let enabled = enabled_plugin_names(&json);
     if enabled.is_empty() {
@@ -501,7 +502,11 @@ mod tests {
         std::fs::create_dir_all(repo.join("mk/plugins/p")).unwrap();
         let settings = r#"{"extraKnownMarketplaces":{"mk":{"source":{"path":"mk"}}},"enabledPlugins":{"p@mk":true}}"#;
         std::fs::write(tmp.path().join("outside.json"), settings).unwrap();
-        std::os::unix::fs::symlink(tmp.path().join("outside.json"), repo.join(".claude/settings.json")).unwrap();
+        std::os::unix::fs::symlink(
+            tmp.path().join("outside.json"),
+            repo.join(".claude/settings.json"),
+        )
+        .unwrap();
         assert!(resolve(&repo).is_empty());
 
         std::fs::remove_file(repo.join(".claude/settings.json")).unwrap();

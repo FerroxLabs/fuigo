@@ -59,7 +59,10 @@ pub(super) fn handle_permission_request(
 }
 
 /// Notification text for an approval request: names the subagent or titled session that is asking, so a card waiting in a background session is identifiable.
-pub(super) fn permission_notification_body(agent: &AgentView, session_id: &acp::SessionId) -> String {
+pub(super) fn permission_notification_body(
+    agent: &AgentView,
+    session_id: &acp::SessionId,
+) -> String {
     let base = NotificationEventKind::ApprovalRequired.as_str();
     let sid = session_id.0.as_ref();
     let who = match agent.subagent_sessions.get(sid) {
@@ -337,7 +340,10 @@ pub(super) fn existing_contents_lines(
         out.push(shown);
     }
     if total > EXISTING_PREVIEW_LINES {
-        out.push(format!("\u{2026} (+{} more lines)", total - EXISTING_PREVIEW_LINES));
+        out.push(format!(
+            "\u{2026} (+{} more lines)",
+            total - EXISTING_PREVIEW_LINES
+        ));
     }
     out
 }

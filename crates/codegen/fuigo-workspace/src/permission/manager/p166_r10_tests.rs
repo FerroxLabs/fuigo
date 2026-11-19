@@ -6,7 +6,14 @@ use super::{ClassifierSecurityFinding, PermissionState, evaluate_bash};
 
 fn project() -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
-    for dir in ["out", "src", "scripts", "sub", ".git/hooks", ".git/modules/foo/hooks"] {
+    for dir in [
+        "out",
+        "src",
+        "scripts",
+        "sub",
+        ".git/hooks",
+        ".git/modules/foo/hooks",
+    ] {
         std::fs::create_dir_all(project.path().join(dir)).unwrap();
     }
     #[cfg(unix)]
@@ -20,10 +27,15 @@ fn check(rows: &[(&str, bool)]) {
         .iter()
         .filter_map(|(cmd, blocked)| {
             let got = floor(project.path(), cmd);
-            (got.is_some() != *blocked).then(|| format!("{cmd}: expected blocked={blocked}, got {got:?}"))
+            (got.is_some() != *blocked)
+                .then(|| format!("{cmd}: expected blocked={blocked}, got {got:?}"))
         })
         .collect();
-    assert!(wrong.is_empty(), "protected floor mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "protected floor mismatches:\n{}",
+        wrong.join("\n")
+    );
 }
 
 fn exec(cmd: &str) -> bool {
@@ -37,8 +49,21 @@ fn exec(cmd: &str) -> bool {
 fn p166_r10_h1_loopback_spellings() {
     let mut rows: Vec<(String, bool)> = Vec::new();
     for host in [
-        "user@localhost", "user@127.0.0.1", "user@[::1]", "127.1", "127.0.1", "localhost.", "0", "[0:0:0:0:0:0:0:1]",
-        "0:0:0:0:0:0:0:1", "[::ffff:127.0.0.1]", "0x7f.1", "017700000001", "2130706433", "root@LOCALHOST.", "::1",
+        "user@localhost",
+        "user@127.0.0.1",
+        "user@[::1]",
+        "127.1",
+        "127.0.1",
+        "localhost.",
+        "0",
+        "[0:0:0:0:0:0:0:1]",
+        "0:0:0:0:0:0:0:1",
+        "[::ffff:127.0.0.1]",
+        "0x7f.1",
+        "017700000001",
+        "2130706433",
+        "root@LOCALHOST.",
+        "::1",
     ] {
         // Unbracketed IPv6 has no `host:path` form; those rows only exist for the bracketed spellings.
         if host.matches(':').count() > 1 && !host.starts_with('[') && !host.contains('@') {
@@ -50,7 +75,10 @@ fn p166_r10_h1_loopback_spellings() {
     }
     for (cmd, blocked) in [
         ("scp evil user@host:.git/hooks/pre-commit", true),
-        ("scp evil user@build.example.com:.git/hooks/pre-commit", true),
+        (
+            "scp evil user@build.example.com:.git/hooks/pre-commit",
+            true,
+        ),
         ("scp evil 10.0.0.5:.git/hooks/pre-commit", true),
         ("scp evil 128.0.0.1:.mcp.json", true),
         ("scp evil user@8.8.8.8:.mcp.json", true),
@@ -71,14 +99,35 @@ fn p166_r10_h1_loopback_spellings() {
 #[test]
 fn p166_r10_h2_insteadof_key_segment() {
     check(&[
-        ("git config url.\"ext::sh -c id\".insteadOf https://github.com/", true),
-        ("git config url.\"ext::sh -c id\".pushInsteadOf https://github.com/", true),
-        ("git config --global url.'ext::sh -c id'.insteadOf https://github.com/", true),
-        ("git config 'url.ext::sh -c id.insteadOf' https://github.com/", true),
+        (
+            "git config url.\"ext::sh -c id\".insteadOf https://github.com/",
+            true,
+        ),
+        (
+            "git config url.\"ext::sh -c id\".pushInsteadOf https://github.com/",
+            true,
+        ),
+        (
+            "git config --global url.'ext::sh -c id'.insteadOf https://github.com/",
+            true,
+        ),
+        (
+            "git config 'url.ext::sh -c id.insteadOf' https://github.com/",
+            true,
+        ),
         // Before r10 this blocked (value tested); the rewrite goes the other way, so it is harmless.
-        ("git config url.https://x/.insteadOf 'ext::sh -c evil'", false),
-        ("git config url.\"https://github.com/\".insteadOf git@github.com:", false),
-        ("git config url.\"ssh://git@github.com/\".pushInsteadOf https://github.com/", false),
+        (
+            "git config url.https://x/.insteadOf 'ext::sh -c evil'",
+            false,
+        ),
+        (
+            "git config url.\"https://github.com/\".insteadOf git@github.com:",
+            false,
+        ),
+        (
+            "git config url.\"ssh://git@github.com/\".pushInsteadOf https://github.com/",
+            false,
+        ),
         ("git config url.https://a/.insteadOf https://b/", false),
     ]);
 }
@@ -88,9 +137,18 @@ fn p166_r10_h2_insteadof_key_segment() {
 fn p166_r10_h2_insteadof_ambient_config_file() {
     use crate::permission::exec_risk::local_repo_config_has_exec_risk;
     for (section, risky) in [
-        ("[url \"ext::sh -c id\"]\n\tinsteadOf = https://github.com/\n", true),
-        ("[url \"ext::sh -c id\"]\n\tpushInsteadOf = https://github.com/\n", true),
-        ("[url \"https://github.com/\"]\n\tinsteadOf = git@github.com:\n", false),
+        (
+            "[url \"ext::sh -c id\"]\n\tinsteadOf = https://github.com/\n",
+            true,
+        ),
+        (
+            "[url \"ext::sh -c id\"]\n\tpushInsteadOf = https://github.com/\n",
+            true,
+        ),
+        (
+            "[url \"https://github.com/\"]\n\tinsteadOf = git@github.com:\n",
+            false,
+        ),
         ("[url \"https://x/\"]\n\tinsteadOf = ext::sh -c id\n", false),
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -99,7 +157,11 @@ fn p166_r10_h2_insteadof_ambient_config_file() {
         let mut text = std::fs::read_to_string(&config).unwrap();
         text.push_str(section);
         std::fs::write(&config, text).unwrap();
-        assert_eq!(local_repo_config_has_exec_risk(dir.path()), risky, "{section}");
+        assert_eq!(
+            local_repo_config_has_exec_risk(dir.path()),
+            risky,
+            "{section}"
+        );
     }
 }
 
@@ -141,7 +203,10 @@ fn p166_r10_h4_chmod_dot_components() {
 fn p166_r10_m5_more_command_keys() {
     check(&[
         ("git config trailer.sign.command /tmp/evil", true),
-        ("git config trailer.sign.cmd 'touch .git/hooks/pre-commit'", true),
+        (
+            "git config trailer.sign.cmd 'touch .git/hooks/pre-commit'",
+            true,
+        ),
         ("git config submodule.lib.update '!/tmp/evil'", true),
         ("git config interactive.diffFilter /tmp/evil", true),
         ("git config init.templateDir /tmp/evil", true),
@@ -177,7 +242,11 @@ fn p166_r10_m5_ambient_keys() {
         ("guitool.x.cmd", "x", true),
         ("init.defaultbranch", "main", false),
     ] {
-        assert_eq!(local_git_config_entry_is_exec(key, value), risky, "{key}={value}");
+        assert_eq!(
+            local_git_config_entry_is_exec(key, value),
+            risky,
+            "{key}={value}"
+        );
     }
 }
 
@@ -223,18 +292,39 @@ fn p166_r10_l7_glob_cap_false_positive() {
 fn p166_r10_false_positive_suite() {
     let project = project();
     let suite = [
-        "scp build.tar host:/srv/", "scp build.tar user@host:/srv/", "rsync -a ./ user@build.example.com:proj/",
-        "scp file 10.0.0.5:/tmp/", "git config url.\"https://github.com/\".insteadOf git@github.com:",
+        "scp build.tar host:/srv/",
+        "scp build.tar user@host:/srv/",
+        "rsync -a ./ user@build.example.com:proj/",
+        "scp file 10.0.0.5:/tmp/",
+        "git config url.\"https://github.com/\".insteadOf git@github.com:",
         "git config url.\"ssh://git@github.com/\".pushInsteadOf https://github.com/",
-        "git config remote.origin.url https://x", "git config submodule.lib.update merge",
-        "git config submodule.lib.update rebase", "git config init.defaultBranch main", "cd src && ls ~+", "echo ~",
-        "chmod -R +x scripts/.", "rm */*", "rm -rf build/*/*.o", "ls */*", "git -C ../other status",
-        "git -C ../other checkout main", "git init newrepo", "git -C sub init",
+        "git config remote.origin.url https://x",
+        "git config submodule.lib.update merge",
+        "git config submodule.lib.update rebase",
+        "git config init.defaultBranch main",
+        "cd src && ls ~+",
+        "echo ~",
+        "chmod -R +x scripts/.",
+        "rm */*",
+        "rm -rf build/*/*.o",
+        "ls */*",
+        "git -C ../other status",
+        "git -C ../other checkout main",
+        "git init newrepo",
+        "git -C sub init",
     ];
     // Informational, not asserted: both are unchanged by r10. `chmod -R go-w .` takes the floor only because the
     // fixture project really holds `.git/hooks` (r8B rule); the two retarget flags are exec risk since round 7.
-    for cmd in ["chmod -R go-w .", "git --git-dir=.git status", "git --work-tree=. status"] {
-        eprintln!("FP-info {cmd} => floor={:?} exec={}", floor(project.path(), cmd), exec(cmd));
+    for cmd in [
+        "chmod -R go-w .",
+        "git --git-dir=.git status",
+        "git --work-tree=. status",
+    ] {
+        eprintln!(
+            "FP-info {cmd} => floor={:?} exec={}",
+            floor(project.path(), cmd),
+            exec(cmd)
+        );
     }
     let mut wrong = Vec::new();
     for cmd in suite {

@@ -2414,13 +2414,14 @@ fn patch_removes_any_empty_id_key() {
 
 #[test]
 fn tool_guidance_description_reaches_responses_wire() {
-    let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
-        .with_tools(vec![ToolSpec {
-        name: "read_file".to_string(),
-        description: Some("stock text\n\nGUIDE-WIRE".to_string()),
-        parameters: serde_json::json!({"type": "object"}),
-        freeform: None,
-    }]);
+    let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_tools(vec![
+        ToolSpec {
+            name: "read_file".to_string(),
+            description: Some("stock text\n\nGUIDE-WIRE".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+            freeform: None,
+        },
+    ]);
     let responses_req: rs::CreateResponse = (&req).into();
     let wire = serde_json::to_value(&responses_req).unwrap();
     assert_eq!(wire["tools"][0]["description"], "stock text\n\nGUIDE-WIRE");
@@ -2453,7 +2454,11 @@ fn downgraded_custom_call_is_read_as_freeform_and_replays_as_function_call() {
     };
     assert_eq!(a.tool_calls.len(), 1);
     assert_eq!(a.tool_calls[0].name, "apply_patch");
-    assert_eq!(a.tool_calls[0].arguments.as_ref(), DOWNGRADE_PATCH, "the text, never the JSON envelope");
+    assert_eq!(
+        a.tool_calls[0].arguments.as_ref(),
+        DOWNGRADE_PATCH,
+        "the text, never the JSON envelope"
+    );
 
     let mut items = vec![ConversationItem::user("edit a.txt")];
     items.extend(turn);
@@ -2463,12 +2468,16 @@ fn downgraded_custom_call_is_read_as_freeform_and_replays_as_function_call() {
     assert_eq!(input[1]["type"], "function_call", "{input:?}");
     assert_eq!(input[1]["call_id"], "call_1");
     assert_eq!(input[1]["name"], "apply_patch");
-    let echoed: serde_json::Value = serde_json::from_str(input[1]["arguments"].as_str().unwrap()).unwrap();
+    let echoed: serde_json::Value =
+        serde_json::from_str(input[1]["arguments"].as_str().unwrap()).unwrap();
     assert_eq!(echoed, serde_json::json!({ "input": DOWNGRADE_PATCH }));
     assert_eq!(input[2]["type"], "function_call_output", "{input:?}");
     assert_eq!(input[2]["call_id"], "call_1");
     let body = serde_json::to_string(&rs::CreateResponse::from(&req)).unwrap();
-    assert!(!body.contains("custom_tool_call\""), "no custom call item for a downgraded call: {body}");
+    assert!(
+        !body.contains("custom_tool_call\""),
+        "no custom call item for a downgraded call: {body}"
+    );
 }
 
 /// The recorded order survives the JSONL round trip, so a resumed session still replays the downgraded shape.
@@ -2482,7 +2491,10 @@ fn downgraded_custom_call_order_round_trips() {
     let json = serde_json::to_string(a).unwrap();
     let back: AssistantItem = serde_json::from_str(&json).unwrap();
     assert_eq!(back.output_order, a.output_order);
-    assert!(matches!(back.output_order.as_deref(), Some([OutputSlot::DowngradedCustomCall { .. }])));
+    assert!(matches!(
+        back.output_order.as_deref(),
+        Some([OutputSlot::DowngradedCustomCall { .. }])
+    ));
 }
 
 /// A genuine function tool, a custom tool called with another shape, and malformed arguments are all unchanged:
@@ -2502,9 +2514,16 @@ fn only_the_exact_downgrade_shape_is_remapped() {
         let ConversationItem::Assistant(a) = turn.last().unwrap() else {
             panic!("{turn:?}")
         };
-        assert_eq!(a.tool_calls.len(), 1, "{name} {args}: the call must not be dropped");
+        assert_eq!(
+            a.tool_calls.len(),
+            1,
+            "{name} {args}: the call must not be dropped"
+        );
         assert_eq!(a.tool_calls[0].arguments.as_ref(), args, "{name} {args}");
-        assert_eq!(a.output_order, None, "{name} {args}: replays as a plain function_call");
+        assert_eq!(
+            a.output_order, None,
+            "{name} {args}: replays as a plain function_call"
+        );
     }
 }
 
@@ -2521,5 +2540,8 @@ fn correct_custom_tool_call_still_works_with_custom_set() {
         panic!("{turn:?}")
     };
     assert_eq!(a.tool_calls[0].arguments.as_ref(), DOWNGRADE_PATCH);
-    assert!(matches!(a.output_order.as_deref(), Some([OutputSlot::CustomToolCall { .. }])));
+    assert!(matches!(
+        a.output_order.as_deref(),
+        Some([OutputSlot::CustomToolCall { .. }])
+    ));
 }

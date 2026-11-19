@@ -209,10 +209,11 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
         )
         // P43: identity only to a FluxRouter-operated destination.
         .headers(
-            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&credits_url).header_map([
-                ("x-userid", auth.user_id.as_str()),
-                ("x-fuigo-client-version", fuigo_version::VERSION),
-            ]),
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&credits_url)
+                .header_map([
+                    ("x-userid", auth.user_id.as_str()),
+                    ("x-fuigo-client-version", fuigo_version::VERSION),
+                ]),
         )
         .header(
             crate::http::CLIENT_MODE_HEADER,

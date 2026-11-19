@@ -40,15 +40,27 @@ const EXPECTED: &[(&str, usize)] = &[
     // P70b (R088): reads the `H_*` names only to leave their values OUT of the sent-credential registry
     // (`NON_CREDENTIAL_HEADERS`); it writes no header. 5 identity aliases, each imported once and listed once.
     ("crates/codegen/fuigo-sampler/src/sent_credentials.rs", 10),
-    ("crates/codegen/fuigo-sampler/tests/fuigo_header_namespace_split.rs", 6),
-    ("crates/codegen/fuigo-shell-session-support/src/managed_mcp.rs", 4),
+    (
+        "crates/codegen/fuigo-sampler/tests/fuigo_header_namespace_split.rs",
+        6,
+    ),
+    (
+        "crates/codegen/fuigo-shell-session-support/src/managed_mcp.rs",
+        4,
+    ),
     ("crates/codegen/fuigo-shell/src/agent/feedback_client.rs", 5),
     ("crates/codegen/fuigo-shell/src/agent/mvp_agent/mod.rs", 2),
     ("crates/codegen/fuigo-shell/src/agent/mvp_agent/tests.rs", 7),
     ("crates/codegen/fuigo-shell/src/agent/relay.rs", 5),
-    ("crates/codegen/fuigo-shell/src/agent/subscription_check.rs", 1),
+    (
+        "crates/codegen/fuigo-shell/src/agent/subscription_check.rs",
+        1,
+    ),
     ("crates/codegen/fuigo-shell/src/auth/device_code.rs", 3),
-    ("crates/codegen/fuigo-shell/src/auth/manager/enrichment.rs", 1),
+    (
+        "crates/codegen/fuigo-shell/src/auth/manager/enrichment.rs",
+        1,
+    ),
     ("crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs", 1),
     ("crates/codegen/fuigo-shell/src/extensions/billing.rs", 4),
     ("crates/codegen/fuigo-shell/src/extensions/bundle.rs", 2),
@@ -57,14 +69,29 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/remote/client.rs", 15),
     ("crates/codegen/fuigo-shell/src/remote/client_tests.rs", 28),
     ("crates/codegen/fuigo-shell/src/remote/mod.rs", 9),
-    ("crates/codegen/fuigo-shell/src/remote/model_source/oai.rs", 7),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_impl/context_snapshot.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_impl/session_setup.rs", 2),
-    ("crates/codegen/fuigo-telemetry/src/external/providers.rs", 4),
+    (
+        "crates/codegen/fuigo-shell/src/remote/model_source/oai.rs",
+        7,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_impl/context_snapshot.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_impl/session_setup.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-telemetry/src/external/providers.rs",
+        4,
+    ),
     ("crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs", 14),
     ("crates/codegen/fuigo-voice/src/stt/batch.rs", 2),
     ("crates/codegen/fuigo-voice/src/stt/streaming.rs", 5),
-    ("crates/codegen/fuigo-workspace/src/session/tool_config.rs", 5),
+    (
+        "crates/codegen/fuigo-workspace/src/session/tool_config.rs",
+        5,
+    ),
 ];
 
 /// Occurrences of `word` in `line` on identifier boundaries.
@@ -84,7 +111,10 @@ fn aliases_in(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in src.lines() {
         let lower = line.to_ascii_lowercase();
-        if !IDENTITY.iter().any(|name| lower.contains(&format!("\"{name}\""))) {
+        if !IDENTITY
+            .iter()
+            .any(|name| lower.contains(&format!("\"{name}\"")))
+        {
             continue;
         }
         for keyword in ["const ", "static "] {
@@ -115,7 +145,10 @@ fn count_tokens(src: &str, aliases: &[String]) -> usize {
             .sum::<usize>();
         n += lower.matches("\"x-fuigo-{").count() + lower.matches("\"x-fuigo-\"").count();
         n += word_count(line, "IDENTITY_HEADER_NAMES");
-        n += aliases.iter().map(|alias| word_count(line, alias)).sum::<usize>();
+        n += aliases
+            .iter()
+            .map(|alias| word_count(line, alias))
+            .sum::<usize>();
     }
     n
 }
@@ -153,14 +186,23 @@ fn scan() -> (BTreeMap<String, usize>, usize) {
         .iter()
         .filter(|path| {
             !(path.file_name() == Some(this_file.as_os_str())
-                && path.parent().is_some_and(|p| p.ends_with("fuigo-extra-ca/tests")))
+                && path
+                    .parent()
+                    .is_some_and(|p| p.ends_with("fuigo-extra-ca/tests")))
         })
         .filter_map(|path| {
-            let rel = path.strip_prefix(&root).ok()?.to_string_lossy().replace('\\', "/");
+            let rel = path
+                .strip_prefix(&root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
             Some((rel, std::fs::read_to_string(path).ok()?))
         })
         .collect();
-    let mut aliases: Vec<String> = sources.iter().flat_map(|(_, src)| aliases_in(src)).collect();
+    let mut aliases: Vec<String> = sources
+        .iter()
+        .flat_map(|(_, src)| aliases_in(src))
+        .collect();
     aliases.sort();
     aliases.dedup();
     let counts = sources
@@ -197,13 +239,19 @@ fn scanner_counts_every_spelling_of_an_identity_header() {
 #[test]
 fn scan_reaches_the_known_writers() {
     let (counts, files) = scan();
-    assert!(files > 1000, "only {files} .rs files scanned: the walk is not reaching the tree");
+    assert!(
+        files > 1000,
+        "only {files} .rs files scanned: the walk is not reaching the tree"
+    );
     for known in [
         "crates/codegen/fuigo-extra-ca/src/fluxrouter.rs",
         "crates/codegen/fuigo-sampler/src/client.rs",
         "crates/codegen/fuigo-shell/src/remote/mod.rs",
     ] {
-        assert!(counts.get(known).is_some_and(|n| *n > 0), "{known} not found by the scan");
+        assert!(
+            counts.get(known).is_some_and(|n| *n > 0),
+            "{known} not found by the scan"
+        );
     }
 }
 
@@ -212,8 +260,10 @@ fn scan_reaches_the_known_writers() {
 #[test]
 fn identity_header_sites_are_exactly_the_reviewed_ones() {
     let (actual, _) = scan();
-    let expected: BTreeMap<String, usize> =
-        EXPECTED.iter().map(|(path, n)| ((*path).to_string(), *n)).collect();
+    let expected: BTreeMap<String, usize> = EXPECTED
+        .iter()
+        .map(|(path, n)| ((*path).to_string(), *n))
+        .collect();
     if actual != expected {
         let mut table = String::new();
         for (path, n) in &actual {
@@ -222,7 +272,10 @@ fn identity_header_sites_are_exactly_the_reviewed_ones() {
         let mut diff = String::new();
         for (path, n) in &actual {
             if expected.get(path) != Some(n) {
-                diff.push_str(&format!("  {path}: expected {:?}, found {n}\n", expected.get(path)));
+                diff.push_str(&format!(
+                    "  {path}: expected {:?}, found {n}\n",
+                    expected.get(path)
+                ));
             }
         }
         for (path, n) in &expected {

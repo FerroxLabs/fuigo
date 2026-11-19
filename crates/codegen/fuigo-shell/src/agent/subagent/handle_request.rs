@@ -820,7 +820,11 @@ pub(crate) async fn run_shell_child(
         Ok(writer) => writer,
         Err(error) => {
             tracing::warn!(subagent_id = %request.id, error = %error.message, "subagent child session is not free");
-            return child_run_output(failure_result(&request, &error.message), completion_data, None);
+            return child_run_output(
+                failure_result(&request, &error.message),
+                completion_data,
+                None,
+            );
         }
     };
     let InitialContext {

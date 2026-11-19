@@ -340,7 +340,10 @@ async fn plan_edit_in_protected_dir(influenced: bool) -> String {
     let (responder, _captured) = spawn_exit_capture(gateway_rx);
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        actor.execute_tool_calls(vec![search_replace_plan("call_write_plan", &plan_path.to_string_lossy())]),
+        actor.execute_tool_calls(vec![search_replace_plan(
+            "call_write_plan",
+            &plan_path.to_string_lossy(),
+        )]),
     )
     .await
     .expect("execute_tool_calls must not hang");

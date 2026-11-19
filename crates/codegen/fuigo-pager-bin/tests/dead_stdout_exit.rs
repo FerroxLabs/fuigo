@@ -216,7 +216,11 @@ fn sessions_list_with_a_live_reader_still_prints() {
     };
     let stdout = reader.join().expect("stdout reader");
     let stderr = stderr_reader.join().expect("stderr reader");
-    assert_eq!(Some(0), status.code(), "status: {status:?}, stderr:\n{stderr}");
+    assert_eq!(
+        Some(0),
+        status.code(),
+        "status: {status:?}, stderr:\n{stderr}"
+    );
     assert!(
         stdout.contains("No sessions found."),
         "expected the empty-home listing on stdout, got:\n{stdout}\nstderr:\n{stderr}"
@@ -237,7 +241,11 @@ fn a_failing_stdout_exits_one_with_a_single_diagnostic() {
         .expect("/dev/full");
     command.stdout(Stdio::from(full)).stderr(Stdio::piped());
     let (status, stderr) = run_bounded(command, &args);
-    assert_eq!(Some(1), status.code(), "status: {status:?}, stderr:\n{stderr}");
+    assert_eq!(
+        Some(1),
+        status.code(),
+        "status: {status:?}, stderr:\n{stderr}"
+    );
     assert_eq!(
         1,
         stderr.matches(HARD_FAILURE_NOTE).count(),
@@ -263,7 +271,9 @@ fn a_failing_stdout_with_a_dead_stderr_still_exits_one_without_aborting() {
         .open("/dev/full")
         .expect("/dev/full");
     let (reader, writer) = std::io::pipe().expect("pipe");
-    command.stdout(Stdio::from(full)).stderr(Stdio::from(writer));
+    command
+        .stdout(Stdio::from(full))
+        .stderr(Stdio::from(writer));
     drop(reader);
     #[allow(
         clippy::disallowed_methods,

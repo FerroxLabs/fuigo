@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config_override::{
     CAMPAIGN_STRIP_KEYS, ConfigOverrideEntry, PatchPath, apply_patches, patch_touches_any,
-    strip_campaign_paths,
-    take_patch_array,
+    strip_campaign_paths, take_patch_array,
 };
 
 pub const CAMPAIGNS_KEY: &str = "campaigns";
@@ -509,7 +508,10 @@ mod tests {
 
     fn campaign_over(base: &str, patch: &str) -> toml::Value {
         let patch: toml::Table = toml::from_str(patch).unwrap();
-        let entries = vec![CampaignEntry { id: "m".into(), patch }];
+        let entries = vec![CampaignEntry {
+            id: "m".into(),
+            patch,
+        }];
         let mut effective = parse(base);
         apply_active_campaign_patches(&mut effective, &entries);
         effective
@@ -547,7 +549,9 @@ mod tests {
         assert_eq!(fresh["url"].as_str(), Some("https://a.invalid/mcp"));
         // Secret-bearing fields of a campaign-added server are dropped; `url` stays.
         assert!(fresh.get("headers").is_none());
-        assert!(fresh.get("bearer_token_file").is_none() && fresh.get("bearer_token_env_var").is_none());
+        assert!(
+            fresh.get("bearer_token_file").is_none() && fresh.get("bearer_token_env_var").is_none()
+        );
         // A new server that held only a token setting leaves nothing behind.
         assert!(effective["mcp_servers"].get("other").is_none());
     }
@@ -590,7 +594,13 @@ mod tests {
         );
         let fresh = &effective["mcp_servers"]["fresh"];
         assert_eq!(fresh["__fuigo_untrusted_source"].as_bool(), Some(true));
-        assert!(!fresh["args"][0].as_str().unwrap_or("").contains("FUIGO_API_KEY"), "{fresh:?}");
+        assert!(
+            !fresh["args"][0]
+                .as_str()
+                .unwrap_or("")
+                .contains("FUIGO_API_KEY"),
+            "{fresh:?}"
+        );
     }
 
     #[test]
@@ -614,13 +624,25 @@ mod tests {
     }
 
     const MODEL_ROUTE_KEYS: &[&str] = &[
-        "base_url", "api_base_url", "extra_headers", "env_http_headers", "http_headers", "query_params",
-        "model_provider", "auth_provider", "api_key", "env_key", "mtls_cert_dir",
+        "base_url",
+        "api_base_url",
+        "extra_headers",
+        "env_http_headers",
+        "http_headers",
+        "query_params",
+        "model_provider",
+        "auth_provider",
+        "api_key",
+        "env_key",
+        "mtls_cert_dir",
     ];
 
     fn assert_no_route_keys(model: &toml::Value) {
         for key in MODEL_ROUTE_KEYS {
-            assert!(model.get(*key).is_none(), "`{key}` survived a campaign: {model:?}");
+            assert!(
+                model.get(*key).is_none(),
+                "`{key}` survived a campaign: {model:?}"
+            );
         }
     }
 
@@ -696,8 +718,15 @@ mod tests {
         let web = &effective["mcp_servers"]["web"];
         assert_eq!(web["url"].as_str(), Some("https://a.invalid/mcp"));
         for key in [
-            "headers", "http_headers", "env_http_headers", "oauth", "oauth_client_secret_env_var", "bearer_token",
-            "bearer_token_env_var", "bearer_token_file", "env",
+            "headers",
+            "http_headers",
+            "env_http_headers",
+            "oauth",
+            "oauth_client_secret_env_var",
+            "bearer_token",
+            "bearer_token_env_var",
+            "bearer_token_file",
+            "env",
         ] {
             assert!(web.get(key).is_none(), "`{key}` survived: {web:?}");
         }
@@ -718,9 +747,18 @@ mod tests {
         );
         assert_eq!(effective["models"]["default"].as_str(), Some("built-in-b"));
         assert_eq!(effective["model"]["a"]["name"].as_str(), Some("New name"));
-        assert_eq!(effective["model"]["a"]["context_window"].as_integer(), Some(2000));
-        assert_eq!(effective["model"]["a"]["base_url"].as_str(), Some("https://mine.invalid"));
-        assert_eq!(effective["mcp_servers"]["docs"]["url"].as_str(), Some("https://docs.invalid/mcp"));
+        assert_eq!(
+            effective["model"]["a"]["context_window"].as_integer(),
+            Some(2000)
+        );
+        assert_eq!(
+            effective["model"]["a"]["base_url"].as_str(),
+            Some("https://mine.invalid")
+        );
+        assert_eq!(
+            effective["mcp_servers"]["docs"]["url"].as_str(),
+            Some("https://docs.invalid/mcp")
+        );
     }
 
     /// The disk-layer campaign and the remote campaign both reach the same strip.
@@ -732,15 +770,29 @@ mod tests {
                      headers = { A = \"b\" }\n";
         let mut layer = parse(patch);
         let entries = take_campaign_entries(&mut layer, "managed");
-        let mut layers = ConfigLayers { user: parse("[models]\ndefault = \"a\"\n"), ..Default::default() };
+        let mut layers = ConfigLayers {
+            user: parse("[models]\ndefault = \"a\"\n"),
+            ..Default::default()
+        };
         layers.campaigns.user = entries.clone();
         for effective in [
             layers.effective_config_with_campaigns(&[], &std::collections::HashSet::new()),
-            ConfigLayers { user: parse("[models]\ndefault = \"a\"\n"), ..Default::default() }
-                .effective_config_with_campaigns(&entries, &std::collections::HashSet::new()),
+            ConfigLayers {
+                user: parse("[models]\ndefault = \"a\"\n"),
+                ..Default::default()
+            }
+            .effective_config_with_campaigns(&entries, &std::collections::HashSet::new()),
         ] {
-            assert!(effective.get("model").is_none_or(|m| m.get("new").is_none()), "{effective:?}");
-            assert_eq!(effective["mcp_servers"]["s"]["url"].as_str(), Some("https://a.invalid/mcp"));
+            assert!(
+                effective
+                    .get("model")
+                    .is_none_or(|m| m.get("new").is_none()),
+                "{effective:?}"
+            );
+            assert_eq!(
+                effective["mcp_servers"]["s"]["url"].as_str(),
+                Some("https://a.invalid/mcp")
+            );
             assert!(effective["mcp_servers"]["s"].get("headers").is_none());
         }
     }

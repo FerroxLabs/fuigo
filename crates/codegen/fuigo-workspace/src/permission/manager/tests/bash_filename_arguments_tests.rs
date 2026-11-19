@@ -388,17 +388,30 @@ fn hub_floor(rule: &str, cmd: &str, cwd: &std::path::Path) -> (bool, bool) {
 fn hub_default_prompt_clears_a_recovered_filename_script_only_under_a_covering_allow() {
     let cwd = tempfile::tempdir().expect("tempdir must be created");
     // A broad rule cannot vouch for a redirect write or an injected environment.
-    assert_eq!((true, true), hub_floor("Bash(git:*)", "git status > out", cwd.path()));
+    assert_eq!(
+        (true, true),
+        hub_floor("Bash(git:*)", "git status > out", cwd.path())
+    );
     assert_eq!((true, true), hub_floor("Bash(*)", "cp src dst", cwd.path()));
     assert_eq!(
         (true, true),
-        hub_floor("Bash(touch:*)", "LD_PRELOAD=/x/e.so touch CANARY", cwd.path())
+        hub_floor(
+            "Bash(touch:*)",
+            "LD_PRELOAD=/x/e.so touch CANARY",
+            cwd.path()
+        )
     );
-    assert_eq!((true, false), hub_floor("Bash(git:*)", "git status", cwd.path()));
+    assert_eq!(
+        (true, false),
+        hub_floor("Bash(git:*)", "git status", cwd.path())
+    );
     // A recovered filename script clears the floor under a rule that covers every command.
     assert_eq!((true, false), hub_floor("Bash", LOG_SCRIPT, cwd.path()));
     // ... and stays a prompt when the rule covers only part of it.
-    assert_eq!((false, true), hub_floor("Bash(rg:*)", LOG_SCRIPT, cwd.path()));
+    assert_eq!(
+        (false, true),
+        hub_floor("Bash(rg:*)", LOG_SCRIPT, cwd.path())
+    );
     // A recovered script never clears a floor finding beyond the filename ones.
     for script in [
         r#"LOG=/x; ls "$LOG" > /tmp/out"#,

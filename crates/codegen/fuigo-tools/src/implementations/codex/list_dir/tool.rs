@@ -22,8 +22,7 @@ const INDENTATION_SPACES: usize = 2;
 
 // ─── Description ────────────────────────────────────────────────────
 
-const DESCRIPTION: &str =
-    "Lists entries in a local directory with 1-indexed entry numbers and simple type labels. Returns up to 200 entries two levels deep by default; raise limit/offset or depth only when the listing says more entries exist.";
+const DESCRIPTION: &str = "Lists entries in a local directory with 1-indexed entry numbers and simple type labels. Returns up to 200 entries two levels deep by default; raise limit/offset or depth only when the listing says more entries exist.";
 
 // ─── Input ──────────────────────────────────────────────────────────
 
@@ -111,9 +110,14 @@ async fn read_deny_for(
     ctx: &fuigo_tool_runtime::ToolCallContext,
 ) -> Option<crate::util::read_deny::ReadDenyFilter> {
     let resources = crate::types::tool_metadata::shared_resources(ctx).ok()?;
-    let cwd = crate::types::tool_metadata::resolve_cwd(ctx, &resources).await.ok()?;
+    let cwd = crate::types::tool_metadata::resolve_cwd(ctx, &resources)
+        .await
+        .ok()?;
     let res = resources.lock().await;
-    crate::util::read_deny::ReadDenyFilter::new(&cwd, &crate::types::resources::deny_read_globs_for_call(ctx, &res))
+    crate::util::read_deny::ReadDenyFilter::new(
+        &cwd,
+        &crate::types::resources::deny_read_globs_for_call(ctx, &res),
+    )
 }
 
 /// Orchestrator: collect entries via BFS → sort → paginate → format.
@@ -127,9 +131,16 @@ async fn list_dir_slice(
     let mut entries = Vec::new();
     // A root that is a symlink into a denied tree is judged by its canonical place too (P198 round 2).
     let rooted = deny.map(|d| d.clone().rooted(dir_path));
-    collect_entries(dir_path, Path::new(""), 0, depth, &mut entries, rooted.as_ref())
-        .await
-        .map_err(|e| format!("Failed to read directory: {e}"))?;
+    collect_entries(
+        dir_path,
+        Path::new(""),
+        0,
+        depth,
+        &mut entries,
+        rooted.as_ref(),
+    )
+    .await
+    .map_err(|e| format!("Failed to read directory: {e}"))?;
 
     // Sort by full relative path (slash-normalized), case-sensitive.
     entries.sort_unstable_by(|a, b| a.name.cmp(&b.name));
@@ -374,7 +385,10 @@ impl fuigo_tool_runtime::Tool for CodexListDirTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,7 +420,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
 
-        let err = list_dir_slice(tmp.path(), 100, 25, 2, None).await.unwrap_err();
+        let err = list_dir_slice(tmp.path(), 100, 25, 2, None)
+            .await
+            .unwrap_err();
         assert_eq!(err, "offset exceeds directory entry count");
     }
 
@@ -477,7 +493,9 @@ mod tests {
         std::fs::write(tmp.path().join("only.txt"), "").unwrap();
 
         // usize::MAX as limit should not panic
-        let result = list_dir_slice(tmp.path(), 1, usize::MAX, 1, None).await.unwrap();
+        let result = list_dir_slice(tmp.path(), 1, usize::MAX, 1, None)
+            .await
+            .unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].contains("only.txt"));
     }
@@ -766,7 +784,12 @@ mod tests {
                 match fuigo_tool_runtime::Tool::run(
                     &CodexListDirTool,
                     ctx,
-                    CodexListDirInput { dir_path: dir.to_string_lossy().into_owned(), offset: 1, limit: 100, depth: 3 },
+                    CodexListDirInput {
+                        dir_path: dir.to_string_lossy().into_owned(),
+                        offset: 1,
+                        limit: 100,
+                        depth: 3,
+                    },
                 )
                 .await
                 .unwrap()
@@ -784,7 +807,10 @@ mod tests {
         let inside = list(tmp.path().join("secrets"), deny).await;
         assert!(!inside.contains("key_material.txt"), "{inside}");
         let none = list(tmp.path().to_path_buf(), None).await;
-        assert!(none.contains("key_material.txt") && none.contains("server_token.pem"), "{none}");
+        assert!(
+            none.contains("key_material.txt") && none.contains("server_token.pem"),
+            "{none}"
+        );
         assert_eq!(none, list(tmp.path().to_path_buf(), Some(Vec::new())).await);
     }
 
@@ -795,7 +821,11 @@ mod tests {
     async fn read_rules_follow_the_policy_matcher() {
         use crate::types::resources::{Cwd, DenyReadGlobs, Resources};
         let list = |cwd: std::path::PathBuf, dir: String, deny: Vec<String>| async move {
-            let dir_path = if dir == "." { cwd.to_string_lossy().into_owned() } else { cwd.join(&dir).to_string_lossy().into_owned() };
+            let dir_path = if dir == "." {
+                cwd.to_string_lossy().into_owned()
+            } else {
+                cwd.join(&dir).to_string_lossy().into_owned()
+            };
             let mut resources = Resources::new();
             resources.insert(Cwd(cwd));
             if !deny.is_empty() {
@@ -805,7 +835,12 @@ mod tests {
             match fuigo_tool_runtime::Tool::run(
                 &CodexListDirTool,
                 ctx,
-                CodexListDirInput { dir_path, offset: 1, limit: 100, depth: 3 },
+                CodexListDirInput {
+                    dir_path,
+                    offset: 1,
+                    limit: 100,
+                    depth: 3,
+                },
             )
             .await
             .unwrap()

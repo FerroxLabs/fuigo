@@ -89,8 +89,7 @@ async fn handle_rewrite(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     });
     let rewritten = rx
         .await
-        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?
-        ?;
+        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))??;
     to_raw_response(&serde_json::json!({ "rewritten": rewritten }))
 }
 

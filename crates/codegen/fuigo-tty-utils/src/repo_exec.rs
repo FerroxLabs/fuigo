@@ -70,7 +70,9 @@ impl From<RepoUntrusted> for std::io::Error {
 fn judged(dir: &Path, cmd: std::process::Command) -> Result<std::process::Command, RepoUntrusted> {
     if !repo_exec_allowed(dir) {
         tracing::debug!(dir = %dir.display(), "folder trust: repository tool not started in an untrusted folder");
-        return Err(RepoUntrusted { dir: dir.to_path_buf() });
+        return Err(RepoUntrusted {
+            dir: dir.to_path_buf(),
+        });
     }
     let mut cmd = cmd;
     cmd.current_dir(dir);
@@ -88,7 +90,10 @@ pub fn git_command_locking_in(dir: &Path) -> Result<std::process::Command, RepoU
 }
 
 /// The git at `program` (an absolute path the caller vetted) that runs in `dir`, judged on `dir`.
-pub fn git_command_at_in(program: &Path, dir: &Path) -> Result<std::process::Command, RepoUntrusted> {
+pub fn git_command_at_in(
+    program: &Path,
+    dir: &Path,
+) -> Result<std::process::Command, RepoUntrusted> {
     judged(dir, crate::git_command_at_unjudged(program))
 }
 
@@ -114,15 +119,23 @@ pub fn git_command_for_worktree(
     run_dir: &Path,
     managed_root: &Path,
 ) -> Result<std::process::Command, RepoUntrusted> {
-    let refuse = || RepoUntrusted { dir: run_dir.to_path_buf() };
+    let refuse = || RepoUntrusted {
+        dir: run_dir.to_path_buf(),
+    };
     if !repo_exec_allowed(source_repo) {
-        return Err(RepoUntrusted { dir: source_repo.to_path_buf() });
+        return Err(RepoUntrusted {
+            dir: source_repo.to_path_buf(),
+        });
     }
-    let (Ok(run), Ok(source)) = (dunce::canonicalize(run_dir), dunce::canonicalize(source_repo)) else {
+    let (Ok(run), Ok(source)) = (
+        dunce::canonicalize(run_dir),
+        dunce::canonicalize(source_repo),
+    ) else {
         return Err(refuse());
     };
     let in_managed_root = dunce::canonicalize(managed_root).is_ok_and(|root| run.starts_with(root));
-    let run_allowed = repo_exec_allowed(&run) || worktree_creation_source(&run).is_some_and(|s| s == source);
+    let run_allowed =
+        repo_exec_allowed(&run) || worktree_creation_source(&run).is_some_and(|s| s == source);
     if !(run.starts_with(&source) || in_managed_root) || !run_allowed {
         return Err(refuse());
     }
@@ -179,7 +192,9 @@ pub fn begin_worktree_creation(
     managed_root: &Path,
 ) -> Result<WorktreeCreation, RepoUntrusted> {
     if !repo_exec_allowed(source_repo) {
-        return Err(RepoUntrusted { dir: source_repo.to_path_buf() });
+        return Err(RepoUntrusted {
+            dir: source_repo.to_path_buf(),
+        });
     }
     let validated = (|| {
         let meta = std::fs::symlink_metadata(dest).ok()?;
@@ -190,7 +205,10 @@ pub fn begin_worktree_creation(
         let root = dunce::canonicalize(managed_root).ok()?;
         let dest = dunce::canonicalize(dest).ok()?;
         let fresh = std::fs::read_dir(&dest).ok()?.next().is_none();
-        let placed = dest.starts_with(&root) && dest != root && !dest.starts_with(&source) && !source.starts_with(&dest);
+        let placed = dest.starts_with(&root)
+            && dest != root
+            && !dest.starts_with(&source)
+            && !source.starts_with(&dest);
         (fresh && placed).then_some((dest, source))
     })();
     let Some((dest, source)) = validated else {
@@ -205,7 +223,10 @@ pub fn begin_worktree_creation(
 /// The source repository of the worktree Fuigo is creating at exactly `run_dir`, while its [`WorktreeCreation`] lives.
 pub fn worktree_creation_source(run_dir: &Path) -> Option<PathBuf> {
     let run = dunce::canonicalize(run_dir).ok()?;
-    creating().iter().find(|(d, _)| *d == run).map(|(_, s)| s.clone())
+    creating()
+        .iter()
+        .find(|(d, _)| *d == run)
+        .map(|(_, s)| s.clone())
 }
 
 #[cfg(unix)]
@@ -263,10 +284,7 @@ pub fn git_command_locking_user_invoked(dir: &Path) -> std::process::Command {
 
 fn outside_every_repository() -> PathBuf {
     let tmp = std::env::temp_dir();
-    tmp.ancestors()
-        .last()
-        .map(Path::to_path_buf)
-        .unwrap_or(tmp)
+    tmp.ancestors().last().map(Path::to_path_buf).unwrap_or(tmp)
 }
 
 fn tool_command(program: &str) -> std::process::Command {
@@ -322,7 +340,10 @@ mod tests {
     fn worktree_builder_judges_the_run_dir_and_refuses_one_that_does_not_resolve() {
         let _serial = JUDGE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         fn refused_root() -> PathBuf {
-            std::env::temp_dir().join(format!("fuigo-t2-repo-exec-untrusted-{}", std::process::id()))
+            std::env::temp_dir().join(format!(
+                "fuigo-t2-repo-exec-untrusted-{}",
+                std::process::id()
+            ))
         }
         struct RestoreAllowAll;
         impl Drop for RestoreAllowAll {
@@ -330,7 +351,8 @@ mod tests {
                 install_repo_exec_judge(|_| true);
             }
         }
-        let scratch = std::env::temp_dir().join(format!("fuigo-t2-repo-exec-trusted-{}", std::process::id()));
+        let scratch =
+            std::env::temp_dir().join(format!("fuigo-t2-repo-exec-trusted-{}", std::process::id()));
         let source = scratch.join("source");
         std::fs::create_dir_all(&source).unwrap();
         let managed = refused_root().join("worktrees");
@@ -338,7 +360,8 @@ mod tests {
         std::fs::create_dir_all(&forged).unwrap();
         install_repo_exec_judge(|dir| {
             let physical = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-            !physical.starts_with(dunce::canonicalize(refused_root()).unwrap_or_else(|_| refused_root()))
+            !physical
+                .starts_with(dunce::canonicalize(refused_root()).unwrap_or_else(|_| refused_root()))
         });
         let _restore = RestoreAllowAll;
         assert!(git_command_for_worktree(&source, &source, &managed).is_ok());
@@ -371,7 +394,8 @@ mod tests {
             }
         }
         let _serial = JUDGE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let scratch = std::env::temp_dir().join(format!("fuigo-t3-creation-{}", std::process::id()));
+        let scratch =
+            std::env::temp_dir().join(format!("fuigo-t3-creation-{}", std::process::id()));
         let source = scratch.join("source");
         let other = scratch.join("other");
         let untrusted_source = refused().join("source");
@@ -388,20 +412,45 @@ mod tests {
         });
         let _restore = RestoreAllowAll;
 
-        assert!(begin_worktree_creation(&untrusted_source, &dest, &root).is_err(), "untrusted source: no worktree");
-        assert!(git_command_for_worktree(&source, &dest, &root).is_err(), "no authority yet");
+        assert!(
+            begin_worktree_creation(&untrusted_source, &dest, &root).is_err(),
+            "untrusted source: no worktree"
+        );
+        assert!(
+            git_command_for_worktree(&source, &dest, &root).is_err(),
+            "no authority yet"
+        );
         {
             let authority = begin_worktree_creation(&source, &dest, &root).unwrap();
             assert!(authority.is_granted());
-            assert_eq!(worktree_creation_source(&dest), Some(dunce::canonicalize(&source).unwrap()));
-            assert!(git_command_for_worktree(&source, &dest, &root).is_ok(), "creation authority covers the dest");
-            assert!(git_command_for_worktree(&other, &dest, &root).is_err(), "only for its own source");
+            assert_eq!(
+                worktree_creation_source(&dest),
+                Some(dunce::canonicalize(&source).unwrap())
+            );
+            assert!(
+                git_command_for_worktree(&source, &dest, &root).is_ok(),
+                "creation authority covers the dest"
+            );
+            assert!(
+                git_command_for_worktree(&other, &dest, &root).is_err(),
+                "only for its own source"
+            );
             let used_authority = begin_worktree_creation(&source, &used, &root).unwrap();
-            assert!(!used_authority.is_granted(), "a destination that already has content gets no authority");
+            assert!(
+                !used_authority.is_granted(),
+                "a destination that already has content gets no authority"
+            );
             let outside = begin_worktree_creation(&source, &other, &root).unwrap();
-            assert!(!outside.is_granted(), "a destination outside the managed root gets no authority");
+            assert!(
+                !outside.is_granted(),
+                "a destination outside the managed root gets no authority"
+            );
         }
-        assert_eq!(worktree_creation_source(&dest), None, "dropped: authority withdrawn");
+        assert_eq!(
+            worktree_creation_source(&dest),
+            None,
+            "dropped: authority withdrawn"
+        );
         assert!(git_command_for_worktree(&source, &dest, &root).is_err());
         let _ = std::fs::remove_dir_all(refused());
         let _ = std::fs::remove_dir_all(&scratch);

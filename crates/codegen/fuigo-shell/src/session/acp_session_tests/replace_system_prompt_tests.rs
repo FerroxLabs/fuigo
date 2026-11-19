@@ -265,8 +265,12 @@ async fn create_test_actor_plain() -> SessionActor {
 fn memory_block() -> String {
     format!(
         "{}\nremembered fact\n{}",
-        fuigo_chat_state::memory_context_open_tag(crate::session::helpers::memory_context::memory_context_nonce()),
-        fuigo_chat_state::memory_context_close_tag(crate::session::helpers::memory_context::memory_context_nonce())
+        fuigo_chat_state::memory_context_open_tag(
+            crate::session::helpers::memory_context::memory_context_nonce()
+        ),
+        fuigo_chat_state::memory_context_close_tag(
+            crate::session::helpers::memory_context::memory_context_nonce()
+        )
     )
 }
 
@@ -282,7 +286,8 @@ async fn set_model_keeps_the_memory_block() {
                 conv[0] = ConversationItem::system(format!("{head}\n\n{}", memory_block()));
                 actor.chat_state_handle.replace_conversation(conv);
                 switch_model(&actor, use_concise).await;
-                let switched = head_text(&actor.chat_state_handle.get_conversation().await).unwrap();
+                let switched =
+                    head_text(&actor.chat_state_handle.get_conversation().await).unwrap();
                 // A never-switched control composed for the new model, with the same turn's memory block
                 let template = if use_concise {
                     fuigo_agent::prompt::template::COMPACT_SYSTEM_PROMPT.to_owned()
@@ -293,7 +298,12 @@ async fn set_model_keeps_the_memory_block() {
                 crate::session::human_rules::append_human_rules(&mut control, CANARY);
                 let control = format!("{}\n\n{}", control.trim_end_matches('\n'), memory_block());
                 assert_eq!(switched, control, "concise={use_concise}");
-                assert_eq!(switched.matches(crate::session::helpers::memory_context::memory_context_nonce()).count(), 2);
+                assert_eq!(
+                    switched
+                        .matches(crate::session::helpers::memory_context::memory_context_nonce())
+                        .count(),
+                    2
+                );
             }
         })
         .await;
@@ -369,7 +379,9 @@ async fn harness_rebuild_keeps_rules_and_memory_like_the_control() {
             conv[0] = ConversationItem::system(format!("{head}\n\n{block}"));
             actor.chat_state_handle.replace_conversation(conv);
             actor
-                .handle_rebuild_agent_for_definition(fuigo_agent::AgentDefinition::default_fuigo_build())
+                .handle_rebuild_agent_for_definition(
+                    fuigo_agent::AgentDefinition::default_fuigo_build(),
+                )
                 .await
                 .expect("rebuild");
             let rebuilt = head_text(&actor.chat_state_handle.get_conversation().await).unwrap();

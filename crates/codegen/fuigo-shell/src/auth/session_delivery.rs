@@ -189,17 +189,28 @@ mod tests {
         for i in 0..5000 {
             am.hot_swap(auth(&format!("p42-rotation-{i}"), AuthMode::External));
         }
-        assert!(am.is_session_bearer("p42-first-session"), "a rotated-out bearer must stay recognised");
+        assert!(
+            am.is_session_bearer("p42-first-session"),
+            "a rotated-out bearer must stay recognised"
+        );
         assert!(am.is_session_bearer("p42-rotation-4999"));
         am.hot_swap(auth("p42-static-api-key", AuthMode::ApiKey));
-        assert!(!am.is_session_bearer("p42-static-api-key"), "a static API key is not a session token");
+        assert!(
+            !am.is_session_bearer("p42-static-api-key"),
+            "a static API key is not a session token"
+        );
         assert!(!am.is_session_bearer("p42-never-held"));
         assert!(!am.is_session_bearer(""));
 
         crate::agent::config::Config::install_test_trusted_origins();
         let refused = "http://127.0.0.1:9/v1";
         assert_eq!(
-            withhold_session_bearer(Some("p42-static-api-key".into()), refused, Some(&am), "test"),
+            withhold_session_bearer(
+                Some("p42-static-api-key".into()),
+                refused,
+                Some(&am),
+                "test"
+            ),
             Some("p42-static-api-key".into())
         );
         assert_eq!(

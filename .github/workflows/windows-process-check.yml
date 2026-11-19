@@ -93,9 +93,9 @@ jobs:
       CARGO_TERM_COLOR: never
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # rust-toolchain.toml pins the channel; this only guarantees rustup exists.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (action default toolchain: stable)
       - name: Show the pinned toolchain
         shell: bash
         run: rustup show active-toolchain
@@ -121,7 +121,7 @@ jobs:
           rm -f protoc.zip
           echo "PROTOC=$(cygpath -w "$RUNNER_TEMP/protoc/bin/protoc.exe")" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/protoc/bin/protoc.exe" --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: windows-process-check-${{ matrix.runner }}
           cache-on-failure: true
@@ -217,7 +217,7 @@ jobs:
           grep -E '^test result: ok\. [1-9][0-9]* passed; 0 failed' process-receipts/fluxrouter-cache-bypass.log
           grep -F 'ci_runs_this_integration_test_and_every_call_site_names_its_gate ... ok' process-receipts/fluxrouter-cache-bypass.log
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: process-${{ matrix.runner }}

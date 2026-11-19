@@ -917,7 +917,11 @@ pub fn sigkill(pid: u32, group: bool) -> bool {
     if pid <= 1 || pid > i32::MAX as u32 {
         return false;
     }
-    let target = if group { -(pid as libc::pid_t) } else { pid as libc::pid_t };
+    let target = if group {
+        -(pid as libc::pid_t)
+    } else {
+        pid as libc::pid_t
+    };
     // SAFETY: SIGKILL to a single pid >= 2, or to the group it names (target <= -2); never 0, 1 or -1.
     unsafe { libc::kill(target, libc::SIGKILL) == 0 }
 }
@@ -1027,7 +1031,10 @@ mod tests {
                 .expect("spawn sleep");
             let pid = child.id();
             assert_eq!(pid_liveness(pid), PidLiveness::Alive);
-            assert!(sigkill(pid, false), "SIGKILL to a live child must be accepted");
+            assert!(
+                sigkill(pid, false),
+                "SIGKILL to a live child must be accepted"
+            );
             child.wait().expect("reap the child");
             assert_eq!(pid_liveness(pid), PidLiveness::Gone);
         }

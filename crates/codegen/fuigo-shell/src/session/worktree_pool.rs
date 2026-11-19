@@ -57,7 +57,10 @@ pub fn cleanup_stale_pool_worktrees(source_git_root: Option<&Path>) {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "worktree pool dirs; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "worktree pool dirs; not inside a session folder"
+)]
 fn cleanup_stale_pool_worktrees_inner() {
     let pool_dir = pool_base_directory();
     tracing::info!(
@@ -135,7 +138,9 @@ fn cleanup_stale_pool_worktrees_inner() {
                 // Judged on the repository the worktree belongs to (read from its `.git` file); a worktree whose
                 // source repository is unknown or untrusted is only deleted from disk, with no git started.
                 let result = pooled_worktree_source_repo(&wt_path)
-                    .ok_or_else(|| std::io::Error::other("source repository of the pooled worktree unknown"))
+                    .ok_or_else(|| {
+                        std::io::Error::other("source repository of the pooled worktree unknown")
+                    })
                     .and_then(|source| {
                         fuigo_tty_utils::git_command_for_worktree(&source, &wt_path, &pool_dir)
                             .map_err(std::io::Error::from)
@@ -184,7 +189,10 @@ fn pool_base_directory() -> PathBuf {
     fuigo_home().join("worktree_pool")
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,9 +203,16 @@ mod tests {
         let wt = tmp.path().join("wt");
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(wt.join(".git"), "gitdir: /src/repo/.git/worktrees/wt\n").unwrap();
-        assert_eq!(pooled_worktree_source_repo(&wt), Some(PathBuf::from("/src/repo")));
+        assert_eq!(
+            pooled_worktree_source_repo(&wt),
+            Some(PathBuf::from("/src/repo"))
+        );
         std::fs::write(wt.join(".git"), "gitdir: /src/repo/.git/modules/x\n").unwrap();
-        assert_eq!(pooled_worktree_source_repo(&wt), None, "not a linked worktree registration");
+        assert_eq!(
+            pooled_worktree_source_repo(&wt),
+            None,
+            "not a linked worktree registration"
+        );
         std::fs::remove_file(wt.join(".git")).unwrap();
         assert_eq!(pooled_worktree_source_repo(&wt), None);
     }

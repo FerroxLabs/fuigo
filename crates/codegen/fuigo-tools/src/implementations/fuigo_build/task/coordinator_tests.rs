@@ -3,11 +3,10 @@ use crate::implementations::fuigo_build::task::admission::{LimitBehavior, Subage
 use crate::implementations::fuigo_build::task::backend::{ChannelBackend, SubagentBackend};
 use crate::implementations::fuigo_build::task::types::{
     ActiveAgentMessageDelivery, ActiveAgentMessageRequest, HandedOffForegroundSubagent,
-    SubagentCancelRequest,
-    SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest, SubagentListActiveRequest,
-    SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest, SubagentOutstandingReply,
-    SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts, SubagentRequest,
-    SubagentSnapshotStatus, SubagentWaitPromptDrainedRequest,
+    SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
+    SubagentListActiveRequest, SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest,
+    SubagentOutstandingReply, SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts,
+    SubagentRequest, SubagentSnapshotStatus, SubagentWaitPromptDrainedRequest,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1234,7 +1233,10 @@ async fn turn_end_hand_off_makes_a_queued_child_a_background_child_when_it_later
         .await;
     assert_eq!(
         vec![HandedOffSubagentState::Queued],
-        handed_off.iter().map(|child| child.state).collect::<Vec<_>>()
+        handed_off
+            .iter()
+            .map(|child| child.state)
+            .collect::<Vec<_>>()
     );
 
     let _ = harness.finish.send(());
@@ -3574,9 +3576,9 @@ async fn an_explicit_stop_cancels_a_queued_loop_fire() {
     let scope = SchedulerScope::register(&path);
     let mut actor = SchedulerActor {
         resources: resources.into_shared(),
-        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new_at(
-            path.clone(),
-        )),
+        resources_persistence: std::sync::Arc::new(
+            crate::persistence::ResourcesPersistence::new_at(path.clone()),
+        ),
         notification_handle: notifications,
         cmd_rx: mpsc::unbounded_channel().1,
         cancel_token: CancellationToken::new(),
@@ -3648,9 +3650,9 @@ async fn an_in_flight_fire_after_the_last_scope_drops_leaves_no_gate() {
     let cancel = CancellationToken::new();
     let mut actor = SchedulerActor {
         resources: shared.clone(),
-        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new_at(
-            path.clone(),
-        )),
+        resources_persistence: std::sync::Arc::new(
+            crate::persistence::ResourcesPersistence::new_at(path.clone()),
+        ),
         notification_handle: notifications,
         cmd_rx: mpsc::unbounded_channel().1,
         cancel_token: cancel.clone(),
@@ -3723,16 +3725,17 @@ async fn a_dead_scheduler_fire_with_a_closed_coordinator_publishes_nothing() {
     resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
     let (dead_tx, dead_rx) = mpsc::unbounded_channel();
     drop(dead_rx);
-    resources.insert(crate::implementations::fuigo_build::task::types::SubagentEventSender(dead_tx));
+    resources
+        .insert(crate::implementations::fuigo_build::task::types::SubagentEventSender(dead_tx));
     resources.insert(SessionIdResource("parent".to_owned()));
     let shared = resources.into_shared();
     let scope = SchedulerScope::register(&path);
     let cancel = CancellationToken::new();
     let mut actor = SchedulerActor {
         resources: shared.clone(),
-        resources_persistence: std::sync::Arc::new(crate::persistence::ResourcesPersistence::new_at(
-            path.clone(),
-        )),
+        resources_persistence: std::sync::Arc::new(
+            crate::persistence::ResourcesPersistence::new_at(path.clone()),
+        ),
         notification_handle: notifications,
         cmd_rx: mpsc::unbounded_channel().1,
         cancel_token: cancel.clone(),

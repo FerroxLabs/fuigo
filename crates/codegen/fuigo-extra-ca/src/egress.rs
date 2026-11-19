@@ -130,9 +130,7 @@ pub struct InvalidAllowList;
 /// Parse the value of `FUIGO_ALLOW_UPSTREAM_HOSTS`. Pure; the caller decides
 /// whether to warn. Returns `Err(InvalidAllowList)` for a malformed list, which callers must
 /// treat as [`UpstreamAllowance::None`], never as the full lift.
-pub fn parse_upstream_allowance(
-    raw: Option<&str>,
-) -> Result<UpstreamAllowance, InvalidAllowList> {
+pub fn parse_upstream_allowance(raw: Option<&str>) -> Result<UpstreamAllowance, InvalidAllowList> {
     let Some(raw) = raw else {
         return Ok(UpstreamAllowance::None);
     };
@@ -147,7 +145,10 @@ pub fn parse_upstream_allowance(
     let mut hosts = Vec::new();
     for entry in trimmed.split(',') {
         let trimmed_entry = entry.trim();
-        let host = trimmed_entry.strip_suffix('.').unwrap_or(trimmed_entry).to_ascii_lowercase();
+        let host = trimmed_entry
+            .strip_suffix('.')
+            .unwrap_or(trimmed_entry)
+            .to_ascii_lowercase();
         if !valid_allow_host(&host) {
             return Err(InvalidAllowList);
         }
@@ -464,11 +465,28 @@ mod tests {
     #[test]
     fn an_invalid_entry_is_an_error_never_the_full_lift() {
         for v in [
-            "1,api.x.ai", "api.x.ai,", ",api.x.ai", "*.x.ai", "x.ai/path", "api.x.ai:443",
-            "https://api.x.ai", "10.0.0.1", "api..x.ai", "-a.x.ai", "bogus", "api.x.ai auth.x.ai",
-            "maybe", "api.x.ai..", "auth.x.ai,api.x.ai..", "api.x.ai.,.",
+            "1,api.x.ai",
+            "api.x.ai,",
+            ",api.x.ai",
+            "*.x.ai",
+            "x.ai/path",
+            "api.x.ai:443",
+            "https://api.x.ai",
+            "10.0.0.1",
+            "api..x.ai",
+            "-a.x.ai",
+            "bogus",
+            "api.x.ai auth.x.ai",
+            "maybe",
+            "api.x.ai..",
+            "auth.x.ai,api.x.ai..",
+            "api.x.ai.,.",
         ] {
-            assert_eq!(parse_upstream_allowance(Some(v)), Err(InvalidAllowList), "{v:?}");
+            assert_eq!(
+                parse_upstream_allowance(Some(v)),
+                Err(InvalidAllowList),
+                "{v:?}"
+            );
         }
     }
 
@@ -481,8 +499,13 @@ mod tests {
         // Only ONE trailing root dot is a spelling variant of the name.
         assert!(refuses_under("api.x.ai..", None, &a));
         for h in [
-            "x.ai", "accounts.x.ai", "v2.api.x.ai", "grok.com", "cli-chat-proxy.grok.com",
-            "api.mixpanel.com", "mixpanel.com",
+            "x.ai",
+            "accounts.x.ai",
+            "v2.api.x.ai",
+            "grok.com",
+            "cli-chat-proxy.grok.com",
+            "api.mixpanel.com",
+            "mixpanel.com",
         ] {
             assert!(refuses_under(h, None, &a), "{h} must stay refused");
         }

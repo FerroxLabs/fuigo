@@ -58,18 +58,29 @@ impl Drop for FlagGuard {
 /// `Config::resolve_runtime_fields` (the same `Config::feature_sources` every other `features.*` flag uses). Until a
 /// config is installed only the environment and the default speak.
 static CONFIG_TIERS: std::sync::RwLock<fuigo_config_types::FeatureSources> =
-    std::sync::RwLock::new(fuigo_config_types::FeatureSources { pin: None, env: None, config: None, remote: None });
+    std::sync::RwLock::new(fuigo_config_types::FeatureSources {
+        pin: None,
+        env: None,
+        config: None,
+        remote: None,
+    });
 
 /// Record the tiers a loaded config has for the flag. The environment tier is always read fresh, never stored.
 pub(crate) fn install_peer_messaging_tiers(sources: fuigo_config_types::FeatureSources) {
-    *CONFIG_TIERS.write().unwrap_or_else(std::sync::PoisonError::into_inner) =
-        fuigo_config_types::FeatureSources { env: None, ..sources };
+    *CONFIG_TIERS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = fuigo_config_types::FeatureSources {
+        env: None,
+        ..sources
+    };
 }
 
 /// Pure resolution: managed pin, then the environment override, then config, then remote, then the default (off). A
 /// managed "off" therefore wins over everything, including an environment "on".
 pub(crate) fn resolve_peer_messaging(sources: fuigo_config_types::FeatureSources) -> bool {
-    fuigo_config_types::Feature::PeerMessaging.resolve(sources).value
+    fuigo_config_types::Feature::PeerMessaging
+        .resolve(sources)
+        .value
 }
 
 /// `features.peer_messaging`, read at call time. THE one resolution function: every caller uses it.
@@ -78,7 +89,9 @@ pub(crate) fn peer_messaging_enabled() -> bool {
     if let Some(forced) = FLAG_OVERRIDE.with(std::cell::Cell::get) {
         return forced;
     }
-    let installed = *CONFIG_TIERS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let installed = *CONFIG_TIERS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let feature = fuigo_config_types::Feature::PeerMessaging;
     resolve_peer_messaging(fuigo_config_types::FeatureSources {
         env: fuigo_config_types::FeatureSources::from_process_env(feature).env,
@@ -135,7 +148,11 @@ pub(crate) struct OutgoingParts {
 /// The stamps are the denials younger than 30 minutes (kind and hash, at most 16); with none the envelope's bytes are as before
 /// the feature. `now` is `fuigo_workspace::permission::mono_secs()` in production.
 #[allow(dead_code)] // see OutgoingParts
-pub(crate) fn build_outgoing_envelope(parts: OutgoingParts, ring: &fuigo_workspace::permission::DenialLog, now: u64) -> Envelope {
+pub(crate) fn build_outgoing_envelope(
+    parts: OutgoingParts,
+    ring: &fuigo_workspace::permission::DenialLog,
+    now: u64,
+) -> Envelope {
     let mut envelope = Envelope {
         message_id: parts.message_id,
         seq: parts.seq,
@@ -154,7 +171,11 @@ pub(crate) fn build_outgoing_envelope(parts: OutgoingParts, ring: &fuigo_workspa
     envelope
 }
 
-pub(super) fn stamp_outgoing(envelope: &mut Envelope, denials: &fuigo_workspace::permission::DenialLog, now: u64) {
+pub(super) fn stamp_outgoing(
+    envelope: &mut Envelope,
+    denials: &fuigo_workspace::permission::DenialLog,
+    now: u64,
+) {
     envelope.denied_recently = denials.stamps(now);
 }
 

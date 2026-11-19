@@ -35,7 +35,10 @@ async fn failed_start_latches_that_version_only_until_it_installs_cleanly() {
         .expect_err("a binary that cannot start must not install");
 
     let notice = auto_update_block_notice_for_test("0.1.181").expect("0.1.181 is latched");
-    assert!(notice.contains("failed to start on this machine"), "{notice}");
+    assert!(
+        notice.contains("failed to start on this machine"),
+        "{notice}"
+    );
     assert!(notice.contains("fuigo update"), "{notice}");
     assert_eq!(
         auto_update_block_notice_for_test("0.1.182"),
@@ -67,7 +70,10 @@ async fn automatic_install_of_a_latched_version_is_refused_before_any_download()
         .await
         .expect_err("garbage");
 
-    for trigger in [CliUpdateTrigger::AutoBackground, CliUpdateTrigger::LeaderConverge] {
+    for trigger in [
+        CliUpdateTrigger::AutoBackground,
+        CliUpdateTrigger::LeaderConverge,
+    ] {
         let err = run_install_script("internal", Some("0.1.181"), &cfg, trigger)
             .await
             .expect_err("a latched version must not be retried automatically");

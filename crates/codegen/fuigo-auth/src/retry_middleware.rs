@@ -353,7 +353,11 @@ mod tests {
             true
         }
 
-        fn bearer_may_reach(&self, _: &reqwest::Url, _: &str) -> Result<(), crate::BearerDestinationRefused> {
+        fn bearer_may_reach(
+            &self,
+            _: &reqwest::Url,
+            _: &str,
+        ) -> Result<(), crate::BearerDestinationRefused> {
             Ok(())
         }
     }
@@ -461,7 +465,9 @@ mod tests {
                 if bearer == "p47-api-key" || url.username().is_empty() {
                     Ok(())
                 } else {
-                    Err(crate::BearerDestinationRefused("userinfo refused for the session".into()))
+                    Err(crate::BearerDestinationRefused(
+                        "userinfo refused for the session".into(),
+                    ))
                 }
             }
         }
@@ -512,12 +518,19 @@ mod tests {
                 self.inner.snapshot()
             }
             async fn refresh_after_unauthorized(&self) -> bool {
-                self.refreshed.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.refreshed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 self.inner.refresh_after_unauthorized().await
             }
-            fn bearer_may_reach(&self, _: &reqwest::Url, _: &str) -> Result<(), crate::BearerDestinationRefused> {
+            fn bearer_may_reach(
+                &self,
+                _: &reqwest::Url,
+                _: &str,
+            ) -> Result<(), crate::BearerDestinationRefused> {
                 if self.refreshed.load(std::sync::atomic::Ordering::SeqCst) {
-                    Err(crate::BearerDestinationRefused("refused after refresh".into()))
+                    Err(crate::BearerDestinationRefused(
+                        "refused after refresh".into(),
+                    ))
                 } else {
                     Ok(())
                 }
@@ -547,7 +560,10 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("refused after refresh"), "{error}");
+        assert!(
+            error.to_string().contains("refused after refresh"),
+            "{error}"
+        );
         first.assert_async().await;
         retried.assert_async().await;
     }
@@ -638,7 +654,10 @@ mod tests {
         let (resp, stamp) = execute_with_stamp(&client, req).await.unwrap();
         assert_eq!(resp.status(), 200);
         // A token of 12 chars or fewer is its own suffix
-        assert_eq!(stamp.expect("bearer was stamped").0, crate::BearerFingerprint::of("fresh-token"));
+        assert_eq!(
+            stamp.expect("bearer was stamped").0,
+            crate::BearerFingerprint::of("fresh-token")
+        );
         m401.assert_async().await;
         m200.assert_async().await;
     }

@@ -23,7 +23,10 @@ impl std::fmt::Debug for McpOAuthConfig {
         } = self;
         f.debug_struct("McpOAuthConfig")
             .field("client_id", client_id)
-            .field("client_secret", &client_secret.as_ref().map(|_| "<redacted>"))
+            .field(
+                "client_secret",
+                &client_secret.as_ref().map(|_| "<redacted>"),
+            )
             .field("scopes", scopes)
             .field("callback_port", callback_port)
             .finish()
@@ -46,12 +49,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }

@@ -489,7 +489,10 @@ mod tests {
             .map(|_| ConversationItem::user_with_parts(vec![data_image('A', 1024 * 1024)]))
             .collect();
         let fixed = apply_image_budget(history.clone(), None);
-        assert!(!fixed.outcome.needs_image_compaction, "35 MiB is under 47 MiB");
+        assert!(
+            !fixed.outcome.needs_image_compaction,
+            "35 MiB is under 47 MiB"
+        );
         assert_eq!(fixed.outcome.evicted, 0);
         let capped = apply_image_budget(
             history,
