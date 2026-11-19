@@ -6,7 +6,9 @@ use fuigo_sampling_types::{
 
 use super::ChatStateActor;
 use crate::events::ChatStateEvent;
-use crate::image_budget::{ImageBudgetOutcome, apply_image_budget_with_limits, image_budget_limits};
+use crate::image_budget::{
+    ImageBudgetOutcome, apply_image_budget_with_limits, image_budget_limits,
+};
 use crate::types::PruningConfig;
 
 /// Placeholder inserted when a tool result is hard-cleared.
@@ -335,7 +337,11 @@ mod tests {
         let ConversationItem::ToolResult(tr) = &conv[2] else {
             panic!("tool result expected");
         };
-        assert_eq!(tr.content.len(), 10_000, "reminders must not age the current turn's tool result");
+        assert_eq!(
+            tr.content.len(),
+            10_000,
+            "reminders must not age the current turn's tool result"
+        );
 
         // Real prompts do age it (age = real prompts after it, minus the current one): one later prompt keeps it
         // in the current window, the second soft-trims it (keep_last_n_turns = 1), the fourth hard-clears it (3).
@@ -350,7 +356,10 @@ mod tests {
         let ConversationItem::ToolResult(tr) = &conv[2] else {
             panic!("tool result expected");
         };
-        assert!(tr.content.len() < 10_000, "a real prompt ages the tool result");
+        assert!(
+            tr.content.len() < 10_000,
+            "a real prompt ages the tool result"
+        );
         assert!(tr.content.contains(SOFT_TRIM_SEPARATOR));
         conv.push(ConversationItem::user("fourth"));
         conv.push(ConversationItem::user("fifth"));

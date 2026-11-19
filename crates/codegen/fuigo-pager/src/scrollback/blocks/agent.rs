@@ -158,10 +158,12 @@ impl AgentMessageBlock {
         if ranges.is_empty() && copy_rows.is_empty() {
             return (out, Vec::new());
         }
-        let affordances =
-            mermaid_content::apply_affordance_rows_with_copy(&mut out, &ranges, |idx| {
-                self.mermaid.source(idx).unwrap_or_default().to_string()
-            }, copy_rows);
+        let affordances = mermaid_content::apply_affordance_rows_with_copy(
+            &mut out,
+            &ranges,
+            |idx| self.mermaid.source(idx).unwrap_or_default().to_string(),
+            copy_rows,
+        );
         (out, affordances)
     }
 
@@ -398,7 +400,9 @@ mod tests {
     #[test]
     fn inline_tags_do_not_break_the_layout() {
         let _modes = crate::theme::cache::pin_theme();
-        let plain = AgentMessageBlock::new("Press Ctrl and C to stop now, then <tag> end.\n\nNext paragraph");
+        let plain = AgentMessageBlock::new(
+            "Press Ctrl and C to stop now, then <tag> end.\n\nNext paragraph",
+        );
         let tagged = AgentMessageBlock::new(
             "Press <kbd>Ctrl</kbd> and <kbd>C</kbd> to stop <b>now</b>, then <tag> end.\n\nNext paragraph",
         );
@@ -407,14 +411,27 @@ mod tests {
                 .output(&ctx(100, false))
                 .lines
                 .iter()
-                .map(|l| l.content.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .map(|l| {
+                    l.content
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
                 .collect()
         };
         let (plain_rows, tagged_rows) = (rows(&plain), rows(&tagged));
-        assert_eq!(tagged_rows.len(), plain_rows.len(), "{tagged_rows:?} vs {plain_rows:?}");
+        assert_eq!(
+            tagged_rows.len(),
+            plain_rows.len(),
+            "{tagged_rows:?} vs {plain_rows:?}"
+        );
         let first = &tagged_rows[0];
         for word in ["Press", "Ctrl", "stop", "now", "end."] {
-            assert!(first.contains(word), "{word} kept on the paragraph's row: {first:?}");
+            assert!(
+                first.contains(word),
+                "{word} kept on the paragraph's row: {first:?}"
+            );
         }
         assert_eq!(tagged_rows.last(), plain_rows.last());
     }
@@ -425,7 +442,8 @@ mod tests {
         use crate::scrollback::block::RenderBlock;
 
         const FENCE: &str = "intro\n\n```rust\nfn main() {\n\tlet x = 1;\n}\n```\n\nbye\n";
-        const TABLE: &str = "intro\n\n| name | note |\n|---|---|\n| a | x\\|y |\n| b | 2 |\n\nbye\n";
+        const TABLE: &str =
+            "intro\n\n| name | note |\n|---|---|\n| a | x\\|y |\n| b | 2 |\n\nbye\n";
 
         fn rows(block: &AgentMessageBlock) -> Vec<mermaid_content::DiagramAffordance> {
             block.diagram_affordances(&ctx(60, false))
@@ -437,8 +455,15 @@ mod tests {
             let block = AgentMessageBlock::new(FENCE);
             let affs = rows(&block);
             assert_eq!(affs.len(), 1, "one code block, one copy row");
-            let copy = affs[0].copy.as_ref().expect("a copy row, not a diagram row");
-            assert!(copy.label.ends_with(" rust"), "labelled with the language: {:?}", copy.label);
+            let copy = affs[0]
+                .copy
+                .as_ref()
+                .expect("a copy row, not a diagram row");
+            assert!(
+                copy.label.ends_with(" rust"),
+                "labelled with the language: {:?}",
+                copy.label
+            );
             assert_eq!(copy.buttons.len(), 1);
             assert_eq!(copy.buttons[0].label, "[Copy]");
             assert_eq!(
@@ -467,19 +492,29 @@ mod tests {
             assert!(rows(&block).is_empty(), "no copy row while streaming");
             assert_eq!(block.estimate_extra_rows(), 0);
             block.finish();
-            assert_eq!(rows(&block).len(), 1, "the copy row appears once the reply is finished");
+            assert_eq!(
+                rows(&block).len(),
+                1,
+                "the copy row appears once the reply is finished"
+            );
         }
 
         #[test]
         fn raw_mode_and_minimal_mode_have_no_copy_rows() {
             let _modes = crate::theme::cache::pin_theme();
             let block = AgentMessageBlock::new(FENCE);
-            assert!(block.diagram_affordances(&ctx(60, true)).is_empty(), "raw shows source only");
+            assert!(
+                block.diagram_affordances(&ctx(60, true)).is_empty(),
+                "raw shows source only"
+            );
             crate::terminal::image::set_inline_overlay_force_off(true);
             let minimal = rows(&block);
             let minimal_len = block.output(&ctx(60, false)).lines.len();
             crate::terminal::image::set_inline_overlay_force_off(false);
-            assert!(minimal.is_empty(), "minimal never paints the row, so it reserves none");
+            assert!(
+                minimal.is_empty(),
+                "minimal never paints the row, so it reserves none"
+            );
             assert_eq!(
                 block.output(&ctx(60, false)).lines.len(),
                 minimal_len + 1,

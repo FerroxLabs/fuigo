@@ -38,16 +38,25 @@ fn an_allowing_hook_loads_project_agents_but_never_over_a_builtin() {
     )
     .unwrap();
 
-    let def = fuigo_agent::discovery::by_name_in_cwd("reviewer", repo.path()).expect("trusted project agent");
+    let def = fuigo_agent::discovery::by_name_in_cwd("reviewer", repo.path())
+        .expect("trusted project agent");
     assert_eq!(def.scope, AgentScope::Project);
-    assert!(CALLS.load(Ordering::SeqCst) >= 1, "the hook must be consulted");
+    assert!(
+        CALLS.load(Ordering::SeqCst) >= 1,
+        "the hook must be consulted"
+    );
 
     let explore = fuigo_agent::discovery::by_name_in_cwd("explore", repo.path()).unwrap();
-    assert_eq!(explore.scope, AgentScope::BuiltIn, "a project file never shadows a built-in");
+    assert_eq!(
+        explore.scope,
+        AgentScope::BuiltIn,
+        "a project file never shadows a built-in"
+    );
     assert_ne!(explore.description, "Project explore");
 
     // Set-once: a different hook is ignored, so the folder stays trusted.
     fuigo_agent::discovery::install_project_agent_trust(deny);
-    let again = fuigo_agent::discovery::by_name_in_cwd("reviewer", repo.path()).expect("still trusted");
+    let again =
+        fuigo_agent::discovery::by_name_in_cwd("reviewer", repo.path()).expect("still trusted");
     assert_eq!(again.scope, AgentScope::Project);
 }

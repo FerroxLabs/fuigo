@@ -68,11 +68,17 @@ impl ParkFailure {
 
     fn message(self) -> &'static str {
         match self {
-            Self::Timeout => "the running turn did not end before the park timeout; the session was not parked",
+            Self::Timeout => {
+                "the running turn did not end before the park timeout; the session was not parked"
+            }
             Self::InProgress => "a park of this session is already waiting for its turn to end",
-            Self::Withdrawn => "the park was withdrawn (unpark or a new prompt) before it completed",
+            Self::Withdrawn => {
+                "the park was withdrawn (unpark or a new prompt) before it completed"
+            }
             Self::SessionClosed => "the session closed before it could be parked",
-            Self::StopIncomplete => "a process started by the session's tools could not be confirmed dead; the session was not parked",
+            Self::StopIncomplete => {
+                "a process started by the session's tools could not be confirmed dead; the session was not parked"
+            }
         }
     }
 
@@ -127,12 +133,19 @@ const MAX_UNPARK_ROUNDS: u32 = 8;
 const STOP_TASK_WAIT: Duration = Duration::from_secs(5);
 
 /// `fut` bounded by `min(now + STEP_BOUND, deadline)`; `None` on timeout.
-async fn bounded<T>(deadline: tokio::time::Instant, fut: impl std::future::Future<Output = T>) -> Option<T> {
+async fn bounded<T>(
+    deadline: tokio::time::Instant,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
     let step = std::cmp::min(tokio::time::Instant::now() + STEP_BOUND, deadline);
     tokio::time::timeout_at(step, fut).await.ok()
 }
 
-async fn probe(session: &crate::session::SessionHandle, park: &ParkOp, stop: bool) -> Option<QuiesceReport> {
+async fn probe(
+    session: &crate::session::SessionHandle,
+    park: &ParkOp,
+    stop: bool,
+) -> Option<QuiesceReport> {
     let (tx, rx) = oneshot::channel();
     session
         .cmd_tx
@@ -243,7 +256,11 @@ async fn resume_scheduler(session: &crate::session::SessionHandle, op: u64) {
 
 /// [`resume_scheduler`] bounded by `deadline` as well (Astra r2 #10: a failing park's withdrawal resume stays
 /// inside the park's one overall deadline; the command is sent even when the deadline has passed).
-async fn resume_scheduler_by(session: &crate::session::SessionHandle, op: u64, deadline: tokio::time::Instant) {
+async fn resume_scheduler_by(
+    session: &crate::session::SessionHandle,
+    op: u64,
+    deadline: tokio::time::Instant,
+) {
     let deadline = std::cmp::min(deadline, tokio::time::Instant::now() + STEP_BOUND);
     let _ = send_scheduler_paused(session, op, false, false, None, deadline).await;
 }
@@ -264,7 +281,11 @@ pub(crate) fn is_scheduled_fire_id(prompt_id: &str) -> bool {
 /// text for that park's release, consume its ticket and return `true` (the caller ends the prompt without a turn).
 /// `false`: no park holds the session now; the caller takes the normal prompt path and the ticket is untouched.
 /// The text is the task prompt without the shell's own framing block.
-pub(crate) fn fold_scheduled_fire(session_id: &str, prompt_id: &str, blocks: &[acp::ContentBlock]) -> bool {
+pub(crate) fn fold_scheduled_fire(
+    session_id: &str,
+    prompt_id: &str,
+    blocks: &[acp::ContentBlock],
+) -> bool {
     let text = blocks
         .iter()
         .filter_map(|block| match block {
@@ -273,7 +294,12 @@ pub(crate) fn fold_scheduled_fire(session_id: &str, prompt_id: &str, blocks: &[a
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let text = text.rsplit("</system-reminder>").next().unwrap_or(&text).trim().to_owned();
+    let text = text
+        .rsplit("</system-reminder>")
+        .next()
+        .unwrap_or(&text)
+        .trim()
+        .to_owned();
     if !quiesce::fold_fire_if_holding(session_id, text) {
         return false;
     }
@@ -287,7 +313,12 @@ fn fires_reminder(texts: &[String]) -> Option<String> {
         return None;
     }
     // The dropped-count notice line (`FoldedFires::into_texts`) is not an arrived prompt.
-    let arrived = texts.iter().filter(|t| !(t.starts_with('(') && t.ends_with(" earlier scheduled prompts were dropped)"))).count();
+    let arrived = texts
+        .iter()
+        .filter(|t| {
+            !(t.starts_with('(') && t.ends_with(" earlier scheduled prompts were dropped)"))
+        })
+        .count();
     let mut text = format!(
         "While the session was parked, {arrived} scheduled task prompt(s) arrived. They were not run; their next run follows the usual interval:"
     );
@@ -307,7 +338,9 @@ fn merge_reminders(first: Option<String>, second: Option<String>) -> Option<Stri
 }
 
 /// The reminder that tells the next turn which scheduled fires came due while the session was parked.
-fn folded_fires_reminder(fires: &[fuigo_tools::implementations::fuigo_build::scheduler::types::FoldedFire]) -> Option<String> {
+fn folded_fires_reminder(
+    fires: &[fuigo_tools::implementations::fuigo_build::scheduler::types::FoldedFire],
+) -> Option<String> {
     if fires.is_empty() {
         return None;
     }
@@ -387,10 +420,11 @@ pub async fn handle_park(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
     let hard_deadline = turn_deadline + STEP_BOUND;
     let session_id = req.session_id;
     let sid = acp::SessionId::new(session_id.clone());
-    let session = tokio::time::timeout_at(hard_deadline, agent.session_handle_waiting_for_load(&sid))
-        .await
-        .map_err(|_| ParkFailure::Timeout.to_error(&session_id, timeout_ms))?
-        .ok_or_else(|| unknown_session(&session_id))?;
+    let session =
+        tokio::time::timeout_at(hard_deadline, agent.session_handle_waiting_for_load(&sid))
+            .await
+            .map_err(|_| ParkFailure::Timeout.to_error(&session_id, timeout_ms))?
+            .ok_or_else(|| unknown_session(&session_id))?;
 
     if let Some(entry) = quiesce::entry(&session_id) {
         // Idempotent once acknowledged: report the park that holds, with the running-task count recorded at
@@ -398,16 +432,22 @@ pub async fn handle_park(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
         if entry.acked && entry.phase == ParkPhase::Parked {
             // Grok r4 #9: bounded by the request's ONE deadline (the load wait above already spent part of it),
             // not by a fresh step bound.
-            let park = ParkOp { session: session_id.as_str().into(), op: entry.op };
+            let park = ParkOp {
+                session: session_id.as_str().into(),
+                op: entry.op,
+            };
             // Opus r1 #9: a deadline miss is a `timeout`; only a dropped probe channel is `SessionClosed`.
             let report = match bounded(hard_deadline, probe(&session, &park, false)).await {
                 None => return Err(ParkFailure::Timeout.to_error(&session_id, timeout_ms)),
-                Some(None) => return Err(ParkFailure::SessionClosed.to_error(&session_id, timeout_ms)),
+                Some(None) => {
+                    return Err(ParkFailure::SessionClosed.to_error(&session_id, timeout_ms));
+                }
                 Some(Some(report)) => report,
             };
             // Astra r2 #4: the park may have been withdrawn or replaced while the probe was in flight.
             if !quiesce::op_is_current(&session_id, entry.op)
-                || !quiesce::entry(&session_id).is_some_and(|now| now.acked && now.phase == ParkPhase::Parked)
+                || !quiesce::entry(&session_id)
+                    .is_some_and(|now| now.acked && now.phase == ParkPhase::Parked)
             {
                 return Err(ParkFailure::Withdrawn.to_error(&session_id, timeout_ms));
             }
@@ -430,7 +470,10 @@ pub async fn handle_park(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
     // actor validates `Quiesce.op`, `kill_running_tasks` fences each kill, the scheduler pause is owned by
     // `op`. A withdrawn park therefore does nothing more,
     // and `complete_park`/`ack_park` (which take `op`) end it.
-    let park = ParkOp { session: session_id.as_str().into(), op };
+    let park = ParkOp {
+        session: session_id.as_str().into(),
+        op,
+    };
 
     // 1. No timer fires while parked. No acknowledgement in time: the park fails `timeout`.
     if send_scheduler_paused(&session, op, true, false, None, hard_deadline)
@@ -481,10 +524,8 @@ pub async fn handle_park(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
             stopped_tasks += kill_running_tasks(&session, &park, hard_deadline).await;
         }
         // The terminal backend notices its killed tasks exited on its next reap.
-        let tasks_deadline = std::cmp::min(
-            tokio::time::Instant::now() + STOP_TASK_WAIT,
-            hard_deadline,
-        );
+        let tasks_deadline =
+            std::cmp::min(tokio::time::Instant::now() + STOP_TASK_WAIT, hard_deadline);
         let mut still_running = bounded(tasks_deadline, running_task_ids(&session)).await;
         while still_running.as_ref().is_none_or(|ids| !ids.is_empty())
             && tokio::time::Instant::now() < tasks_deadline
@@ -559,7 +600,12 @@ fn mcp_server_states(
     let sdk = snapshot
         .acp_servers
         .iter()
-        .filter(|name| !snapshot.configs.iter().any(|c| fuigo_mcp::servers::mcp_server_name(c) == name.as_str()))
+        .filter(|name| {
+            !snapshot
+                .configs
+                .iter()
+                .any(|c| fuigo_mcp::servers::mcp_server_name(c) == name.as_str())
+        })
         .cloned();
     configured
         .chain(sdk)
@@ -570,7 +616,10 @@ fn mcp_server_states(
             } else if snapshot.init_failed.contains_key(&name)
                 || snapshot.auth_required.contains(&name)
                 || client.is_some_and(|c| {
-                    matches!(c.status, McpSessionStatus::Unavailable | McpSessionStatus::SetupRequired)
+                    matches!(
+                        c.status,
+                        McpSessionStatus::Unavailable | McpSessionStatus::SetupRequired
+                    )
                 })
             {
                 Some("failed")
@@ -602,7 +651,9 @@ pub(crate) async fn wait_mcp_settled(session: &crate::session::SessionHandle) ->
             break;
         };
         states = mcp_server_states(&snapshot);
-        if states.iter().all(|(_, state)| state.is_some()) || tokio::time::Instant::now() >= deadline {
+        if states.iter().all(|(_, state)| state.is_some())
+            || tokio::time::Instant::now() >= deadline
+        {
             break;
         }
         tokio::time::sleep(MCP_READY_POLL).await;
@@ -699,7 +750,9 @@ pub(crate) async fn implicit_unpark(
     }
     if entry.phase == ParkPhase::Parked {
         let Ok(params) = serde_json::value::to_raw_value(&serde_json::json!({})) else {
-            return Err(crate::acp_error::internal_error("park barrier could not be built"));
+            return Err(crate::acp_error::internal_error(
+                "park barrier could not be built",
+            ));
         };
         let barrier = acp::ExtRequest::new(PARK_BARRIER_METHOD, std::sync::Arc::from(params));
         if tokio::time::timeout(STEP_BOUND, agent.gateway.send(barrier))
@@ -733,7 +786,10 @@ pub(crate) async fn implicit_unpark(
             current.op,
             false,
             true,
-            Some(FoldTxn { id: fold_id, commit: commit_rx }),
+            Some(FoldTxn {
+                id: fold_id,
+                commit: commit_rx,
+            }),
             deadline,
         )
         .await;
@@ -745,7 +801,11 @@ pub(crate) async fn implicit_unpark(
         rounds += 1;
         match quiesce::entry(session_id) {
             // The park changed op under us: fold and unpark the one that holds now.
-            Some(next) if next.op != current.op && next.phase != ParkPhase::Unparking && rounds < MAX_UNPARK_ROUNDS => {
+            Some(next)
+                if next.op != current.op
+                    && next.phase != ParkPhase::Unparking
+                    && rounds < MAX_UNPARK_ROUNDS =>
+            {
                 current = next;
             }
             // Another prompt or an explicit unpark won, or nothing parks the session any more.
@@ -775,7 +835,10 @@ pub(crate) async fn implicit_unpark(
         },
         reopen_spawns: entry.mode == ParkMode::Stop,
         kick: false,
-        reminder: merge_reminders(folded_fires_reminder(&folded), fires_reminder(&entry.fires.into_texts())),
+        reminder: merge_reminders(
+            folded_fires_reminder(&folded),
+            fires_reminder(&entry.fires.into_texts()),
+        ),
     };
     // Astra r2 #7: the fold is committed ONLY if the release (which carries the fold's reminder) was queued;
     // otherwise the commit sender is dropped and the scheduler leaves its tasks unchanged.
@@ -826,9 +889,19 @@ mod tests {
         }
         let texts = quiesce::entry(&id).expect("entry").fires.into_texts();
         quiesce::unpark(&id);
-        assert_eq!(texts.len(), quiesce::MAX_FOLDED_FIRES + 1, "32 kept plus the notice line");
+        assert_eq!(
+            texts.len(),
+            quiesce::MAX_FOLDED_FIRES + 1,
+            "32 kept plus the notice line"
+        );
         let reminder = fires_reminder(&texts).expect("reminder");
-        assert!(reminder.contains(&format!("{} scheduled task prompt(s) arrived", quiesce::MAX_FOLDED_FIRES)), "{reminder}");
+        assert!(
+            reminder.contains(&format!(
+                "{} scheduled task prompt(s) arrived",
+                quiesce::MAX_FOLDED_FIRES
+            )),
+            "{reminder}"
+        );
         assert!(reminder.contains("(8 earlier scheduled prompts were dropped)"));
     }
 
@@ -860,15 +933,25 @@ mod tests {
         };
         let mut snapshot = McpStatusSnapshot {
             clients: vec![client("sdk-ok", McpSessionStatus::Ready)],
-            acp_servers: vec!["sdk-ok".to_owned(), "sdk-bad".to_owned(), "sdk-slow".to_owned()],
+            acp_servers: vec![
+                "sdk-ok".to_owned(),
+                "sdk-bad".to_owned(),
+                "sdk-slow".to_owned(),
+            ],
             ..Default::default()
         };
-        snapshot.init_failed.insert("sdk-bad".to_owned(), "handshake failed".to_owned());
+        snapshot
+            .init_failed
+            .insert("sdk-bad".to_owned(), "handshake failed".to_owned());
         let states = mcp_server_states(&snapshot);
         let state_of = |name: &str| states.iter().find(|(n, _)| n == name).map(|(_, s)| *s);
         assert_eq!(state_of("sdk-ok"), Some(Some("ready")));
         assert_eq!(state_of("sdk-bad"), Some(Some("failed")));
-        assert_eq!(state_of("sdk-slow"), Some(None), "an unsettled SDK server must hold the wait (then time out)");
+        assert_eq!(
+            state_of("sdk-slow"),
+            Some(None),
+            "an unsettled SDK server must hold the wait (then time out)"
+        );
     }
 
     #[test]

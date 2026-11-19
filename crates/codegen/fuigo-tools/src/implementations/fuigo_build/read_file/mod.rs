@@ -85,7 +85,11 @@ pub(crate) fn source_too_large_message(
     tool: &str,
 ) -> Option<String> {
     use crate::computer::types::ComputerError;
-    matches!(error, ComputerError::IOError(_, Some(std::io::ErrorKind::FileTooLarge))).then(|| {
+    matches!(
+        error,
+        ComputerError::IOError(_, Some(std::io::ErrorKind::FileTooLarge))
+    )
+    .then(|| {
         format!(
             "Error: {file_path} is larger than 256 MB, which is more than {tool} will load. \
              Edit it with a shell command (sed, patch) instead."
@@ -144,11 +148,10 @@ pub(crate) async fn tool_path_refused_by_gitignore(
 /// The reader's message for a FIFO, device, socket or other special file, when `error` is one.
 fn not_regular_file_message(error: &crate::computer::types::ComputerError) -> Option<&str> {
     match error {
-        crate::computer::types::ComputerError::IOError(msg, Some(std::io::ErrorKind::InvalidInput))
-            if msg.starts_with(crate::util::file_reader::NOT_REGULAR_FILE) =>
-        {
-            Some(msg)
-        }
+        crate::computer::types::ComputerError::IOError(
+            msg,
+            Some(std::io::ErrorKind::InvalidInput),
+        ) if msg.starts_with(crate::util::file_reader::NOT_REGULAR_FILE) => Some(msg),
         _ => None,
     }
 }
@@ -621,9 +624,8 @@ pub(crate) async fn run_read_file(
     if let Some(flag) = streamable_out {
         *flag = true;
     }
-    let absolute_path = absolute_path.unwrap_or_else(|| {
-        cwd_override.unwrap_or_else(|| std::path::PathBuf::from("."))
-    });
+    let absolute_path = absolute_path
+        .unwrap_or_else(|| cwd_override.unwrap_or_else(|| std::path::PathBuf::from(".")));
     Ok(ReadFileOutput::FileContent(FileContent {
         content,
         content_concise: Some(content_concise),
@@ -675,11 +677,16 @@ pub fn read_target_paths(input: &ReadFileInput) -> Vec<String> {
         entries.into_iter().map(|e| e.path).collect()
     };
     let mut seen = std::collections::HashSet::new();
-    paths.into_iter().filter(|p| seen.insert(p.clone())).collect()
+    paths
+        .into_iter()
+        .filter(|p| seen.insert(p.clone()))
+        .collect()
 }
 /// The file a resolved (`resolve_model_path`) read path opens: canonicalized (symlinks followed), or, when it does not
 /// exist, the unique Unicode-confusable sibling the reader falls back to (with its note).
-async fn resolve_joined_read_path(joined_path: std::path::PathBuf) -> (std::path::PathBuf, Option<String>) {
+async fn resolve_joined_read_path(
+    joined_path: std::path::PathBuf,
+) -> (std::path::PathBuf, Option<String>) {
     match crate::util::fs::try_canonicalize(&joined_path).await {
         Ok(p) => (p, None),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -818,7 +825,9 @@ async fn run_read_one(
                     display_path.display(),
                     MAX_READ_SOURCE_BYTES / (1024 * 1024)
                 )),
-                Some(std::io::ErrorKind::InvalidInput) if not_regular_file_message(&e).is_some() => {
+                Some(std::io::ErrorKind::InvalidInput)
+                    if not_regular_file_message(&e).is_some() =>
+                {
                     ReadFileOutput::FileReadError(format!(
                         "Error: {} is {}. The read tool reads regular files only.",
                         display_path.display(),
@@ -979,12 +988,8 @@ async fn run_read_one(
                 byte_budget / 1024,
             )));
         }
-        extracted = extract_file_content_lines(
-            &file_content,
-            effective_offset,
-            Some(kept),
-            total_lines,
-        );
+        extracted =
+            extract_file_content_lines(&file_content, effective_offset, Some(kept), total_lines);
         truncated_to = Some(kept);
     }
     let (stored_offset, stored_limit) = if is_whole_read {
@@ -1181,7 +1186,10 @@ impl ReadFileTool {
         Ok((output, streamable_text))
     }
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1634,7 +1642,8 @@ mod tests {
             ReadFileOutput::FileContent(fc) => {
                 let hint = fc.content.rsplit('\n').next().unwrap();
                 assert!(
-                    hint.starts_with("[... truncated at line ") && hint.contains("of 220 (40 KB per-call cap); continue with offset="),
+                    hint.starts_with("[... truncated at line ")
+                        && hint.contains("of 220 (40 KB per-call cap); continue with offset="),
                     "hint: {hint}"
                 );
                 let last: usize = hint
@@ -1647,10 +1656,20 @@ mod tests {
                     .parse()
                     .unwrap();
                 assert!(last < 220 && last > 180, "kept {last} lines");
-                assert!(hint.ends_with(&format!("offset={}]", last + 1)), "hint: {hint}");
-                assert_eq!(fc.limit, Some(last), "stored limit reflects the truncated window");
+                assert!(
+                    hint.ends_with(&format!("offset={}]", last + 1)),
+                    "hint: {hint}"
+                );
+                assert_eq!(
+                    fc.limit,
+                    Some(last),
+                    "stored limit reflects the truncated window"
+                );
                 assert!(fc.content.len() <= MAX_READ_BYTES + hint.len() + 1);
-                assert!(!fc.content.contains(&format!("\n{}→", last + 10)), "no lines past the cut");
+                assert!(
+                    !fc.content.contains(&format!("\n{}→", last + 10)),
+                    "no lines past the cut"
+                );
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
@@ -1683,7 +1702,11 @@ mod tests {
             .unwrap();
         match result {
             ReadFileOutput::FileContent(fc) => {
-                assert!(!fc.content.contains("truncated"), "160 lines fit: {}", &fc.content[fc.content.len() - 200..]);
+                assert!(
+                    !fc.content.contains("truncated"),
+                    "160 lines fit: {}",
+                    &fc.content[fc.content.len() - 200..]
+                );
                 assert_eq!(fc.limit, Some(160));
             }
             other => panic!("Expected FileContent, got {:?}", other),
@@ -1709,10 +1732,24 @@ mod tests {
         match result {
             ReadFileOutput::FileContent(fc) => {
                 let hint = fc.content.rsplit('\n').next().unwrap();
-                let last: usize = hint.split("truncated at line ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+                let last: usize = hint
+                    .split("truncated at line ")
+                    .nth(1)
+                    .unwrap()
+                    .split(' ')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
                 assert!((200 + 180..200 + 220).contains(&last), "cut at {last}");
-                assert!(hint.contains(&format!("continue with offset={}", last + 1)), "hint: {hint}");
-                assert!(fc.content.starts_with("200→"), "window starts at offset 200");
+                assert!(
+                    hint.contains(&format!("continue with offset={}", last + 1)),
+                    "hint: {hint}"
+                );
+                assert!(
+                    fc.content.starts_with("200→"),
+                    "window starts at offset 200"
+                );
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
@@ -1791,25 +1828,67 @@ mod tests {
             pages: None,
             format: None,
             files: Some(vec![
-                ReadFileEntry { path: "a.rs".into(), offset: None, limit: None },
-                ReadFileEntry { path: "b.rs".into(), offset: Some(2), limit: None },
-                ReadFileEntry { path: "a.rs".into(), offset: None, limit: None },
-                ReadFileEntry { path: "missing.rs".into(), offset: None, limit: None },
+                ReadFileEntry {
+                    path: "a.rs".into(),
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileEntry {
+                    path: "b.rs".into(),
+                    offset: Some(2),
+                    limit: None,
+                },
+                ReadFileEntry {
+                    path: "a.rs".into(),
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileEntry {
+                    path: "missing.rs".into(),
+                    offset: None,
+                    limit: None,
+                },
             ]),
         };
-        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let result =
+            fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
         match result {
             ReadFileOutput::FileContent(fc) => {
-                assert!(fc.content.starts_with("==> a.rs <==\n1→fn a() {}"), "{}", fc.content);
-                assert!(fc.content.contains("\n\n==> b.rs <==\n2→fn c() {}"), "{}", fc.content);
-                assert!(fc.content.contains("==> missing.rs <==\nError: ") && fc.content.contains("does not exist"), "{}", fc.content);
-                assert_eq!(fc.content.matches("==> a.rs <==").count(), 1, "repeated path reads once");
-                assert_eq!(fc.absolute_path, dunce::canonicalize(tmp.path().join("a.rs")).unwrap());
+                assert!(
+                    fc.content.starts_with("==> a.rs <==\n1→fn a() {}"),
+                    "{}",
+                    fc.content
+                );
+                assert!(
+                    fc.content.contains("\n\n==> b.rs <==\n2→fn c() {}"),
+                    "{}",
+                    fc.content
+                );
+                assert!(
+                    fc.content.contains("==> missing.rs <==\nError: ")
+                        && fc.content.contains("does not exist"),
+                    "{}",
+                    fc.content
+                );
+                assert_eq!(
+                    fc.content.matches("==> a.rs <==").count(),
+                    1,
+                    "repeated path reads once"
+                );
+                assert_eq!(
+                    fc.absolute_path,
+                    dunce::canonicalize(tmp.path().join("a.rs")).unwrap()
+                );
                 assert_eq!(fc.total_lines, 2 + 3);
                 assert!(fc.raw_output.contains("fn a() {}") && fc.raw_output.contains("fn c() {}"));
-                assert!(fc.content_concise.as_deref().unwrap().starts_with("==> a.rs <==\n1→fn a() {}"));
+                assert!(
+                    fc.content_concise
+                        .as_deref()
+                        .unwrap()
+                        .starts_with("==> a.rs <==\n1→fn a() {}")
+                );
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
@@ -1823,33 +1902,59 @@ mod tests {
         for name in ["t.rs", "a.rs", "b.rs"] {
             std::fs::write(tmp.path().join(name), format!("{name}\n")).unwrap();
         }
-        let entry = |path: &str| ReadFileEntry { path: path.into(), offset: None, limit: None };
+        let entry = |path: &str| ReadFileEntry {
+            path: path.into(),
+            offset: None,
+            limit: None,
+        };
         let input = ReadFileInput {
             path: "t.rs".into(),
             offset: None,
             limit: None,
             pages: None,
             format: None,
-            files: Some(vec![entry("a.rs"), entry(" "), entry("b.rs"), entry("a.rs")]),
+            files: Some(vec![
+                entry("a.rs"),
+                entry(" "),
+                entry("b.rs"),
+                entry("a.rs"),
+            ]),
         };
         let targets = read_target_paths(&input);
         assert_eq!(targets, vec!["t.rs", "a.rs", "b.rs"]);
         let resources = test_resources(tmp.path());
-        let ReadFileOutput::FileContent(fc) =
-            fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input.clone()).await.unwrap()
-        else {
+        let ReadFileOutput::FileContent(fc) = fuigo_tool_runtime::Tool::run(
+            &ReadFileTool,
+            test_ctx(resources.into_shared()),
+            input.clone(),
+        )
+        .await
+        .unwrap() else {
             panic!("expected FileContent");
         };
         let headers: Vec<&str> = fc
             .content
             .lines()
-            .filter_map(|line| line.strip_prefix("==> ").and_then(|l| l.strip_suffix(" <==")))
+            .filter_map(|line| {
+                line.strip_prefix("==> ")
+                    .and_then(|l| l.strip_suffix(" <=="))
+            })
             .collect();
-        assert_eq!(headers, targets.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            headers,
+            targets.iter().map(String::as_str).collect::<Vec<_>>()
+        );
 
-        let single = ReadFileInput { files: Some(vec![entry("")]), ..input.clone() };
+        let single = ReadFileInput {
+            files: Some(vec![entry("")]),
+            ..input.clone()
+        };
         assert_eq!(read_target_paths(&single), vec!["t.rs"]);
-        let none = ReadFileInput { path: " ".into(), files: None, ..input };
+        let none = ReadFileInput {
+            path: " ".into(),
+            files: None,
+            ..input
+        };
         assert!(read_target_paths(&none).is_empty());
     }
 
@@ -1865,25 +1970,42 @@ mod tests {
             limit: None,
             pages: None,
             format: None,
-            files: Some(vec![ReadFileEntry { path: "b.rs".into(), offset: None, limit: None }]),
+            files: Some(vec![ReadFileEntry {
+                path: "b.rs".into(),
+                offset: None,
+                limit: None,
+            }]),
         };
-        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let result =
+            fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
         match result {
             ReadFileOutput::FileContent(fc) => {
-                assert!(fc.content.starts_with("==> a.rs <==\n1→alpha"), "{}", fc.content);
-                assert!(fc.content.contains("==> b.rs <==\n1→beta"), "{}", fc.content);
+                assert!(
+                    fc.content.starts_with("==> a.rs <==\n1→alpha"),
+                    "{}",
+                    fc.content
+                );
+                assert!(
+                    fc.content.contains("==> b.rs <==\n1→beta"),
+                    "{}",
+                    fc.content
+                );
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
         let resources = test_resources(tmp.path());
         let input: ReadFileInput = serde_json::from_value(serde_json::json!({})).unwrap();
-        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let result =
+            fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
         match result {
-            ReadFileOutput::FileReadError(msg) => assert!(msg.contains("target_file") && msg.contains("files"), "{msg}"),
+            ReadFileOutput::FileReadError(msg) => assert!(
+                msg.contains("target_file") && msg.contains("files"),
+                "{msg}"
+            ),
             other => panic!("Expected FileReadError, got {:?}", other),
         }
     }
@@ -1891,7 +2013,11 @@ mod tests {
     #[test]
     fn read_file_schema_requires_neither_target_file_nor_files() {
         let schema = serde_json::to_value(schemars::schema_for!(ReadFileInput)).unwrap();
-        let required = schema.get("required").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let required = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
         assert!(required.is_empty(), "no single required key: {required:?}");
         let props = schema["properties"].as_object().unwrap();
         assert!(props.contains_key("target_file") && props.contains_key("files"));
@@ -1915,21 +2041,45 @@ mod tests {
             pages: None,
             format: None,
             files: Some(vec![
-                ReadFileEntry { path: "a.txt".into(), offset: None, limit: None },
-                ReadFileEntry { path: "b.txt".into(), offset: None, limit: None },
-                ReadFileEntry { path: "c.txt".into(), offset: None, limit: None },
+                ReadFileEntry {
+                    path: "a.txt".into(),
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileEntry {
+                    path: "b.txt".into(),
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileEntry {
+                    path: "c.txt".into(),
+                    offset: None,
+                    limit: None,
+                },
             ]),
         };
-        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let result =
+            fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
         match result {
             ReadFileOutput::FileContent(fc) => {
                 let a_end = fc.content.find("==> b.txt <==").unwrap();
-                assert!(!fc.content[..a_end].contains("truncated"), "first file fits whole");
-                assert!(fc.content[a_end..].contains("[... truncated at line "), "second file is cut: {}", &fc.content[a_end..a_end + 200]);
+                assert!(
+                    !fc.content[..a_end].contains("truncated"),
+                    "first file fits whole"
+                );
+                assert!(
+                    fc.content[a_end..].contains("[... truncated at line "),
+                    "second file is cut: {}",
+                    &fc.content[a_end..a_end + 200]
+                );
                 assert!(fc.content.ends_with("[40 KB cap reached: 1 of 3 files not read: c.txt. Read them in another call.]"), "{}", &fc.content[fc.content.len() - 200..]);
-                assert!(fc.content.len() <= MAX_READ_BYTES + 400, "{}", fc.content.len());
+                assert!(
+                    fc.content.len() <= MAX_READ_BYTES + 400,
+                    "{}",
+                    fc.content.len()
+                );
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
@@ -1946,7 +2096,11 @@ mod tests {
         std::fs::write(tmp.path().join("c.txt"), "gamma\n").unwrap();
         let mut resources = test_resources(tmp.path());
         resources.insert(TemplateRenderer::new(
-            [(ToolKind::Search, "grep".to_string()), (ToolKind::Execute, "run_terminal_command".to_string())].into(),
+            [
+                (ToolKind::Search, "grep".to_string()),
+                (ToolKind::Execute, "run_terminal_command".to_string()),
+            ]
+            .into(),
             Default::default(),
         ));
         let input = ReadFileInput {
@@ -1956,22 +2110,54 @@ mod tests {
             pages: None,
             format: None,
             files: Some(vec![
-                ReadFileEntry { path: "a.txt".into(), offset: None, limit: None },
-                ReadFileEntry { path: "b.txt".into(), offset: None, limit: None },
-                ReadFileEntry { path: "c.txt".into(), offset: None, limit: None },
+                ReadFileEntry {
+                    path: "a.txt".into(),
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileEntry {
+                    path: "b.txt".into(),
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileEntry {
+                    path: "c.txt".into(),
+                    offset: None,
+                    limit: None,
+                },
             ]),
         };
-        let result = fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let result =
+            fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
         match result {
             ReadFileOutput::FileContent(fc) => {
-                assert!(fc.content.starts_with("==> a.txt <==\n1→yyy"), "{}", &fc.content[..60]);
-                assert!(!fc.content.contains("truncated") && !fc.content.contains("alone is"), "a fits whole and b is not blamed as an oversized line: {}", &fc.content[fc.content.len() - 300..]);
-                assert!(!fc.content.contains("==> b.txt <=="), "b is deferred, not read into a sliver");
-                assert!(fc.content.contains("\n\n==> c.txt <==\n1→gamma\n"), "c still fits the leftover budget: {}", &fc.content[fc.content.len() - 300..]);
+                assert!(
+                    fc.content.starts_with("==> a.txt <==\n1→yyy"),
+                    "{}",
+                    &fc.content[..60]
+                );
+                assert!(
+                    !fc.content.contains("truncated") && !fc.content.contains("alone is"),
+                    "a fits whole and b is not blamed as an oversized line: {}",
+                    &fc.content[fc.content.len() - 300..]
+                );
+                assert!(
+                    !fc.content.contains("==> b.txt <=="),
+                    "b is deferred, not read into a sliver"
+                );
+                assert!(
+                    fc.content.contains("\n\n==> c.txt <==\n1→gamma\n"),
+                    "c still fits the leftover budget: {}",
+                    &fc.content[fc.content.len() - 300..]
+                );
                 assert!(fc.content.ends_with("[40 KB cap reached: 1 of 3 files not read: b.txt. Read them in another call.]"), "{}", &fc.content[fc.content.len() - 200..]);
-                assert!(fc.content.len() <= MAX_READ_BYTES + 400, "{}", fc.content.len());
+                assert!(
+                    fc.content.len() <= MAX_READ_BYTES + 400,
+                    "{}",
+                    fc.content.len()
+                );
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
@@ -2315,7 +2501,10 @@ mod tests {
         // Absolute spelling of the logical path, through a non-canonical repo alias when one exists.
         let abs = repo.path().join("secret").join("key.txt");
         let resources = p166_gitignore_resources(repo.path(), &["secret/", ".env"]);
-        p166_assert_ignored(p166_read(resources, abs.to_str().unwrap()).await, "absolute");
+        p166_assert_ignored(
+            p166_read(resources, abs.to_str().unwrap()).await,
+            "absolute",
+        );
     }
     /// P166/S7: the session cwd is an alias of the repo (macOS `/var` -> `/private/var`, a symlinked checkout), so the
     /// logical spelling does not start with the canonical git root; the prefix resolution must still see the ignored dir.
@@ -2393,8 +2582,11 @@ mod tests {
     async fn read_file_refuses_fifo_without_hanging() {
         let tmp = TempDir::new().unwrap();
         let fifo = tmp.path().join("pipe");
-        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR)
-            .unwrap();
+        nix::unistd::mkfifo(
+            &fifo,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
         let resources = test_resources(tmp.path());
         let read = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -2631,7 +2823,10 @@ impl Config {
     /// End-to-end test: write a real file to disk, read it back, format it
     /// with extract_file_content_lines — exercising the exact same pipeline
     /// that reread_file_for_compaction uses in production.
-    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+    )]
     #[tokio::test]
     async fn reread_file_from_disk_for_compaction() {
         let tmp = TempDir::new().unwrap();
@@ -2885,11 +3080,22 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             .await
             .unwrap();
         let ReadFileOutput::FileContent(fc) = result else {
-            panic!("expected FileContent, got {:?}", std::mem::discriminant(&result));
+            panic!(
+                "expected FileContent, got {:?}",
+                std::mem::discriminant(&result)
+            );
         };
         // 220 KB is far over the per-call cap: the skill is read in a window that names where to continue.
-        assert!(fc.content.len() < MAX_READ_BYTES + 400, "{} bytes", fc.content.len());
-        assert!(fc.content.contains("continue with offset="), "{}", &fc.content[fc.content.len() - 200..]);
+        assert!(
+            fc.content.len() < MAX_READ_BYTES + 400,
+            "{} bytes",
+            fc.content.len()
+        );
+        assert!(
+            fc.content.contains("continue with offset="),
+            "{}",
+            &fc.content[fc.content.len() - 200..]
+        );
     }
     #[tokio::test]
     async fn md_in_skills_dir_ignores_model_offset_and_limit() {
@@ -2958,10 +3164,21 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         .await
         .unwrap();
         let ReadFileOutput::FileContent(fc) = result else {
-            panic!("expected FileContent, got {:?}", std::mem::discriminant(&result));
+            panic!(
+                "expected FileContent, got {:?}",
+                std::mem::discriminant(&result)
+            );
         };
-        assert!(fc.content.starts_with("1\u{2192}line1\nline2"), "not whole from line 1: {}", fc.content);
-        assert!(fc.content.ends_with("line1200"), "cut before line 1200: {}", fc.content);
+        assert!(
+            fc.content.starts_with("1\u{2192}line1\nline2"),
+            "not whole from line 1: {}",
+            fc.content
+        );
+        assert!(
+            fc.content.ends_with("line1200"),
+            "cut before line 1200: {}",
+            fc.content
+        );
         assert_eq!((None, None), (fc.offset, fc.limit));
     }
 
@@ -2974,8 +3191,14 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, five_lines).unwrap();
         }
-        let skill_only = WholeReadPolicy { skill_markdown: true, instruction_files: false };
-        let instruction_only = WholeReadPolicy { skill_markdown: false, instruction_files: true };
+        let skill_only = WholeReadPolicy {
+            skill_markdown: true,
+            instruction_files: false,
+        };
+        let instruction_only = WholeReadPolicy {
+            skill_markdown: false,
+            instruction_files: true,
+        };
         let whole = (None, None, "1\u{2192}line1\nline2\nline3\nline4\nline5");
         let windowed = (Some(3), Some(1), "3\u{2192}line3");
         for (policy, rel_path, expected) in [
@@ -3058,16 +3281,28 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         );
         let skill_only = base
             .clone()
-            .with_whole_read(WholeReadPolicy { skill_markdown: true, instruction_files: false })
+            .with_whole_read(WholeReadPolicy {
+                skill_markdown: true,
+                instruction_files: false,
+            })
             .render(DESCRIPTION_FULL)
             .unwrap();
-        assert!(skill_only.contains("- SKILL.md files are returned whole"), "{skill_only}");
+        assert!(
+            skill_only.contains("- SKILL.md files are returned whole"),
+            "{skill_only}"
+        );
         assert!(!skill_only.contains("AGENTS.md"), "{skill_only}");
         let off = base
-            .with_whole_read(WholeReadPolicy { skill_markdown: false, instruction_files: false })
+            .with_whole_read(WholeReadPolicy {
+                skill_markdown: false,
+                instruction_files: false,
+            })
             .render(DESCRIPTION_FULL)
             .unwrap();
-        assert!(!off.contains("returned whole"), "note must vanish with both classes off: {off}");
+        assert!(
+            !off.contains("returned whole"),
+            "note must vanish with both classes off: {off}"
+        );
         assert!(
             off.contains("only for very large files.\n- The "),
             "the bullet list must stay intact: {off}"
@@ -3621,7 +3856,8 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             ReadFileOutput::FileContent(fc) => {
                 let hint = fc.content.rsplit('\n').next().unwrap();
                 assert!(
-                    !hint.contains("single very long line") && hint.contains("continue with offset="),
+                    !hint.contains("single very long line")
+                        && hint.contains("continue with offset="),
                     "multi-line overflow must give offset guidance, got: {hint}"
                 );
             }

@@ -20,12 +20,24 @@ impl SessionActor {
     }
     /// [`Self::note_history_not_rewritten`] for a change a resumed session does not make again (`reapplied_on_resume`
     /// false), whose note must not say it does (P135).
-    pub(super) async fn note_history_not_rewritten_with(&self, what: &str, reapplied_on_resume: bool) {
+    pub(super) async fn note_history_not_rewritten_with(
+        &self,
+        what: &str,
+        reapplied_on_resume: bool,
+    ) {
         use crate::session::storage::jsonl::load_repair as repair;
         let note = if reapplied_on_resume {
-            repair::note_for_refused_rewrite(&self.session_info, self.rebuild_spec.session_writer.as_ref(), what)
+            repair::note_for_refused_rewrite(
+                &self.session_info,
+                self.rebuild_spec.session_writer.as_ref(),
+                what,
+            )
         } else {
-            repair::note_for_refused_unrepeated_rewrite(&self.session_info, self.rebuild_spec.session_writer.as_ref(), what)
+            repair::note_for_refused_unrepeated_rewrite(
+                &self.session_info,
+                self.rebuild_spec.session_writer.as_ref(),
+                what,
+            )
         };
         if let Some(message) = note {
             self.send_fuigo_notification(FuigoSessionUpdate::HistoryRepaired { message })

@@ -186,11 +186,18 @@ async fn interrupted_gh_download_leaves_the_live_binary_runnable() {
 
     let result = run_update(true, None, None, &mut cfg, CliUpdateTrigger::UserCommand).await;
 
-    assert!(result.is_err(), "an interrupted download must fail the update");
+    assert!(
+        result.is_err(),
+        "an interrupted download must fail the update"
+    );
     assert_eq!(release.downloads().len(), 1, "{:?}", release.downloads());
     let (name, bytes, runs) = live_binary();
     assert_eq!(name, format!("fuigo-0.2.7-{}", host_platform()));
-    assert_eq!(bytes, small_good_artifact(), "the live binary must be untouched");
+    assert_eq!(
+        bytes,
+        small_good_artifact(),
+        "the live binary must be untouched"
+    );
     assert!(runs, "the live binary must still run");
     assert!(temp_leftovers().is_empty(), "{:?}", temp_leftovers());
 }
@@ -218,12 +225,21 @@ async fn gh_release_install_renames_a_verified_download_into_place() {
     assert!(runs);
     let mut seen = Vec::new();
     old_handle.read_to_end(&mut seen).unwrap();
-    assert_eq!(seen, small_good_artifact(), "the old file must have been replaced by rename, not rewritten");
+    assert_eq!(
+        seen,
+        small_good_artifact(),
+        "the old file must have been replaced by rename, not rewritten"
+    );
     let downloads = release.downloads();
-    assert!(downloads.iter().any(|l| l.contains("--pattern SHA256SUMS")), "{downloads:?}");
+    assert!(
+        downloads.iter().any(|l| l.contains("--pattern SHA256SUMS")),
+        "{downloads:?}"
+    );
     let live = old_path.to_string_lossy().into_owned();
     assert!(
-        downloads.iter().all(|l| !l.ends_with(&live) && !l.contains(&format!("{live} "))),
+        downloads
+            .iter()
+            .all(|l| !l.ends_with(&live) && !l.contains(&format!("{live} "))),
         "gh must never write to the live path: {downloads:?}"
     );
     assert!(temp_leftovers().is_empty(), "{:?}", temp_leftovers());
@@ -245,7 +261,11 @@ async fn gh_release_install_refuses_an_unverified_download() {
             Some(format!("{}  fuigo-0.2.7-{platform}\n", "0".repeat(64))),
             NEW_BINARY,
         ),
-        ("asset not listed", Some(format!("{NEW_BINARY_SHA256}  fuigo-0.2.6-{platform}\n")), NEW_BINARY),
+        (
+            "asset not listed",
+            Some(format!("{NEW_BINARY_SHA256}  fuigo-0.2.6-{platform}\n")),
+            NEW_BINARY,
+        ),
         ("no SHA256SUMS", None, NEW_BINARY),
         (
             "empty download",
@@ -268,9 +288,17 @@ async fn gh_release_install_refuses_an_unverified_download() {
 
         assert!(result.is_err(), "{label}: must be refused");
         let (_, bytes, runs) = live_binary();
-        assert_eq!(bytes, small_good_artifact(), "{label}: the live binary must be untouched");
+        assert_eq!(
+            bytes,
+            small_good_artifact(),
+            "{label}: the live binary must be untouched"
+        );
         assert!(runs, "{label}");
-        assert!(temp_leftovers().is_empty(), "{label}: {:?}", temp_leftovers());
+        assert!(
+            temp_leftovers().is_empty(),
+            "{label}: {:?}",
+            temp_leftovers()
+        );
     }
 }
 
@@ -287,7 +315,10 @@ async fn newest_created_lower_release_is_not_chosen() {
     assert_eq!(status.error, None);
     assert_eq!(status.latest_version.as_deref(), Some("1.0.21"));
     assert!(!status.update_available);
-    assert_eq!(auto_update_target(&make_update_config("stable")).await, None);
+    assert_eq!(
+        auto_update_target(&make_update_config("stable")).await,
+        None
+    );
 
     // And a newer release created before an older-line hotfix is still found.
     let _release = Release::new("1.0.20", &["v1.0.19", "v1.0.21", "v1.0.20"]);
@@ -315,7 +346,14 @@ async fn automatic_update_never_downgrades_a_gh_release_install() {
     assert_eq!(outcome.installed, None);
     assert!(!outcome.relaunch_needed);
     let mut cfg = make_update_config("stable");
-    let plain = run_update(false, None, None, &mut cfg, CliUpdateTrigger::AutoBackground).await;
+    let plain = run_update(
+        false,
+        None,
+        None,
+        &mut cfg,
+        CliUpdateTrigger::AutoBackground,
+    )
+    .await;
     // It reports what is on disk (not the lower release), so the caller signals only leaders older than that
     // (Astra P110 r3 #2).
     assert_eq!(plain.unwrap().as_deref(), Some("1.0.21"));
@@ -336,10 +374,22 @@ async fn explicit_version_downgrade_still_installs() {
     managed_install("1.0.21");
     let mut cfg = make_update_config("stable");
 
-    let result = run_update(false, Some("1.0.19"), None, &mut cfg, CliUpdateTrigger::UserCommand).await;
+    let result = run_update(
+        false,
+        Some("1.0.19"),
+        None,
+        &mut cfg,
+        CliUpdateTrigger::UserCommand,
+    )
+    .await;
 
     assert_eq!(result.unwrap().as_deref(), Some("1.0.19"));
-    assert!(release.downloads().iter().any(|l| l.contains("release download v1.0.19")));
+    assert!(
+        release
+            .downloads()
+            .iter()
+            .any(|l| l.contains("release download v1.0.19"))
+    );
     let (name, bytes, _) = live_binary();
     assert_eq!(name, format!("fuigo-1.0.19-{}", host_platform()));
     assert_eq!(bytes, NEW_BINARY);
@@ -360,7 +410,12 @@ async fn forced_update_still_downgrades_to_the_highest_release() {
     let result = run_update(true, None, None, &mut cfg, CliUpdateTrigger::UserCommand).await;
 
     assert_eq!(result.unwrap().as_deref(), Some("1.0.19"));
-    assert!(release.downloads().iter().any(|l| l.contains("release download v1.0.19")));
+    assert!(
+        release
+            .downloads()
+            .iter()
+            .any(|l| l.contains("release download v1.0.19"))
+    );
     let (name, _, _) = live_binary();
     assert_eq!(name, format!("fuigo-1.0.19-{}", host_platform()));
 }

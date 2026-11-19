@@ -33,20 +33,30 @@ impl SessionFiles {
     #[cfg(test)]
     pub(crate) fn at(folder: impl Into<PathBuf>) -> Self {
         let folder = folder.into();
-        let writer = SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), &folder).expect("claim a test writer");
-        Self { folder, writer: Some(writer) }
+        let writer = SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), &folder)
+            .expect("claim a test writer");
+        Self {
+            folder,
+            writer: Some(writer),
+        }
     }
 
     /// A folder with no writer, as a session folder without one (tests).
     #[cfg(test)]
     pub(crate) fn at_without_writer(folder: impl Into<PathBuf>) -> Self {
-        Self { folder: folder.into(), writer: None }
+        Self {
+            folder: folder.into(),
+            writer: None,
+        }
     }
 
     /// The session's folder and writer from the toolset's resources; `None` without a [`SessionFolder`].
     pub(crate) fn from_resources(res: &Resources) -> Option<Self> {
         let folder = res.get::<SessionFolder>()?.0.clone();
-        Some(Self::new(folder, res.get::<SessionFolderWriter>().map(|w| w.0.clone())))
+        Some(Self::new(
+            folder,
+            res.get::<SessionFolderWriter>().map(|w| w.0.clone()),
+        ))
     }
 
     /// [`Self::from_resources`], failing as `require::<SessionFolder>()` does.
@@ -128,7 +138,8 @@ impl SessionFileWriter {
         // Lazy-init: scan existing files for counter resume + byte accounting.
         // compare_exchange ensures only the winner initialises; losers no-op.
         if self.counter.load(Ordering::Relaxed) == 0
-            && let Ok((max_n, total_bytes)) = scan_dir_stats(&dir, session_folder.writer(), self.dir_name).await
+            && let Ok((max_n, total_bytes)) =
+                scan_dir_stats(&dir, session_folder.writer(), self.dir_name).await
             && self
                 .counter
                 .compare_exchange(0, max_n, Ordering::Relaxed, Ordering::Relaxed)
@@ -158,7 +169,10 @@ impl SessionFileWriter {
         // The writer's atomic replace: owner-only temp, sync, rename, directory sync. The number was reserved past
         // every existing file, so nothing is replaced.
         let result: anyhow::Result<()> = writer
-            .replace_atomic(Path::new(self.dir_name).join(format!("{n}.{ext}")), bytes.to_vec())
+            .replace_atomic(
+                Path::new(self.dir_name).join(format!("{n}.{ext}")),
+                bytes.to_vec(),
+            )
             .await
             .with_context(|| format!("persist to {}", path.display()));
 
@@ -217,7 +231,10 @@ async fn scan_dir_stats(
     Ok((max, total_bytes))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,8 +244,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let writer = SessionFileWriter::new("images", "jpg");
 
-        let p1 = writer.save(&SessionFiles::at(tmp.path()), b"img1", None).await.unwrap();
-        let p2 = writer.save(&SessionFiles::at(tmp.path()), b"img2", None).await.unwrap();
+        let p1 = writer
+            .save(&SessionFiles::at(tmp.path()), b"img1", None)
+            .await
+            .unwrap();
+        let p2 = writer
+            .save(&SessionFiles::at(tmp.path()), b"img2", None)
+            .await
+            .unwrap();
 
         assert_eq!(p1.file_name().unwrap(), "1.jpg");
         assert_eq!(p2.file_name().unwrap(), "2.jpg");
@@ -246,7 +269,10 @@ mod tests {
         tokio::fs::write(dir.join("readme.txt"), b"").await.unwrap();
 
         let writer = SessionFileWriter::new("downloads", "pdf");
-        let path = writer.save(&SessionFiles::at(tmp.path()), b"new", None).await.unwrap();
+        let path = writer
+            .save(&SessionFiles::at(tmp.path()), b"new", None)
+            .await
+            .unwrap();
 
         assert_eq!(path.file_name().unwrap(), "6.pdf");
     }
@@ -256,7 +282,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let writer = SessionFileWriter::new("downloads", "pdf");
 
-        let p1 = writer.save(&SessionFiles::at(tmp.path()), b"doc", Some("docx")).await.unwrap();
+        let p1 = writer
+            .save(&SessionFiles::at(tmp.path()), b"doc", Some("docx"))
+            .await
+            .unwrap();
         assert_eq!(p1.file_name().unwrap(), "1.docx");
     }
 
@@ -311,13 +340,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let folder = tmp.path().join("session");
         let files = SessionFiles::at_without_writer(&folder);
-        let err = SessionFileWriter::new("images", "jpg").save(&files, b"img", None).await.unwrap_err();
+        let err = SessionFileWriter::new("images", "jpg")
+            .save(&files, b"img", None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("no session writer"), "{err}");
-        assert!(!folder.exists(), "a writer-less save created the session folder");
+        assert!(
+            !folder.exists(),
+            "a writer-less save created the session folder"
+        );
 
-        tokio::fs::write(tmp.path().join(".tmp9"), b"orphan").await.unwrap();
+        tokio::fs::write(tmp.path().join(".tmp9"), b"orphan")
+            .await
+            .unwrap();
         scan_dir_stats(tmp.path(), None, "").await.unwrap();
-        assert!(tmp.path().join(".tmp9").exists(), "a writer-less scan removed a file by path");
+        assert!(
+            tmp.path().join(".tmp9").exists(),
+            "a writer-less scan removed a file by path"
+        );
     }
 
     #[tokio::test]
@@ -343,12 +383,25 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&p1).unwrap().permissions().mode() & 0o777, 0o600);
-            assert_eq!(std::fs::metadata(folder.join("images")).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                std::fs::metadata(&p1).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(folder.join("images"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
         }
 
         session_writer.delete_tree().await.unwrap();
         assert!(writer.save(&files, b"img2", None).await.is_err());
-        assert!(!folder.exists(), "a save after the delete recreated the session folder");
+        assert!(
+            !folder.exists(),
+            "a save after the delete recreated the session folder"
+        );
     }
 }

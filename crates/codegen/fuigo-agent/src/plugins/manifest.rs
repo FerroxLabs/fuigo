@@ -324,9 +324,11 @@ pub enum ManifestLoadResult {
 /// Tries manifest files in priority order (see [`MANIFEST_PATHS`]). The manifest is read only from inside the plugin
 /// folder: one that links outside it is an error (the plugin is skipped), checked on the opened file.
 pub fn load_manifest(plugin_root: &Path) -> Result<ManifestLoadResult, ManifestError> {
-    let pinned = fuigo_dirs::contained::PinnedRoot::pin(plugin_root).map_err(|e| ManifestError::IoError {
-        path: plugin_root.to_path_buf(),
-        source: e,
+    let pinned = fuigo_dirs::contained::PinnedRoot::pin(plugin_root).map_err(|e| {
+        ManifestError::IoError {
+            path: plugin_root.to_path_buf(),
+            source: e,
+        }
     })?;
     load_manifest_in(plugin_root, &pinned)
 }
@@ -341,10 +343,12 @@ pub fn load_manifest_in(
     for rel_path in MANIFEST_PATHS {
         let manifest_path = plugin_root.join(rel_path);
         if manifest_path.is_file() {
-            let content = fuigo_dirs::contained::read_contained(&manifest_path, pinned)
-                .map_err(|e| ManifestError::IoError {
-                    path: manifest_path.clone(),
-                    source: e,
+            let content =
+                fuigo_dirs::contained::read_contained(&manifest_path, pinned).map_err(|e| {
+                    ManifestError::IoError {
+                        path: manifest_path.clone(),
+                        source: e,
+                    }
                 })?;
             let manifest: PluginManifest =
                 serde_json::from_str(&content).map_err(|e| ManifestError::ParseError {
@@ -899,8 +903,14 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("commands")).unwrap();
         std::os::unix::fs::symlink(root.join("real-agents"), root.join("agents")).unwrap();
         let manifest: PluginManifest = serde_json::from_str(r#"{"name": "p"}"#).unwrap();
-        assert!(manifest.skill_dirs(&root).is_empty(), "default skills/ linked out was followed");
-        assert!(manifest.command_dirs(&root).is_empty(), "default commands/ linked out was followed");
+        assert!(
+            manifest.skill_dirs(&root).is_empty(),
+            "default skills/ linked out was followed"
+        );
+        assert!(
+            manifest.command_dirs(&root).is_empty(),
+            "default commands/ linked out was followed"
+        );
         assert_eq!(manifest.agent_dirs(&root), vec![root.join("agents")]);
     }
 
@@ -935,17 +945,34 @@ mod tests {
         std::fs::write(outside.join("x.json"), "{}").unwrap();
         let root = base.join("plugin");
         std::fs::create_dir_all(root.join("hooks")).unwrap();
-        std::os::unix::fs::symlink(outside.join("x.json"), root.join("hooks").join("hooks.json")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("x.json"),
+            root.join("hooks").join("hooks.json"),
+        )
+        .unwrap();
         std::os::unix::fs::symlink(outside.join("x.json"), root.join(".mcp.json")).unwrap();
         std::os::unix::fs::symlink(outside.join("x.json"), root.join(".lsp.json")).unwrap();
 
         let m: PluginManifest = serde_json::from_str(r#"{"name": "p"}"#).unwrap();
-        assert!(m.hooks_path(&root).is_none(), "linked-out default hooks.json used");
-        assert!(m.mcp_config_path(&root).is_none(), "linked-out default .mcp.json used");
-        assert!(m.lsp_config_path(&root).is_none(), "linked-out default .lsp.json used");
+        assert!(
+            m.hooks_path(&root).is_none(),
+            "linked-out default hooks.json used"
+        );
+        assert!(
+            m.mcp_config_path(&root).is_none(),
+            "linked-out default .mcp.json used"
+        );
+        assert!(
+            m.lsp_config_path(&root).is_none(),
+            "linked-out default .lsp.json used"
+        );
         let inline: PluginManifest =
-            serde_json::from_str(r#"{"name": "p", "mcpServers": {"s": {"command": "x"}}}"#).unwrap();
-        assert!(inline.mcp_config_path(&root).is_none(), "linked-out .mcp.json beside inline servers used");
+            serde_json::from_str(r#"{"name": "p", "mcpServers": {"s": {"command": "x"}}}"#)
+                .unwrap();
+        assert!(
+            inline.mcp_config_path(&root).is_none(),
+            "linked-out .mcp.json beside inline servers used"
+        );
 
         std::fs::write(root.join("real.json"), "{}").unwrap();
         std::fs::remove_file(root.join(".mcp.json")).unwrap();
@@ -960,18 +987,35 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let base = dunce::canonicalize(tmp.path()).unwrap();
         std::fs::create_dir_all(base.join("outside")).unwrap();
-        std::fs::write(base.join("outside").join("plugin.json"), r#"{"name": "outsider"}"#).unwrap();
+        std::fs::write(
+            base.join("outside").join("plugin.json"),
+            r#"{"name": "outsider"}"#,
+        )
+        .unwrap();
         let root = base.join("plugin");
         std::fs::create_dir_all(&root).unwrap();
-        std::os::unix::fs::symlink(base.join("outside").join("plugin.json"), root.join("plugin.json")).unwrap();
-        assert!(load_manifest(&root).is_err(), "manifest linked outside the plugin was loaded");
+        std::os::unix::fs::symlink(
+            base.join("outside").join("plugin.json"),
+            root.join("plugin.json"),
+        )
+        .unwrap();
+        assert!(
+            load_manifest(&root).is_err(),
+            "manifest linked outside the plugin was loaded"
+        );
     }
 
     /// Fable m3 Low 4: a path that cannot be resolved is not contained (fails closed, like the skill walk).
     #[test]
     fn m4_unresolvable_component_path_is_not_contained() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(!is_path_contained(&tmp.path().join("missing").join("..").join("x"), tmp.path()));
-        assert!(!is_path_contained(tmp.path(), &tmp.path().join("missing-root")));
+        assert!(!is_path_contained(
+            &tmp.path().join("missing").join("..").join("x"),
+            tmp.path()
+        ));
+        assert!(!is_path_contained(
+            tmp.path(),
+            &tmp.path().join("missing-root")
+        ));
     }
 }

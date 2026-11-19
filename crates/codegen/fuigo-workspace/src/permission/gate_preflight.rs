@@ -155,8 +155,9 @@ impl GatePreflight {
             let mut written = judge(&target.written);
             let mut restrictive = None;
             for other in target.others() {
-                if let Some(decision @ (Decision::Ask | Decision::Reject(_) | Decision::PolicyDeny(_))) =
-                    judge(other)
+                if let Some(
+                    decision @ (Decision::Ask | Decision::Reject(_) | Decision::PolicyDeny(_)),
+                ) = judge(other)
                 {
                     restrictive = combine_decisions(restrictive, Some(decision));
                 }
@@ -235,8 +236,10 @@ impl GatePreflight {
                 )
             });
             for (index, spelling) in spellings.iter().enumerate() {
-                let (judged, fail_closed) = policy
-                    .evaluate_with_cwd_details(&AccessKind::Read(Some(spelling.clone())), Some(cwd));
+                let (judged, fail_closed) = policy.evaluate_with_cwd_details(
+                    &AccessKind::Read(Some(spelling.clone())),
+                    Some(cwd),
+                );
                 native_symlink_fail_closed |= fail_closed;
                 match judged {
                     Some(Decision::Allow) if index > 0 => {}
@@ -273,7 +276,8 @@ impl GatePreflight {
         match policy.launch() {
             None => merged,
             Some(launch) => {
-                let nested = Self::evaluate_read_targets(Some(launch), access, targets, cwd, auto_mode);
+                let nested =
+                    Self::evaluate_read_targets(Some(launch), access, targets, cwd, auto_mode);
                 merged.with_launch(&nested)
             }
         }

@@ -6,6 +6,10 @@
 //! Per-call attribution uses per-call proxy credentials in the proxy URL's userinfo; see
 //! [`credential`] for the mechanism and [`decider`] for the hold-and-ask seam.
 
+// Panic-path lints are denied in this crate (shipped code is panic = "abort"); tests may unwrap.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::await_holding_lock)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 mod connect;
 pub mod credential;
 pub mod decider;

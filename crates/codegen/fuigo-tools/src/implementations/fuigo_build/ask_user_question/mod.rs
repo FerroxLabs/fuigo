@@ -739,7 +739,10 @@ mod tests {
             );
             assert_eq!(MISSING_USER_QUESTION_SENDER_CODE, "missing_resource");
             let msg = err.to_string();
-            assert!(msg.contains("UserQuestionSender"), "{non_interactive:?}: {msg}");
+            assert!(
+                msg.contains("UserQuestionSender"),
+                "{non_interactive:?}: {msg}"
+            );
             assert!(msg.contains("not wired"), "{non_interactive:?}: {msg}");
             assert!(
                 !msg.contains("presented to the user"),
@@ -1121,8 +1124,12 @@ mod tests {
         let handle = tokio::spawn({
             let shared = shared.clone();
             async move {
-                fuigo_tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "tc-short"), input)
-                    .await
+                fuigo_tool_runtime::Tool::run(
+                    &tool,
+                    test_ctx_with_call_id(shared, "tc-short"),
+                    input,
+                )
+                .await
             }
         });
 
@@ -1256,9 +1263,7 @@ mod tests {
         params: AskUserQuestionParams,
         call_id: &'static str,
     ) -> (
-        tokio::task::JoinHandle<
-            Result<AskUserQuestionOutput, fuigo_tool_runtime::ToolError>,
-        >,
+        tokio::task::JoinHandle<Result<AskUserQuestionOutput, fuigo_tool_runtime::ToolError>>,
         mpsc::UnboundedReceiver<types::UserQuestionRequest>,
     ) {
         let (shared, rx) = resources_with_sender_and_params(params);
@@ -1432,7 +1437,9 @@ mod tests {
         let request = rx.recv().await.unwrap();
         request
             .result_tx
-            .send(Err(UserQuestionError::MalformedResponse("bad json".to_string())))
+            .send(Err(UserQuestionError::MalformedResponse(
+                "bad json".to_string(),
+            )))
             .unwrap();
         let msg = handle.await.unwrap().unwrap_err().to_string();
         assert!(msg.contains("invalid response"), "msg: {msg}");

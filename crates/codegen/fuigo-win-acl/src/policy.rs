@@ -26,7 +26,9 @@ pub fn is_sid_text(s: &str) -> bool {
     };
     s.len() <= 184
         && !rest.is_empty()
-        && rest.split('-').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        && rest
+            .split('-')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// One ACE as read from the binary ACL (`GetAce`): numeric type, flags and mask, and the trustee as a FULL SID string
@@ -44,12 +46,24 @@ pub struct RawAce {
 /// Flags are empty when zero, else hex (so any inherit or audit flag fails). The mask is `0x...` lowercase hex.
 pub fn dacl_summary_from_binary(protected: bool, aces: &[RawAce]) -> DaclSummary {
     DaclSummary {
-        flags: if protected { "P".to_owned() } else { String::new() },
+        flags: if protected {
+            "P".to_owned()
+        } else {
+            String::new()
+        },
         aces: aces
             .iter()
             .map(|a| AceSummary {
-                kind: if a.ace_type == 0 { "A".to_owned() } else { format!("0x{:x}", a.ace_type) },
-                flags: if a.flags == 0 { String::new() } else { format!("0x{:x}", a.flags) },
+                kind: if a.ace_type == 0 {
+                    "A".to_owned()
+                } else {
+                    format!("0x{:x}", a.ace_type)
+                },
+                flags: if a.flags == 0 {
+                    String::new()
+                } else {
+                    format!("0x{:x}", a.flags)
+                },
                 rights: format!("0x{:x}", a.mask),
                 trustee: a.trustee_sid.clone(),
             })
@@ -90,7 +104,12 @@ mod locator_policy_tests {
     const ME: &str = "S-1-5-21-1-2-3-1001";
 
     fn ace(kind: &str, flags: &str, who: &str) -> AceSummary {
-        AceSummary { kind: kind.into(), flags: flags.into(), rights: "0x1f01ff".into(), trustee: who.into() }
+        AceSummary {
+            kind: kind.into(),
+            flags: flags.into(),
+            rights: "0x1f01ff".into(),
+            trustee: who.into(),
+        }
     }
 
     #[test]
@@ -104,11 +123,24 @@ mod locator_policy_tests {
 
     #[test]
     fn dacl_rule() {
-        let d = |aces| DaclSummary { flags: "P".into(), aces };
+        let d = |aces| DaclSummary {
+            flags: "P".into(),
+            aces,
+        };
         assert!(locator_dacl_ok(&d(vec![ace("A", "", ME)]), ME));
-        assert!(locator_dacl_ok(&d(vec![ace("A", "0x10", ME), ace("A", "0x10", SID_SYSTEM), ace("A", "", SID_ADMINISTRATORS)]), ME));
+        assert!(locator_dacl_ok(
+            &d(vec![
+                ace("A", "0x10", ME),
+                ace("A", "0x10", SID_SYSTEM),
+                ace("A", "", SID_ADMINISTRATORS)
+            ]),
+            ME
+        ));
         assert!(locator_dacl_ok(&d(vec![]), ME));
-        assert!(!locator_dacl_ok(&d(vec![ace("A", "", ME), ace("A", "", "S-1-5-32-545")]), ME));
+        assert!(!locator_dacl_ok(
+            &d(vec![ace("A", "", ME), ace("A", "", "S-1-5-32-545")]),
+            ME
+        ));
         assert!(!locator_dacl_ok(&d(vec![ace("A", "", "S-1-1-0")]), ME));
         assert!(!locator_dacl_ok(&d(vec![ace("0x1", "", ME)]), ME));
         assert!(!locator_dacl_ok(&d(vec![ace("A", "0x8", ME)]), ME));
@@ -119,7 +151,17 @@ mod locator_policy_tests {
     fn sid_text_check() {
         assert!(is_sid_text(ME));
         assert!(is_sid_text("S-1-5-18"));
-        for bad in ["", "S-1-", "S-1--5", "S-2-5-18", "s-1-5-18", "S-1-5-18\\x", "S-1-5-1a", "S-1-5-18 ", "S-1-5-\u{660}"] {
+        for bad in [
+            "",
+            "S-1-",
+            "S-1--5",
+            "S-2-5-18",
+            "s-1-5-18",
+            "S-1-5-18\\x",
+            "S-1-5-1a",
+            "S-1-5-18 ",
+            "S-1-5-\u{660}",
+        ] {
             assert!(!is_sid_text(bad), "{bad:?}");
         }
         assert!(!is_sid_text(&format!("S-1-{}", "5-".repeat(100) + "1")));

@@ -353,7 +353,8 @@ impl SessionActor {
     /// Shared with `SnapshotToolDefinitions` so verbatim mirrors preserve the parent schema.
     pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
         let backend_search_active = self.backend_search_active();
-        let tools = defs.iter()
+        let tools = defs
+            .iter()
             .filter(|td| !backend_search_active || td.function.name != "web_search")
             .cloned()
             .map(ToolSpec::from)
@@ -363,7 +364,16 @@ impl SessionActor {
 
     pub(crate) fn present_tool_specs(&self, mut tools: Vec<ToolSpec>) -> Vec<ToolSpec> {
         crate::session::tool_presentation::present(
-            &mut tools, matches!(self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode().as_str(), "compact" | "adaptive"),
+            &mut tools,
+            matches!(
+                self.tool_metadata_snapshot
+                    .lock()
+                    .unwrap()
+                    .native_presentation
+                    .mode()
+                    .as_str(),
+                "compact" | "adaptive"
+            ),
         );
         tools
     }
@@ -405,10 +415,27 @@ impl SessionActor {
         tools: &[ToolSpec],
     ) -> std::collections::BTreeMap<String, String> {
         use fuigo_tools::types::tool::ToolKind;
-        tools.iter().filter(|tool| !self.delivery_tools.borrow().contains(&tool.name) && matches!(
-            self.agent.borrow().tool_bridge().tool_kind(&tool.name),
-            Some(ToolKind::ImageGen | ToolKind::VideoGen | ToolKind::ImageToVideo | ToolKind::ReferenceToVideo)
-        )).map(|tool| (tool.name.clone(), crate::session::tool_presentation::fingerprint(tool))).collect()
+        tools
+            .iter()
+            .filter(|tool| {
+                !self.delivery_tools.borrow().contains(&tool.name)
+                    && matches!(
+                        self.agent.borrow().tool_bridge().tool_kind(&tool.name),
+                        Some(
+                            ToolKind::ImageGen
+                                | ToolKind::VideoGen
+                                | ToolKind::ImageToVideo
+                                | ToolKind::ReferenceToVideo
+                        )
+                    )
+            })
+            .map(|tool| {
+                (
+                    tool.name.clone(),
+                    crate::session::tool_presentation::fingerprint(tool),
+                )
+            })
+            .collect()
     }
 
     /// Function tools for a cache-aligned side call (turn summary, recap, `/btw`, compaction).
@@ -422,13 +449,24 @@ impl SessionActor {
             return sent;
         }
         let tools = self.main_turn_tool_specs(&self.prepare_tool_definitions().await);
-        if self.tool_metadata_snapshot.lock().unwrap().native_presentation.mode() != "adaptive" {
+        if self
+            .tool_metadata_snapshot
+            .lock()
+            .unwrap()
+            .native_presentation
+            .mode()
+            != "adaptive"
+        {
             return tools;
         }
         let deferred: std::collections::BTreeSet<String> =
             self.adaptive_deferred_native(&tools).into_keys().collect();
         let enabled = tools.iter().any(|tool| tool.name == "search_tool");
-        self.tool_metadata_snapshot.lock().unwrap().native_presentation.preview(tools, &deferred, enabled)
+        self.tool_metadata_snapshot
+            .lock()
+            .unwrap()
+            .native_presentation
+            .preview(tools, &deferred, enabled)
     }
 
     /// Hosted tools with overrides applied, plus the applied overrides to echo, in one pass.
@@ -746,11 +784,13 @@ impl SessionActor {
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let (mut model_facts, mut selected_provider) = self.model_auth_state(cfg.model.as_str());
-        let by_endpoint = crate::auth::subscription::inference::selected_for_endpoint(&cfg.model,&cfg.base_url);
+        let by_endpoint =
+            crate::auth::subscription::inference::selected_for_endpoint(&cfg.model, &cfg.base_url);
         if by_endpoint.is_some() {
             model_facts.byok = crate::agent::auth_method::ModelByok::Byok;
         }
-        selected_provider = crate::auth::subscription::inference::turn_provider(by_endpoint, selected_provider);
+        selected_provider =
+            crate::auth::subscription::inference::turn_provider(by_endpoint, selected_provider);
         // Gate on the stable session classifier, not `creds.auth_type`; see `crate::agent::auth_method::session_token_auth_gate`
         // P42: `cfg.base_url` is checked with the one session-delivery predicate for every BYOK status
         let auth_method = self.auth_method_id.load();
@@ -875,15 +915,19 @@ impl SessionActor {
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
             dispatch_gate: Some(std::sync::Arc::new(ParkGate::new(
-                self.session_info.id.0.to_string(), role,
-                self.rebuild_spec.session_writer.clone().map(|writer| (self.held_wakes.clone(), writer)),
+                self.session_info.id.0.to_string(),
+                role,
+                self.rebuild_spec
+                    .session_writer
+                    .clone()
+                    .map(|writer| (self.held_wakes.clone(), writer)),
             ))),
             mtls_cert_dir: cfg.mtls_cert_dir,
             rate_limit_retry_threshold: cfg.rate_limit_retry_threshold,
             reasoning_summary: cfg.reasoning_summary,
         };
         if let Some(provider) = selected_provider {
-            crate::auth::subscription::inference::configure(&mut sampler,&provider,false);
+            crate::auth::subscription::inference::configure(&mut sampler, &provider, false);
         }
         sampler
     }
@@ -920,7 +964,8 @@ impl SessionActor {
         let classifier_choice = auto_cfg.classifier_model.as_deref().map(|slug| {
             crate::agent::config::HelperModelChoice::of(explicit_classifier.as_deref(), slug)
         });
-        let aux_classifier_sampler = match (auto_cfg.classifier_model.as_deref(), classifier_choice) {
+        let aux_classifier_sampler = match (auto_cfg.classifier_model.as_deref(), classifier_choice)
+        {
             (Some(slug), Some(choice)) => self.resolve_auto_classifier_sampler(slug, choice).await,
             _ => None,
         };
@@ -962,7 +1007,9 @@ impl SessionActor {
             unusable: explicit_classifier_unusable,
             effort: classifier_reasoning_effort,
         };
-        helper_cache.get_or_rebuild(seeded_epoch, || async { seeded }).await;
+        helper_cache
+            .get_or_rebuild(seeded_epoch, || async { seeded })
+            .await;
         let rebuild_cfg = auto_cfg.clone();
         // One shared worker serializes parent and subagent classifier requests.
         tokio::task::spawn_local(async move {
@@ -1180,7 +1227,11 @@ impl SessionActor {
         );
         let (_prompt_type, effort) =
             crate::util::config::auto_mode_classifier_defaults(auto_cfg, supports_re);
-        ClassifierHelper { aux, unusable, effort }
+        ClassifierHelper {
+            aux,
+            unusable,
+            effort,
+        }
     }
 
     async fn resolve_auto_classifier_sampler(
@@ -1243,12 +1294,20 @@ impl SessionActor {
 
     /// Refresh auth and push a fresh `SamplerConfig` before each turn.
     pub(crate) async fn prepare_sampler_for_turn(&self) {
-        if self.refusal_prompt.lock().unwrap().state==fuigo_sampling_types::refusal::PromptState::Terminal {return;}
-        if self.refusal_prompt.lock().unwrap().refreshes==0 {
+        if self.refusal_prompt.lock().unwrap().state
+            == fuigo_sampling_types::refusal::PromptState::Terminal
+        {
+            return;
+        }
+        if self.refusal_prompt.lock().unwrap().refreshes == 0 {
             self.refresh_token_if_expired().await;
         }
-        let mut sampler_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
-        self.refusal_prompt.lock().unwrap().refreshable=self.auth_gate(&sampler_config.model,&sampler_config.base_url).active();
+        let mut sampler_config = self
+            .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+            .await;
+        self.refusal_prompt.lock().unwrap().refreshable = self
+            .auth_gate(&sampler_config.model, &sampler_config.base_url)
+            .active();
         if self.tool_context.task_output_token_budget.is_some()
             || self.tool_context.sampler_retry_only_before_output
         {
@@ -1279,7 +1338,8 @@ impl SessionActor {
         // The same endpoint-aware provider resolution `reconstruct_full_config` uses: a native subscription (or
         // any auth provider) attaches its own credential at dispatch, after the sampler recorded `Missing`, so its
         // 401 is a real rejection, not a withheld session.
-        if crate::auth::subscription::inference::selected_for_endpoint(model_id, base_url).is_some() {
+        if crate::auth::subscription::inference::selected_for_endpoint(model_id, base_url).is_some()
+        {
             return false;
         }
         let (facts, provider) = self.model_auth_state(model_id);
@@ -1353,7 +1413,10 @@ impl SessionActor {
             crate::extensions::notification::RetryState::Failed {
                 error_type: error_type.to_owned(),
                 message: message.clone(),
-                upstream: fuigo_sampling_types::error::UpstreamError { http_status: STATUS, ..Default::default() },
+                upstream: fuigo_sampling_types::error::UpstreamError {
+                    http_status: STATUS,
+                    ..Default::default()
+                },
                 verdicts: None,
             },
         ))
@@ -1502,22 +1565,36 @@ impl SessionActor {
 
         // A2.1: STOP and PAUSE terminate before compaction, 4c, and 4d. The sole
         // exception is one bare-401 session-token refresh in this user prompt.
-        let classification=error.upstream().classification();
-        let (failed_model_id, failed_base_url) = self.chat_state_handle
-            .get_sampling_config().await.map(|c| (c.model, c.base_url)).unwrap_or_default();
-        let session_withheld = self.session_withheld_401(&error, &failed_model_id, &failed_base_url);
-        let refreshable = classification.refresh_eligible(error.upstream().http_status.unwrap_or(0), true)
+        let classification = error.upstream().classification();
+        let (failed_model_id, failed_base_url) = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| (c.model, c.base_url))
+            .unwrap_or_default();
+        let session_withheld =
+            self.session_withheld_401(&error, &failed_model_id, &failed_base_url);
+        let refreshable = classification
+            .refresh_eligible(error.upstream().http_status.unwrap_or(0), true)
             && self.auth_gate(&failed_model_id, &failed_base_url).active();
-        let terminal={
-            let mut prompt=self.refusal_prompt.lock().unwrap();
-            prompt.refreshable=refreshable;
-            prompt.respond("main",error.upstream().http_status.unwrap_or(0),Some(&classification));
+        let terminal = {
+            let mut prompt = self.refusal_prompt.lock().unwrap();
+            prompt.refreshable = refreshable;
+            prompt.respond(
+                "main",
+                error.upstream().http_status.unwrap_or(0),
+                Some(&classification),
+            );
             // The resubmit has spent the sole exception, even if its answer is transient.
-            if prompt.refreshes>0 { prompt.state=fuigo_sampling_types::refusal::PromptState::Terminal; }
-            prompt.state==fuigo_sampling_types::refusal::PromptState::Terminal
+            if prompt.refreshes > 0 {
+                prompt.state = fuigo_sampling_types::refusal::PromptState::Terminal;
+            }
+            prompt.state == fuigo_sampling_types::refusal::PromptState::Terminal
         };
 
-        if terminal { self.persist_terminal_prompt(); }
+        if terminal {
+            self.persist_terminal_prompt();
+        }
 
         // On an in-flight salvage continuation, a max-tokens failure or a probable context overflow is not terminal
         // For an overflow, compact-and-resubmit would delete the continue reminder and split the report
@@ -1534,7 +1611,8 @@ impl SessionActor {
         let encrypted_content_mismatch = matches!(error.kind, SamplingErrorKind::Api)
             && error.status_code == Some(400)
             && error.message.contains("encrypted_content");
-        let quiet_mid_salvage = !terminal && mid_salvage_continuation
+        let quiet_mid_salvage = !terminal
+            && mid_salvage_continuation
             && (error.kind == SamplingErrorKind::MaxTokensTruncation
                 || fuigo_sampling_types::is_context_length_error(&error.message)
                 || (!matches!(
@@ -1601,9 +1679,9 @@ impl SessionActor {
         };
         if let Some(cw) = overflow_window {
             {
-                self.compaction.overflow_compactions_since_response.set(
-                    self.compaction.overflow_compactions_since_response.get() + 1,
-                );
+                self.compaction
+                    .overflow_compactions_since_response
+                    .set(self.compaction.overflow_compactions_since_response.get() + 1);
                 let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
                 let percentage = fuigo_token_estimation::usage_percentage_u8(total_tokens, cw);
 
@@ -1701,34 +1779,35 @@ impl SessionActor {
                 None
             };
 
-        let auth_recovery_eligible = !terminal && matches!(error.kind, SamplingErrorKind::Auth) && {
-            let gate = self.auth_gate(&failed_model_id, &failed_base_url);
-            let eligible = gate.active();
-            // Log the Unknown-BYOK decision (eligible or not) so a session still 401ing shows whether refresh fired
-            self.log_auth_gate_unknown("handle_sampling_failure", gate, &failed_base_url);
-            if !eligible && auth_provider.is_none() {
-                tracing::warn!(
-                    session_id = %self.session_info.id.0,
-                    is_session_based = gate.is_session_based,
-                    model_byok = gate.model_byok.as_str(),
-                    destination_may_receive_session = gate.destination_may_receive_session,
-                    "auth recovery: sampler 401 not refreshable (api-key auth) — surfacing 401",
-                );
-                fuigo_telemetry::unified_log::warn(
-                    "auth recovery: sampler 401 not eligible (api-key auth)",
-                    Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "kind": error.kind.as_str(),
-                        "status_code": error.status_code,
-                        "is_session_based": gate.is_session_based,
-                        "model_byok": gate.model_byok.as_str(),
-                        "destination_may_receive_session": gate.destination_may_receive_session,
-                        "endpoint_is_first_party": gate.destination_may_receive_session,
-                    })),
-                );
-            }
-            eligible
-        };
+        let auth_recovery_eligible =
+            !terminal && matches!(error.kind, SamplingErrorKind::Auth) && {
+                let gate = self.auth_gate(&failed_model_id, &failed_base_url);
+                let eligible = gate.active();
+                // Log the Unknown-BYOK decision (eligible or not) so a session still 401ing shows whether refresh fired
+                self.log_auth_gate_unknown("handle_sampling_failure", gate, &failed_base_url);
+                if !eligible && auth_provider.is_none() {
+                    tracing::warn!(
+                        session_id = %self.session_info.id.0,
+                        is_session_based = gate.is_session_based,
+                        model_byok = gate.model_byok.as_str(),
+                        destination_may_receive_session = gate.destination_may_receive_session,
+                        "auth recovery: sampler 401 not refreshable (api-key auth) — surfacing 401",
+                    );
+                    fuigo_telemetry::unified_log::warn(
+                        "auth recovery: sampler 401 not eligible (api-key auth)",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "kind": error.kind.as_str(),
+                            "status_code": error.status_code,
+                            "is_session_based": gate.is_session_based,
+                            "model_byok": gate.model_byok.as_str(),
+                            "destination_may_receive_session": gate.destination_may_receive_session,
+                            "endpoint_is_first_party": gate.destination_may_receive_session,
+                        })),
+                    );
+                }
+                eligible
+            };
 
         // A provider-backed model is BYOK, so its gate is inactive and the session arm (4b) can't fire; provider recovery (4c) is exclusive
         // Assert it so a future gate change trips here, not double-recovers.
@@ -1769,7 +1848,9 @@ impl SessionActor {
             if park.is_parked() && self.uncharged_401_park_eligible(am, error.credential) {
                 return Ok(self.park_uncharged_401(error.credential, true));
             }
-            if error.upstream().flux_routed { self.refusal_prompt.lock().unwrap().refresh_token(); }
+            if error.upstream().flux_routed {
+                self.refusal_prompt.lock().unwrap().refresh_token();
+            }
             if am
                 .try_recover_unauthorized(crate::auth::recovery::RecoverySource::Turn)
                 .await
@@ -1803,11 +1884,16 @@ impl SessionActor {
             if self.uncharged_401_park_eligible(am, error.credential) {
                 return Ok(self.park_uncharged_401(error.credential, false));
             }
-            if error.upstream().flux_routed { self.refusal_prompt.lock().unwrap().state=fuigo_sampling_types::refusal::PromptState::Terminal; self.persist_terminal_prompt(); }
+            if error.upstream().flux_routed {
+                self.refusal_prompt.lock().unwrap().state =
+                    fuigo_sampling_types::refusal::PromptState::Terminal;
+                self.persist_terminal_prompt();
+            }
         }
 
         // 4c. Auth failure or bare 401 on a provider-backed model (gateway 401s can classify under other error kinds).
-        if !terminal && let Some(ref provider) = auth_provider
+        if !terminal
+            && let Some(ref provider) = auth_provider
             && self.try_provider_401_recovery(provider).await
         {
             self.prepare_sampler_for_turn().await;
@@ -2040,16 +2126,22 @@ impl SessionActor {
             // P42: a refused destination carries no `http_status` (a client keys its re-auth prompt, and the prompt
             // it stashes for a post-login resubmit, off a 401 status) and is not an `auth` kind: signing in again
             // cannot fix a destination.
-            return Err(acp::Error::internal_error().data(crate::acp_error::typed_error_data(
-                Some(serde_json::json!({
-                    "message": detailed_message,
-                    "upstream": error.upstream(),
-                    crate::acp_error::ERROR_KIND_DATA_KEY: SESSION_WITHHELD_ERROR_TYPE,
-                })),
-                SESSION_WITHHELD_ERROR_TYPE,
-            )));
+            return Err(
+                acp::Error::internal_error().data(crate::acp_error::typed_error_data(
+                    Some(serde_json::json!({
+                        "message": detailed_message,
+                        "upstream": error.upstream(),
+                        crate::acp_error::ERROR_KIND_DATA_KEY: SESSION_WITHHELD_ERROR_TYPE,
+                    })),
+                    SESSION_WITHHELD_ERROR_TYPE,
+                )),
+            );
         }
-        Err(prompt_terminal_error(&error, detailed_message, error.status_code))
+        Err(prompt_terminal_error(
+            &error,
+            detailed_message,
+            error.status_code,
+        ))
     }
 
     async fn wait_for_stream_drain(
@@ -2124,7 +2216,8 @@ impl SessionActor {
                             .await;
                     };
                     earlier_attempts = attempts;
-                    self.notify_rate_limit_wait(attempt, budget, backoff, info.upstream()).await;
+                    self.notify_rate_limit_wait(attempt, budget, backoff, info.upstream())
+                        .await;
                     // Esc cancels a turn by aborting its task, so this await point is itself the cancellation point; no select needed
                     sleep(super::auth_retry::paced(backoff)).await;
                     // A token can expire across minutes of accumulated waits
@@ -2228,9 +2321,9 @@ impl SessionActor {
                     }
                 } else if !self.turn_stream_drained.lock().contains_key(&request_id) {
                     return Err(FailedSubmission {
-                            info: revoked_sampling_info(),
-                            attempts,
-                        });
+                        info: revoked_sampling_info(),
+                        attempts,
+                    });
                 }
 
                 // The awaited result is authoritative for successful-request accounting once the request survives the turn boundary
@@ -2326,9 +2419,15 @@ impl SessionActor {
             SamplerFailureRecovery::RefreshAuthAndResubmit { credential, store } => {
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store })
             }
-            SamplerFailureRecovery::RetryTransient { kind, status_code, upstream } => {
-                Ok(SamplerTurnOutcome::RetryTransient { kind, status_code, upstream })
-            }
+            SamplerFailureRecovery::RetryTransient {
+                kind,
+                status_code,
+                upstream,
+            } => Ok(SamplerTurnOutcome::RetryTransient {
+                kind,
+                status_code,
+                upstream,
+            }),
         }
     }
 
@@ -2414,8 +2513,12 @@ impl SessionActor {
         // Every preflight caller, including helper/compaction clients, observes the
         // same prompt boundary; a terminal refusal cannot start another refresh.
         {
-            let prompt=self.refusal_prompt.lock().unwrap();
-            if prompt.state==fuigo_sampling_types::refusal::PromptState::Terminal || prompt.refreshes>0 {return;}
+            let prompt = self.refusal_prompt.lock().unwrap();
+            if prompt.state == fuigo_sampling_types::refusal::PromptState::Terminal
+                || prompt.refreshes > 0
+            {
+                return;
+            }
         }
         if let Some(ref am) = self.auth_manager {
             let creds = self.chat_state_handle.get_credentials().await;
@@ -2741,44 +2844,71 @@ fn prompt_terminal_error(
         -32603
     };
     // Parent Error::internal_error() has exactly this JSON-RPC message.
-    acp::Error::new(code, "Internal error").data(
-        crate::sampling::error::sampling_error_data(message, http_status, error),
-    )
+    acp::Error::new(code, "Internal error").data(crate::sampling::error::sampling_error_data(
+        message,
+        http_status,
+        error,
+    ))
 }
 
 /// P189 (M3): holds every model HTTP request of a session tree at the single dispatch point while the tree is parked.
 /// Set on every `SamplerConfig` built for a session or its subagents, so the sampler's own retries and any side call
 /// that got past execution admission wait here, just before the request leaves the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CallRole { Main, Side }
+pub(crate) enum CallRole {
+    Main,
+    Side,
+}
 
 pub(crate) struct ParkGate {
     session_id: String,
     role: CallRole,
-    durable: Option<(Arc<std::sync::Mutex<super::held_wakes::HeldWakes>>, fuigo_session_writer::SessionWriter)>,
+    durable: Option<(
+        Arc<std::sync::Mutex<super::held_wakes::HeldWakes>>,
+        fuigo_session_writer::SessionWriter,
+    )>,
 }
 impl ParkGate {
     pub(crate) fn new(
         session_id: String,
         role: CallRole,
-        durable: Option<(Arc<std::sync::Mutex<super::held_wakes::HeldWakes>>, fuigo_session_writer::SessionWriter)>,
+        durable: Option<(
+            Arc<std::sync::Mutex<super::held_wakes::HeldWakes>>,
+            fuigo_session_writer::SessionWriter,
+        )>,
     ) -> Self {
-        ParkGate { session_id, role, durable }
+        ParkGate {
+            session_id,
+            role,
+            durable,
+        }
     }
 }
 
-
 impl fuigo_sampling_types::DispatchGate for ParkGate {
-    fn on_refusal(&self,error:&fuigo_sampling_types::SamplingError)->bool {
-        if self.role == CallRole::Side {return false;}
-        let prompt=REFUSAL_PROMPTS.lock().unwrap().get(&self.session_id).and_then(std::sync::Weak::upgrade);
-        if let Some(prompt)=prompt {
-            let mut prompt=prompt.lock().unwrap();
-            let result=error.upstream().classification();
-            let eligible=prompt.refreshes==0 && result.refresh_eligible(error.upstream().http_status.unwrap_or(0),prompt.refreshable);
-            if !eligible && (result.is_terminal() || prompt.refreshes>0) {
-                prompt.state=fuigo_sampling_types::refusal::PromptState::Terminal;
-                TERMINAL_REFUSALS.lock().unwrap().insert(self.session_id.clone(), fuigo_sampler::SamplingErrorInfo::from(error));
+    fn on_refusal(&self, error: &fuigo_sampling_types::SamplingError) -> bool {
+        if self.role == CallRole::Side {
+            return false;
+        }
+        let prompt = REFUSAL_PROMPTS
+            .lock()
+            .unwrap()
+            .get(&self.session_id)
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(prompt) = prompt {
+            let mut prompt = prompt.lock().unwrap();
+            let result = error.upstream().classification();
+            let eligible = prompt.refreshes == 0
+                && result.refresh_eligible(
+                    error.upstream().http_status.unwrap_or(0),
+                    prompt.refreshable,
+                );
+            if !eligible && (result.is_terminal() || prompt.refreshes > 0) {
+                prompt.state = fuigo_sampling_types::refusal::PromptState::Terminal;
+                TERMINAL_REFUSALS.lock().unwrap().insert(
+                    self.session_id.clone(),
+                    fuigo_sampler::SamplingErrorInfo::from(error),
+                );
                 if let Some((queue, writer)) = &self.durable {
                     let mut queue = queue.lock().unwrap();
                     queue.terminal = true;
@@ -2791,11 +2921,13 @@ impl fuigo_sampling_types::DispatchGate for ParkGate {
         }
         false
     }
-    fn check_open(&self)->fuigo_sampling_types::Result<()> {
+    fn check_open(&self) -> fuigo_sampling_types::Result<()> {
         check_refusal_dispatch(&self.session_id)
     }
     fn wait_open(&self) -> fuigo_sampling_types::DispatchGateFuture<'_> {
-        Box::pin(crate::session::quiesce::wait_model_allowed(&self.session_id))
+        Box::pin(crate::session::quiesce::wait_model_allowed(
+            &self.session_id,
+        ))
     }
 }
 
@@ -2807,8 +2939,14 @@ impl fuigo_tools::implementations::web_search::client::ModelDispatchGate for Sid
         fuigo_sampling_types::DispatchGate::check_open(&self.0).map_err(|e| e.to_string())
     }
 }
-pub(crate) fn side_model_gate(session_id: &str) -> fuigo_tools::implementations::web_search::client::SharedModelDispatchGate {
-    std::sync::Arc::new(SideModelGate(ParkGate::new(session_id.to_string(), CallRole::Side, None)))
+pub(crate) fn side_model_gate(
+    session_id: &str,
+) -> fuigo_tools::implementations::web_search::client::SharedModelDispatchGate {
+    std::sync::Arc::new(SideModelGate(ParkGate::new(
+        session_id.to_string(),
+        CallRole::Side,
+        None,
+    )))
 }
 
 impl SessionActor {
@@ -2816,21 +2954,45 @@ impl SessionActor {
     /// the prompt is terminal and the error is not a compaction failure (those carry `error_kind` "compaction"). The wire form of `upstream` does not carry the Flux routing bit, so it cannot be read back.
     pub(crate) fn is_terminal_prompt_refusal(&self, error: &acp::Error) -> bool {
         crate::sampling::error::error_kind_str_from_error(error) != Some("compaction")
-            && self.refusal_prompt.lock().unwrap().state == fuigo_sampling_types::refusal::PromptState::Terminal
+            && self.refusal_prompt.lock().unwrap().state
+                == fuigo_sampling_types::refusal::PromptState::Terminal
     }
     /// A compaction call that ends the prompt with a terminal Flux refusal returns that refusal, through the path a
     /// main-call refusal takes, instead of a compaction failure the caller would log before the main request is
     /// blocked with a generic error. Anything else comes back unchanged.
-    pub(crate) async fn end_prompt_on_compaction_refusal(self: &Arc<Self>, failure: acp::Error) -> acp::Error {
-        let Some(info) = TERMINAL_REFUSALS.lock().unwrap().remove(&self.session_id_string()) else { return failure };
+    pub(crate) async fn end_prompt_on_compaction_refusal(
+        self: &Arc<Self>,
+        failure: acp::Error,
+    ) -> acp::Error {
+        let Some(info) = TERMINAL_REFUSALS
+            .lock()
+            .unwrap()
+            .remove(&self.session_id_string())
+        else {
+            return failure;
+        };
         if !info.upstream().flux_routed
-            || self.refusal_prompt.lock().unwrap().state != fuigo_sampling_types::refusal::PromptState::Terminal
+            || self.refusal_prompt.lock().unwrap().state
+                != fuigo_sampling_types::refusal::PromptState::Terminal
         {
             return failure;
         }
-        let transient = TransientRetryState { step_attempts: 0, prompt_attempts: 0, episode_start: None, enabled: false };
+        let transient = TransientRetryState {
+            step_attempts: 0,
+            prompt_attempts: 0,
+            episode_start: None,
+            enabled: false,
+        };
         // Boxed: handle_sampling_failure can itself run a compaction.
-        match Box::pin(self.handle_sampling_failure(info, 0, transient, false, TurnParkState::Fresh)).await {
+        match Box::pin(self.handle_sampling_failure(
+            info,
+            0,
+            transient,
+            false,
+            TurnParkState::Fresh,
+        ))
+        .await
+        {
             Err(error) => error,
             Ok(_) => failure,
         }
@@ -2866,6 +3028,47 @@ impl SessionActor {
             });
         server_window
     }
+}
+
+// Weak entries cannot keep actors alive. Bind once per prompt; session/load does not
+// reopen the prompt. The same gate protects main, retry, compact, and title dispatches.
+type RefusalPrompt = std::sync::Mutex<fuigo_sampling_types::refusal::PromptSM>;
+static REFUSAL_PROMPTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<RefusalPrompt>>>,
+> = std::sync::LazyLock::new(Default::default);
+/// The refusal that ended each session's prompt, kept so a failed inline compaction can end the prompt with the
+/// same classified error a main call would have returned. Cleared when the next prompt binds.
+static TERMINAL_REFUSALS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, fuigo_sampler::SamplingErrorInfo>>,
+> = std::sync::LazyLock::new(Default::default);
+pub(super) fn bind_refusal_prompt(id: &str, prompt: &std::sync::Arc<RefusalPrompt>) {
+    TERMINAL_REFUSALS.lock().unwrap().remove(id);
+    let mut entries = REFUSAL_PROMPTS.lock().unwrap();
+    entries.retain(|_, v| v.strong_count() > 0);
+    entries.insert(id.into(), std::sync::Arc::downgrade(prompt));
+}
+#[allow(
+    clippy::result_large_err,
+    reason = "SamplingError carries the inline upstream classification; boxing it is a separate refactor"
+)]
+fn check_refusal_dispatch(id: &str) -> fuigo_sampling_types::Result<()> {
+    // Rebuilt child samplers keep the dispatch veto of every parent prompt.
+    // Their own refusal is still recorded only against their own session.
+    for id in crate::session::quiesce::ancestors_including_self(id) {
+        let prompt = REFUSAL_PROMPTS
+            .lock()
+            .unwrap()
+            .get(&id)
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(prompt) = prompt
+            && prompt.lock().unwrap().state == fuigo_sampling_types::refusal::PromptState::Terminal
+        {
+            return Err(fuigo_sampling_types::SamplingError::InvalidConfiguration(
+                "prompt ended with a terminal upstream refusal",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2925,28 +3128,4 @@ mod stream_drain_tests {
         assert_eq!(result.kind, fuigo_sampler::SamplingErrorKind::Cancelled);
         assert_eq!(result.status_code, None);
     }
-}
-
-// Weak entries cannot keep actors alive. Bind once per prompt; session/load does not
-// reopen the prompt. The same gate protects main, retry, compact, and title dispatches.
-type RefusalPrompt = std::sync::Mutex<fuigo_sampling_types::refusal::PromptSM>;
-static REFUSAL_PROMPTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String,std::sync::Weak<RefusalPrompt>>>> = std::sync::LazyLock::new(Default::default);
-/// The refusal that ended each session's prompt, kept so a failed inline compaction can end the prompt with the
-/// same classified error a main call would have returned. Cleared when the next prompt binds.
-static TERMINAL_REFUSALS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String,fuigo_sampler::SamplingErrorInfo>>> = std::sync::LazyLock::new(Default::default);
-pub(super) fn bind_refusal_prompt(id:&str,prompt:&std::sync::Arc<RefusalPrompt>) {
-    TERMINAL_REFUSALS.lock().unwrap().remove(id);
-    let mut entries=REFUSAL_PROMPTS.lock().unwrap();entries.retain(|_,v|v.strong_count()>0);
-    entries.insert(id.into(),std::sync::Arc::downgrade(prompt));
-}
-fn check_refusal_dispatch(id:&str)->fuigo_sampling_types::Result<()> {
-    // Rebuilt child samplers keep the dispatch veto of every parent prompt.
-    // Their own refusal is still recorded only against their own session.
-    for id in crate::session::quiesce::ancestors_including_self(id) {
-        let prompt=REFUSAL_PROMPTS.lock().unwrap().get(&id).and_then(std::sync::Weak::upgrade);
-        if let Some(prompt)=prompt && prompt.lock().unwrap().state==fuigo_sampling_types::refusal::PromptState::Terminal {
-            return Err(fuigo_sampling_types::SamplingError::InvalidConfiguration("prompt ended with a terminal upstream refusal"));
-        }
-    }
-    Ok(())
 }

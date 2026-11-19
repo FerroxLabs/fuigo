@@ -2355,7 +2355,10 @@ fn cancelled_execute_names_the_command_that_stopped() {
     };
     let error = error_of(&call("cancelled", "sleep 600 && make all"));
     assert!(error.starts_with("cancelled"), "{error:?}");
-    assert!(error.contains("sleep 600 && make all"), "names the command: {error:?}");
+    assert!(
+        error.contains("sleep 600 && make all"),
+        "names the command: {error:?}"
+    );
     // Only the first line of a long script is named, and it is cut to a short length
     let long = format!("make {}\necho done", "x".repeat(200));
     let error = error_of(&call("cancelled", &long));
@@ -5542,7 +5545,10 @@ fn user_image(display_number: Option<usize>) -> acp::SessionUpdate {
     let mut img = acp::ImageContent::new("AAAA", "image/png");
     if let Some(n) = display_number {
         let mut m = acp::Meta::new();
-        m.insert("fuigo.dev/imageDisplayNumber".to_owned(), serde_json::json!(n));
+        m.insert(
+            "fuigo.dev/imageDisplayNumber".to_owned(),
+            serde_json::json!(n),
+        );
         img = img.meta(Some(m));
     }
     acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Image(img)))
@@ -5557,7 +5563,11 @@ fn replayed_image_block_marks_its_placeholder_sent() {
         is_replay: true,
         ..NotificationMeta::default()
     };
-    tracker.handle_update(user_message("see [Image #1] and [Image #2]"), &replay, &mut sb);
+    tracker.handle_update(
+        user_message("see [Image #1] and [Image #2]"),
+        &replay,
+        &mut sb,
+    );
     assert!(tracker.handle_update(user_image(Some(1)), &replay, &mut sb));
     // An image block without a display number names no placeholder
     assert!(!tracker.handle_update(user_image(None), &replay, &mut sb));

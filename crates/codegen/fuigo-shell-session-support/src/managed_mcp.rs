@@ -481,7 +481,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let _ = call_gateway_tool(&format!("http://{addr}"), "token", "t", serde_json::json!({})).await;
+        let _ = call_gateway_tool(
+            &format!("http://{addr}"),
+            "token",
+            "t",
+            serde_json::json!({}),
+        )
+        .await;
         server.abort();
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "the mock must have received the call");
@@ -515,7 +521,11 @@ mod tests {
         .await;
         server.abort();
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 1, "the mock must have received the discovery call");
+        assert_eq!(
+            seen.len(),
+            1,
+            "the mock must have received the discovery call"
+        );
         assert!(!seen[0].contains_key("x-fuigo-client-version"));
         assert_eq!(seen[0]["authorization"], "Bearer token");
     }

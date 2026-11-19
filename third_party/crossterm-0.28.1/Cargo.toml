@@ -152,6 +152,13 @@ features = [
 optional = true
 
 # Match the other vendored crates: audit prints without enabling unrelated lints.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(winapi)",
+    "cfg(crossterm_winapi)",
+    'cfg(feature, values("winapi", "crossterm_winapi"))',
+] }
+
 [lints.clippy]
 all = { level = "allow", priority = -1 }
 print_stdout = "deny"

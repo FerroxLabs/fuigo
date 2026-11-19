@@ -11,7 +11,8 @@ use std::process::{Command, Output};
 
 fn pager_binary() -> PathBuf {
     if let Ok(p) = std::env::var("PAGER_BINARY") {
-        return std::path::absolute(&p).unwrap_or_else(|e| panic!("absolutize PAGER_BINARY {p}: {e}"));
+        return std::path::absolute(&p)
+            .unwrap_or_else(|e| panic!("absolutize PAGER_BINARY {p}: {e}"));
     }
     option_env!("CARGO_BIN_EXE_fuigo-pager")
         .map(PathBuf::from)
@@ -36,9 +37,19 @@ fn invalid_utf8() -> OsString {
 fn a_non_utf8_prompt_is_a_usage_error_not_a_crash() {
     let out = run(&[OsString::from("-p"), invalid_utf8()]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2), "usage error expected\nstderr:\n{stderr}");
-    assert!(!stderr.contains("panicked"), "must not panic\nstderr:\n{stderr}");
-    assert!(stderr.to_lowercase().contains("utf-8"), "names the problem\nstderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "usage error expected\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "must not panic\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("utf-8"),
+        "names the problem\nstderr:\n{stderr}"
+    );
 }
 
 #[test]
@@ -47,9 +58,17 @@ fn a_non_utf8_cwd_is_accepted() {
     let odd = dir.path().join(OsString::from_vec(vec![b'd', 0xff, b'r']));
     std::fs::create_dir(&odd).unwrap();
     assert!(odd.as_os_str().as_bytes().contains(&0xff));
-    let out = run(&[OsString::from("--cwd"), odd.into_os_string(), OsString::from("version")]);
+    let out = run(&[
+        OsString::from("--cwd"),
+        odd.into_os_string(),
+        OsString::from("version"),
+    ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "--cwd with a non-UTF-8 path\nstderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "--cwd with a non-UTF-8 path\nstderr:\n{stderr}"
+    );
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
@@ -63,7 +82,11 @@ fn a_non_utf8_cwd_does_not_panic_the_leader_stdio_bridge() {
     let home = root.path().join("fuigo-home");
     let sock = root.path().join("l.sock");
     let mut bridge = Command::new(pager_binary());
-    bridge.env("FUIGO_HOME", &home).env("HOME", root.path()).env_remove("RUST_BACKTRACE").stdin(std::process::Stdio::null());
+    bridge
+        .env("FUIGO_HOME", &home)
+        .env("HOME", root.path())
+        .env_remove("RUST_BACKTRACE")
+        .stdin(std::process::Stdio::null());
     bridge.args(vec![
         "--leader-socket".into(),
         sock.clone().into_os_string(),
@@ -73,7 +96,8 @@ fn a_non_utf8_cwd_does_not_panic_the_leader_stdio_bridge() {
         "--leader".into(),
         "stdio".into(),
     ]);
-    #[allow(clippy::disallowed_methods)] // test fixture; waited for below, and its leader is stopped by home
+    #[allow(clippy::disallowed_methods)]
+    // test fixture; waited for below, and its leader is stopped by home
     let mut child = bridge
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -94,18 +118,35 @@ fn a_non_utf8_cwd_does_not_panic_the_leader_stdio_bridge() {
     // The leader the bridge spawned lives on after it; stop every process that carries this private home.
     stop_processes_with_home(&home);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(status.is_some(), "the bridge did not exit on stdin EOF\nstderr:\n{stderr}");
-    assert!(!stderr.contains("panicked"), "must not panic\nstderr:\n{stderr}");
-    assert_ne!(status.unwrap().code(), Some(101), "panic exit code\nstderr:\n{stderr}");
+    assert!(
+        status.is_some(),
+        "the bridge did not exit on stdin EOF\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "must not panic\nstderr:\n{stderr}"
+    );
+    assert_ne!(
+        status.unwrap().code(),
+        Some(101),
+        "panic exit code\nstderr:\n{stderr}"
+    );
 }
 
 /// SIGTERM every process (Linux: found through /proc) whose environment names `home` as FUIGO_HOME, then wait for it
 /// to go, so the test leaves no leader behind.
 fn stop_processes_with_home(home: &std::path::Path) {
-    let needle = [b"FUIGO_HOME=".as_slice(), home.as_os_str().as_bytes(), b"\0"].concat();
+    let needle = [
+        b"FUIGO_HOME=".as_slice(),
+        home.as_os_str().as_bytes(),
+        b"\0",
+    ]
+    .concat();
     let me = std::process::id();
     let find = || -> Vec<u32> {
-        let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
         dir.flatten()
             .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
             .filter(|pid| *pid != me)

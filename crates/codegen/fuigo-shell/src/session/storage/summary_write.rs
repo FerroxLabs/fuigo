@@ -392,7 +392,11 @@ pub(crate) fn apply_patch_locked(writer: &SessionWriter, patch: &SummaryPatch) -
     })
 }
 
-fn read_modify_write(writer: &SessionWriter, summary_path: &Path, patch: &SummaryPatch) -> io::Result<bool> {
+fn read_modify_write(
+    writer: &SessionWriter,
+    summary_path: &Path,
+    patch: &SummaryPatch,
+) -> io::Result<bool> {
     let mut summary = read_summary(summary_path)?;
     let absent_title_applied = summary.apply_patch(patch, Utc::now());
     write_summary_atomic(writer, summary_path, &summary)?;
@@ -401,11 +405,19 @@ fn read_modify_write(writer: &SessionWriter, summary_path: &Path, patch: &Summar
 
 // Every raw write below takes the session's `&SessionWriter` and refuses a path outside its folder: with no writer
 // there is no way to call it, so the compiler lists every caller (review r2).
-#[allow(clippy::disallowed_methods, reason = "summary RMW (§5.5): summary.json.lock")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "summary RMW (§5.5): summary.json.lock"
+)]
 fn open_lock_file(writer: &SessionWriter, path: &Path) -> io::Result<File> {
     writer.rel_of(path)?;
-    crate::session::storage::owner_only::open( // F5-A: summary RMW (§5.5): summary.json.lock
-        OpenOptions::new().read(true).write(true).create(true).truncate(false), // F5-A: summary RMW (§5.5): summary.json.lock
+    crate::session::storage::owner_only::open(
+        // F5-A: summary RMW (§5.5): summary.json.lock
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false), // F5-A: summary RMW (§5.5): summary.json.lock
         path,
     )
 }
@@ -422,7 +434,11 @@ fn read_summary(path: &Path) -> io::Result<Summary> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-fn write_summary_atomic(writer: &SessionWriter, summary_path: &Path, summary: &Summary) -> io::Result<()> {
+fn write_summary_atomic(
+    writer: &SessionWriter,
+    summary_path: &Path,
+    summary: &Summary,
+) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(summary)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     // F5-A: summary RMW (§5.5): the sanctioned summary.json rewrite under summary.json.lock
@@ -439,8 +455,15 @@ pub(crate) fn fail_next_restore_summary_mtime() {
     RESTORE_MTIME_FAULT.set(true);
 }
 
-#[allow(clippy::disallowed_methods, reason = "summary RMW (§5.5): mtime restore under summary.json.lock")]
-fn restore_summary_mtime(writer: &SessionWriter, path: &Path, mtime: std::time::SystemTime) -> io::Result<()> {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "summary RMW (§5.5): mtime restore under summary.json.lock"
+)]
+fn restore_summary_mtime(
+    writer: &SessionWriter,
+    path: &Path,
+    mtime: std::time::SystemTime,
+) -> io::Result<()> {
     writer.rel_of(path)?;
     #[cfg(test)]
     if RESTORE_MTIME_FAULT.replace(false) {
@@ -452,7 +475,10 @@ fn restore_summary_mtime(writer: &SessionWriter, path: &Path, mtime: std::time::
         .set_modified(mtime)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,7 +978,9 @@ mod tests {
         let (_adapter, _info, summary_path) = new_session(&dir).await;
         let mut expected = read_summary(&summary_path).unwrap();
 
-        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
+        let repair = repair_worktree_identity(
+            &writer_of(&_adapter, &_info),
+            &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
 
@@ -986,7 +1014,9 @@ mod tests {
             .modified()
             .unwrap();
 
-        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
+        let repair = repair_worktree_identity(
+            &writer_of(&_adapter, &_info),
+            &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
         assert!(matches!(repair, WorktreeIdentityRepair::Applied(_)));
@@ -1011,7 +1041,9 @@ mod tests {
         let (_adapter, _info, summary_path) = new_session(&dir).await;
         fail_next_restore_summary_mtime();
 
-        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
+        let repair = repair_worktree_identity(
+            &writer_of(&_adapter, &_info),
+            &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
         let WorktreeIdentityRepair::Applied(applied) = repair else {
@@ -1035,7 +1067,9 @@ mod tests {
         std::fs::write(&summary_path, serde_json::to_vec_pretty(&on_disk).unwrap()).unwrap();
         let bytes_before = std::fs::read(&summary_path).unwrap();
 
-        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
+        let repair = repair_worktree_identity(
+            &writer_of(&_adapter, &_info),
+            &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
 
@@ -1056,7 +1090,9 @@ mod tests {
         on_disk.source_workspace_dir = Some("/home/user/repo".to_owned());
         std::fs::write(&summary_path, serde_json::to_vec_pretty(&on_disk).unwrap()).unwrap();
 
-        let repair = repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/other/source")),
+        let repair = repair_worktree_identity(
+            &writer_of(&_adapter, &_info),
+            &identity("fix-bug", Some("/other/source")),
         )
         .unwrap();
 
@@ -1079,14 +1115,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (_adapter, _info, summary_path) = new_session(&dir).await;
         let lock_path = lock_path_for(&summary_path);
-        repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("fix-bug", Some("/home/user/repo")),
+        repair_worktree_identity(
+            &writer_of(&_adapter, &_info),
+            &identity("fix-bug", Some("/home/user/repo")),
         )
         .unwrap();
         let bytes_after_first = std::fs::read(&summary_path).unwrap();
 
-        let repair =
-            repair_worktree_identity(&writer_of(&_adapter, &_info), &identity("other-label", None))
-                .unwrap();
+        let repair = repair_worktree_identity(
+            &writer_of(&_adapter, &_info),
+            &identity("other-label", None),
+        )
+        .unwrap();
 
         let WorktreeIdentityRepair::AlreadyKinded(fresh) = repair else {
             panic!("expected the second repair to decline");

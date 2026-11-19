@@ -995,7 +995,14 @@ fn rewind_all_previews_then_executes_when_clean() {
     dispatch(Action::RewindPickerSelect(1), &mut app);
     let effects = dispatch(Action::RewindConfirm(1), &mut app);
     assert!(
-        matches!(&effects[0], Effect::RewindExecute { mode: RewindScope::All, force: false, .. }),
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                mode: RewindScope::All,
+                force: false,
+                ..
+            }
+        ),
         "first request must be a dry run, got {effects:?}"
     );
     let effects = dispatch(
@@ -1006,10 +1013,21 @@ fn rewind_all_previews_then_executes_when_clean() {
         &mut app,
     );
     assert!(
-        matches!(&effects[0], Effect::RewindExecute { mode: RewindScope::All, force: true, target_prompt_index: 1, .. }),
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                mode: RewindScope::All,
+                force: true,
+                target_prompt_index: 1,
+                ..
+            }
+        ),
         "clean preview must proceed, got {effects:?}"
     );
-    assert!(matches!(phase_of(&app, id), crate::views::rewind::RewindPhase::Executing { .. }));
+    assert!(matches!(
+        phase_of(&app, id),
+        crate::views::rewind::RewindPhase::Executing { .. }
+    ));
 }
 
 /// Files changed outside Fuigo are listed and NOT overwritten unless the user says so.
@@ -1035,18 +1053,30 @@ fn rewind_conflicts_are_reported_and_not_overwritten_until_confirmed() {
         }),
         &mut app,
     );
-    assert!(effects.is_empty(), "a conflict must not execute anything: {effects:?}");
-    let RewindPhase::Conflicts { conflicts, scope, .. } = phase_of(&app, id) else {
+    assert!(
+        effects.is_empty(),
+        "a conflict must not execute anything: {effects:?}"
+    );
+    let RewindPhase::Conflicts {
+        conflicts, scope, ..
+    } = phase_of(&app, id)
+    else {
         panic!("expected the conflict prompt");
     };
     assert_eq!(scope, RewindScope::All);
     assert_eq!(conflicts[0].path, "src/a.rs");
 
-
     // Keep files: conversation-only, forced.
     let effects = dispatch(Action::RewindConflict(ConflictChoice::KeepFiles), &mut app);
     assert!(
-        matches!(&effects[0], Effect::RewindExecute { mode: RewindScope::ConversationOnly, force: true, .. }),
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                mode: RewindScope::ConversationOnly,
+                force: true,
+                ..
+            }
+        ),
         "got {effects:?}"
     );
 }
@@ -1054,7 +1084,10 @@ fn rewind_conflicts_are_reported_and_not_overwritten_until_confirmed() {
 #[test]
 fn rewind_conflict_overwrite_forces_the_same_scope_and_cancel_sends_nothing() {
     use crate::views::rewind::{ConflictChoice, RewindScope};
-    for (choice, expect_send) in [(ConflictChoice::Overwrite, true), (ConflictChoice::Cancel, false)] {
+    for (choice, expect_send) in [
+        (ConflictChoice::Overwrite, true),
+        (ConflictChoice::Cancel, false),
+    ] {
         let mut app = app_with_two_turns();
         let id = AgentId(0);
         dispatch(Action::RewindShowPicker, &mut app);
@@ -1066,18 +1099,33 @@ fn rewind_conflict_overwrite_forces_the_same_scope_and_cancel_sends_nothing() {
             &mut app,
         );
         dispatch(Action::RewindPickerSelect(1), &mut app);
-        dispatch(Action::RewindConfirmScoped(1, RewindScope::FilesOnly), &mut app);
+        dispatch(
+            Action::RewindConfirmScoped(1, RewindScope::FilesOnly),
+            &mut app,
+        );
         dispatch(
             Action::TaskComplete(TaskResult::RewindExecuteComplete {
                 agent_id: id,
-                response: files_response("files_only", false, &[], &[("b.txt", "deleted_externally")]),
+                response: files_response(
+                    "files_only",
+                    false,
+                    &[],
+                    &[("b.txt", "deleted_externally")],
+                ),
             }),
             &mut app,
         );
         let effects = dispatch(Action::RewindConflict(choice), &mut app);
         if expect_send {
             assert!(
-                matches!(&effects[0], Effect::RewindExecute { mode: RewindScope::FilesOnly, force: true, .. }),
+                matches!(
+                    &effects[0],
+                    Effect::RewindExecute {
+                        mode: RewindScope::FilesOnly,
+                        force: true,
+                        ..
+                    }
+                ),
                 "got {effects:?}"
             );
         } else {
@@ -1102,9 +1150,19 @@ fn rewind_conversation_only_executes_directly() {
         &mut app,
     );
     dispatch(Action::RewindPickerSelect(1), &mut app);
-    let effects = dispatch(Action::RewindConfirmScoped(1, RewindScope::ConversationOnly), &mut app);
+    let effects = dispatch(
+        Action::RewindConfirmScoped(1, RewindScope::ConversationOnly),
+        &mut app,
+    );
     assert!(
-        matches!(&effects[0], Effect::RewindExecute { mode: RewindScope::ConversationOnly, force: true, .. }),
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                mode: RewindScope::ConversationOnly,
+                force: true,
+                ..
+            }
+        ),
         "got {effects:?}"
     );
 }
@@ -1117,7 +1175,9 @@ fn rewind_result_lists_restored_files_and_files_only_keeps_the_transcript() {
     let id = AgentId(0);
     let before = app.agents[&id].scrollback.len();
     app.agents.get_mut(&id).unwrap().rewind_state = Some(crate::views::rewind::RewindState {
-        phase: RewindPhase::Executing { target_prompt_index: 1 },
+        phase: RewindPhase::Executing {
+            target_prompt_index: 1,
+        },
         anchor_entry_idx: 0,
         stashed_draft: None,
         selected_prompt_index: None,
@@ -1133,14 +1193,27 @@ fn rewind_result_lists_restored_files_and_files_only_keeps_the_transcript() {
     assert_eq!(sb.len(), before + 1, "files only must not remove any turn");
     let text = last_system_text(&app, id);
     assert!(text.contains("Restored 2 files"), "{text}");
-    assert!(text.contains("a.txt") && text.contains("dir/b.txt"), "{text}");
+    assert!(
+        text.contains("a.txt") && text.contains("dir/b.txt"),
+        "{text}"
+    );
 
     assert_eq!(
-        crate::app::dispatch::rewind::rewind_result_message(&files_response("all", true, &["x"], &[])),
+        crate::app::dispatch::rewind::rewind_result_message(&files_response(
+            "all",
+            true,
+            &["x"],
+            &[]
+        )),
         "Reverted conversation and 1 file"
     );
     assert_eq!(
-        crate::app::dispatch::rewind::rewind_result_message(&files_response("conversation_only", true, &[], &[])),
+        crate::app::dispatch::rewind::rewind_result_message(&files_response(
+            "conversation_only",
+            true,
+            &[],
+            &[]
+        )),
         "Reverted conversation"
     );
 }

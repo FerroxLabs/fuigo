@@ -7,11 +7,11 @@ use crate::agent::mvp_agent::{
     HarnessSwitch, MvpAgent, agent_name_after_model_switch, explicit_agent_selection,
     harness_switch_decision, harnesses_are_compatible, resolve_required_agent_type,
 };
-pub(crate) use crate::session::SwitchContextWindow;
 use crate::session::SessionCommand;
-use std::num::NonZeroU64;
+pub(crate) use crate::session::SwitchContextWindow;
 use agent_client_protocol::{self as acp};
 use fuigo_sampling_types::ReasoningEffort;
+use std::num::NonZeroU64;
 use tokio::sync::oneshot;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigNotice {

@@ -18,8 +18,8 @@ use fuigo_config::policy_sources::{
 use tracing::{info, warn};
 
 use super::{
-    AllowedMcpServer, ManagedSettings, MarketplaceAllowlist, McpServerAllowlist,
-    locked_down_base, parse_managed_settings_base, warn_on_unmatchable_allow_url, warn_on_unmatchable_deny_url,
+    AllowedMcpServer, ManagedSettings, MarketplaceAllowlist, McpServerAllowlist, locked_down_base,
+    parse_managed_settings_base, warn_on_unmatchable_allow_url, warn_on_unmatchable_deny_url,
 };
 
 // ── MCP ────────────────────────────────────────────────────────────────────────────────────────
@@ -448,7 +448,8 @@ pub(super) fn resolve_managed_settings_with(
                     && source.tier != fuigo_config::policy_sources::PolicyLayerTier::Vendor
                     && copy_of(source).is_none()
                 {
-                    ms.permissions.extend(locked_down_base(&source.path).permissions);
+                    ms.permissions
+                        .extend(locked_down_base(&source.path).permissions);
                 }
             }
         }

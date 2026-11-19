@@ -4,7 +4,9 @@
 use super::support::*;
 use super::*;
 use fuigo_workspace::permission::PermissionConfig;
-use fuigo_workspace::permission::types::{PatternMode, PermissionRule, PromptPolicy, RuleAction, ToolFilter};
+use fuigo_workspace::permission::types::{
+    PatternMode, PermissionRule, PromptPolicy, RuleAction, ToolFilter,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug)]
@@ -36,7 +38,10 @@ fn decode_output_bytes(json: &str) -> String {
         match v {
             serde_json::Value::Object(map) => {
                 if let Some(serde_json::Value::Array(bytes)) = map.get("output") {
-                    let raw: Vec<u8> = bytes.iter().filter_map(|b| b.as_u64().map(|n| n as u8)).collect();
+                    let raw: Vec<u8> = bytes
+                        .iter()
+                        .filter_map(|b| b.as_u64().map(|n| n as u8))
+                        .collect();
                     out.push_str(&format!("\n[output] {}", String::from_utf8_lossy(&raw)));
                 }
                 map.values().for_each(|c| walk(c, out));
@@ -83,14 +88,21 @@ async fn harness(
     let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let persisted = seen.clone();
-    super::disk_full_tests::spawn_persistence_stub_observing(persistence_rx, || Ok(()), move |message| {
-        if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(n)) = message {
-            let text = serde_json::to_string(&**n).unwrap_or_default();
-            persisted.lock().unwrap().push(decode_output_bytes(&text));
-        }
-    });
+    super::disk_full_tests::spawn_persistence_stub_observing(
+        persistence_rx,
+        || Ok(()),
+        move |message| {
+            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(n)) = message
+            {
+                let text = serde_json::to_string(&**n).unwrap_or_default();
+                persisted.lock().unwrap().push(decode_output_bytes(&text));
+            }
+        },
+    );
     let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let terminal = Arc::new(CountingTerminal { commands: commands.clone() });
+    let terminal = Arc::new(CountingTerminal {
+        commands: commands.clone(),
+    });
     let hook_gateway = fuigo_acp_lib::AcpAgentGatewaySender::new(gateway_tx.clone());
     let (mut actor, _ev) =
         create_test_actor_with_terminal(0, 256_000, 85, gateway_tx, persistence_tx, terminal).await;
@@ -101,9 +113,11 @@ async fn harness(
             match msg {
                 fuigo_acp_lib::AcpClientMessage::RequestPermission(args) => {
                     p.fetch_add(1, Ordering::SeqCst);
-                    let _ = args.response_tx.send(Ok(acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Cancelled,
-                    )));
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::RequestPermissionResponse::new(
+                            acp::RequestPermissionOutcome::Cancelled,
+                        )));
                 }
                 fuigo_acp_lib::AcpClientMessage::SessionNotification(args) => {
                     let text = serde_json::to_string(&args.request).unwrap_or_default();
@@ -111,7 +125,9 @@ async fn harness(
                     let _ = args.response_tx.send(Ok(()));
                 }
                 fuigo_acp_lib::AcpClientMessage::ExtNotification(args) => {
-                    s.lock().unwrap().push(decode_output_bytes(args.request.params.get()));
+                    s.lock()
+                        .unwrap()
+                        .push(decode_output_bytes(args.request.params.get()));
                 }
                 _ => {}
             }
@@ -137,13 +153,23 @@ async fn harness(
     if !specs.is_empty() {
         install_pre_tool_use_hooks(&mut actor, specs);
     }
-    Harness { actor, commands, prompts, seen }
+    Harness {
+        actor,
+        commands,
+        prompts,
+        seen,
+    }
 }
 
 impl Harness {
     async fn bang(&self, command: &str) {
-        let blocks = [acp::ContentBlock::Text(acp::TextContent::new(format!("!{command}")))];
-        let result = self.actor.handle_direct_bash_command("bang-1", command.to_owned(), &blocks).await;
+        let blocks = [acp::ContentBlock::Text(acp::TextContent::new(format!(
+            "!{command}"
+        )))];
+        let result = self
+            .actor
+            .handle_direct_bash_command("bang-1", command.to_owned(), &blocks)
+            .await;
         assert!(result.is_ok(), "the turn must end normally: {result:?}");
     }
     fn ran(&self) -> Vec<String> {
@@ -151,21 +177,31 @@ impl Harness {
     }
     /// The one refusal line the user sees (what `bang_refusal` returns), or "" when nothing refuses.
     async fn refusal(&self, command: &str) -> String {
-        let input = fuigo_tools::types::ToolInput::Bash(fuigo_tools::implementations::BashToolInput {
-            command: command.to_owned(),
-            timeout: None,
-            description: command.to_owned(),
-            is_background: false,
-            block_until_ms: None,
-            workdir: None,
-        });
+        let input =
+            fuigo_tools::types::ToolInput::Bash(fuigo_tools::implementations::BashToolInput {
+                command: command.to_owned(),
+                timeout: None,
+                description: command.to_owned(),
+                is_background: false,
+                block_until_ms: None,
+                workdir: None,
+            });
         self.actor
-            .bang_refusal("bang-1", command, &acp::ToolCallId::from("bash-mode-t"), "Bash", &input)
+            .bang_refusal(
+                "bang-1",
+                command,
+                &acp::ToolCallId::from("bash-mode-t"),
+                "Bash",
+                &input,
+            )
             .await
             .unwrap_or_default()
     }
     async fn model_items(&self) -> String {
-        format!("{:?}", self.actor.chat_state_handle.get_conversation().await)
+        format!(
+            "{:?}",
+            self.actor.chat_state_handle.get_conversation().await
+        )
     }
 }
 
@@ -188,20 +224,34 @@ local_test!(no_rule_no_hook_runs_as_before, async {
         items.contains("I executed a terminal command: `echo hi`\\n\\nOutput:\\n```\\nok\\n```"),
         "{items}"
     );
-    assert_eq!(h.refusal("echo hi").await, "", "nothing objects, nothing refuses");
+    assert_eq!(
+        h.refusal("echo hi").await,
+        "",
+        "nothing objects, nothing refuses"
+    );
     assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
 });
 
 local_test!(bash_deny_rule_refuses_and_names_the_rule, async {
-    let config = PermissionConfig::new(vec![rule(RuleAction::Deny, ToolFilter::Bash, Some("rm *"))]);
+    let config =
+        PermissionConfig::new(vec![rule(RuleAction::Deny, ToolFilter::Bash, Some("rm *"))]);
     let h = harness(Some(config), vec![]).await;
     h.bang("rm -rf /tmp/x").await;
     assert!(h.ran().is_empty(), "a denied command must not run");
     let screen = h.refusal("rm -rf /tmp/x").await;
-    assert!(screen.starts_with("Refused: Denied by permission policy: deny rule on bash matching"), "{screen}");
+    assert!(
+        screen.starts_with("Refused: Denied by permission policy: deny rule on bash matching"),
+        "{screen}"
+    );
     let items = h.model_items().await;
-    assert!(items.contains("refused by policy and did not run"), "{items}");
-    assert!(!items.contains("deny rule"), "the model must not see the rule: {items}");
+    assert!(
+        items.contains("refused by policy and did not run"),
+        "{items}"
+    );
+    assert!(
+        !items.contains("deny rule"),
+        "the model must not see the rule: {items}"
+    );
     assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
 });
 
@@ -210,39 +260,73 @@ local_test!(locked_down_policy_refuses, async {
     let h = harness(Some(config), vec![]).await;
     h.bang("echo hi").await;
     assert!(h.ran().is_empty());
-    assert!(h.refusal("echo hi").await.starts_with("Refused: Denied by permission policy"));
+    assert!(
+        h.refusal("echo hi")
+            .await
+            .starts_with("Refused: Denied by permission policy")
+    );
 });
 
 local_test!(write_into_a_deny_ruled_path_refuses, async {
-    let config = PermissionConfig::new(vec![rule(RuleAction::Deny, ToolFilter::Edit, Some("/tmp/bang-denied/**"))]);
+    let config = PermissionConfig::new(vec![rule(
+        RuleAction::Deny,
+        ToolFilter::Edit,
+        Some("/tmp/bang-denied/**"),
+    )]);
     let h = harness(Some(config), vec![]).await;
     h.bang("echo x > /tmp/bang-denied/file").await;
-    assert!(h.ran().is_empty(), "a shell write into a deny-ruled path must not run");
-    assert!(h.refusal("echo x > /tmp/bang-denied/file").await.starts_with("Refused:"));
+    assert!(
+        h.ran().is_empty(),
+        "a shell write into a deny-ruled path must not run"
+    );
+    assert!(
+        h.refusal("echo x > /tmp/bang-denied/file")
+            .await
+            .starts_with("Refused:")
+    );
 });
 
-local_test!(ask_rule_and_ask_everything_modes_never_prompt_and_run, async {
-    let mut ask = PermissionConfig::new(vec![rule(RuleAction::Ask, ToolFilter::Bash, Some("echo *"))]);
-    ask.prompt_policy = PromptPolicy::Ask;
-    let h = harness(Some(ask), vec![]).await;
-    h.bang("echo hi").await;
-    assert_eq!(h.ran(), vec!["echo hi".to_owned()]);
-    assert_eq!(h.prompts.load(Ordering::SeqCst), 0, "an ask rule must not prompt for a ! line");
+local_test!(
+    ask_rule_and_ask_everything_modes_never_prompt_and_run,
+    async {
+        let mut ask = PermissionConfig::new(vec![rule(
+            RuleAction::Ask,
+            ToolFilter::Bash,
+            Some("echo *"),
+        )]);
+        ask.prompt_policy = PromptPolicy::Ask;
+        let h = harness(Some(ask), vec![]).await;
+        h.bang("echo hi").await;
+        assert_eq!(h.ran(), vec!["echo hi".to_owned()]);
+        assert_eq!(
+            h.prompts.load(Ordering::SeqCst),
+            0,
+            "an ask rule must not prompt for a ! line"
+        );
 
-    let mut dont_ask = PermissionConfig::new(vec![rule(RuleAction::Ask, ToolFilter::Bash, Some("echo *"))]);
-    dont_ask.prompt_policy = PromptPolicy::Deny;
-    let h = harness(Some(dont_ask), vec![]).await;
-    h.bang("echo hi").await;
-    assert_eq!(h.ran(), vec!["echo hi".to_owned()], "dontAsk must not refuse a ! line");
-    assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
+        let mut dont_ask = PermissionConfig::new(vec![rule(
+            RuleAction::Ask,
+            ToolFilter::Bash,
+            Some("echo *"),
+        )]);
+        dont_ask.prompt_policy = PromptPolicy::Deny;
+        let h = harness(Some(dont_ask), vec![]).await;
+        h.bang("echo hi").await;
+        assert_eq!(
+            h.ran(),
+            vec!["echo hi".to_owned()],
+            "dontAsk must not refuse a ! line"
+        );
+        assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
 
-    let mut auto = PermissionConfig::new(vec![]);
-    auto.prompt_policy = PromptPolicy::Auto;
-    let h = harness(Some(auto), vec![]).await;
-    h.bang("echo hi").await;
-    assert_eq!(h.ran(), vec!["echo hi".to_owned()]);
-    assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
-});
+        let mut auto = PermissionConfig::new(vec![]);
+        auto.prompt_policy = PromptPolicy::Auto;
+        let h = harness(Some(auto), vec![]).await;
+        h.bang("echo hi").await;
+        assert_eq!(h.ran(), vec!["echo hi".to_owned()]);
+        assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
+    }
+);
 
 local_test!(plan_mode_does_not_refuse, async {
     let h = harness(None, vec![]).await;
@@ -253,16 +337,23 @@ local_test!(plan_mode_does_not_refuse, async {
 
 const DENY_HOOK: &str = r#"echo '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"hook says no"}}'"#;
 const ASK_HOOK: &str = r#"echo '{"hookSpecificOutput":{"permissionDecision":"ask","permissionDecisionReason":"Confirm this run"}}'"#;
-const REWRITE_HOOK: &str = r#"echo '{"hookSpecificOutput":{"updatedInput":{"command":"echo rewritten"}}}'"#;
+const REWRITE_HOOK: &str =
+    r#"echo '{"hookSpecificOutput":{"updatedInput":{"command":"echo rewritten"}}}'"#;
 
 local_test!(denying_pre_tool_use_hook_refuses, async {
     let h = harness(None, vec![pre_tool_use_spec("test/deny", None, DENY_HOOK)]).await;
     h.bang("echo hi").await;
     assert!(h.ran().is_empty());
     let screen = h.refusal("echo hi").await;
-    assert!(screen.contains("Refused: a PreToolUse hook (") && screen.contains("hook says no"), "{screen}");
+    assert!(
+        screen.contains("Refused: a PreToolUse hook (") && screen.contains("hook says no"),
+        "{screen}"
+    );
     let items = h.model_items().await;
-    assert!(!items.contains("hook says no"), "the hook message must not reach the model: {items}");
+    assert!(
+        !items.contains("hook says no"),
+        "the hook message must not reach the model: {items}"
+    );
 });
 
 const STOP_HOOK: &str = r#"echo '{"continue":false,"stopReason":"halt now"}'"#;
@@ -270,20 +361,37 @@ const STOP_HOOK: &str = r#"echo '{"continue":false,"stopReason":"halt now"}'"#;
 local_test!(stopping_pre_tool_use_hook_refuses_a_bang_line, async {
     let h = harness(None, vec![pre_tool_use_spec("test/stop", None, STOP_HOOK)]).await;
     h.bang("echo hi").await;
-    assert!(h.ran().is_empty(), "continue:false must keep the command from running");
+    assert!(
+        h.ran().is_empty(),
+        "continue:false must keep the command from running"
+    );
     let screen = h.refusal("echo hi").await;
-    assert!(screen.contains("Refused: a PreToolUse hook (") && screen.contains("halt now"), "{screen}");
+    assert!(
+        screen.contains("Refused: a PreToolUse hook (") && screen.contains("halt now"),
+        "{screen}"
+    );
 });
 
-local_test!(asking_or_rewriting_pre_tool_use_hook_neither_prompts_nor_changes_the_command, async {
-    let h = harness(None, vec![pre_tool_use_spec("test/ask", None, ASK_HOOK)]).await;
-    h.bang("echo hi").await;
-    assert_eq!(h.ran(), vec!["echo hi".to_owned()]);
-    assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
-    let h = harness(None, vec![pre_tool_use_spec("test/rewrite", None, REWRITE_HOOK)]).await;
-    h.bang("echo hi").await;
-    assert_eq!(h.ran(), vec!["echo hi".to_owned()], "a hook cannot rewrite a ! line");
-});
+local_test!(
+    asking_or_rewriting_pre_tool_use_hook_neither_prompts_nor_changes_the_command,
+    async {
+        let h = harness(None, vec![pre_tool_use_spec("test/ask", None, ASK_HOOK)]).await;
+        h.bang("echo hi").await;
+        assert_eq!(h.ran(), vec!["echo hi".to_owned()]);
+        assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
+        let h = harness(
+            None,
+            vec![pre_tool_use_spec("test/rewrite", None, REWRITE_HOOK)],
+        )
+        .await;
+        h.bang("echo hi").await;
+        assert_eq!(
+            h.ran(),
+            vec!["echo hi".to_owned()],
+            "a hook cannot rewrite a ! line"
+        );
+    }
+);
 
 local_test!(blocking_user_prompt_submit_hook_refuses, async {
     let spec = prompt_submit_spec("test/gate", "echo 'no shell today' >&2; exit 2");
@@ -291,7 +399,10 @@ local_test!(blocking_user_prompt_submit_hook_refuses, async {
     h.bang("echo hi").await;
     assert!(h.ran().is_empty());
     let screen = h.refusal("echo hi").await;
-    assert!(screen.contains("Refused: a UserPromptSubmit hook (") && screen.contains("no shell today"), "{screen}");
+    assert!(
+        screen.contains("Refused: a UserPromptSubmit hook (") && screen.contains("no shell today"),
+        "{screen}"
+    );
 });
 
 local_test!(post_tool_use_fires_after_the_command, async {
@@ -314,7 +425,11 @@ local_test!(prompt_submit_payload_carries_the_shell_command, async {
     let script = format!("cat > {}", marker.display());
     let h = harness(None, vec![prompt_submit_spec("test/ups", &script)]).await;
     h.bang("echo hi").await;
-    let payload = std::fs::read_to_string(&marker).expect("UserPromptSubmit hook must run for a ! line");
+    let payload =
+        std::fs::read_to_string(&marker).expect("UserPromptSubmit hook must run for a ! line");
     let _ = std::fs::remove_file(&marker);
-    assert!(payload.contains("\"shellCommand\":\"echo hi\""), "{payload}");
+    assert!(
+        payload.contains("\"shellCommand\":\"echo hi\""),
+        "{payload}"
+    );
 });

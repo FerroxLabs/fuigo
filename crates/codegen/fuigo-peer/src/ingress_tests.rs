@@ -34,7 +34,9 @@ fn admit(i: &mut PeerIngress, now: u64, e: &Envelope) -> IngressVerdict {
 }
 
 fn rate_limited() -> IngressVerdict {
-    IngressVerdict::Refuse(DeliveryOutcome::Rejected { reason: RejectReason::RateLimited })
+    IngressVerdict::Refuse(DeliveryOutcome::Rejected {
+        reason: RejectReason::RateLimited,
+    })
 }
 
 fn delivered() -> DeliveryOutcome {
@@ -47,14 +49,22 @@ fn s5_1_body_and_frame_caps_at_n_and_n_plus_1() {
     let mut i = PeerIngress::default();
     let ok = env(1, "a", &"x".repeat(MAX_BODY_BYTES));
     assert_eq!(admit(&mut i, 0, &ok), IngressVerdict::Proceed);
-    let big = Envelope { body: "x".repeat(MAX_BODY_BYTES + 1), ..env(1, "b", "") };
+    let big = Envelope {
+        body: "x".repeat(MAX_BODY_BYTES + 1),
+        ..env(1, "b", "")
+    };
     assert_eq!(
         i.admit(0, 1, &big, "h"),
-        IngressVerdict::Refuse(DeliveryOutcome::Rejected { reason: RejectReason::TooLarge })
+        IngressVerdict::Refuse(DeliveryOutcome::Rejected {
+            reason: RejectReason::TooLarge
+        })
     );
     assert!(frame_within_limit(MAX_FRAME_BYTES));
     assert!(!frame_within_limit(MAX_FRAME_BYTES + 1));
-    assert_eq!(check_frame(MAX_FRAME_BYTES + 1), Err(RejectReason::TooLarge));
+    assert_eq!(
+        check_frame(MAX_FRAME_BYTES + 1),
+        Err(RejectReason::TooLarge)
+    );
     assert_eq!(check_frame(MAX_FRAME_BYTES), Ok(()));
     assert_eq!(MAX_BODY_BYTES, 32 * 1024);
     assert_eq!(MAX_FRAME_BYTES, 64 * 1024);
@@ -68,18 +78,31 @@ fn s5_1_body_and_frame_caps_at_n_and_n_plus_1() {
 fn s5_3_pair_rate_ten_per_minute_with_clock() {
     let mut i = PeerIngress::default();
     for n in 0..10 {
-        assert_eq!(admit(&mut i, 100 + n, &env(1, &format!("m{n}"), "b")), IngressVerdict::Proceed, "message {n}");
+        assert_eq!(
+            admit(&mut i, 100 + n, &env(1, &format!("m{n}"), "b")),
+            IngressVerdict::Proceed,
+            "message {n}"
+        );
     }
     assert_eq!(admit(&mut i, 109, &env(1, "m10", "b")), rate_limited());
     // Another sender is a different pair.
-    assert_eq!(admit(&mut i, 109, &env(2, "x", "b")), IngressVerdict::Proceed);
+    assert_eq!(
+        admit(&mut i, 109, &env(2, "x", "b")),
+        IngressVerdict::Proceed
+    );
     // The first send ages out at t=160: one slot frees, not ten.
     assert_eq!(admit(&mut i, 159, &env(1, "m11", "b")), rate_limited());
-    assert_eq!(admit(&mut i, 160, &env(1, "m12", "b")), IngressVerdict::Proceed);
+    assert_eq!(
+        admit(&mut i, 160, &env(1, "m12", "b")),
+        IngressVerdict::Proceed
+    );
     assert_eq!(admit(&mut i, 160, &env(1, "m13", "b")), rate_limited());
     // After a full minute of quiet the allowance is whole again.
     for n in 0..10 {
-        assert_eq!(admit(&mut i, 400, &env(1, &format!("q{n}"), "b")), IngressVerdict::Proceed);
+        assert_eq!(
+            admit(&mut i, 400, &env(1, &format!("q{n}"), "b")),
+            IngressVerdict::Proceed
+        );
     }
     // A refusal charged nothing: the 11th stays refused only for its own window.
     assert_eq!(admit(&mut i, 400, &env(1, "q10", "b")), rate_limited());
@@ -93,11 +116,18 @@ fn s5_3_host_rate_sixty_per_minute_across_pairs() {
         // 6 sessions x 10 senders-per-pair: each pair stays under 10.
         let receiver = (n / 10) as u64;
         let e = env(n, &format!("m{n}"), "b");
-        assert_eq!(i.admit(5, receiver, &e, "h"), IngressVerdict::Proceed, "message {n}");
+        assert_eq!(
+            i.admit(5, receiver, &e, "h"),
+            IngressVerdict::Proceed,
+            "message {n}"
+        );
     }
     assert_eq!(i.admit(5, 99, &env(500, "late", "b"), "h"), rate_limited());
     assert_eq!(i.admit(64, 99, &env(500, "late", "b"), "h"), rate_limited());
-    assert_eq!(i.admit(65, 99, &env(500, "late", "b"), "h"), IngressVerdict::Proceed);
+    assert_eq!(
+        i.admit(65, 99, &env(500, "late", "b"), "h"),
+        IngressVerdict::Proceed
+    );
 }
 
 /// S5.3: cycling through fresh senders cannot beat the host total, and the pair table stays at its cap.
@@ -116,7 +146,11 @@ fn s5_3_pair_table_cycling_cannot_exceed_host_total() {
     let mut passed = 0;
     for minute in 0..20u64 {
         for n in 0..200 {
-            let e = env(10_000 + (minute as usize) * 200 + n, &format!("z{minute}-{n}"), "b");
+            let e = env(
+                10_000 + (minute as usize) * 200 + n,
+                &format!("z{minute}-{n}"),
+                "b",
+            );
             if admit(&mut i, 1_000 + minute * 60, &e) == IngressVerdict::Proceed {
                 passed += 1;
             }
@@ -128,19 +162,32 @@ fn s5_3_pair_table_cycling_cannot_exceed_host_total() {
 /// S5.3: when the table is full of LIVE pairs an unknown pair is refused, never given a fresh allowance by evicting one.
 #[test]
 fn s5_3_full_table_of_live_pairs_refuses_unknown_pair() {
-    let cfg = IngressConfig { pair_table: 4, host_per_minute: 1000, ..IngressConfig::default() };
+    let cfg = IngressConfig {
+        pair_table: 4,
+        host_per_minute: 1000,
+        ..IngressConfig::default()
+    };
     let mut i = PeerIngress::new(cfg, Arc::new(HostLedger::default()));
     for n in 0..4 {
-        assert_eq!(admit(&mut i, 10, &env(n, "m", "b")), IngressVerdict::Proceed);
+        assert_eq!(
+            admit(&mut i, 10, &env(n, "m", "b")),
+            IngressVerdict::Proceed
+        );
     }
     assert_eq!(admit(&mut i, 11, &env(4, "m", "b")), rate_limited());
     // Pair 0 is still limited by its own history, not reset.
     for k in 0..9 {
-        assert_eq!(admit(&mut i, 12, &env(0, &format!("k{k}"), "b")), IngressVerdict::Proceed);
+        assert_eq!(
+            admit(&mut i, 12, &env(0, &format!("k{k}"), "b")),
+            IngressVerdict::Proceed
+        );
     }
     assert_eq!(admit(&mut i, 12, &env(0, "k9", "b")), rate_limited());
     // A minute later the old pairs are dead and give way.
-    assert_eq!(admit(&mut i, 71, &env(4, "m", "b")), IngressVerdict::Proceed);
+    assert_eq!(
+        admit(&mut i, 71, &env(4, "m", "b")),
+        IngressVerdict::Proceed
+    );
     assert!(i.sizes().pairs <= 4);
 }
 
@@ -152,13 +199,18 @@ fn s5_4_repeat_answers_original_outcome_without_rate_cost() {
     assert_eq!(admit(&mut i, 0, &e), IngressVerdict::Proceed);
     i.record(0, 1, &e.from.to_string(), "id1", "body", &delivered());
     for t in 1..200 {
-        assert_eq!(admit(&mut i, t % 59, &e), IngressVerdict::Replay(delivered()));
+        assert_eq!(
+            admit(&mut i, t % 59, &e),
+            IngressVerdict::Replay(delivered())
+        );
     }
     assert_eq!(i.sizes().host_log, 1);
     let other = env(1, "id1", "different");
     assert_eq!(
         admit(&mut i, 5, &other),
-        IngressVerdict::Refuse(DeliveryOutcome::Rejected { reason: RejectReason::Ambiguous })
+        IngressVerdict::Refuse(DeliveryOutcome::Rejected {
+            reason: RejectReason::Ambiguous
+        })
     );
     // Another receiver never sees this session's memory.
     assert_eq!(i.admit(5, 2, &e, "body"), IngressVerdict::Proceed);
@@ -170,7 +222,9 @@ fn s5_4_rejected_id_resent_1000_times_memory_flat() {
     let mut i = PeerIngress::default();
     let e = env(1, "rej", "body");
     assert_eq!(admit(&mut i, 0, &e), IngressVerdict::Proceed);
-    let out = DeliveryOutcome::Rejected { reason: RejectReason::PolicyRefused };
+    let out = DeliveryOutcome::Rejected {
+        reason: RejectReason::PolicyRefused,
+    };
     i.record(0, 1, &e.from.to_string(), "rej", "body", &out);
     let before = i.sizes();
     for _ in 0..1000 {
@@ -182,18 +236,35 @@ fn s5_4_rejected_id_resent_1000_times_memory_flat() {
 /// S5.4: 1,024 ids; the 1,025th evicts the oldest; and an id is forgotten after 10 minutes.
 #[test]
 fn s5_4_capacity_1024_and_ten_minute_expiry() {
-    let cfg = IngressConfig { host_per_minute: usize::MAX, pair_per_minute: usize::MAX, ..IngressConfig::default() };
+    let cfg = IngressConfig {
+        host_per_minute: usize::MAX,
+        pair_per_minute: usize::MAX,
+        ..IngressConfig::default()
+    };
     let mut i = PeerIngress::new(cfg, Arc::new(HostLedger::default()));
     for n in 0..REMEMBERED_MESSAGE_IDS + 1 {
         let e = env(1, &format!("m{n}"), "b");
         i.record(0, 1, &e.from.to_string(), &e.message_id, "b", &delivered());
     }
     assert_eq!(i.sizes().replay, REMEMBERED_MESSAGE_IDS);
-    assert_eq!(admit(&mut i, 1, &env(1, "m0", "b")), IngressVerdict::Proceed, "oldest evicted");
-    assert_eq!(admit(&mut i, 1, &env(1, "m1", "b")), IngressVerdict::Replay(delivered()));
+    assert_eq!(
+        admit(&mut i, 1, &env(1, "m0", "b")),
+        IngressVerdict::Proceed,
+        "oldest evicted"
+    );
+    assert_eq!(
+        admit(&mut i, 1, &env(1, "m1", "b")),
+        IngressVerdict::Replay(delivered())
+    );
     // Exactly at the lifetime the entry is gone; one second before it is not.
-    assert_eq!(admit(&mut i, MESSAGE_ID_MEMORY_SECS - 1, &env(1, "m2", "b")), IngressVerdict::Replay(delivered()));
-    assert_eq!(admit(&mut i, MESSAGE_ID_MEMORY_SECS, &env(1, "m2", "b")), IngressVerdict::Proceed);
+    assert_eq!(
+        admit(&mut i, MESSAGE_ID_MEMORY_SECS - 1, &env(1, "m2", "b")),
+        IngressVerdict::Replay(delivered())
+    );
+    assert_eq!(
+        admit(&mut i, MESSAGE_ID_MEMORY_SECS, &env(1, "m2", "b")),
+        IngressVerdict::Proceed
+    );
     assert_eq!(i.sizes().replay, 0);
 }
 
@@ -202,8 +273,19 @@ fn s5_4_capacity_1024_and_ten_minute_expiry() {
 fn s5_4_transient_refusals_are_not_remembered() {
     let mut i = PeerIngress::default();
     let e = env(1, "t", "b");
-    for r in [RejectReason::RateLimited, RejectReason::Saturated, RejectReason::TooLarge] {
-        i.record(0, 1, &e.from.to_string(), "t", "b", &DeliveryOutcome::Rejected { reason: r });
+    for r in [
+        RejectReason::RateLimited,
+        RejectReason::Saturated,
+        RejectReason::TooLarge,
+    ] {
+        i.record(
+            0,
+            1,
+            &e.from.to_string(),
+            "t",
+            "b",
+            &DeliveryOutcome::Rejected { reason: r },
+        );
     }
     assert_eq!(i.sizes().replay, 0);
 }
@@ -232,13 +314,20 @@ fn s5_2_host_ledger_bounds_and_exact_release() {
     assert!(l.reserve(1).is_err(), "message N+1");
     assert_eq!(l.usage(), (MAX_MESSAGES_PER_HOST, MAX_MESSAGES_PER_HOST));
     t.pop();
-    assert!(l.reserve(1).is_ok(), "freed slot is reusable (and the temporary frees it again)");
+    assert!(
+        l.reserve(1).is_ok(),
+        "freed slot is reusable (and the temporary frees it again)"
+    );
     t.clear();
     assert_eq!(l.usage(), (0, 0));
     let a = l.reserve(MAX_BODY_BYTES_PER_HOST).unwrap();
     assert!(l.reserve(1).is_err(), "byte N+1");
     let b = a.clone();
-    assert_eq!(l.usage(), (2, 2 * MAX_BODY_BYTES_PER_HOST), "a clone is a second reservation");
+    assert_eq!(
+        l.usage(),
+        (2, 2 * MAX_BODY_BYTES_PER_HOST),
+        "a clone is a second reservation"
+    );
     drop(a);
     assert_eq!(l.usage(), (1, MAX_BODY_BYTES_PER_HOST));
     drop(b);
@@ -281,7 +370,9 @@ fn flood_100k_envelopes_keep_tables_bounded() {
         let now = (n / 50) as u64; // 50 per second: far above both rates
         let out = match admit(&mut i, now, &e) {
             IngressVerdict::Proceed => {
-                let o = DeliveryOutcome::Rejected { reason: RejectReason::Unavailable };
+                let o = DeliveryOutcome::Rejected {
+                    reason: RejectReason::Unavailable,
+                };
                 i.record(now, 1, &e.from.to_string(), &e.message_id, "b", &o);
                 o
             }

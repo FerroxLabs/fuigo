@@ -437,8 +437,10 @@ mod tests {
         let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::SHIFT);
         assert!(key!('G').matches(&g));
         assert!(key!('g', SHIFT).matches(&KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
-        let ctrl_shift_slash =
-            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let ctrl_shift_slash = KeyEvent::new(
+            KeyCode::Char('/'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         assert!(!key!('/', CONTROL).matches(&ctrl_shift_slash));
     }
 

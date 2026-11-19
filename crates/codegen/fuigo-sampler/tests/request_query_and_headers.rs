@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::http::{HeaderMap, Uri};
 use axum::routing::post;
-use tokio::net::TcpListener;
 use fuigo_sampler::SamplingClient;
+use tokio::net::TcpListener;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_carries_query_params_and_env_http_headers() {

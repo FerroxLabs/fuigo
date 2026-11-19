@@ -409,10 +409,16 @@ fn enter_on_a_video_card_without_graphics_opens_the_default_player() {
 
     assert!(effects.is_empty());
     let agent = &app.agents[&AgentId(0)];
-    assert!(agent.video_load_rx.is_none(), "no frame extraction is started");
+    assert!(
+        agent.video_load_rx.is_none(),
+        "no frame extraction is started"
+    );
     assert!(agent.inline_video.is_none());
     let toast = toast_text(&app);
-    assert!(!toast.contains("not supported"), "no image-guard dead end: {toast}");
+    assert!(
+        !toast.contains("not supported"),
+        "no image-guard dead end: {toast}"
+    );
     assert!(
         toast.contains("default app") || toast.contains("Could not open"),
         "the open was attempted: {toast}"
@@ -432,9 +438,15 @@ fn enter_on_a_video_card_without_ffmpeg_opens_the_default_player() {
 
     assert!(effects.is_empty());
     let agent = &app.agents[&AgentId(0)];
-    assert!(agent.video_load_rx.is_none(), "no extraction thread without ffmpeg");
+    assert!(
+        agent.video_load_rx.is_none(),
+        "no extraction thread without ffmpeg"
+    );
     let toast = toast_text(&app);
-    assert!(!toast.contains("Loading video"), "no stalled loading state: {toast}");
+    assert!(
+        !toast.contains("Loading video"),
+        "no stalled loading state: {toast}"
+    );
     assert!(
         toast.contains("default app") || toast.contains("Could not open"),
         "the open was attempted: {toast}"

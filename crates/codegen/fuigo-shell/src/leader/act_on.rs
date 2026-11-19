@@ -52,7 +52,10 @@ impl ActTarget {
 /// The pid an eviction may open: the one recorded at connect, only if the OS still reports the same one when asked again
 /// immediately before opening. A failed re-query or a different pid means "do not act" (the pid may have been recycled).
 #[cfg(any(windows, test))]
-pub(super) fn pid_to_act_on(recorded_at_connect: Option<u32>, requeried_now: Option<u32>) -> Option<u32> {
+pub(super) fn pid_to_act_on(
+    recorded_at_connect: Option<u32>,
+    requeried_now: Option<u32>,
+) -> Option<u32> {
     match (recorded_at_connect, requeried_now) {
         (Some(a), Some(b)) if a == b => Some(a),
         _ => None,
@@ -62,13 +65,19 @@ pub(super) fn pid_to_act_on(recorded_at_connect: Option<u32>, requeried_now: Opt
 /// Read a process image path with a buffer of 1024 units and, if the OS says it is too small, once more with 32768.
 /// `call` fills the buffer, sets the length written, and returns the Win32 error code on failure.
 #[cfg(any(windows, test))]
-pub(super) fn read_image_with_retry(mut call: impl FnMut(&mut [u16], &mut u32) -> Result<(), u32>) -> Option<String> {
+pub(super) fn read_image_with_retry(
+    mut call: impl FnMut(&mut [u16], &mut u32) -> Result<(), u32>,
+) -> Option<String> {
     const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
     for capacity in [1024usize, 32768] {
         let mut buffer = vec![0u16; capacity];
         let mut size = capacity as u32;
         match call(&mut buffer, &mut size) {
-            Ok(()) => return Some(String::from_utf16_lossy(&buffer[..(size as usize).min(capacity)])),
+            Ok(()) => {
+                return Some(String::from_utf16_lossy(
+                    &buffer[..(size as usize).min(capacity)],
+                ));
+            }
             Err(ERROR_INSUFFICIENT_BUFFER) => continue,
             Err(_) => return None,
         }
@@ -81,8 +90,8 @@ pub(super) mod win {
     use std::io;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-        QueryFullProcessImageNameW, TerminateProcess,
+        GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
     };
     use windows::core::PWSTR;
 
@@ -93,7 +102,11 @@ pub(super) mod win {
     /// directory with `fuigo` in its name. Another Fuigo binary of the same user (a second install) is accepted on purpose.
     /// This is stricter than `util::is_fuigo_process`, which looks for `fuigo` anywhere in the full path.
     pub(in crate::leader) fn is_fuigo_image(image_path: &str) -> bool {
-        let name = image_path.rsplit(['\\', '/']).next().unwrap_or("").to_ascii_lowercase();
+        let name = image_path
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         name.starts_with("fuigo") && name.ends_with(".exe")
     }
 
@@ -108,12 +121,26 @@ pub(super) mod win {
         /// opened or queried, or is refused.
         pub(in crate::leader) fn open_if(pid: u32, accept: impl Fn(&str) -> bool) -> Option<Self> {
             // SAFETY: plain Win32 call; the returned handle is owned by `CheckedProcess` and closed in `Drop`.
-            let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                    false,
+                    pid,
+                )
+            }
+            .ok()?;
             let process = Self(handle);
             let image = super::read_image_with_retry(|buffer, size| {
                 // SAFETY: the handle is live; `buffer` holds `*size` u16.
-                unsafe { QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), size) }
-                    .map_err(|e| (e.code().0 as u32) & 0xFFFF)
+                unsafe {
+                    QueryFullProcessImageNameW(
+                        handle,
+                        PROCESS_NAME_WIN32,
+                        PWSTR(buffer.as_mut_ptr()),
+                        size,
+                    )
+                }
+                .map_err(|e| (e.code().0 as u32) & 0xFFFF)
             })?;
             accept(&image).then_some(process)
         }
@@ -122,7 +149,8 @@ pub(super) mod win {
                 return Ok(());
             }
             // SAFETY: the handle is live and has PROCESS_TERMINATE.
-            unsafe { TerminateProcess(self.0, 0) }.map_err(|e| io::Error::other(format!("TerminateProcess: {e}")))
+            unsafe { TerminateProcess(self.0, 0) }
+                .map_err(|e| io::Error::other(format!("TerminateProcess: {e}")))
         }
         pub(in crate::leader) fn is_alive(&self) -> bool {
             let mut code = 0u32;
@@ -140,15 +168,22 @@ pub(super) mod win {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::win::{CheckedProcess, is_fuigo_image};
     use super::ActTarget;
+    use super::win::{CheckedProcess, is_fuigo_image};
 
     #[test]
     fn only_a_fuigo_file_name_is_a_fuigo_image() {
-        assert!(is_fuigo_image(r"C:\Users\a\AppData\Local\Fuigo\bin\fuigo.exe"));
-        assert!(is_fuigo_image(r"C:\t\target\debug\deps\fuigo_shell-1a2b.exe"));
+        assert!(is_fuigo_image(
+            r"C:\Users\a\AppData\Local\Fuigo\bin\fuigo.exe"
+        ));
+        assert!(is_fuigo_image(
+            r"C:\t\target\debug\deps\fuigo_shell-1a2b.exe"
+        ));
         assert!(!is_fuigo_image(r"C:\Windows\System32\cmd.exe"));
-        assert!(!is_fuigo_image(r"C:\Users\fuigo\evil.exe"), "a directory name does not count");
+        assert!(
+            !is_fuigo_image(r"C:\Users\fuigo\evil.exe"),
+            "a directory name does not count"
+        );
         assert!(!is_fuigo_image(r"C:\x\fuigo.txt"));
         assert!(!is_fuigo_image(""));
     }
@@ -172,13 +207,17 @@ mod tests {
 
     #[test]
     fn a_gone_process_gives_no_target_and_this_fuigo_test_binary_is_accepted() {
-        let mut child = std::process::Command::new("cmd").args(["/C", "exit", "0"]).spawn().unwrap();
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .unwrap();
         let pid = child.id();
         child.wait().unwrap();
         // Either the process cannot be opened any more, or the handle reports it as exited.
         assert!(CheckedProcess::open_if(pid, |_| true).is_none_or(|p| !p.is_alive()));
         // Only built, never terminated: this process is the test runner.
-        let me = ActTarget::from_os_server_pid(std::process::id()).expect("the test binary is named fuigo_shell-*.exe");
+        let me = ActTarget::from_os_server_pid(std::process::id())
+            .expect("the test binary is named fuigo_shell-*.exe");
         assert!(me.is_alive());
     }
 }
@@ -191,8 +230,16 @@ mod pure_tests {
     #[test]
     fn h_the_pid_is_acted_on_only_if_the_os_still_reports_the_same_one() {
         assert_eq!(pid_to_act_on(Some(10), Some(10)), Some(10));
-        assert_eq!(pid_to_act_on(Some(10), Some(11)), None, "a changed pid is not acted on");
-        assert_eq!(pid_to_act_on(Some(10), None), None, "a failed re-query is not acted on");
+        assert_eq!(
+            pid_to_act_on(Some(10), Some(11)),
+            None,
+            "a changed pid is not acted on"
+        );
+        assert_eq!(
+            pid_to_act_on(Some(10), None),
+            None,
+            "a failed re-query is not acted on"
+        );
         assert_eq!(pid_to_act_on(None, Some(10)), None);
         assert_eq!(pid_to_act_on(None, None), None);
     }
@@ -215,12 +262,22 @@ mod pure_tests {
         let short = read_image_with_retry(fake_query(100)).unwrap();
         assert_eq!(short.len(), 100);
         let long = read_image_with_retry(fake_query(2000)).unwrap();
-        assert_eq!(long.len(), 2000, "a path longer than 1024 units is read on the retry");
+        assert_eq!(
+            long.len(),
+            2000,
+            "a path longer than 1024 units is read on the retry"
+        );
     }
 
     #[test]
     fn i_other_errors_and_an_oversized_path_give_none() {
-        assert!(read_image_with_retry(|_, _| Err(5)).is_none(), "access denied is not retried");
-        assert!(read_image_with_retry(fake_query(40000)).is_none(), "still too long after the retry");
+        assert!(
+            read_image_with_retry(|_, _| Err(5)).is_none(),
+            "access denied is not retried"
+        );
+        assert!(
+            read_image_with_retry(fake_query(40000)).is_none(),
+            "still too long after the retry"
+        );
     }
 }

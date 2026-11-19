@@ -9,7 +9,9 @@ use tempfile::TempDir;
 
 use crate::permission::policy::CompiledPolicy;
 use crate::permission::rules::parse_permission_rule;
-use crate::permission::types::{AccessKind, Decision, PermissionConfig, PermissionRule, RuleAction};
+use crate::permission::types::{
+    AccessKind, Decision, PermissionConfig, PermissionRule, RuleAction,
+};
 
 #[test]
 fn symlinked_cwd_rules_match_every_spelling_of_a_workspace_path() {
@@ -170,18 +172,42 @@ fn symlinked_cwd_relative_secret_deny_matches_real_written_and_linked_subdir_pat
         deny("Read(./secret/**)"),
         allow("Read(./**)"),
     ]));
-    let read = |path: &str| policy.evaluate_with_cwd(&AccessKind::Read(Some(path.to_owned())), Some(&cwd));
+    let read =
+        |path: &str| policy.evaluate_with_cwd(&AccessKind::Read(Some(path.to_owned())), Some(&cwd));
     let denied = reject("read", "./secret/**");
     let cases = [
         ("written relative", read("secret/key"), denied.clone()),
-        ("written absolute", read(&path_string(&cwd.join("secret/key"))), denied.clone()),
-        ("real absolute", read(&path_string(&ws.join("secret/key"))), denied.clone()),
-        ("real absolute, new file", read(&path_string(&ws.join("secret/new"))), denied.clone()),
+        (
+            "written absolute",
+            read(&path_string(&cwd.join("secret/key"))),
+            denied.clone(),
+        ),
+        (
+            "real absolute",
+            read(&path_string(&ws.join("secret/key"))),
+            denied.clone(),
+        ),
+        (
+            "real absolute, new file",
+            read(&path_string(&ws.join("secret/new"))),
+            denied.clone(),
+        ),
         ("linked subdir, written", read("vault/key"), denied.clone()),
-        ("linked subdir, real", read(&path_string(&ws.join("vault/key"))), denied.clone()),
-        ("other file, written", read("notes.toml"), Some(Decision::Allow)),
+        (
+            "linked subdir, real",
+            read(&path_string(&ws.join("vault/key"))),
+            denied.clone(),
+        ),
+        (
+            "other file, written",
+            read("notes.toml"),
+            Some(Decision::Allow),
+        ),
     ];
-    let expected: Vec<_> = cases.iter().map(|(n, _, want)| (*n, want.clone())).collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(n, _, want)| (*n, want.clone()))
+        .collect();
     let actual: Vec<_> = cases.iter().map(|(n, got, _)| (*n, got.clone())).collect();
     assert_eq!(expected, actual);
 }
@@ -194,8 +220,13 @@ fn symlink_outside_workspace_never_widens_a_workspace_allow() {
     let cwd = fixture.cwd();
     let outside = fixture.outside();
     let policy = CompiledPolicy::new(PermissionConfig::new(vec![allow("Edit(./**)")]));
-    let edit = |path: &str| policy.evaluate_with_cwd(&AccessKind::Edit(path.to_owned()), Some(&cwd));
-    assert_eq!(edit(&path_string(&outside.join("x"))), None, "outside target spelled directly");
+    let edit =
+        |path: &str| policy.evaluate_with_cwd(&AccessKind::Edit(path.to_owned()), Some(&cwd));
+    assert_eq!(
+        edit(&path_string(&outside.join("x"))),
+        None,
+        "outside target spelled directly"
+    );
     assert_eq!(
         edit(&path_string(&fixture.physical_ws().join("escape/x"))),
         None,
@@ -209,8 +240,9 @@ fn symlink_outside_workspace_never_widens_a_workspace_allow() {
 
     // A deny keyed on the outside target still catches every spelling through the link
     let target_glob = format!("{}/**", path_string(&outside));
-    let deny_policy =
-        CompiledPolicy::new(PermissionConfig::new(vec![deny(&format!("Edit({target_glob})"))]));
+    let deny_policy = CompiledPolicy::new(PermissionConfig::new(vec![deny(&format!(
+        "Edit({target_glob})"
+    ))]));
     let denied = reject("edit", &target_glob);
     for path in [
         "escape/x".to_owned(),
@@ -239,7 +271,13 @@ fn workspace_allow_does_not_follow_a_link_out_of_the_workspace() {
     let read = |path: &str| AccessKind::Read(Some(path.to_owned()));
     let outside_glob = format!("{}/**", path_string(&outside));
     let cases = [
-        ("written alias out", vec![allow("Edit(./**)")], edit("escape/x"), &cwd, None),
+        (
+            "written alias out",
+            vec![allow("Edit(./**)")],
+            edit("escape/x"),
+            &cwd,
+            None,
+        ),
         (
             "written absolute alias out",
             vec![allow("Edit(./**)")],
@@ -254,18 +292,42 @@ fn workspace_allow_does_not_follow_a_link_out_of_the_workspace() {
             &cwd,
             Some(Decision::Allow),
         ),
-        ("in-workspace file link", vec![allow("Read(./**)")], read("alias"), &cwd, Some(Decision::Allow)),
-        ("in-workspace dir link", vec![allow("Read(./**)")], read("vault/key"), &cwd, Some(Decision::Allow)),
-        ("plain file, symlinked cwd", vec![allow("Edit(./**)")], edit("notes.toml"), &cwd, Some(Decision::Allow)),
+        (
+            "in-workspace file link",
+            vec![allow("Read(./**)")],
+            read("alias"),
+            &cwd,
+            Some(Decision::Allow),
+        ),
+        (
+            "in-workspace dir link",
+            vec![allow("Read(./**)")],
+            read("vault/key"),
+            &cwd,
+            Some(Decision::Allow),
+        ),
+        (
+            "plain file, symlinked cwd",
+            vec![allow("Edit(./**)")],
+            edit("notes.toml"),
+            &cwd,
+            Some(Decision::Allow),
+        ),
         (
             "non-workspace absolute allow through a link is unchanged",
-            vec![allow(&format!("Edit({}/**)", path_string(&fixture.root.join("link"))))],
+            vec![allow(&format!(
+                "Edit({}/**)",
+                path_string(&fixture.root.join("link"))
+            ))],
             edit(&path_string(&cwd.join("notes.toml"))),
             &outside,
             Some(Decision::Allow),
         ),
     ];
-    let expected: Vec<_> = cases.iter().map(|(n, _, _, _, want)| (*n, want.clone())).collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(n, _, _, _, want)| (*n, want.clone()))
+        .collect();
     let actual: Vec<_> = cases
         .iter()
         .map(|(n, rules, access, cwd, _)| (*n, eval(rules.clone(), access.clone(), cwd)))
@@ -332,7 +394,13 @@ fn outbound_link_containment_uses_the_physical_workspace_and_keeps_in_workspace_
             &cwd,
             None,
         ),
-        ("narrow allow on an in-workspace file link", vec![allow("Edit(alias)")], edit("alias"), &cwd, Some(Decision::Allow)),
+        (
+            "narrow allow on an in-workspace file link",
+            vec![allow("Edit(alias)")],
+            edit("alias"),
+            &cwd,
+            Some(Decision::Allow),
+        ),
         (
             "narrow allow on an in-workspace dir link",
             vec![allow("Read(vault/**)")],
@@ -348,7 +416,10 @@ fn outbound_link_containment_uses_the_physical_workspace_and_keeps_in_workspace_
             reject("read", &written_notes),
         ),
     ];
-    let expected: Vec<_> = cases.iter().map(|(n, _, _, _, want)| (*n, want.clone())).collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(n, _, _, _, want)| (*n, want.clone()))
+        .collect();
     let actual: Vec<_> = cases
         .iter()
         .map(|(n, rules, access, cwd, _)| (*n, eval(rules.clone(), access.clone(), cwd)))
@@ -372,7 +443,10 @@ fn containment_ignores_dotdot_and_honours_allows_spelled_through_a_linked_ancest
     let cases = [
         (
             "physical absolute allow, link out through sub/..",
-            eval(vec![allow(&format!("Edit({physical_ws_glob})"))], &path_string(&ws.join("sub/../escape/x"))),
+            eval(
+                vec![allow(&format!("Edit({physical_ws_glob})"))],
+                &path_string(&ws.join("sub/../escape/x")),
+            ),
             None,
         ),
         (
@@ -382,7 +456,10 @@ fn containment_ignores_dotdot_and_honours_allows_spelled_through_a_linked_ancest
         ),
         (
             "outside target allowed via the linked ancestor spelling",
-            eval(vec![allow("Edit(./**)"), allow(&format!("Edit({linked_other})"))], "up"),
+            eval(
+                vec![allow("Edit(./**)"), allow(&format!("Edit({linked_other})"))],
+                "up",
+            ),
             Some(Decision::Allow),
         ),
         (
@@ -391,7 +468,10 @@ fn containment_ignores_dotdot_and_honours_allows_spelled_through_a_linked_ancest
             None,
         ),
     ];
-    let expected: Vec<_> = cases.iter().map(|(n, _, want)| (*n, want.clone())).collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(n, _, want)| (*n, want.clone()))
+        .collect();
     let actual: Vec<_> = cases.iter().map(|(n, got, _)| (*n, got.clone())).collect();
     assert_eq!(expected, actual);
 }
@@ -439,7 +519,11 @@ fn symlinked_cwd_shell_secret_deny_matches_real_and_linked_subdir_paths() {
         "cat vault/key".to_owned(),
         format!("cat {}", path_string(&ws.join("vault/key"))),
     ] {
-        assert_eq!(policy.evaluate_shell_file_access(&cmd, &cwd), denied, "{cmd}");
+        assert_eq!(
+            policy.evaluate_shell_file_access(&cmd, &cwd),
+            denied,
+            "{cmd}"
+        );
     }
 }
 

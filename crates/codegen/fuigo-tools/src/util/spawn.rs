@@ -5,7 +5,8 @@
 //! (tracing is unavailable there).
 
 pub use fuigo_tty_utils::{
-    ProcessGroup, ProcessScope, SpawnPlacedError, detach_command, global_process_scope, new_process_group,
+    ProcessGroup, ProcessScope, SpawnPlacedError, detach_command, global_process_scope,
+    new_process_group,
 };
 
 /// Prepare a search child (`rg` and friends): the policy base environment, then
@@ -27,7 +28,8 @@ pub fn detach_search_command(cmd: &mut tokio::process::Command) {
 pub async fn reap_killed_search_child(
     child: &mut tokio::process::Child,
 ) -> Option<std::process::ExitStatus> {
-    let status = fuigo_tty_utils::reap_killed_bounded(child, fuigo_tty_utils::KILL_REAP_TIMEOUT).await;
+    let status =
+        fuigo_tty_utils::reap_killed_bounded(child, fuigo_tty_utils::KILL_REAP_TIMEOUT).await;
     if status.is_none() {
         tracing::warn!(
             reap_timeout_secs = fuigo_tty_utils::KILL_REAP_TIMEOUT.as_secs(),
@@ -80,7 +82,12 @@ pub struct ShellSpawnFailure {
 }
 
 impl ShellSpawnFailure {
-    pub fn new(site: &'static str, program: &std::ffi::OsStr, err: &std::io::Error, path_set: bool) -> Self {
+    pub fn new(
+        site: &'static str,
+        program: &std::ffi::OsStr,
+        err: &std::io::Error,
+        path_set: bool,
+    ) -> Self {
         Self {
             site,
             program: program.to_string_lossy().into_owned(),
@@ -93,7 +100,12 @@ impl ShellSpawnFailure {
     /// The failure for an error that reached the caller only as text (a dependency formatted the
     /// `io::Error` into its message): the OS error code is the last `(os error N)` in `text`, and the
     /// kind is the one std gives that code. No code in the text leaves both unknown.
-    pub fn from_error_text(site: &'static str, program: &std::ffi::OsStr, text: &str, path_set: bool) -> Self {
+    pub fn from_error_text(
+        site: &'static str,
+        program: &std::ffi::OsStr,
+        text: &str,
+        path_set: bool,
+    ) -> Self {
         let os_error = text.rmatch_indices("(os error ").find_map(|(at, marker)| {
             let digits = text[at + marker.len()..].split(')').next()?;
             digits.trim().parse::<i32>().ok()
@@ -102,13 +114,19 @@ impl ShellSpawnFailure {
             site,
             program: program.to_string_lossy().into_owned(),
             os_error,
-            kind: os_error.map_or(std::io::ErrorKind::Other, |code| std::io::Error::from_raw_os_error(code).kind()),
+            kind: os_error.map_or(std::io::ErrorKind::Other, |code| {
+                std::io::Error::from_raw_os_error(code).kind()
+            }),
             path_set,
         }
     }
 
     /// The failure for `cmd` (its program and its child's `PATH`).
-    pub fn for_command(site: &'static str, cmd: &std::process::Command, err: &std::io::Error) -> Self {
+    pub fn for_command(
+        site: &'static str,
+        cmd: &std::process::Command,
+        err: &std::io::Error,
+    ) -> Self {
         Self::new(site, cmd.get_program(), err, child_path_is_set(cmd))
     }
 
@@ -127,7 +145,11 @@ impl ShellSpawnFailure {
 
 impl std::fmt::Display for ShellSpawnFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: failed to start shell {:?} (", self.site, self.program)?;
+        write!(
+            f,
+            "{}: failed to start shell {:?} (",
+            self.site, self.program
+        )?;
         match self.os_error {
             Some(code) => write!(f, "os error {code}")?,
             None => f.write_str("no os error code")?,
@@ -154,7 +176,10 @@ pub mod capture {
     impl CaptureEvents {
         /// Every event recorded so far, one per line.
         pub fn text(&self) -> String {
-            self.0.lock().unwrap_or_else(PoisonError::into_inner).join("\n")
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .join("\n")
         }
     }
 
@@ -170,14 +195,21 @@ pub mod capture {
         fn event(&self, event: &tracing::Event<'_>) {
             struct Fields(String);
             impl tracing::field::Visit for Fields {
-                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
                     use std::fmt::Write as _;
                     let _ = write!(self.0, " {}={:?}", field.name(), value);
                 }
             }
             let mut fields = Fields(format!("{}:", event.metadata().level()));
             event.record(&mut fields);
-            self.0.lock().unwrap_or_else(PoisonError::into_inner).push(fields.0);
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(fields.0);
         }
         fn enter(&self, _: &tracing::span::Id) {}
         fn exit(&self, _: &tracing::span::Id) {}
@@ -195,15 +227,31 @@ mod u35_winenv_tests {
         let p = |s: &'static str| OsStr::new(s);
         assert!(child_path_is_set_for([], true, EnvPlatform::Windows));
         assert!(!child_path_is_set_for([], false, EnvPlatform::Unix));
-        assert!(!child_path_is_set_for([(p("Path"), None)], true, EnvPlatform::Windows));
-        assert!(child_path_is_set_for([(p("Path"), None)], true, EnvPlatform::Unix));
+        assert!(!child_path_is_set_for(
+            [(p("Path"), None)],
+            true,
+            EnvPlatform::Windows
+        ));
+        assert!(child_path_is_set_for(
+            [(p("Path"), None)],
+            true,
+            EnvPlatform::Unix
+        ));
         assert!(child_path_is_set_for(
             [(p("PATH"), None), (p("path"), Some(p("C:\\bin")))],
             false,
             EnvPlatform::Windows
         ));
-        assert!(!child_path_is_set_for([(p("PATH"), Some(p("")))], true, EnvPlatform::Unix));
-        assert!(child_path_is_set_for([(p("OTHER"), None)], true, EnvPlatform::Unix));
+        assert!(!child_path_is_set_for(
+            [(p("PATH"), Some(p("")))],
+            true,
+            EnvPlatform::Unix
+        ));
+        assert!(child_path_is_set_for(
+            [(p("OTHER"), None)],
+            true,
+            EnvPlatform::Unix
+        ));
     }
 
     #[test]
@@ -214,9 +262,18 @@ mod u35_winenv_tests {
         assert_eq!(failure.os_error, Some(5));
         assert_eq!(failure.kind, std::io::Error::from_raw_os_error(5).kind());
         assert_eq!(failure.program, "C:\\Windows\\System32\\cmd.exe");
-        let failure = ShellSpawnFailure::from_error_text("pty", program, "doesn't exist (ENOENT)", false);
-        assert_eq!((failure.os_error, failure.kind), (None, std::io::ErrorKind::Other));
-        let failure = ShellSpawnFailure::from_error_text("pty", program, "(os error x) then (os error 2)", false);
+        let failure =
+            ShellSpawnFailure::from_error_text("pty", program, "doesn't exist (ENOENT)", false);
+        assert_eq!(
+            (failure.os_error, failure.kind),
+            (None, std::io::ErrorKind::Other)
+        );
+        let failure = ShellSpawnFailure::from_error_text(
+            "pty",
+            program,
+            "(os error x) then (os error 2)",
+            false,
+        );
         assert_eq!(failure.os_error, Some(2));
     }
 

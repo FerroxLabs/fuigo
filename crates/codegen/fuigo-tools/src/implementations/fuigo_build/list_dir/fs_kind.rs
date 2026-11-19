@@ -22,9 +22,29 @@ pub(super) fn is_remote_or_virtual_fstype(fstype: &str) -> bool {
         || f.starts_with("cgroup")
         || matches!(
             f.as_str(),
-            "9p" | "drvfs" | "virtiofs" | "vboxsf" | "vmhgfs" | "afs" | "afpfs" | "davfs" | "ncpfs" | "lustre"
-                | "glusterfs" | "gpfs" | "beegfs" | "ocfs2" | "proc" | "sysfs" | "debugfs" | "tracefs"
-                | "securityfs" | "pstore" | "bpf" | "configfs" | "autofs" | "webdav"
+            "9p" | "drvfs"
+                | "virtiofs"
+                | "vboxsf"
+                | "vmhgfs"
+                | "afs"
+                | "afpfs"
+                | "davfs"
+                | "ncpfs"
+                | "lustre"
+                | "glusterfs"
+                | "gpfs"
+                | "beegfs"
+                | "ocfs2"
+                | "proc"
+                | "sysfs"
+                | "debugfs"
+                | "tracefs"
+                | "securityfs"
+                | "pstore"
+                | "bpf"
+                | "configfs"
+                | "autofs"
+                | "webdav"
         )
 }
 
@@ -63,12 +83,21 @@ fn longest_covering_fstype(mountinfo: &str, path: &Path) -> Option<String> {
         let (Some(left), Some(right)) = (sides.next(), sides.next()) else {
             continue;
         };
-        let (Some(mount_point), Some(fstype)) = (left.split_whitespace().nth(4), right.split_whitespace().next()) else {
+        let (Some(mount_point), Some(fstype)) = (
+            left.split_whitespace().nth(4),
+            right.split_whitespace().next(),
+        ) else {
             continue;
         };
         let mount_point = unescape_mountinfo_field(mount_point);
-        let covers = mount_point == "/" || path_s == mount_point || path_s.starts_with(&format!("{mount_point}/"));
-        if covers && best.as_ref().is_none_or(|(len, _)| mount_point.len() >= *len) {
+        let covers = mount_point == "/"
+            || path_s == mount_point
+            || path_s.starts_with(&format!("{mount_point}/"));
+        if covers
+            && best
+                .as_ref()
+                .is_none_or(|(len, _)| mount_point.len() >= *len)
+        {
             best = Some((mount_point.len(), fstype.to_owned()));
         }
     }
@@ -82,7 +111,8 @@ pub(super) fn network_or_virtual_filesystem(path: &Path) -> Option<String> {
     {
         let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
         let resolved = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        longest_covering_fstype(&mountinfo, &resolved).filter(|fstype| is_remote_or_virtual_fstype(fstype))
+        longest_covering_fstype(&mountinfo, &resolved)
+            .filter(|fstype| is_remote_or_virtual_fstype(fstype))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -108,18 +138,47 @@ mod tests {
         let at = |p: &str| longest_covering_fstype(MOUNTINFO, Path::new(p));
         assert_eq!(at("/home/u/src").as_deref(), Some("ext4"));
         assert_eq!(at("/proc/self").as_deref(), Some("proc"));
-        assert_eq!(at("/mnt/share drive/a/b").as_deref(), Some("nfs4"), "octal escapes in the mount point");
-        assert_eq!(at("/mnt/share drive/local/x").as_deref(), Some("ext4"), "a local mount inside a network one");
+        assert_eq!(
+            at("/mnt/share drive/a/b").as_deref(),
+            Some("nfs4"),
+            "octal escapes in the mount point"
+        );
+        assert_eq!(
+            at("/mnt/share drive/local/x").as_deref(),
+            Some("ext4"),
+            "a local mount inside a network one"
+        );
         assert_eq!(at("/home/u/mnt/deep").as_deref(), Some("fuse.sshfs"));
-        assert_eq!(at("/proceedings").as_deref(), Some("ext4"), "a prefix of the name is not a parent");
+        assert_eq!(
+            at("/proceedings").as_deref(),
+            Some("ext4"),
+            "a prefix of the name is not a parent"
+        );
     }
 
     #[test]
     fn network_and_virtual_types_are_recognised_and_local_ones_are_not() {
-        for yes in ["nfs", "nfs4", "cifs", "smb3", "smbfs", "fuse", "fuse.sshfs", "9p", "drvfs", "virtiofs", "proc", "sysfs", "cgroup2"] {
+        for yes in [
+            "nfs",
+            "nfs4",
+            "cifs",
+            "smb3",
+            "smbfs",
+            "fuse",
+            "fuse.sshfs",
+            "9p",
+            "drvfs",
+            "virtiofs",
+            "proc",
+            "sysfs",
+            "cgroup2",
+        ] {
             assert!(is_remote_or_virtual_fstype(yes), "{yes}");
         }
-        for no in ["ext4", "xfs", "btrfs", "tmpfs", "overlay", "zfs", "apfs", "ntfs", "fuseblk", "fusectl", "devtmpfs"] {
+        for no in [
+            "ext4", "xfs", "btrfs", "tmpfs", "overlay", "zfs", "apfs", "ntfs", "fuseblk",
+            "fusectl", "devtmpfs",
+        ] {
             assert!(!is_remote_or_virtual_fstype(no), "{no}");
         }
     }

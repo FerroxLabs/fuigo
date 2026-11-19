@@ -56,8 +56,13 @@ const CALLERS: &[(&str, usize)] = &[
 ];
 
 /// Names of the `fuigo_file_utils::gcs` dispatchers and of the signed-URL helper beneath `upload_bytes_signed`.
-const DISPATCHERS: [&str; 5] =
-    ["upload_bytes", "upload_bytes_signed", "upload_file", "upload_stream", "upload_bytes_via_signed_url"];
+const DISPATCHERS: [&str; 5] = [
+    "upload_bytes",
+    "upload_bytes_signed",
+    "upload_file",
+    "upload_stream",
+    "upload_bytes_via_signed_url",
+];
 
 /// The public `StorageClient` methods that move content to the proxy or name an object to it for
 /// upload, with the gate each must open with. (The signed-URL flow has ONE public entry,
@@ -132,8 +137,10 @@ const SINK_FUNCTIONS: &[(&str, &[&str])] = &[
 ];
 
 /// Crates that are test infrastructure (mock storage servers): they spell `/storage` routes to SERVE them.
-const TEST_INFRASTRUCTURE: [&str; 2] =
-    ["crates/codegen/fuigo-test-support/", "crates/codegen/fuigo-pager-pty-harness/"];
+const TEST_INFRASTRUCTURE: [&str; 2] = [
+    "crates/codegen/fuigo-test-support/",
+    "crates/codegen/fuigo-pager-pty-harness/",
+];
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
@@ -150,7 +157,9 @@ fn files_with_extension(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
             if name != "target" && name != ".git" {
                 files_with_extension(&path, ext, out);
             }
-        } else if path.file_name().is_some_and(|n| n == ext) || path.extension().is_some_and(|e| e == ext) {
+        } else if path.file_name().is_some_and(|n| n == ext)
+            || path.extension().is_some_and(|e| e == ext)
+        {
             out.push(path);
         }
     }
@@ -197,8 +206,15 @@ struct Lexed {
 fn lex(text: &str) -> Vec<Lexed> {
     let chars: Vec<char> = text.chars().collect();
     let mut out: Vec<Lexed> = Vec::with_capacity(chars.len());
-    let code = |out: &mut Vec<Lexed>, text: &str| out.extend(text.chars().map(|c| Lexed { c, literal: false }));
-    let literal = |out: &mut Vec<Lexed>, body: &[char]| out.extend(body.iter().map(|c| Lexed { c: *c, literal: true }));
+    let code = |out: &mut Vec<Lexed>, text: &str| {
+        out.extend(text.chars().map(|c| Lexed { c, literal: false }))
+    };
+    let literal = |out: &mut Vec<Lexed>, body: &[char]| {
+        out.extend(body.iter().map(|c| Lexed {
+            c: *c,
+            literal: true,
+        }))
+    };
     let mut at = 0;
     while at < chars.len() {
         let c = chars[at];
@@ -239,7 +255,8 @@ fn lex(text: &str) -> Vec<Lexed> {
                 let start = at + 2 + hashes;
                 let mut end = start;
                 while end < chars.len()
-                    && !(chars[end] == '"' && (1..=hashes).all(|h| chars.get(end + h) == Some(&'#')))
+                    && !(chars[end] == '"'
+                        && (1..=hashes).all(|h| chars.get(end + h) == Some(&'#')))
                 {
                     end += 1;
                 }
@@ -256,7 +273,10 @@ fn lex(text: &str) -> Vec<Lexed> {
                 end += if chars[end] == '\\' { 2 } else { 1 };
             }
             code(&mut out, "\"");
-            literal(&mut out, &chars[(at + 1).min(chars.len())..end.min(chars.len())]);
+            literal(
+                &mut out,
+                &chars[(at + 1).min(chars.len())..end.min(chars.len())],
+            );
             code(&mut out, "\"");
             at = (end + 1).min(chars.len());
             continue;
@@ -287,7 +307,11 @@ fn lex(text: &str) -> Vec<Lexed> {
 /// The text of a lexed file: with `keep_literals`, everything; without, the program text alone
 /// (literal contents dropped, their line breaks kept so both views stay line-aligned).
 fn view(lexed: &[Lexed], keep_literals: bool) -> String {
-    lexed.iter().filter(|l| keep_literals || !l.literal || l.c == '\n').map(|l| l.c).collect()
+    lexed
+        .iter()
+        .filter(|l| keep_literals || !l.literal || l.c == '\n')
+        .map(|l| l.c)
+        .collect()
 }
 
 fn code_only(text: &str, keep_literals: bool) -> String {
@@ -301,11 +325,19 @@ fn code_only(text: &str, keep_literals: bool) -> String {
 fn drop_test_items(lexed: Vec<Lexed>) -> Vec<Lexed> {
     const ATTRIBUTE: &str = "#[cfg(test)]";
     // The program text with, for each of its characters, its index in `lexed`.
-    let bare: Vec<(usize, char)> =
-        lexed.iter().enumerate().filter(|(_, l)| !l.literal).map(|(at, l)| (at, l.c)).collect();
+    let bare: Vec<(usize, char)> = lexed
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.literal)
+        .map(|(at, l)| (at, l.c))
+        .collect();
     let attribute: Vec<char> = ATTRIBUTE.chars().collect();
     let starts_with = |at: usize, pattern: &[char]| {
-        bare.len() >= at + pattern.len() && bare[at..at + pattern.len()].iter().map(|(_, c)| c).eq(pattern.iter())
+        bare.len() >= at + pattern.len()
+            && bare[at..at + pattern.len()]
+                .iter()
+                .map(|(_, c)| c)
+                .eq(pattern.iter())
     };
     let mut dropped = vec![false; lexed.len()];
     let mut at = 0;
@@ -370,7 +402,12 @@ fn drop_test_items(lexed: Vec<Lexed>) -> Vec<Lexed> {
         dropped[from..to].fill(true);
         at = end.max(start + 1);
     }
-    lexed.into_iter().zip(dropped).filter(|(l, dropped)| !*dropped || l.c == '\n').map(|(l, _)| l).collect()
+    lexed
+        .into_iter()
+        .zip(dropped)
+        .filter(|(l, dropped)| !*dropped || l.c == '\n')
+        .map(|(l, _)| l)
+        .collect()
 }
 
 /// The production part of a source file, as lines.
@@ -390,10 +427,17 @@ impl Production {
 fn production_of(text: &str) -> Production {
     let lexed = drop_test_items(lex(text));
     let lines = |keep_literals: bool| -> Vec<String> {
-        view(&lexed, keep_literals).split('\n').map(str::to_string).collect()
+        view(&lexed, keep_literals)
+            .split('\n')
+            .map(str::to_string)
+            .collect()
     };
     let (code, bare) = (lines(true), lines(false));
-    assert_eq!(code.len(), bare.len(), "the two views of a file must stay line-aligned");
+    assert_eq!(
+        code.len(),
+        bare.len(),
+        "the two views of a file must stay line-aligned"
+    );
     Production { code, bare }
 }
 
@@ -453,15 +497,21 @@ fn without_imports(bare: &str) -> String {
     let mut out = String::new();
     let mut rest = bare;
     loop {
-        let import = identifier_uses(rest, "use").into_iter().find(|(before, after)| {
-            let head = before.trim_end();
-            let head = match head.strip_suffix(')').and_then(|h| h.rfind('(').map(|open| h[..open].trim_end())) {
-                Some(visibility) if visibility.ends_with("pub") => visibility,
-                _ => head,
-            };
-            let head = head.strip_suffix("pub").map_or(head, str::trim_end);
-            after.starts_with(char::is_whitespace) && (head.is_empty() || head.ends_with([';', '}', '{', ']']))
-        });
+        let import = identifier_uses(rest, "use")
+            .into_iter()
+            .find(|(before, after)| {
+                let head = before.trim_end();
+                let head = match head
+                    .strip_suffix(')')
+                    .and_then(|h| h.rfind('(').map(|open| h[..open].trim_end()))
+                {
+                    Some(visibility) if visibility.ends_with("pub") => visibility,
+                    _ => head,
+                };
+                let head = head.strip_suffix("pub").map_or(head, str::trim_end);
+                after.starts_with(char::is_whitespace)
+                    && (head.is_empty() || head.ends_with([';', '}', '{', ']']))
+            });
         let Some((before, after)) = import else {
             out.push_str(rest);
             return out;
@@ -479,7 +529,9 @@ fn aliased_dispatchers(bare: &str) -> Vec<&'static str> {
         .filter(|name| {
             identifier_uses(bare, name).into_iter().any(|(_, after)| {
                 let after = after.trim_start();
-                after.strip_prefix("as").is_some_and(|rest| rest.starts_with(char::is_whitespace))
+                after
+                    .strip_prefix("as")
+                    .is_some_and(|rest| rest.starts_with(char::is_whitespace))
             })
         })
         .collect()
@@ -495,7 +547,9 @@ fn only_the_pinned_files_call_the_dispatchers() {
         if is_sink_implementation(&rel) {
             continue;
         }
-        let Some(source) = production(&path) else { continue };
+        let Some(source) = production(&path) else {
+            continue;
+        };
         let bare = source.bare_text();
         let aliased = aliased_dispatchers(&bare);
         assert!(
@@ -522,10 +576,16 @@ fn nothing_outside_the_sink_files_spells_a_storage_route() {
     let mut offenders = Vec::new();
     for path in rust_sources() {
         let rel = relative(&path);
-        if is_sink_implementation(&rel) || TEST_INFRASTRUCTURE.iter().any(|krate| rel.starts_with(krate)) {
+        if is_sink_implementation(&rel)
+            || TEST_INFRASTRUCTURE
+                .iter()
+                .any(|krate| rel.starts_with(krate))
+        {
             continue;
         }
-        let Some(source) = production(&path) else { continue };
+        let Some(source) = production(&path) else {
+            continue;
+        };
         for line in &source.code {
             if line.contains("/storage") || line.to_ascii_lowercase().contains("x-storage-path") {
                 offenders.push(format!("{rel}: {}", line.trim()));
@@ -549,17 +609,24 @@ fn functions(bare: &str) -> Vec<String> {
             continue; // a function-pointer type: `fn(u8) -> u8`
         }
         let after = after.trim_start();
-        let name: String =
-            after.strip_prefix("r#").unwrap_or(after).chars().take_while(|c| is_identifier_char(*c)).collect();
+        let name: String = after
+            .strip_prefix("r#")
+            .unwrap_or(after)
+            .chars()
+            .take_while(|c| is_identifier_char(*c))
+            .collect();
         if name.is_empty() {
             continue;
         }
         let mut head = before.trim_end();
-        while let Some(rest) = ["async", "const", "unsafe", "extern", "\"\""].iter().find_map(|qualifier| {
-            let rest = head.strip_suffix(qualifier)?;
-            let word = qualifier.starts_with(|c: char| c.is_ascii_alphabetic());
-            (!word || !rest.chars().next_back().is_some_and(is_identifier_char)).then_some(rest)
-        }) {
+        while let Some(rest) = ["async", "const", "unsafe", "extern", "\"\""]
+            .iter()
+            .find_map(|qualifier| {
+                let rest = head.strip_suffix(qualifier)?;
+                let word = qualifier.starts_with(|c: char| c.is_ascii_alphabetic());
+                (!word || !rest.chars().next_back().is_some_and(is_identifier_char)).then_some(rest)
+            })
+        {
             head = rest.trim_end();
         }
         if head.ends_with(')') {
@@ -591,27 +658,44 @@ fn the_sink_files_hold_only_the_reviewed_functions() {
 /// non-blank line after the line that opens its body. That line must open the body and nothing else
 /// (exactly one `{`, at its end), so no code can sit between the signature and the statement returned.
 fn first_statement<'a>(source: &'a Production, header: &str) -> &'a str {
-    let start = source.code.iter().position(|l| l.trim_start().starts_with(header));
-    let Some(start) = start else { panic!("{header}: not found") };
+    let start = source
+        .code
+        .iter()
+        .position(|l| l.trim_start().starts_with(header));
+    let Some(start) = start else {
+        panic!("{header}: not found")
+    };
     let opens = (start..source.bare.len()).find(|at| source.bare[*at].contains('{'));
-    let Some(opens) = opens else { panic!("{header}: body not found") };
+    let Some(opens) = opens else {
+        panic!("{header}: body not found")
+    };
     let opening = source.bare[opens].trim_end();
     assert!(
         opening.ends_with('{') && opening.matches('{').count() == 1 && !opening.contains('}'),
         "{header}: the line that opens the body carries more than the opening brace: {opening}"
     );
-    source.code[opens + 1..].iter().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or_default()
+    source.code[opens + 1..]
+        .iter()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or_default()
 }
 
 #[test]
 fn each_public_storage_client_upload_opens_with_the_gate() {
-    let source = production(&repo_root().join(STORAGE_CLIENT)).expect("storage_client.rs production text");
+    let source =
+        production(&repo_root().join(STORAGE_CLIENT)).expect("storage_client.rs production text");
     for (function, gate) in GATED_CLIENT_METHODS {
         // Its header is `pub async fn name(` or `pub async fn name<`, on one line (anything else fails here).
         let statement = ["(", "<"]
             .iter()
             .map(|open| format!("pub async fn {function}{open}"))
-            .find(|header| source.code.iter().any(|l| l.trim_start().starts_with(header.as_str())))
+            .find(|header| {
+                source
+                    .code
+                    .iter()
+                    .any(|l| l.trim_start().starts_with(header.as_str()))
+            })
             .map(|header| first_statement(&source, &header).to_string());
         assert_eq!(
             statement.as_deref(),
@@ -643,19 +727,26 @@ fn the_loopback_test_seam_cannot_be_in_a_shipped_build() {
     // 1. The seam is compiled only with debug assertions AND (cfg(test) or the feature): both places.
     let gate = std::fs::read_to_string(repo_root().join(GATE)).unwrap();
     assert_eq!(
-        gate.matches("#[cfg(all(debug_assertions, any(test, feature = \"test-loopback-operator\")))]").count(),
+        gate.matches(
+            "#[cfg(all(debug_assertions, any(test, feature = \"test-loopback-operator\")))]"
+        )
+        .count(),
         2,
         "the seam function and its one call site are both compiled only with debug assertions"
     );
     assert_eq!(
-        code_only(&gate, false).matches("test_loopback_operator(").count(),
+        code_only(&gate, false)
+            .matches("test_loopback_operator(")
+            .count(),
         2,
         "the seam has exactly one definition and one call"
     );
     // 2. No profile turns debug assertions on (a release-profile build has none by default).
     let root_manifest = std::fs::read_to_string(repo_root().join("Cargo.toml")).unwrap();
     assert!(
-        !root_manifest.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("debug-assertions")),
+        !root_manifest
+            .lines()
+            .any(|l| !l.trim_start().starts_with('#') && l.contains("debug-assertions")),
         "a profile sets debug-assertions: a release-family profile with them on could carry the test seam"
     );
     // 3. The feature is requested only from `[dev-dependencies]`, in every manifest incl. the workspace root.
@@ -683,7 +774,10 @@ fn the_loopback_test_seam_cannot_be_in_a_shipped_build() {
             enabled_in.push((rel.clone(), section.clone()));
         }
     }
-    assert!(!enabled_in.is_empty(), "the seam is enabled nowhere: tests would fail closed");
+    assert!(
+        !enabled_in.is_empty(),
+        "the seam is enabled nowhere: tests would fail closed"
+    );
     for (rel, section) in &enabled_in {
         assert!(
             section.ends_with("dev-dependencies]"),
@@ -697,25 +791,86 @@ fn the_loopback_test_seam_cannot_be_in_a_shipped_build() {
 fn the_scanners_see_what_they_must() {
     // The lexer: comments and literal contents are not code.
     let source = "let a = \"src/*\"; // gone\nlet b = r#\"x \" /* y\"#; /* c1 /* nested */ c2 */ let c = '\\''; let d: &'a str = b\"z\";";
-    assert_eq!(code_only(source, false), "let a = \"\"; \nlet b = r\"\";   let c = ''; let d: &'a str = b\"\";");
-    assert_eq!(code_only(source, true), "let a = \"src/*\"; \nlet b = r\"x \" /* y\";   let c = ''; let d: &'a str = b\"z\";");
-    assert_eq!(code_only("a /* 1\n2 */ b \"x\ny\" c", false), "a \n  b \"\n\" c");
+    assert_eq!(
+        code_only(source, false),
+        "let a = \"\"; \nlet b = r\"\";   let c = ''; let d: &'a str = b\"\";"
+    );
+    assert_eq!(
+        code_only(source, true),
+        "let a = \"src/*\"; \nlet b = r\"x \" /* y\";   let c = ''; let d: &'a str = b\"z\";"
+    );
+    assert_eq!(
+        code_only("a /* 1\n2 */ b \"x\ny\" c", false),
+        "a \n  b \"\n\" c"
+    );
     // Dispatcher calls and names.
-    assert_eq!(dispatcher_uses("    let u = fuigo_file_utils::gcs::upload_bytes(&c, p, b, t).await;"), 1);
-    assert_eq!(dispatcher_uses("    match upload_file(&config, path, file, ct).await {"), 1);
-    assert_eq!(dispatcher_uses("    upload_bytes_signed(&c, p, b, t).await?; upload_stream(&c, p, r, t).await?;"), 2);
-    assert_eq!(dispatcher_uses("    gcs::upload_bytes::<Config>(&c, p, b, t).await"), 1);
-    assert_eq!(dispatcher_uses("    let send = upload_bytes; send(&c, p, b, t).await"), 1);
-    assert_eq!(dispatcher_uses("    gcs::upload_bytes_via_signed_url(base, t, None, p, b, ct, None, None, None).await"), 1);
-    assert_eq!(dispatcher_uses("pub async fn upload_bytes<C: StorageConfig>("), 0);
+    assert_eq!(
+        dispatcher_uses("    let u = fuigo_file_utils::gcs::upload_bytes(&c, p, b, t).await;"),
+        1
+    );
+    assert_eq!(
+        dispatcher_uses("    match upload_file(&config, path, file, ct).await {"),
+        1
+    );
+    assert_eq!(
+        dispatcher_uses(
+            "    upload_bytes_signed(&c, p, b, t).await?; upload_stream(&c, p, r, t).await?;"
+        ),
+        2
+    );
+    assert_eq!(
+        dispatcher_uses("    gcs::upload_bytes::<Config>(&c, p, b, t).await"),
+        1
+    );
+    assert_eq!(
+        dispatcher_uses("    let send = upload_bytes; send(&c, p, b, t).await"),
+        1
+    );
+    assert_eq!(
+        dispatcher_uses(
+            "    gcs::upload_bytes_via_signed_url(base, t, None, p, b, ct, None, None, None).await"
+        ),
+        1
+    );
+    assert_eq!(
+        dispatcher_uses("pub async fn upload_bytes<C: StorageConfig>("),
+        0
+    );
     assert_eq!(dispatcher_uses("pub async fn upload_file("), 0);
-    assert_eq!(dispatcher_uses("    client.upload_file(path, file, ct).await"), 0);
-    assert_eq!(dispatcher_uses("use fuigo_file_utils::gcs::upload_bytes;\nuse a::{\n    b,\n    gcs::upload_file,\n};"), 0);
-    assert_eq!(dispatcher_uses("fn f() {\n}\nuse fuigo_file_utils::gcs::upload_bytes;\nfn g() { upload_bytes(c) }"), 1);
-    assert_eq!(dispatcher_uses("    my_upload_bytes(x); upload_bytes_direct(y)"), 0);
-    assert_eq!(aliased_dispatchers("use fuigo_file_utils::gcs::upload_bytes as\n    send;"), ["upload_bytes"]);
-    assert_eq!(aliased_dispatchers("use a::{upload_file  as  put, upload_stream};"), ["upload_file"]);
-    assert!(aliased_dispatchers("use fuigo_file_utils::gcs::upload_bytes;\nlet assigned = upload_bytes;").is_empty());
+    assert_eq!(
+        dispatcher_uses("    client.upload_file(path, file, ct).await"),
+        0
+    );
+    assert_eq!(
+        dispatcher_uses(
+            "use fuigo_file_utils::gcs::upload_bytes;\nuse a::{\n    b,\n    gcs::upload_file,\n};"
+        ),
+        0
+    );
+    assert_eq!(
+        dispatcher_uses(
+            "fn f() {\n}\nuse fuigo_file_utils::gcs::upload_bytes;\nfn g() { upload_bytes(c) }"
+        ),
+        1
+    );
+    assert_eq!(
+        dispatcher_uses("    my_upload_bytes(x); upload_bytes_direct(y)"),
+        0
+    );
+    assert_eq!(
+        aliased_dispatchers("use fuigo_file_utils::gcs::upload_bytes as\n    send;"),
+        ["upload_bytes"]
+    );
+    assert_eq!(
+        aliased_dispatchers("use a::{upload_file  as  put, upload_stream};"),
+        ["upload_file"]
+    );
+    assert!(
+        aliased_dispatchers(
+            "use fuigo_file_utils::gcs::upload_bytes;\nlet assigned = upload_bytes;"
+        )
+        .is_empty()
+    );
     // Functions, with their visibility, however they are laid out.
     assert_eq!(
         functions(
@@ -723,14 +878,34 @@ fn the_scanners_see_what_they_must() {
              pub\n    async fn g(\npub (crate) async fn h(\npub(in crate::x) const unsafe fn i()\npub(crate)\nfn j<T>(\n\
              pub   extern \"\" fn k(\nlet p: fn(u8) -> u8;\npub fn r#l(\nfn pubfn(\ntrait T { fn m(&self); }"
         ),
-        ["c", "e", "m", "pub a", "pub b", "pub d", "pub g", "pub h", "pub i", "pub j", "pub k", "pub l", "pubfn"]
+        [
+            "c", "e", "m", "pub a", "pub b", "pub d", "pub g", "pub h", "pub i", "pub j", "pub k",
+            "pub l", "pubfn"
+        ]
     );
-    assert_eq!(functions(&code_only("pub /* why */ async fn n() {} // fn o()\nlet s = \"fn q()\";", false)), ["pub n"]);
+    assert_eq!(
+        functions(&code_only(
+            "pub /* why */ async fn n() {} // fn o()\nlet s = \"fn q()\";",
+            false
+        )),
+        ["pub n"]
+    );
     // Test items are not production; a test file has none.
     let stripped = production_of(
         "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() { let s = \"}\"; x.upload(1) }\n} pub async fn after() {}\nfn c() {}\n",
     );
-    assert_eq!(stripped.bare, ["fn a() {}", "", "", "", " pub async fn after() {}", "fn c() {}", ""]);
+    assert_eq!(
+        stripped.bare,
+        [
+            "fn a() {}",
+            "",
+            "",
+            "",
+            " pub async fn after() {}",
+            "fn c() {}",
+            ""
+        ]
+    );
     assert_eq!(functions(&stripped.bare_text()), ["a", "c", "pub after"]);
     let members = production_of(
         "impl S {\n    #[cfg(test)]\n    #[allow(x)]\n    fn t(&self) -> Result<A, B> { 1 }\n    fn p(&self) {}\n}\n\
@@ -738,14 +913,33 @@ fn the_scanners_see_what_they_must() {
     );
     assert_eq!(functions(&members.bare_text()), ["p", "y", "z"]);
     let gcs = production(&repo_root().join(GCS)).unwrap();
-    assert!(gcs.bare_text().contains("pub async fn upload_bytes"), "production text lost the dispatchers");
-    assert!(!gcs.bare_text().contains("mod p71_gate_tests"), "production text kept a #[cfg(test)] module");
-    assert!(production(&repo_root().join("crates/codegen/fuigo-file-utils/src/queue_tests.rs")).is_none());
+    assert!(
+        gcs.bare_text().contains("pub async fn upload_bytes"),
+        "production text lost the dispatchers"
+    );
+    assert!(
+        !gcs.bare_text().contains("mod p71_gate_tests"),
+        "production text kept a #[cfg(test)] module"
+    );
+    assert!(
+        production(&repo_root().join("crates/codegen/fuigo-file-utils/src/queue_tests.rs"))
+            .is_none()
+    );
     // The signature walker: the body's first statement, and nothing allowed on the line that opens the body.
     let sample = production_of(
         "    pub async fn upload_stream<C, R>(\n    c: &C,\n) -> R\nwhere\n    R: X,\n    {\n\n    gate()?;\n    rest();\n}\n",
     );
-    assert_eq!(first_statement(&sample, "pub async fn upload_stream<"), "gate()?;");
-    let conditional = production_of("pub async fn upload(p: &str) -> R { if p.is_empty() {\n    gate()?;\n    }\n}\n");
-    assert!(std::panic::catch_unwind(|| first_statement(&conditional, "pub async fn upload(").to_string()).is_err());
+    assert_eq!(
+        first_statement(&sample, "pub async fn upload_stream<"),
+        "gate()?;"
+    );
+    let conditional = production_of(
+        "pub async fn upload(p: &str) -> R { if p.is_empty() {\n    gate()?;\n    }\n}\n",
+    );
+    assert!(
+        std::panic::catch_unwind(
+            || first_statement(&conditional, "pub async fn upload(").to_string()
+        )
+        .is_err()
+    );
 }

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use base64::Engine;
-use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use fuigo_workspace_types::rpc::fs::FsReadEncoding;
+use ignore::{WalkBuilder, overrides::OverrideBuilder};
 
 /// Hard cap on entries collected per list call before sorting.
 /// A pathological directory truncates (`truncated = true`) instead of ballooning memory.

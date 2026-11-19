@@ -395,7 +395,9 @@ impl fuigo_tool_runtime::Tool for BashTool {
         let request = TerminalRunRequest {
             request_cwd: Some(session_cwd.clone()),
             approved_without_grant: crate::sandbox_launch::ApprovedWithoutGrant::of(
-                ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>().as_deref(),
+                ctx.extensions
+                    .get::<crate::sandbox_launch::ApprovedWithoutGrant>()
+                    .as_deref(),
             ),
             command: input.command.clone(),
             working_directory: cwd.clone(),
@@ -756,9 +758,12 @@ mod tests {
         // No Terminal inserted
         let tool = BashTool;
 
-        let result =
-            fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input("ls"))
-                .await;
+        let result = fuigo_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input("ls"),
+        )
+        .await;
         assert!(result.is_err());
         assert!(
             result
@@ -1136,9 +1141,12 @@ mod tests {
         resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
 
         let tool = BashTool;
-        let result =
-            fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input("ls"))
-                .await;
+        let result = fuigo_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input("ls"),
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(

@@ -2927,11 +2927,15 @@ mod tests {
         let dir = project.path().join(".fuigo/personas");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(outside.path().join("x.toml"), "description = \"outside\"\n").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("x.toml"), dir.join("m5linked.toml")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("x.toml"), dir.join("m5linked.toml"))
+            .unwrap();
         std::fs::write(dir.join("m5inside.toml"), "description = \"inside\"\n").unwrap();
         let list = merge_persona_lists(&BundleState::default(), project.path());
         assert!(list.iter().any(|p| p.name == "m5inside"));
-        assert!(!list.iter().any(|p| p.name == "m5linked"), "outside-linked persona must not be listed");
+        assert!(
+            !list.iter().any(|p| p.name == "m5linked"),
+            "outside-linked persona must not be listed"
+        );
     }
     #[test]
     fn build_persona_list_fallback_to_names() {

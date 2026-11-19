@@ -10,8 +10,9 @@ use fuigo_agent::prompt::skills::SkillsConfig;
 use fuigo_sampler::{AuthScheme, SamplerConfig};
 use fuigo_sampling_types::{
     CONTEXT_WINDOWS_META_KEY, CompactionAtTokens, CompactionsRemaining, MODEL_NOTICE_META_KEY,
-    ModelNotice, REASONING_EFFORT_META_KEY, REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption, ReasoningSummary,
-    context_windows_meta_value, reasoning_effort_meta_value, reasoning_efforts_meta_value,
+    ModelNotice, REASONING_EFFORT_META_KEY, REASONING_EFFORTS_META_KEY, ReasoningEffort,
+    ReasoningEffortOption, ReasoningSummary, context_windows_meta_value,
+    reasoning_effort_meta_value, reasoning_efforts_meta_value,
 };
 use fuigo_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
@@ -286,31 +287,98 @@ impl std::fmt::Debug for EndpointsConfig {
             gcs_service_account_key,
         } = self;
         f.debug_struct("EndpointsConfig")
-            .field("cli_chat_proxy_base_url", &cli_chat_proxy_base_url.as_deref().map(fuigo_auth::redact_url))
-            .field("fuigo_api_base_url", &fuigo_auth::redact_url(fuigo_api_base_url))
-            .field("alpha_test_key", &alpha_test_key.as_ref().map(|_| "<redacted>"))
-            .field("models_base_url", &models_base_url.as_deref().map(fuigo_auth::redact_url))
-            .field("models_list_url", &models_list_url.as_deref().map(fuigo_auth::redact_url))
-            .field("feedback_base_url", &feedback_base_url.as_deref().map(fuigo_auth::redact_url))
-            .field("trace_upload_url", &trace_upload_url.as_deref().map(fuigo_auth::redact_url))
+            .field(
+                "cli_chat_proxy_base_url",
+                &cli_chat_proxy_base_url
+                    .as_deref()
+                    .map(fuigo_auth::redact_url),
+            )
+            .field(
+                "fuigo_api_base_url",
+                &fuigo_auth::redact_url(fuigo_api_base_url),
+            )
+            .field(
+                "alpha_test_key",
+                &alpha_test_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "models_base_url",
+                &models_base_url.as_deref().map(fuigo_auth::redact_url),
+            )
+            .field(
+                "models_list_url",
+                &models_list_url.as_deref().map(fuigo_auth::redact_url),
+            )
+            .field(
+                "feedback_base_url",
+                &feedback_base_url.as_deref().map(fuigo_auth::redact_url),
+            )
+            .field(
+                "trace_upload_url",
+                &trace_upload_url.as_deref().map(fuigo_auth::redact_url),
+            )
             .field("trace_upload_bucket", trace_upload_bucket)
             .field("trace_upload_region", trace_upload_region)
-            .field("trace_upload_credentials_file", trace_upload_credentials_file)
-            .field("trace_upload_credentials", &trace_upload_credentials.as_ref().map(|_| "<redacted>"))
-            .field("trace_upload_endpoint_url", &trace_upload_endpoint_url.as_deref().map(fuigo_auth::redact_url))
-            .field("deployment_key", &deployment_key.as_ref().map(|_| "<redacted>"))
-            .field("managed_config_url", &managed_config_url.as_deref().map(fuigo_auth::redact_url))
-            .field("otel_exporter_otlp_endpoint", &otel_exporter_otlp_endpoint.as_deref().map(fuigo_auth::redact_url))
-            .field("otel_exporter_otlp_traces_endpoint", &otel_exporter_otlp_traces_endpoint.as_deref().map(fuigo_auth::redact_url))
-            .field("otel_exporter_otlp_headers", &otel_exporter_otlp_headers.as_ref().map(|_| "<redacted>"))
-            .field("fuigo_internal_otlp_traces_endpoint", &fuigo_internal_otlp_traces_endpoint.as_deref().map(fuigo_auth::redact_url))
-            .field("fuigo_internal_otlp_headers", &fuigo_internal_otlp_headers.as_ref().map(|_| "<redacted>"))
+            .field(
+                "trace_upload_credentials_file",
+                trace_upload_credentials_file,
+            )
+            .field(
+                "trace_upload_credentials",
+                &trace_upload_credentials.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "trace_upload_endpoint_url",
+                &trace_upload_endpoint_url
+                    .as_deref()
+                    .map(fuigo_auth::redact_url),
+            )
+            .field(
+                "deployment_key",
+                &deployment_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "managed_config_url",
+                &managed_config_url.as_deref().map(fuigo_auth::redact_url),
+            )
+            .field(
+                "otel_exporter_otlp_endpoint",
+                &otel_exporter_otlp_endpoint
+                    .as_deref()
+                    .map(fuigo_auth::redact_url),
+            )
+            .field(
+                "otel_exporter_otlp_traces_endpoint",
+                &otel_exporter_otlp_traces_endpoint
+                    .as_deref()
+                    .map(fuigo_auth::redact_url),
+            )
+            .field(
+                "otel_exporter_otlp_headers",
+                &otel_exporter_otlp_headers.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "fuigo_internal_otlp_traces_endpoint",
+                &fuigo_internal_otlp_traces_endpoint
+                    .as_deref()
+                    .map(fuigo_auth::redact_url),
+            )
+            .field(
+                "fuigo_internal_otlp_headers",
+                &fuigo_internal_otlp_headers.as_ref().map(|_| "<redacted>"),
+            )
             .field("external_otel_master_switch", external_otel_master_switch)
             .field("otel_traces_exporter", otel_traces_exporter)
             .field("otel_traces_export_interval", otel_traces_export_interval)
             .field("otel_exporter_otlp_timeout", otel_exporter_otlp_timeout)
-            .field("management_api_key", &management_api_key.as_ref().map(|_| "<redacted>"))
-            .field("gcs_service_account_key", &gcs_service_account_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "management_api_key",
+                &management_api_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "gcs_service_account_key",
+                &gcs_service_account_key.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -582,8 +650,12 @@ impl EndpointsConfig {
         let auth_token = auth_token.filter(|_| {
             !is_session || self.deployment_key.is_some() || {
                 let url = self.resolve_trace_upload_url();
-                crate::auth::session_delivery::service_session_url_gate(&url, Some(&url), "trace_upload_static")
-                    .is_ok()
+                crate::auth::session_delivery::service_session_url_gate(
+                    &url,
+                    Some(&url),
+                    "trace_upload_static",
+                )
+                .is_ok()
             }
         });
         if auth_token.is_some() || self.deployment_key.is_some() {
@@ -1400,14 +1472,23 @@ impl std::fmt::Debug for ModelsConfig {
             .field("hidden_models", hidden_models)
             .field("disabled_models", disabled_models)
             .field("agent_type", agent_type)
-            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_headers",
+                &extra_headers
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("temperature", temperature)
             .field("top_p", top_p)
             .field("max_completion_tokens", max_completion_tokens)
             .field("max_retries", max_retries)
             .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
             .field("inference_idle_timeout_secs", inference_idle_timeout_secs)
-            .field("subagent_rate_limit_max_attempts", subagent_rate_limit_max_attempts)
+            .field(
+                "subagent_rate_limit_max_attempts",
+                subagent_rate_limit_max_attempts,
+            )
             .field("stream_tool_calls", stream_tool_calls)
             .finish()
     }
@@ -2150,13 +2231,26 @@ mod title_policy_tests {
     fn title_policy_defaults_to_model_and_round_trips_explicit_ownership() {
         let default: SessionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(default.title_policy.unwrap_or_default(), TitlePolicy::Model);
-        assert!(serde_json::to_value(default).unwrap().get("title_policy").is_none());
-        for (wire, policy) in [("local", TitlePolicy::Local), ("model", TitlePolicy::Model), ("host", TitlePolicy::Host)] {
-            let session: SessionConfig = serde_json::from_value(serde_json::json!({"title_policy": wire})).unwrap();
+        assert!(
+            serde_json::to_value(default)
+                .unwrap()
+                .get("title_policy")
+                .is_none()
+        );
+        for (wire, policy) in [
+            ("local", TitlePolicy::Local),
+            ("model", TitlePolicy::Model),
+            ("host", TitlePolicy::Host),
+        ] {
+            let session: SessionConfig =
+                serde_json::from_value(serde_json::json!({"title_policy": wire})).unwrap();
             assert_eq!(session.title_policy, Some(policy));
             assert_eq!(serde_json::to_value(session).unwrap()["title_policy"], wire);
         }
-        assert!(serde_json::from_value::<SessionConfig>(serde_json::json!({"title_policy": "unknown"})).is_err());
+        assert!(
+            serde_json::from_value::<SessionConfig>(serde_json::json!({"title_policy": "unknown"}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2177,7 +2271,10 @@ mod title_policy_tests {
         for policy in [TitlePolicy::Local, TitlePolicy::Host] {
             config.session.title_policy = Some(policy);
             assert!(!config.is_title_refresh_enabled());
-            assert_eq!(config.is_feature_enabled(Feature::TurnSummary), semantic_summary);
+            assert_eq!(
+                config.is_feature_enabled(Feature::TurnSummary),
+                semantic_summary
+            );
         }
     }
 }
@@ -2705,14 +2802,11 @@ impl Config {
             config.client_version = Self::default().client_version;
         }
         let model_overrides = crate::config::ModelOverrideConfig::resolve_with_user_config(
-            None,
-            None,
-            raw_config,
+            None, None, raw_config,
             // No campaign-free table travels with a bare TOML value: nothing counts as the
             // user's helper choice here. Every agent config is then re-resolved by
             // `resolve_runtime_fields`, which has it.
-            None,
-            None,
+            None, None,
         );
         config.web_search_model = model_overrides.web_search;
         config.session_summary_model = model_overrides.session_summary;
@@ -2853,9 +2947,8 @@ impl Config {
         Self::install_test_trusted_origins();
         #[cfg(not(test))]
         {
-            static AUTHORITY: std::sync::OnceLock<
-                Option<crate::util::TrustedOriginAuthority>,
-            > = std::sync::OnceLock::new();
+            static AUTHORITY: std::sync::OnceLock<Option<crate::util::TrustedOriginAuthority>> =
+                std::sync::OnceLock::new();
             install_trust_record_sink();
             if let Some(authority) =
                 AUTHORITY.get_or_init(crate::util::claim_trusted_origin_authority)
@@ -2957,7 +3050,9 @@ impl Config {
         // starts; see `re_resolve_runtime_fields` (P150).
         self.publish_trusted_api_origins();
         // `features.peer_messaging`: the config and managed-requirements tiers reach the session-side resolution.
-        crate::session::peer_message::install_peer_messaging_tiers(self.feature_sources(Feature::PeerMessaging));
+        crate::session::peer_message::install_peer_messaging_tiers(
+            self.feature_sources(Feature::PeerMessaging),
+        );
         self.cli_subagents = ctx.cli_subagents;
         self.web_search_model_override = ctx.cli_web_search_model.map(|s| s.to_owned());
         self.session_summary_model_override = ctx.cli_session_summary_model.map(|s| s.to_owned());
@@ -4444,7 +4539,9 @@ pub(crate) fn resolve_model_list(
                 );
             }
             provider.attach_trusted_config(config);
-            if provider.subscription_provider().is_some() && (entry.api_key.is_some() || entry.env_key.is_some()) {
+            if provider.subscription_provider().is_some()
+                && (entry.api_key.is_some() || entry.env_key.is_some())
+            {
                 provider.config.command = "invalid subscription/static-key combination".into();
             }
         }
@@ -4966,19 +5063,34 @@ impl std::fmt::Debug for ModelEntryConfig {
             .field("supports_reasoning_effort", supports_reasoning_effort)
             .field("reasoning_efforts", reasoning_efforts)
             .field("variants", variants)
-            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_headers",
+                &extra_headers
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("context_window", context_window)
             .field("context_windows", context_windows)
             .field("max_request_bytes", max_request_bytes)
-            .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
+            .field(
+                "auto_compact_threshold_percent",
+                auto_compact_threshold_percent,
+            )
             .field("system_prompt_label", system_prompt_label)
-            .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field(
+                "api_base_url",
+                &api_base_url.as_deref().map(fuigo_auth::redact_url),
+            )
             .field("use_concise", use_concise)
             .field("agent_type", agent_type)
             .field("inference_idle_timeout_secs", inference_idle_timeout_secs)
             .field("max_retries", max_retries)
             .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
-            .field("subagent_rate_limit_max_attempts", subagent_rate_limit_max_attempts)
+            .field(
+                "subagent_rate_limit_max_attempts",
+                subagent_rate_limit_max_attempts,
+            )
             .field("hidden", hidden)
             .field("supported_in_api", supported_in_api)
             .field("supports_backend_search", supports_backend_search)
@@ -5150,26 +5262,47 @@ impl std::fmt::Debug for ConfigModelOverride {
             .field("env_key", env_key)
             .field("auth_provider", auth_provider)
             .field("model_provider", model_provider)
-            .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field(
+                "api_base_url",
+                &api_base_url.as_deref().map(fuigo_auth::redact_url),
+            )
             .field("max_completion_tokens", max_completion_tokens)
             .field("temperature", temperature)
             .field("top_p", top_p)
             .field("api_backend", api_backend)
             .field("auth_scheme", auth_scheme)
-            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
-            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_headers",
+                &extra_headers
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "query_params",
+                &query_params
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
             .field("context_windows", context_windows)
             .field("max_request_bytes", max_request_bytes)
-            .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
+            .field(
+                "auto_compact_threshold_percent",
+                auto_compact_threshold_percent,
+            )
             .field("system_prompt_label", system_prompt_label)
             .field("use_concise", use_concise)
             .field("agent_type", agent_type)
             .field("inference_idle_timeout_secs", inference_idle_timeout_secs)
             .field("max_retries", max_retries)
             .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
-            .field("subagent_rate_limit_max_attempts", subagent_rate_limit_max_attempts)
+            .field(
+                "subagent_rate_limit_max_attempts",
+                subagent_rate_limit_max_attempts,
+            )
             .field("hidden", hidden)
             .field("supported_in_api", supported_in_api)
             .field("reasoning_effort", reasoning_effort)
@@ -5525,13 +5658,28 @@ impl std::fmt::Debug for ModelInfo {
             .field("top_p", top_p)
             .field("api_backend", api_backend)
             .field("auth_scheme", auth_scheme)
-            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
-            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_headers",
+                &extra_headers
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "query_params",
+                &query_params
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
             .field("context_windows", context_windows)
             .field("max_request_bytes", max_request_bytes)
-            .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
+            .field(
+                "auto_compact_threshold_percent",
+                auto_compact_threshold_percent,
+            )
             .field("system_prompt_label", system_prompt_label)
             .field("use_concise", use_concise)
             .field("agent_type", agent_type)
@@ -5539,7 +5687,10 @@ impl std::fmt::Debug for ModelInfo {
             .field("inference_idle_timeout_secs", inference_idle_timeout_secs)
             .field("max_retries", max_retries)
             .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
-            .field("subagent_rate_limit_max_attempts", subagent_rate_limit_max_attempts)
+            .field(
+                "subagent_rate_limit_max_attempts",
+                subagent_rate_limit_max_attempts,
+            )
             .field("hidden", hidden)
             .field("user_selectable", user_selectable)
             .field("supported_in_api", supported_in_api)
@@ -5775,7 +5926,10 @@ impl std::fmt::Debug for ModelEntry {
             .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
             .field("env_key", env_key)
             .field("auth_provider", auth_provider)
-            .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field(
+                "api_base_url",
+                &api_base_url.as_deref().map(fuigo_auth::redact_url),
+            )
             .finish()
     }
 }
@@ -5815,10 +5969,16 @@ impl ModelEntry {
     /// The provider governing this model's bearer: `None` when a static `api_key`/`env_key` resolves.
     /// The turn paths consult this, so a shadowed provider never runs.
     pub(crate) fn effective_auth_provider(&self) -> Option<&crate::auth::AuthProviderRef> {
-        if self.auth_provider.as_ref().is_some_and(|p| p.subscription_provider().is_some()) {
+        if self
+            .auth_provider
+            .as_ref()
+            .is_some_and(|p| p.subscription_provider().is_some())
+        {
             return self.auth_provider.as_ref();
         }
-        if self.own_credential().is_some() { return None; }
+        if self.own_credential().is_some() {
+            return None;
+        }
         self.auth_provider.as_ref()
     }
     /// `true` when the model has a non-empty `api_key`, an `env_key` that resolves to a non-empty value, or a named auth provider.
@@ -6274,8 +6434,16 @@ pub(crate) fn resolve_credentials(
     session_key: Option<&str>,
 ) -> ResolvedCredentials {
     let info = model.info();
-    let (api_key, base_url, auth_type) = if model.auth_provider.as_ref().is_some_and(|p| p.subscription_provider().is_some()) {
-        (None, info.base_url.clone(), fuigo_chat_state::AuthType::ApiKey)
+    let (api_key, base_url, auth_type) = if model
+        .auth_provider
+        .as_ref()
+        .is_some_and(|p| p.subscription_provider().is_some())
+    {
+        (
+            None,
+            info.base_url.clone(),
+            fuigo_chat_state::AuthType::ApiKey,
+        )
     } else if let Some(key) = model.own_credential() {
         (
             Some(key),
@@ -6356,9 +6524,7 @@ pub(crate) fn enforce_disable_api_key_auth(
     {
         let session_may_reach = crate::auth::session_delivery::session_may_reach(&creds.base_url);
         creds.auth_type = fuigo_chat_state::AuthType::SessionToken;
-        creds.api_key = session_key
-            .filter(|_| session_may_reach)
-            .map(str::to_owned);
+        creds.api_key = session_key.filter(|_| session_may_reach).map(str::to_owned);
         fuigo_telemetry::unified_log::debug(
             "auth: kill switch blocked a first-party API key at the credential seam",
             None,
@@ -6940,7 +7106,11 @@ pub(crate) fn sampling_config_for_model(
         mtls_cert_dir: model.mtls_cert_dir.clone(),
     };
     if let Some(provider) = model.effective_auth_provider() {
-        crate::auth::subscription::inference::configure(&mut sampler,provider,model.api_key.is_some() || model.env_key.is_some());
+        crate::auth::subscription::inference::configure(
+            &mut sampler,
+            provider,
+            model.api_key.is_some() || model.env_key.is_some(),
+        );
     }
     sampler
 }
@@ -7091,7 +7261,11 @@ pub(crate) fn resolve_web_search_sampling_config(
     }
     let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
-        if credentials.api_key.is_none() && entry.effective_auth_provider().is_some_and(|p| p.subscription_provider().is_none()) {
+        if credentials.api_key.is_none()
+            && entry
+                .effective_auth_provider()
+                .is_some_and(|p| p.subscription_provider().is_none())
+        {
             tracing::warn!(
                 web_search_model = %model_id,
                 "web search model uses an auth provider with no cached token; disabling web search"
@@ -7254,7 +7428,10 @@ impl ModelSwitchIncompatibleAgentError {
         )
     }
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;

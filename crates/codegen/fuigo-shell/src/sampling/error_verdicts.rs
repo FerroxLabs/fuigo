@@ -106,9 +106,7 @@ pub fn is_disk_full_text(raw: &str) -> bool {
 const HTTP_DUMP_PREFIX: &str = "request error:";
 
 /// Verdicts of an error reply, as the shell stamped them into `data.verdicts`; `None` for a reply without them.
-pub fn error_verdicts_from_error(
-    err: &agent_client_protocol::Error,
-) -> Option<ErrorVerdicts> {
+pub fn error_verdicts_from_error(err: &agent_client_protocol::Error) -> Option<ErrorVerdicts> {
     serde_json::from_value(err.data.as_ref()?.get(ERROR_VERDICTS_DATA_KEY)?.clone()).ok()
 }
 
@@ -269,7 +267,9 @@ mod tests {
             fuigo_sampling_types::error::MAX_TOKENS_TRUNCATION_MESSAGE,
         );
         assert!(v.max_tokens_truncation);
-        assert!(ErrorVerdicts::for_error(None, None, "write failed: No space left on device").disk_full);
+        assert!(
+            ErrorVerdicts::for_error(None, None, "write failed: No space left on device").disk_full
+        );
         assert!(!ErrorVerdicts::for_error(None, None, "all fine").disk_full);
     }
 
@@ -292,12 +292,18 @@ mod tests {
     fn parse_http_status_rejects_non_status_numbers() {
         assert_eq!(parse_http_status("expected status 200 but got EOF"), None);
         assert_eq!(parse_http_status("status 2024 items processed"), None);
-        assert_eq!(parse_http_status("merge conflict (300 files changed)"), None);
+        assert_eq!(
+            parse_http_status("merge conflict (300 files changed)"),
+            None
+        );
         assert_eq!(
             parse_http_status("status unknown; API error (status 503): overloaded"),
             Some(503)
         );
-        assert_eq!(parse_http_status("Unauthorized (401) from https://x"), Some(401));
+        assert_eq!(
+            parse_http_status("Unauthorized (401) from https://x"),
+            Some(401)
+        );
     }
 
     /// The rate-limit copy reads the verdicts, not the (possibly scrubbed) detail.

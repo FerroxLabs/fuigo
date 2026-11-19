@@ -18,7 +18,10 @@ fn p113_mcp_credential_variables_are_denied_at_config_parse() {
         "P113_RELOAD_BEARER",
     ];
     for name in names {
-        assert!(!is_provider_credential(name), "precondition: {name} is not denied yet");
+        assert!(
+            !is_provider_credential(name),
+            "precondition: {name} is not denied yet"
+        );
     }
     let raw: TomlValue = toml::from_str(
         r#"
@@ -41,7 +44,10 @@ clientSecretEnvVar = "P113_PARSE_OAUTH_BLOCK_SECRET"
     let parsed = parse_mcp_servers_from_toml(&raw);
     assert_eq!(parsed.len(), 2, "control: both servers parse");
     for name in &names[..3] {
-        assert!(is_provider_credential(name), "{name}, named by an MCP server's config, reaches child processes");
+        assert!(
+            is_provider_credential(name),
+            "{name}, named by an MCP server's config, reaches child processes"
+        );
     }
 
     let reloaded: TomlValue = toml::from_str(
@@ -53,7 +59,10 @@ bearer_token_env_var = "P113_RELOAD_BEARER"
     )
     .unwrap();
     crate::agent::config::deny_credentials_named_in(&reloaded);
-    assert!(is_provider_credential("P113_RELOAD_BEARER"), "the hot-reload pre-pass leaves the new token inheritable");
+    assert!(
+        is_provider_credential("P113_RELOAD_BEARER"),
+        "the hot-reload pre-pass leaves the new token inheritable"
+    );
 }
 
 /// At resolution: a server config that never went through the TOML loader (`.mcp.json`, an import, a plugin) has
@@ -72,14 +81,30 @@ fn p113_mcp_credential_variables_are_denied_at_resolution() {
         "oauth": {"clientId": "client", "clientSecretEnvVar": "P113_RESOLVE_OAUTH_BLOCK_SECRET"},
     }))
     .unwrap();
-    for name in ["P113_RESOLVE_BEARER", "P113_RESOLVE_OAUTH_SECRET", "P113_RESOLVE_OAUTH_BLOCK_SECRET"] {
-        assert!(!is_provider_credential(name), "precondition: {name} is not denied yet");
+    for name in [
+        "P113_RESOLVE_BEARER",
+        "P113_RESOLVE_OAUTH_SECRET",
+        "P113_RESOLVE_OAUTH_BLOCK_SECRET",
+    ] {
+        assert!(
+            !is_provider_credential(name),
+            "precondition: {name} is not denied yet"
+        );
     }
-    assert!(config.to_acp_mcp_server("a").is_some(), "control: the server converts");
+    assert!(
+        config.to_acp_mcp_server("a").is_some(),
+        "control: the server converts"
+    );
     assert!(is_provider_credential("P113_RESOLVE_BEARER"));
-    assert!(config.oauth_config().is_some(), "control: the OAuth config resolves");
+    assert!(
+        config.oauth_config().is_some(),
+        "control: the OAuth config resolves"
+    );
     assert!(is_provider_credential("P113_RESOLVE_OAUTH_SECRET"));
-    assert!(block.oauth_config().is_some(), "control: the [oauth] block resolves");
+    assert!(
+        block.oauth_config().is_some(),
+        "control: the [oauth] block resolves"
+    );
     assert!(is_provider_credential("P113_RESOLVE_OAUTH_BLOCK_SECRET"));
 }
 
@@ -95,18 +120,38 @@ fn p113_mcp_credential_variables_of_a_server_awaiting_setup_are_denied() {
         })
     };
     for name in ["P113_SETUP_JSON_BEARER", "P113_SETUP_LOADER_BEARER"] {
-        assert!(!is_provider_credential(name), "precondition: {name} is not denied yet");
+        assert!(
+            !is_provider_credential(name),
+            "precondition: {name} is not denied yet"
+        );
     }
     // A server name no preferences file holds a setup choice for (Astra r2 #7), so the server really awaits setup.
     const SERVER: &str = "p113-awaiting-setup-7c41e9";
-    let parsed = mcp_config_from_json_value(&serde_json::json!({"mcpServers": serde_json::Map::from_iter([(SERVER.to_string(), pending("P113_SETUP_JSON_BEARER"))])}));
+    let parsed = mcp_config_from_json_value(
+        &serde_json::json!({"mcpServers": serde_json::Map::from_iter([(SERVER.to_string(), pending("P113_SETUP_JSON_BEARER"))])}),
+    );
     assert_eq!(parsed.mcp_servers.len(), 1, "control: the entry parses");
-    assert!(is_provider_credential("P113_SETUP_JSON_BEARER"), "a .mcp.json server awaiting setup leaves its token inheritable");
+    assert!(
+        is_provider_credential("P113_SETUP_JSON_BEARER"),
+        "a .mcp.json server awaiting setup leaves its token inheritable"
+    );
 
-    let built: McpServerConfig = serde_json::from_value(pending("P113_SETUP_LOADER_BEARER")).unwrap();
-    assert!(!load_mcp_preferences().file().servers.contains_key(SERVER), "precondition: no setup choice saved");
-    let config = McpConfig { mcp_servers: IndexMap::from([(SERVER.to_string(), built)]) };
+    let built: McpServerConfig =
+        serde_json::from_value(pending("P113_SETUP_LOADER_BEARER")).unwrap();
+    assert!(
+        !load_mcp_preferences().file().servers.contains_key(SERVER),
+        "precondition: no setup choice saved"
+    );
+    let config = McpConfig {
+        mcp_servers: IndexMap::from([(SERVER.to_string(), built)]),
+    };
     let (servers, _) = parse_mcp_config_with_oauth(&config, "p113", &|s: &str| s.to_string());
-    assert!(servers.is_empty(), "control: the server awaits setup and is not built");
-    assert!(is_provider_credential("P113_SETUP_LOADER_BEARER"), "the loader skipped the server before registering its token");
+    assert!(
+        servers.is_empty(),
+        "control: the server awaits setup and is not built"
+    );
+    assert!(
+        is_provider_credential("P113_SETUP_LOADER_BEARER"),
+        "the loader skipped the server before registering its token"
+    );
 }

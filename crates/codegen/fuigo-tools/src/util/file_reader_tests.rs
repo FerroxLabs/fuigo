@@ -22,7 +22,11 @@ async fn bounded_reads_are_complete_or_error() {
     tokio::fs::write(&path, b"abcd").await.unwrap();
     assert_eq!(
         b"abcd",
-        LocalFs.read_file_bounded(&path, 4).await.unwrap().as_slice()
+        LocalFs
+            .read_file_bounded(&path, 4)
+            .await
+            .unwrap()
+            .as_slice()
     );
     for (source, limit, kind) in [
         (path.as_path(), 3, io::ErrorKind::FileTooLarge),
@@ -43,7 +47,10 @@ async fn bounded_reads_are_complete_or_error() {
     // usize::MAX cannot overflow the probe.
     assert_eq!(
         b"abcd",
-        read_regular_file(&path, Some(usize::MAX)).await.unwrap().as_slice()
+        read_regular_file(&path, Some(usize::MAX))
+            .await
+            .unwrap()
+            .as_slice()
     );
     let mock = MockFs::new();
     mock.set_file(&path, b"abcd").await;
@@ -81,7 +88,10 @@ async fn bounded_read_caps_bytes_not_just_the_stat() {
     assert_eq!(0, std::fs::metadata(status).unwrap().len());
     assert_eq!(
         io::ErrorKind::FileTooLarge,
-        read_regular_file(status, Some(16)).await.unwrap_err().kind()
+        read_regular_file(status, Some(16))
+            .await
+            .unwrap_err()
+            .kind()
     );
     assert!(read_regular_file(status, None).await.unwrap().len() > 16);
 }
@@ -144,8 +154,14 @@ async fn read_tool_source_prefers_the_bounded_read() {
         }
     }
     let path = Path::new("/x");
-    assert_eq!(b"bounded", read_tool_source(&Bounded, path).await.unwrap().as_slice());
-    assert_eq!(b"plain", read_tool_source(&Plain, path).await.unwrap().as_slice());
+    assert_eq!(
+        b"bounded",
+        read_tool_source(&Bounded, path).await.unwrap().as_slice()
+    );
+    assert_eq!(
+        b"plain",
+        read_tool_source(&Plain, path).await.unwrap().as_slice()
+    );
 }
 
 #[tokio::test]
@@ -153,7 +169,10 @@ async fn unsupported_backend_never_uses_unbounded_read() {
     struct Unsupported;
     #[async_trait::async_trait]
     impl AsyncFileSystem for Unsupported {
-        async fn read_file(&self, _: &Path) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+        async fn read_file(
+            &self,
+            _: &Path,
+        ) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
             panic!("unbounded fallback");
         }
         async fn write_file(
@@ -189,7 +208,11 @@ async fn bounded_read_follows_ordinary_symlinks() {
     std::os::unix::fs::symlink(source, &link).unwrap();
     assert_eq!(
         b"abcd",
-        LocalFs.read_file_bounded(&link, 4).await.unwrap().as_slice()
+        LocalFs
+            .read_file_bounded(&link, 4)
+            .await
+            .unwrap()
+            .as_slice()
     );
 }
 
@@ -199,8 +222,11 @@ async fn bounded_read_follows_ordinary_symlinks() {
 async fn special_files_are_refused_without_blocking() {
     let dir = tempfile::tempdir().unwrap();
     let fifo = dir.path().join("pipe");
-    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR)
-        .unwrap();
+    nix::unistd::mkfifo(
+        &fifo,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .unwrap();
     let sock = dir.path().join("s.sock");
     let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
     let fifo_link = dir.path().join("pipe-link");

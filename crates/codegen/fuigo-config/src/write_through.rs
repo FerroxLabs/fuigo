@@ -154,11 +154,13 @@ fn stage_with(
         // Bound to the special file seen here: an optimistic commit requires
         // the edited snapshot to be this very file, never a regular config
         // that took its name back meanwhile.
-        return Ok(crate::fs_atomic::StagedReplacement::written_in_place_at_commit(
-            target,
-            contents.to_vec(),
-        )
-        .from_original(crate::fs_atomic::FileKey::of(&md)));
+        return Ok(
+            crate::fs_atomic::StagedReplacement::written_in_place_at_commit(
+                target,
+                contents.to_vec(),
+            )
+            .from_original(crate::fs_atomic::FileKey::of(&md)),
+        );
     }
     let existing = match std::fs::OpenOptions::new().write(true).open(&target) {
         // The write-access probe: no truncate, no create, so it changes
@@ -520,7 +522,8 @@ pub fn create_temp_with(
     let pre_opened = None;
     #[cfg(not(unix))]
     let pre_opened = ();
-    create_temp_with_mode(dir, name, 0o600, pre_opened, next_nonce).map(|(tmp, file, _)| (tmp, file))
+    create_temp_with_mode(dir, name, 0o600, pre_opened, next_nonce)
+        .map(|(tmp, file, _)| (tmp, file))
 }
 
 fn create_temp_with_mode(
@@ -1039,7 +1042,9 @@ pub mod fault {
         #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::metadata(tmp).ok().map(|m| m.permissions().mode() & 0o7777)
+            std::fs::metadata(tmp)
+                .ok()
+                .map(|m| m.permissions().mode() & 0o7777)
         };
         #[cfg(not(unix))]
         let mode = None;
@@ -1097,13 +1102,21 @@ mod tests {
             let fifo = fifo.clone();
             std::thread::spawn(move || {
                 let mut s = String::new();
-                std::fs::File::open(&fifo).unwrap().read_to_string(&mut s).unwrap();
+                std::fs::File::open(&fifo)
+                    .unwrap()
+                    .read_to_string(&mut s)
+                    .unwrap();
                 s
             })
         };
         write_file_atomically(&fifo, b"through\n").unwrap();
         assert_eq!(reader.join().unwrap(), "through\n");
-        assert!(std::fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
+        assert!(
+            std::fs::symlink_metadata(&fifo)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
     }
 
     /// Staging for a non-regular target writes nothing: the write happens in
@@ -1187,7 +1200,10 @@ mod tests {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => got.extend_from_slice(&buf[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => {
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 Err(e) => panic!("reading the FIFO: {e}"),

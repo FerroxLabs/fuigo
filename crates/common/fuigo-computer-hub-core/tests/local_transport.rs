@@ -303,7 +303,9 @@ async fn missing_tool_resolves_as_terminal_not_found() {
     let items = collect(&mut stream).await;
     assert_eq!(items.len(), 1);
     match &items[0] {
-        ToolStreamItem::Terminal(Err(e)) if e.kind == fuigo_tool_runtime::ToolErrorKind::NotFound => {
+        ToolStreamItem::Terminal(Err(e))
+            if e.kind == fuigo_tool_runtime::ToolErrorKind::NotFound =>
+        {
             assert!(
                 e.detail.contains("ghost"),
                 "detail should mention tool id: {}",

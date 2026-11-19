@@ -13,8 +13,8 @@
 
 mod otlp_collector;
 
-use otlp_collector as col;
 use fuigo_telemetry::external::{self, ExternalOtelRemotePolicy, IdentityAttrs};
+use otlp_collector as col;
 
 // Secret shapes that MUST be scrubbed everywhere, even inside gated content
 const SECRET_KEY: &str = "sk-LEAKaaaaaaaaaaaaaaaa1234567890";
@@ -172,7 +172,8 @@ fn external_stream_gates_on_end_to_end() {
     );
 
     // ── Prompt gate ON: text present, secret still scrubbed ─────────────
-    let prompt = col::find_event(&collected, "fuigo_code.user_prompt").expect("user_prompt present");
+    let prompt =
+        col::find_event(&collected, "fuigo_code.user_prompt").expect("user_prompt present");
     let prompt_text = prompt
         .attrs
         .get("prompt")

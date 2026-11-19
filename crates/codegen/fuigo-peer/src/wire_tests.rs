@@ -38,20 +38,47 @@ fn envelope() -> Envelope {
 fn all_ops() -> Vec<Op> {
     vec![
         Op::List { page: 0 },
-        Op::List { page: MAX_LIST_PAGES - 1 },
-        Op::Send { to: addr(), envelope: envelope(), watch: false },
-        Op::Notice { message_id: BoundedId::new("m-1").unwrap(), kind: NoticeKind::Idle },
+        Op::List {
+            page: MAX_LIST_PAGES - 1,
+        },
+        Op::Send {
+            to: addr(),
+            envelope: envelope(),
+            watch: false,
+        },
+        Op::Notice {
+            message_id: BoundedId::new("m-1").unwrap(),
+            kind: NoticeKind::Idle,
+        },
     ]
 }
 
 fn all_replies() -> Vec<Reply> {
     vec![
-        Reply::List { rows: vec![SessionRow { address: addr(), name: "a".into(), session_ref: "3f2a9c10".into() }], more: true },
-        Reply::List { rows: vec![], more: false },
-        Reply::Send { outcome: DeliveryOutcome::Delivered {} },
-        Reply::Send { outcome: DeliveryOutcome::Rejected { reason: RejectReason::StaleAddress } },
+        Reply::List {
+            rows: vec![SessionRow {
+                address: addr(),
+                name: "a".into(),
+                session_ref: "3f2a9c10".into(),
+            }],
+            more: true,
+        },
+        Reply::List {
+            rows: vec![],
+            more: false,
+        },
+        Reply::Send {
+            outcome: DeliveryOutcome::Delivered {},
+        },
+        Reply::Send {
+            outcome: DeliveryOutcome::Rejected {
+                reason: RejectReason::StaleAddress,
+            },
+        },
         Reply::Notice {},
-        Reply::Unavailable { reason: ReasonText::new("version mismatch").unwrap() },
+        Reply::Unavailable {
+            reason: ReasonText::new("version mismatch").unwrap(),
+        },
     ]
 }
 
@@ -71,7 +98,10 @@ fn every_op_and_reply_round_trips() {
         back.validate().unwrap();
     }
     let h = Hello::new(hid(HOST));
-    assert_eq!(serde_json::from_slice::<Hello>(&serde_json::to_vec(&h).unwrap()).unwrap(), h);
+    assert_eq!(
+        serde_json::from_slice::<Hello>(&serde_json::to_vec(&h).unwrap()).unwrap(),
+        h
+    );
     assert!(h.version_matches());
 }
 
@@ -91,25 +121,57 @@ fn unknown_op_unknown_field_and_watch_are_rejected() {
     ] {
         assert!(serde_json::from_str::<Op>(bad).is_err(), "{bad}");
     }
-    let mut v = serde_json::to_value(Op::Send { to: addr(), envelope: envelope(), watch: false }).unwrap();
+    let mut v = serde_json::to_value(Op::Send {
+        to: addr(),
+        envelope: envelope(),
+        watch: false,
+    })
+    .unwrap();
     v["authority"] = "operator".into();
     assert!(serde_json::from_value::<Op>(v).is_err());
-    let mut v = serde_json::to_value(Op::Send { to: addr(), envelope: envelope(), watch: false }).unwrap();
+    let mut v = serde_json::to_value(Op::Send {
+        to: addr(),
+        envelope: envelope(),
+        watch: false,
+    })
+    .unwrap();
     v["envelope"]["origin"] = "human".into();
     assert!(serde_json::from_value::<Op>(v).is_err());
     assert!(serde_json::from_str::<Reply>(r#"{"reply":"watching"}"#).is_err());
     assert!(serde_json::from_str::<Reply>(r#"{"reply":"notice","extra":1}"#).is_err());
-    assert!(serde_json::from_str::<Hello>(&format!(r#"{{"version":1,"host_id":"{HOST}","pid":1}}"#)).is_err());
+    assert!(
+        serde_json::from_str::<Hello>(&format!(r#"{{"version":1,"host_id":"{HOST}","pid":1}}"#))
+            .is_err()
+    );
 }
 
 #[test]
 fn list_page_and_reason_and_rows_are_bounded() {
-    assert!(Op::List { page: MAX_LIST_PAGES }.validate().is_err());
+    assert!(
+        Op::List {
+            page: MAX_LIST_PAGES
+        }
+        .validate()
+        .is_err()
+    );
     assert!(ReasonText::new(&"x".repeat(MAX_REASON_BYTES + 1)).is_err());
-    let row = SessionRow { address: addr(), name: "a".into(), session_ref: "r".into() };
-    let r = Reply::List { rows: vec![row.clone(); LIST_PAGE_ROWS + 1], more: false };
+    let row = SessionRow {
+        address: addr(),
+        name: "a".into(),
+        session_ref: "r".into(),
+    };
+    let r = Reply::List {
+        rows: vec![row.clone(); LIST_PAGE_ROWS + 1],
+        more: false,
+    };
     assert!(r.validate().is_err());
-    let r = Reply::List { rows: vec![SessionRow { name: "fuigo-peer:x".into(), ..row }], more: false };
+    let r = Reply::List {
+        rows: vec![SessionRow {
+            name: "fuigo-peer:x".into(),
+            ..row
+        }],
+        more: false,
+    };
     assert!(r.validate().is_err());
     assert!(check_wire_frame(MAX_FRAME_BYTES).is_ok());
     assert!(check_wire_frame(MAX_FRAME_BYTES + 1).is_err());
@@ -118,7 +180,13 @@ fn list_page_and_reason_and_rows_are_bounded() {
 #[test]
 fn hello_version_is_exact() {
     for v in [0, 2, u32::MAX] {
-        assert!(!Hello { version: v, host_id: hid(HOST) }.version_matches());
+        assert!(
+            !Hello {
+                version: v,
+                host_id: hid(HOST)
+            }
+            .version_matches()
+        );
     }
 }
 
@@ -152,7 +220,10 @@ fn a_to_address_cannot_change_the_socket_path() {
     }
     let dir = Path::new("/home/u/.fuigo/peers");
     let p = socket_path(dir, &HostId::of(&addr()));
-    assert_eq!(p, Path::new("/home/u/.fuigo/peers/0123456789abcdef0123456789abcdef.sock"));
+    assert_eq!(
+        p,
+        Path::new("/home/u/.fuigo/peers/0123456789abcdef0123456789abcdef.sock")
+    );
     assert_eq!(p.parent(), Some(dir));
     // Whatever session part an address carries, the path depends on the host id alone.
     let a2 = Address::new(HOST, "other-session", 99).unwrap();
@@ -162,12 +233,27 @@ fn a_to_address_cannot_change_the_socket_path() {
 #[test]
 fn directory_choice_by_length() {
     assert_eq!(choose_dir(20, None), DirChoice::Home);
-    assert_eq!(choose_dir(SOCKET_PATH_MAX - HOME_SUFFIX_LEN, None), DirChoice::Home);
-    assert_eq!(choose_dir(SOCKET_PATH_MAX - HOME_SUFFIX_LEN + 1, Some(20)), DirChoice::Runtime);
+    assert_eq!(
+        choose_dir(SOCKET_PATH_MAX - HOME_SUFFIX_LEN, None),
+        DirChoice::Home
+    );
+    assert_eq!(
+        choose_dir(SOCKET_PATH_MAX - HOME_SUFFIX_LEN + 1, Some(20)),
+        DirChoice::Runtime
+    );
     assert_eq!(choose_dir(120, Some(20)), DirChoice::Runtime);
-    assert_eq!(choose_dir(120, None), DirChoice::Unavailable(DirUnavailable::NoRuntimeDir));
-    assert_eq!(choose_dir(120, Some(90)), DirChoice::Unavailable(DirUnavailable::RuntimeTooLong));
-    assert_eq!(choose_dir(usize::MAX, Some(usize::MAX)), DirChoice::Unavailable(DirUnavailable::RuntimeTooLong));
+    assert_eq!(
+        choose_dir(120, None),
+        DirChoice::Unavailable(DirUnavailable::NoRuntimeDir)
+    );
+    assert_eq!(
+        choose_dir(120, Some(90)),
+        DirChoice::Unavailable(DirUnavailable::RuntimeTooLong)
+    );
+    assert_eq!(
+        choose_dir(usize::MAX, Some(usize::MAX)),
+        DirChoice::Unavailable(DirUnavailable::RuntimeTooLong)
+    );
     // The smaller of 108 (Linux) and 104 (macOS), minus the NUL.
     assert_eq!(SOCKET_PATH_MAX, 103);
     // The limit really is the length of the path we would build.
@@ -187,10 +273,23 @@ fn host_n(n: usize) -> String {
 #[test]
 fn rows_parse_and_match_serde_output() {
     let rows = vec![
-        HostRow { host_id: hid(HOST), pid: 1, started: 2, dir: HostDir::Home },
-        HostRow { host_id: hid(OTHER), pid: u32::MAX, started: u64::MAX, dir: HostDir::Runtime },
+        HostRow {
+            host_id: hid(HOST),
+            pid: 1,
+            started: 2,
+            dir: HostDir::Home,
+        },
+        HostRow {
+            host_id: hid(OTHER),
+            pid: u32::MAX,
+            started: u64::MAX,
+            dir: HostDir::Runtime,
+        },
     ];
-    for json in [serde_json::to_vec(&rows).unwrap(), serde_json::to_vec_pretty(&rows).unwrap()] {
+    for json in [
+        serde_json::to_vec(&rows).unwrap(),
+        serde_json::to_vec_pretty(&rows).unwrap(),
+    ] {
         assert_eq!(parse_rows(&json).unwrap(), rows);
         assert_eq!(serde_json::from_slice::<Vec<HostRow>>(&json).unwrap(), rows);
     }
@@ -201,7 +300,15 @@ fn rows_parse_and_match_serde_output() {
 fn rows_refuse_bad_input() {
     let ok = row_json(HOST, "home");
     // 64 rows pass, 65 do not.
-    let n = |k: usize| format!("[{}]", (0..k).map(|i| row_json(&host_n(i), "home")).collect::<Vec<_>>().join(","));
+    let n = |k: usize| {
+        format!(
+            "[{}]",
+            (0..k)
+                .map(|i| row_json(&host_n(i), "home"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
     assert_eq!(parse_rows(n(64).as_bytes()).unwrap().len(), 64);
     assert_eq!(parse_rows(n(65).as_bytes()), Err(RowsError::TooManyRows));
     // 64 KiB passes the size gate, 64 KiB + 1 does not (even if it is only spaces).
@@ -210,15 +317,24 @@ fn rows_refuse_bad_input() {
     assert!(parse_rows(&pad).is_ok());
     pad.push(b' ');
     assert_eq!(parse_rows(&pad), Err(RowsError::TooLarge));
-    assert_eq!(parse_rows(&vec![b'['; MAX_ROWS_BYTES + 1]), Err(RowsError::TooLarge));
+    assert_eq!(
+        parse_rows(&vec![b'['; MAX_ROWS_BYTES + 1]),
+        Err(RowsError::TooLarge)
+    );
     // Duplicate host id.
-    assert_eq!(parse_rows(format!("[{ok},{ok}]").as_bytes()), Err(RowsError::DuplicateHost));
+    assert_eq!(
+        parse_rows(format!("[{ok},{ok}]").as_bytes()),
+        Err(RowsError::DuplicateHost)
+    );
     for bad in [
         format!(r#"[{{"host_id":"{HOST}","pid":1,"started":1,"dir":"home","path":"/tmp/x"}}]"#),
         format!(r#"[{{"host_id":"{HOST}","pid":1,"started":1,"dir":"/tmp"}}]"#),
         format!(r#"[{{"host_id":"{HOST}","pid":1,"started":1}}]"#),
         format!(r#"[{{"host_id":"{HOST}","host_id":"{HOST}","pid":1,"started":1,"dir":"home"}}]"#),
-        format!(r#"[{{"host_id":"{}","pid":1,"started":1,"dir":"home"}}]"#, HOST.to_uppercase()),
+        format!(
+            r#"[{{"host_id":"{}","pid":1,"started":1,"dir":"home"}}]"#,
+            HOST.to_uppercase()
+        ),
         format!(r#"[{{"host_id":"{HOST}","pid":-1,"started":1,"dir":"home"}}]"#),
         format!(r#"[{{"host_id":"{HOST}","pid":4294967296,"started":1,"dir":"home"}}]"#),
         format!(r#"[{{"host_id":"{HOST}","pid":01,"started":1,"dir":"home"}}]"#),
@@ -231,7 +347,12 @@ fn rows_refuse_bad_input() {
     ] {
         assert!(parse_rows(bad.as_bytes()).is_err(), "{bad}");
     }
-    assert!(serde_json::from_str::<HostRow>(&format!(r#"{{"host_id":"{HOST}","pid":1,"started":1,"dir":"home","path":"x"}}"#)).is_err());
+    assert!(
+        serde_json::from_str::<HostRow>(&format!(
+            r#"{{"host_id":"{HOST}","pid":1,"started":1,"dir":"home","path":"x"}}"#
+        ))
+        .is_err()
+    );
 }
 
 #[test]
@@ -255,7 +376,12 @@ fn reap_table() {
         (VersionMismatch, NoSuchFile, Reap::Keep, Reap::Keep),
         (Other, Other, Reap::Keep, Reap::Keep),
         (Refused, Other, Reap::Keep, Reap::Keep),
-        (Hello(exp.clone()), Hello(exp.clone()), Reap::Keep, Reap::Keep),
+        (
+            Hello(exp.clone()),
+            Hello(exp.clone()),
+            Reap::Keep,
+            Reap::Keep,
+        ),
         (Hello(exp.clone()), Refused, Reap::Keep, Reap::Keep),
         (Refused, Hello(exp.clone()), Reap::Keep, Reap::Keep),
         (Hello(x.clone()), Hello(x.clone()), Reap::Reap, Reap::Reap),
@@ -266,12 +392,32 @@ fn reap_table() {
         (NoSuchFile, Hello(x.clone()), Reap::Keep, Reap::Keep),
     ];
     for (a, b, home, runtime) in cases {
-        assert_eq!(reap_decision(HostDir::Home, &exp, &a, &b, false), home, "home {a:?} {b:?}");
-        assert_eq!(reap_decision(HostDir::Runtime, &exp, &a, &b, false), runtime, "runtime {a:?} {b:?}");
+        assert_eq!(
+            reap_decision(HostDir::Home, &exp, &a, &b, false),
+            home,
+            "home {a:?} {b:?}"
+        );
+        assert_eq!(
+            reap_decision(HostDir::Runtime, &exp, &a, &b, false),
+            runtime,
+            "runtime {a:?} {b:?}"
+        );
         // The runtime directory was verified to be the row's own: absent twice now reaps; nothing else changes.
-        let same = if (a == NoSuchFile || a == Refused) && (b == NoSuchFile || b == Refused) { Reap::Reap } else { runtime };
-        assert_eq!(reap_decision(HostDir::Runtime, &exp, &a, &b, true), same, "runtime same dir {a:?} {b:?}");
-        assert_eq!(reap_decision(HostDir::Home, &exp, &a, &b, true), home, "home same dir {a:?} {b:?}");
+        let same = if (a == NoSuchFile || a == Refused) && (b == NoSuchFile || b == Refused) {
+            Reap::Reap
+        } else {
+            runtime
+        };
+        assert_eq!(
+            reap_decision(HostDir::Runtime, &exp, &a, &b, true),
+            same,
+            "runtime same dir {a:?} {b:?}"
+        );
+        assert_eq!(
+            reap_decision(HostDir::Home, &exp, &a, &b, true),
+            home,
+            "home same dir {a:?} {b:?}"
+        );
     }
 }
 
@@ -293,10 +439,19 @@ impl Rng {
 
 #[test]
 fn mutated_frames_never_panic_and_never_yield_an_invalid_envelope() {
-    let mut seeds: Vec<Vec<u8>> = all_ops().iter().map(|o| serde_json::to_vec(o).unwrap()).collect();
+    let mut seeds: Vec<Vec<u8>> = all_ops()
+        .iter()
+        .map(|o| serde_json::to_vec(o).unwrap())
+        .collect();
     seeds.extend(all_replies().iter().map(|r| serde_json::to_vec(r).unwrap()));
     seeds.push(serde_json::to_vec(&Hello::new(hid(HOST))).unwrap());
-    let row_seed = serde_json::to_vec(&[HostRow { host_id: hid(HOST), pid: 1, started: 2, dir: HostDir::Home }]).unwrap();
+    let row_seed = serde_json::to_vec(&[HostRow {
+        host_id: hid(HOST),
+        pid: 1,
+        started: 2,
+        dir: HostDir::Home,
+    }])
+    .unwrap();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let (mut decoded_ops, mut decoded_sends) = (0usize, 0usize);
     for i in 0..6000 {

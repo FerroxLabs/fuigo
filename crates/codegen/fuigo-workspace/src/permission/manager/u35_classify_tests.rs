@@ -7,7 +7,9 @@
 //! commands stay auto-allowed on every path.
 
 use super::*;
-use crate::permission::auto_mode::{ClassifierContext, ClassifierVerdict, HeuristicPermissionClassifier};
+use crate::permission::auto_mode::{
+    ClassifierContext, ClassifierVerdict, HeuristicPermissionClassifier,
+};
 
 /// A decision path that can approve a shell command without asking.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -28,26 +30,80 @@ enum Path {
     Glob,
 }
 
-const ALL: &[Path] =
-    &[Path::Ask, Path::Blanket, Path::Sandbox, Path::CatchAllRule, Path::AutoFast, Path::Prefix, Path::Glob];
+const ALL: &[Path] = &[
+    Path::Ask,
+    Path::Blanket,
+    Path::Sandbox,
+    Path::CatchAllRule,
+    Path::AutoFast,
+    Path::Prefix,
+    Path::Glob,
+];
 /// Every path except the catch-all allow rule, a documented explicit override that keeps only its own floors.
-const SESSION: &[Path] = &[Path::Ask, Path::Blanket, Path::Sandbox, Path::AutoFast, Path::Prefix, Path::Glob];
+const SESSION: &[Path] = &[
+    Path::Ask,
+    Path::Blanket,
+    Path::Sandbox,
+    Path::AutoFast,
+    Path::Prefix,
+    Path::Glob,
+];
 
 /// Prefix grants a user could have remembered for the tools whose floors are under test.
 const PREFIX_GRANTS: &[&str] = &[
-    "rg", "cat", "ls", "sed", "awk", "printf", "kubectl get", "git grep", "git status", "python3", "node", "perl",
-    "ssh", "scp", "sftp", "declare", "typeset", "export", "find", "tar", "man", "jq", "go", "wget", "head", "xxd",
+    "rg",
+    "cat",
+    "ls",
+    "sed",
+    "awk",
+    "printf",
+    "kubectl get",
+    "git grep",
+    "git status",
+    "python3",
+    "node",
+    "perl",
+    "ssh",
+    "scp",
+    "sftp",
+    "declare",
+    "typeset",
+    "export",
+    "find",
+    "tar",
+    "man",
+    "jq",
+    "go",
+    "wget",
+    "head",
+    "xxd",
     "grep",
 ];
 /// Glob grants a user could have remembered for the same tools.
-const GLOB_GRANTS: &[&str] =
-    &["rg *", "cat *", "sed *", "awk *", "printf *", "python3 *", "ssh *", "kubectl get *", "declare *", "go *", "grep *", "find *"];
+const GLOB_GRANTS: &[&str] = &[
+    "rg *",
+    "cat *",
+    "sed *",
+    "awk *",
+    "printf *",
+    "python3 *",
+    "ssh *",
+    "kubectl get *",
+    "declare *",
+    "go *",
+    "grep *",
+    "find *",
+];
 
 fn grant_state(path: Path) -> PermissionState {
     let mut state = PermissionState::default();
     match path {
-        Path::Prefix => state.allowed_bash_commands.extend(PREFIX_GRANTS.iter().map(|g| (*g).to_owned())),
-        Path::Glob => state.allowed_bash_globs.extend(GLOB_GRANTS.iter().map(|g| (*g).to_owned())),
+        Path::Prefix => state
+            .allowed_bash_commands
+            .extend(PREFIX_GRANTS.iter().map(|g| (*g).to_owned())),
+        Path::Glob => state
+            .allowed_bash_globs
+            .extend(GLOB_GRANTS.iter().map(|g| (*g).to_owned())),
         _ => {}
     }
     state
@@ -94,12 +150,20 @@ fn approves(path: Path, cmd: &str, cwd: &std::path::Path) -> bool {
                 ..PermissionState::default()
             };
             matches!(
-                bash_grant_pre_decision(cmd, &evaluation, &state, None, BashGrantOpts::post_classify(false)),
+                bash_grant_pre_decision(
+                    cmd,
+                    &evaluation,
+                    &state,
+                    None,
+                    BashGrantOpts::post_classify(false)
+                ),
                 Some((Decision::Allow, _))
             )
         }
         Path::Sandbox => sandbox_may_auto_allow_bash(Some(&evaluation), true),
-        Path::CatchAllRule => !hub_needs_default_prompt(&access, Some(&catch_all_policy()), true, cwd),
+        Path::CatchAllRule => {
+            !hub_needs_default_prompt(&access, Some(&catch_all_policy()), true, cwd)
+        }
         Path::AutoFast => {
             let verdict = HeuristicPermissionClassifier::classify_sync(
                 "run_terminal_command",
@@ -116,7 +180,13 @@ fn approves(path: Path, cmd: &str, cwd: &std::path::Path) -> bool {
             let state = grant_state(path);
             let evaluation = evaluation_in(cmd, &state, cwd);
             matches!(
-                bash_grant_pre_decision(cmd, &evaluation, &state, None, BashGrantOpts::post_classify(false)),
+                bash_grant_pre_decision(
+                    cmd,
+                    &evaluation,
+                    &state,
+                    None,
+                    BashGrantOpts::post_classify(false)
+                ),
                 Some((Decision::Allow, _))
             )
         }
@@ -140,7 +210,11 @@ fn approving_paths(cases: &[&str], paths: &[Path]) -> Vec<String> {
 #[track_caller]
 fn assert_requires_approval(cases: &[&str], paths: &[Path]) {
     let open = approving_paths(cases, paths);
-    assert!(open.is_empty(), "must require approval:\n{}", open.join("\n"));
+    assert!(
+        open.is_empty(),
+        "must require approval:\n{}",
+        open.join("\n")
+    );
 }
 
 // ---- Shared word normaliser: quotes, escapes, adjacent fragments, braces, globs ----
@@ -183,9 +257,26 @@ fn u35_brace_expansion_reaches_every_check() {
 /// Review r1 (glob): a glob that can expand into an option (or a program name) is not modelled.
 #[test]
 fn u35_option_capable_glob_requires_approval() {
-    assert_requires_approval(&["rg needle *", "cat *", "cat *.md", "ls -* .", "sort ?ompress f", "*"], ALL);
+    assert_requires_approval(
+        &[
+            "rg needle *",
+            "cat *",
+            "cat *.md",
+            "ls -* .",
+            "sort ?ompress f",
+            "*",
+        ],
+        ALL,
+    );
     // u35 r3 (Fable r2 M3): a glob inside an option value (`--include=*.rs`) can match an option-like file name too.
-    assert_requires_approval(&["grep -rn foo src --include=*.rs", "rg -g *.rs needle", "ls --ignore=*.o"], ALL);
+    assert_requires_approval(
+        &[
+            "grep -rn foo src --include=*.rs",
+            "rg -g *.rs needle",
+            "ls --ignore=*.o",
+        ],
+        ALL,
+    );
 }
 
 // ---- Shell-state mutation ----
@@ -194,7 +285,11 @@ fn u35_option_capable_glob_requires_approval() {
 #[test]
 fn u35_printf_v_mutates_shell_variables() {
     assert_requires_approval(
-        &["printf -v PATH ./bin; ls", "printf -vPATH ./bin; ls", "printf -v PATH -- ./bin && cat f"],
+        &[
+            "printf -v PATH ./bin; ls",
+            "printf -vPATH ./bin; ls",
+            "printf -v PATH -- ./bin && cat f",
+        ],
         ALL,
     );
 }
@@ -202,14 +297,29 @@ fn u35_printf_v_mutates_shell_variables() {
 /// Review r1: a path-qualified or case-variant program must not inherit a read-only or routine approval.
 #[test]
 fn u35_untrusted_program_identity_gets_no_positive_approval() {
-    assert_requires_approval(&["./env ls", "./find .", "/tmp/x/timeout 5 ls", "LS -la", "Cat f"], IDENTITY);
+    assert_requires_approval(
+        &[
+            "./env ls",
+            "./find .",
+            "/tmp/x/timeout 5 ls",
+            "LS -la",
+            "Cat f",
+        ],
+        IDENTITY,
+    );
 }
 
 /// Review r1: a `cd` inside a pipeline does not move the shell that runs git, so the scanned directory is not
 /// the one git runs in.
 #[test]
 fn u35_scoped_cd_before_git_fails_closed() {
-    assert_requires_approval(&["cd /tmp/clean-repo | git status", "cd /tmp/clean-repo || git status"], ALL);
+    assert_requires_approval(
+        &[
+            "cd /tmp/clean-repo | git status",
+            "cd /tmp/clean-repo || git status",
+        ],
+        ALL,
+    );
 }
 
 /// Review r1: `/dev/tcp` / `/dev/udp` redirects open a network socket in either direction.
@@ -230,14 +340,23 @@ fn u35_dev_tcp_redirects_require_approval() {
 /// Review r1: `git grep -O` runs a pager program; `-nO./payload` hides it in a short-option cluster.
 #[test]
 fn u35_git_grep_open_in_pager_cluster() {
-    assert_requires_approval(&["git grep -nO./payload needle", "git grep -iO ./payload needle"], ALL);
+    assert_requires_approval(
+        &[
+            "git grep -nO./payload needle",
+            "git grep -iO ./payload needle",
+        ],
+        ALL,
+    );
 }
 
 /// Review r1: kubectl `-s` with an attached value points kubectl (and its credentials) at another server.
 #[test]
 fn u35_kubectl_attached_short_server() {
     assert_requires_approval(
-        &["kubectl get pods -shttps://example.test --insecure-skip-tls-verify", "kubectl get pods -s=https://example.test"],
+        &[
+            "kubectl get pods -shttps://example.test --insecure-skip-tls-verify",
+            "kubectl get pods -s=https://example.test",
+        ],
         ALL,
     );
 }
@@ -360,7 +479,17 @@ fn u35_exec_vehicles_require_approval() {
 /// Review r1: environment dumps disclose secrets to the model context.
 #[test]
 fn u35_environment_dumps() {
-    assert_requires_approval(&["env", "printenv", "printenv AWS_SECRET_ACCESS_KEY", "set", "jq -n env", "jq -n '$ENV'"], ALL);
+    assert_requires_approval(
+        &[
+            "env",
+            "printenv",
+            "printenv AWS_SECRET_ACCESS_KEY",
+            "set",
+            "jq -n env",
+            "jq -n '$ENV'",
+        ],
+        ALL,
+    );
 }
 
 /// Review r1: a destructive command under a broad grant or sandbox auto-allow still asks.
@@ -368,7 +497,12 @@ fn u35_environment_dumps() {
 fn u35_dangerous_command_floors_broad_grants() {
     // The catch-all allow rule is a documented explicit override and keeps its own floors.
     assert_requires_approval(
-        &["kill -TERM 12345", "rm -rf build", "chmod 600 f", "git push origin main"],
+        &[
+            "kill -TERM 12345",
+            "rm -rf build",
+            "chmod 600 f",
+            "git push origin main",
+        ],
         SESSION,
     );
 }
@@ -377,7 +511,12 @@ fn u35_dangerous_command_floors_broad_grants() {
 #[test]
 fn u35_unparseable_and_unresolved_floor_broad_grants() {
     assert_requires_approval(
-        &["sed 'e id' \"$F\"", "for f in a b; do echo $f; done", "echo $(id)", "ls \"$DIR\""],
+        &[
+            "sed 'e id' \"$F\"",
+            "for f in a b; do echo $f; done",
+            "echo $(id)",
+            "ls \"$DIR\"",
+        ],
         SESSION,
     );
 }
@@ -385,13 +524,25 @@ fn u35_unparseable_and_unresolved_floor_broad_grants() {
 /// An exact whole-command grant is the user's authority for that command and keeps working over the new floors.
 #[test]
 fn u35_exact_whole_command_grant_still_allows() {
-    for cmd in ["kill -TERM 12345", "sed 'e id' fixture.txt", "rg needle *", "echo $(id)", "printf -v PATH ./bin; ls"] {
+    for cmd in [
+        "kill -TERM 12345",
+        "sed 'e id' fixture.txt",
+        "rg needle *",
+        "echo $(id)",
+        "printf -v PATH ./bin; ls",
+    ] {
         let mut state = PermissionState::default();
         state.allowed_bash_commands.insert(cmd.to_owned());
         let evaluation = evaluate_bash(cmd, &state, true);
         assert!(
             matches!(
-                bash_grant_pre_decision(cmd, &evaluation, &state, None, BashGrantOpts::post_classify(false)),
+                bash_grant_pre_decision(
+                    cmd,
+                    &evaluation,
+                    &state,
+                    None,
+                    BashGrantOpts::post_classify(false)
+                ),
                 Some((Decision::Allow, _))
             ),
             "an exact grant of {cmd:?} must still allow it"
@@ -457,11 +608,17 @@ fn u35_read_only_commands_stay_auto_allowed() {
         }
         for path in IDENTITY {
             if approves(*path, cmd, cwd.path()) {
-                closed.push(format!("{path:?} approves non-plain {cmd:?} without a grant"));
+                closed.push(format!(
+                    "{path:?} approves non-plain {cmd:?} without a grant"
+                ));
             }
         }
     }
-    assert!(closed.is_empty(), "read-only commands must stay auto-allowed:\n{}", closed.join("\n"));
+    assert!(
+        closed.is_empty(),
+        "read-only commands must stay auto-allowed:\n{}",
+        closed.join("\n")
+    );
 }
 
 /// Positive controls for the new floors: ordinary uses of the same tools carry no floor finding, so a broad grant
@@ -512,7 +669,11 @@ fn u35_ordinary_tool_use_keeps_broad_grants() {
             }
         }
     }
-    assert!(closed.is_empty(), "ordinary tool use must keep broad grants:\n{}", closed.join("\n"));
+    assert!(
+        closed.is_empty(),
+        "ordinary tool use must keep broad grants:\n{}",
+        closed.join("\n")
+    );
 }
 
 // ---- Review r1 round 2: structural normalisation ----
@@ -546,7 +707,13 @@ fn u35_r1_transparent_wrappers_hide_no_floor() {
     );
     // Dangerous commands; the catch-all allow rule is a documented explicit override with its own floors.
     assert_requires_approval(
-        &["command rm -rf build", "builtin kill 1", "time rm -rf build", "exec chmod 600 f", "nice -n 5 command git push"],
+        &[
+            "command rm -rf build",
+            "builtin kill 1",
+            "time rm -rf build",
+            "exec chmod 600 f",
+            "nice -n 5 command git push",
+        ],
         SESSION,
     );
 }
@@ -587,18 +754,32 @@ fn u35_r1_segment_exact_grant_keeps_script_floor() {
         state.allowed_bash_commands.insert(granted.to_owned());
         let evaluation = evaluate_bash(cmd, &state, true);
         assert!(
-            evaluation.assessment.contains(ClassifierSecurityFinding::SpecialExecSurface),
+            evaluation
+                .assessment
+                .contains(ClassifierSecurityFinding::SpecialExecSurface),
             "the floor finding must be recorded for {cmd:?}"
         );
-        assert!(bash_session_floor_requires_prompt(Some(&evaluation)), "{cmd:?} must keep its floor");
+        assert!(
+            bash_session_floor_requires_prompt(Some(&evaluation)),
+            "{cmd:?} must keep its floor"
+        );
         assert!(
             !matches!(
-                bash_grant_pre_decision(cmd, &evaluation, &state, None, BashGrantOpts::post_classify(false)),
+                bash_grant_pre_decision(
+                    cmd,
+                    &evaluation,
+                    &state,
+                    None,
+                    BashGrantOpts::post_classify(false)
+                ),
                 Some((Decision::Allow, _))
             ),
             "a grant of {granted:?} must not allow {cmd:?}"
         );
-        assert!(!sandbox_may_auto_allow_bash(Some(&evaluation), true), "sandbox must not allow {cmd:?}");
+        assert!(
+            !sandbox_may_auto_allow_bash(Some(&evaluation), true),
+            "sandbox must not allow {cmd:?}"
+        );
     }
 }
 
@@ -607,7 +788,14 @@ fn u35_r1_segment_exact_grant_keeps_script_floor() {
 #[test]
 fn u35_r1_program_identity_is_argv_exact() {
     assert_requires_approval(
-        &["'ls -la'", "'cat fixture.txt'", "\"git status\"", "'kubectl get' pods", "ls.exe", "command 'ls -la'"],
+        &[
+            "'ls -la'",
+            "'cat fixture.txt'",
+            "\"git status\"",
+            "'kubectl get' pods",
+            "ls.exe",
+            "command 'ls -la'",
+        ],
         IDENTITY,
     );
     let mut state = PermissionState::default();
@@ -622,7 +810,12 @@ fn u35_r1_program_identity_is_argv_exact() {
     }
     // The argv-boundary grant still covers its own command with operands.
     let evaluation = evaluate_bash("ls -la src", &state, false);
-    assert!(matches!(evaluation.segments, SegmentEvaluation::AutoAllow { via_session_grant: true }));
+    assert!(matches!(
+        evaluation.segments,
+        SegmentEvaluation::AutoAllow {
+            via_session_grant: true
+        }
+    ));
 }
 
 /// R1 (Astra H8): redirect destinations go through the shared word normaliser; the socket check runs on the
@@ -667,15 +860,35 @@ fn u35_r1_cd_identity_is_normalised() {
 fn u35_r1_tilde_resolves_to_home_or_fails_closed() {
     use crate::permission::shell_words::{NormalisedWord, normalise_word};
     let home = std::env::var("HOME").unwrap();
-    assert_eq!(normalise_word("~"), NormalisedWord::Words(vec![home.clone()]));
-    assert_eq!(normalise_word("~/src"), NormalisedWord::Words(vec![format!("{home}/src")]));
-    assert_eq!(normalise_word("'~'"), NormalisedWord::Words(vec!["~".to_owned()]));
-    assert_eq!(normalise_word("a~b"), NormalisedWord::Words(vec!["a~b".to_owned()]));
+    assert_eq!(
+        normalise_word("~"),
+        NormalisedWord::Words(vec![home.clone()])
+    );
+    assert_eq!(
+        normalise_word("~/src"),
+        NormalisedWord::Words(vec![format!("{home}/src")])
+    );
+    assert_eq!(
+        normalise_word("'~'"),
+        NormalisedWord::Words(vec!["~".to_owned()])
+    );
+    assert_eq!(
+        normalise_word("a~b"),
+        NormalisedWord::Words(vec!["a~b".to_owned()])
+    );
     for word in ["~root", "~root/x", "~-", "~+", "~+0/x", "~2", "~\"/x\""] {
-        assert!(matches!(normalise_word(word), NormalisedWord::Unresolved(_)), "{word:?} must be unresolved");
+        assert!(
+            matches!(normalise_word(word), NormalisedWord::Unresolved(_)),
+            "{word:?} must be unresolved"
+        );
     }
     assert_requires_approval(
-        &["cd ~root && git status", "cd ~- && git status", "cd ~+ && git status", "git -C ~root status"],
+        &[
+            "cd ~root && git status",
+            "cd ~- && git status",
+            "cd ~+ && git status",
+            "git -C ~root status",
+        ],
         &[Path::Blanket, Path::Sandbox, Path::AutoFast],
     );
     // A `~` still spelled after normalisation (quoted, or a form nobody can resolve) fails the ambient scan closed.
@@ -688,7 +901,10 @@ fn u35_r1_tilde_resolves_to_home_or_fails_closed() {
         vec![words("cd ~"), words("git status")],
     ] {
         assert!(
-            matches!(ambient_scan_plan_from_segments(&segments, cwd.path()), AmbientScanPlan::FailClosed),
+            matches!(
+                ambient_scan_plan_from_segments(&segments, cwd.path()),
+                AmbientScanPlan::FailClosed
+            ),
             "{segments:?} must fail closed"
         );
     }
@@ -765,7 +981,10 @@ fn u35_interpreter_script_runs_follow_grants() {
     let mut wrong = Vec::new();
     for cmd in broad {
         let evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
-        if evaluation.assessment.contains(ClassifierSecurityFinding::SpecialExecSurface) {
+        if evaluation
+            .assessment
+            .contains(ClassifierSecurityFinding::SpecialExecSurface)
+        {
             wrong.push(format!("{cmd:?} carries SpecialExecSurface"));
         }
         for path in [Path::Blanket, Path::Sandbox] {
@@ -774,19 +993,34 @@ fn u35_interpreter_script_runs_follow_grants() {
             }
         }
     }
-    for cmd in ["python3 script.py", "python3 -m pytest -q", "python3 -u tools/gen.py --out x"] {
+    for cmd in [
+        "python3 script.py",
+        "python3 -m pytest -q",
+        "python3 -u tools/gen.py --out x",
+    ] {
         if !approves(Path::Glob, cmd, cwd.path()) {
             wrong.push(format!("Glob no longer approves {cmd:?}"));
         }
     }
-    for cmd in ["ruby -v app.rb", "php artisan", "deno run x.ts", "bun x.js", "lua5.4 x.lua", "uv run python -m pytest"] {
+    for cmd in [
+        "ruby -v app.rb",
+        "php artisan",
+        "deno run x.ts",
+        "bun x.js",
+        "lua5.4 x.lua",
+        "uv run python -m pytest",
+    ] {
         for path in [Path::Blanket, Path::Sandbox] {
             if !approves(path, cmd, cwd.path()) {
                 wrong.push(format!("{path:?} no longer approves {cmd:?}"));
             }
         }
     }
-    assert!(wrong.is_empty(), "visible script runs must follow the grants:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "visible script runs must follow the grants:\n{}",
+        wrong.join("\n")
+    );
     // Still not read-only, and not Auto mode routine.
     assert_requires_approval(&broad, IDENTITY);
     assert_requires_approval(&["uv run python -m pytest", "php artisan"], IDENTITY);
@@ -835,7 +1069,12 @@ fn u35_r2_sed_unresolved_script() {
             .assessment
             .contains(ClassifierSecurityFinding::SpecialExecSurface)
     };
-    for cmd in ["sed \"$S\" fixture.txt", "sed -e \"$S\" fixture.txt", "sed s* fixture.txt", "sed $'\\x65 id' fixture.txt"] {
+    for cmd in [
+        "sed \"$S\" fixture.txt",
+        "sed -e \"$S\" fixture.txt",
+        "sed s* fixture.txt",
+        "sed $'\\x65 id' fixture.txt",
+    ] {
         assert!(floored(cmd), "{cmd:?} must carry the exec-surface floor");
     }
     assert!(!floored("sed -n 1,5p fixture.txt"));
@@ -969,7 +1208,10 @@ fn u35_r2_prefix_and_glob_grant_paths() {
         let state = grant_state(path);
         for cmd in floored {
             let evaluation = evaluate_bash(cmd, &state, true);
-            for opts in [BashGrantOpts::PRE_CLASSIFIER, BashGrantOpts::ASK_FLOOR_REMEMBER] {
+            for opts in [
+                BashGrantOpts::PRE_CLASSIFIER,
+                BashGrantOpts::ASK_FLOOR_REMEMBER,
+            ] {
                 assert!(
                     !matches!(
                         bash_grant_pre_decision(cmd, &evaluation, &state, None, opts),
@@ -981,14 +1223,25 @@ fn u35_r2_prefix_and_glob_grant_paths() {
         }
     }
     let cwd = tempfile::tempdir().unwrap();
-    for cmd in ["rg -n needle src", "kubectl get pods -o wide", "cat fixture.txt"] {
+    for cmd in [
+        "rg -n needle src",
+        "kubectl get pods -o wide",
+        "cat fixture.txt",
+    ] {
         for path in [Path::Prefix, Path::Glob] {
-            assert!(approves(path, cmd, cwd.path()), "{path:?} must still approve {cmd:?}");
+            assert!(
+                approves(path, cmd, cwd.path()),
+                "{path:?} must still approve {cmd:?}"
+            );
         }
     }
     // sed and awk are scope-pinned: a prefix grant never widens to other scripts, a glob grant does.
     assert!(approves(Path::Glob, "sed -n 1,5p fixture.txt", cwd.path()));
-    assert!(approves(Path::Glob, "awk '{print $1}' fixture.txt", cwd.path()));
+    assert!(approves(
+        Path::Glob,
+        "awk '{print $1}' fixture.txt",
+        cwd.path()
+    ));
 }
 
 // ---- Review r2, round 3: the strict plain-text gate, and the floors behind user grants ----
@@ -1022,7 +1275,10 @@ fn u35_r3_plain_text_gate_rich_forms_ask_without_grant() {
         "cargo test 2>&1 | tail -5",
     ];
     for cmd in cases {
-        assert!(!crate::permission::plain_text_gate::is_plain_text_command(cmd), "{cmd:?} must fail the gate");
+        assert!(
+            !crate::permission::plain_text_gate::is_plain_text_command(cmd),
+            "{cmd:?} must fail the gate"
+        );
     }
     assert_requires_approval(&cases, IDENTITY);
 }
@@ -1088,20 +1344,33 @@ fn u35_r3_plain_text_gate_keeps_plain_commands() {
             closed.push(format!("AutoFast no longer approves {cmd:?}"));
         }
     }
-    assert!(closed.is_empty(), "plain commands must stay auto-allowed:\n{}", closed.join("\n"));
+    assert!(
+        closed.is_empty(),
+        "plain commands must stay auto-allowed:\n{}",
+        closed.join("\n")
+    );
 }
 
 /// Astra r2 Critical: a wrapper chain hiding a `PATH` assignment runs a planted `ls`.
 #[test]
 fn u35_r3_wrapper_env_path_assignment() {
-    assert_requires_approval(&["command env 'PATH=./bin' ls", "command env PATH=./bin ls"], SESSION);
+    assert_requires_approval(
+        &["command env 'PATH=./bin' ls", "command env PATH=./bin ls"],
+        SESSION,
+    );
 }
 
 /// Astra r2 H2: `set +B` (and other option changes) make bash read later words differently from the model.
 #[test]
 fn u35_r3_shell_option_changes_expansion() {
     assert_requires_approval(
-        &["set +B; {ls,./payload}", "set -f; ls", "set -o posix; ls", "shopt -s extglob; ls", "alias ls=./payload; ls"],
+        &[
+            "set +B; {ls,./payload}",
+            "set -f; ls",
+            "set -o posix; ls",
+            "shopt -s extglob; ls",
+            "alias ls=./payload; ls",
+        ],
         SESSION,
     );
     // Common error-handling options are not parsing changes.
@@ -1120,9 +1389,15 @@ fn u35_r3_shell_option_changes_expansion() {
 fn u35_r3_empty_quotes_keep_words_literal() {
     use crate::permission::shell_words::{NormalisedWord, normalise_word};
     for word in ["''~", "\"\"~/x", "{r''..r}epo"] {
-        assert!(matches!(normalise_word(word), NormalisedWord::Unresolved(_)), "{word:?} must be unresolved");
+        assert!(
+            matches!(normalise_word(word), NormalisedWord::Unresolved(_)),
+            "{word:?} must be unresolved"
+        );
     }
-    assert_eq!(normalise_word("''"), NormalisedWord::Words(vec![String::new()]));
+    assert_eq!(
+        normalise_word("''"),
+        NormalisedWord::Words(vec![String::new()])
+    );
     assert_requires_approval(&["git -C ''~ status", "ls {r''..r}epo"], SESSION);
 }
 
@@ -1149,10 +1424,17 @@ fn u35_r3_conditional_cd_before_later_git() {
             .assessment
             .contains(ClassifierSecurityFinding::ExecOrAmbientGit)
     };
-    for cmd in ["ls /missing && cd clean; git status", "true && cd clean\ngit status", "ls && cd a && cd b; git log"] {
+    for cmd in [
+        "ls /missing && cd clean; git status",
+        "true && cd clean\ngit status",
+        "ls && cd a && cd b; git log",
+    ] {
         assert!(ambient(cmd), "{cmd:?} must fail the ambient scan closed");
     }
-    assert!(!ambient("cd clean && git status"), "a leading cd followed by && git is certain");
+    assert!(
+        !ambient("cd clean && git status"),
+        "a leading cd followed by && git is certain"
+    );
     assert_requires_approval(&["ls /missing && cd clean; git status"], SESSION);
 }
 
@@ -1174,7 +1456,13 @@ fn u35_r3_git_identity_and_global_options() {
 #[test]
 fn u35_r3_git_push_after_global_options() {
     // The catch-all rule is an explicit override that keeps only the request floors, as for every dangerous command.
-    assert_requires_approval(&["git --no-pager push --force", "git -C . push --force origin main"], SESSION);
+    assert_requires_approval(
+        &[
+            "git --no-pager push --force",
+            "git -C . push --force origin main",
+        ],
+        SESSION,
+    );
     let dangerous = |cmd: &str| {
         evaluate_bash(cmd, &PermissionState::default(), true)
             .assessment
@@ -1218,7 +1506,11 @@ fn u35_r3_environment_globs_and_relative_proc() {
 #[test]
 fn u35_r3_jq_filter_file_clusters() {
     assert_requires_approval(
-        &["printf env | jq -nf /dev/stdin", "jq -rf filter.jq data.json", "jq -n 'import \"m\" as m; m::x'"],
+        &[
+            "printf env | jq -nf /dev/stdin",
+            "jq -rf filter.jq data.json",
+            "jq -n 'import \"m\" as m; m::x'",
+        ],
         ALL,
     );
 }
@@ -1246,16 +1538,40 @@ fn u35_r3_extglob_pins() {
 /// Astra r2 M: a non-ASCII character in an option cluster neither panics nor clears a floor.
 #[test]
 fn u35_r3_non_ascii_option_cluster_does_not_panic() {
-    assert_requires_approval(&["python3 -é", "perl -é", "ruby -é", "node -é", "php -é", "lua -é"], SESSION);
+    assert_requires_approval(
+        &[
+            "python3 -é",
+            "perl -é",
+            "ruby -é",
+            "node -é",
+            "php -é",
+            "lua -é",
+        ],
+        SESSION,
+    );
     // Other cluster scanners: only that classification completes.
-    let _ = approving_paths(&["sed -é fixture.txt", "tar -é", "awk -é 'x'", "rg -é x", "sort -é f"], ALL);
+    let _ = approving_paths(
+        &[
+            "sed -é fixture.txt",
+            "tar -é",
+            "awk -é 'x'",
+            "rg -é x",
+            "sort -é f",
+        ],
+        ALL,
+    );
 }
 
 /// Fable r2 L: the commonest declaration shapes are not environment dumps. (They still ask under the session blanket
 /// and sandbox auto-allow, because a declaration is structure the classifier does not decompose.)
 #[test]
 fn u35_r3_declarations_are_not_environment_dumps() {
-    for cmd in ["export FOO=1 && ls", "declare -i n=5; echo ok", "local -r x=1", "export -f fn"] {
+    for cmd in [
+        "export FOO=1 && ls",
+        "declare -i n=5; echo ok",
+        "local -r x=1",
+        "export -f fn",
+    ] {
         let assessment = evaluate_bash(cmd, &PermissionState::default(), true).assessment;
         assert!(
             !assessment.contains(ClassifierSecurityFinding::SpecialExecSurface),
@@ -1264,7 +1580,10 @@ fn u35_r3_declarations_are_not_environment_dumps() {
     }
     for cmd in ["export -p", "declare -p TOKEN", "typeset"] {
         let assessment = evaluate_bash(cmd, &PermissionState::default(), true).assessment;
-        assert!(assessment.contains(ClassifierSecurityFinding::SpecialExecSurface), "{cmd:?} must be an environment dump");
+        assert!(
+            assessment.contains(ClassifierSecurityFinding::SpecialExecSurface),
+            "{cmd:?} must be an environment dump"
+        );
     }
 }
 
@@ -1276,25 +1595,45 @@ fn u35_r3_declarations_are_not_environment_dumps() {
 /// ugrep `--filter=EXTS:COMMAND` runs a filter command on each searched file.
 #[test]
 fn u35_ugrep_filter_runs_a_program() {
-    assert_requires_approval(&["grep --filter=txt:id needle .", "grep -rn --filter=log:./payload needle src"], ALL);
+    assert_requires_approval(
+        &[
+            "grep --filter=txt:id needle .",
+            "grep -rn --filter=log:./payload needle src",
+        ],
+        ALL,
+    );
 }
 
 /// ugrep `--pager[=COMMAND]` pipes the output into a command (`$PAGER` when none is given).
 #[test]
 fn u35_ugrep_pager_runs_a_program() {
-    assert_requires_approval(&["grep --pager=./payload needle .", "grep --pager needle ."], ALL);
+    assert_requires_approval(
+        &["grep --pager=./payload needle .", "grep --pager needle ."],
+        ALL,
+    );
 }
 
 /// ugrep `--view[=COMMAND]` names the viewer the query TUI runs.
 #[test]
 fn u35_ugrep_view_runs_a_program() {
-    assert_requires_approval(&["grep --view=./payload needle .", "grep --view needle ."], ALL);
+    assert_requires_approval(
+        &["grep --view=./payload needle .", "grep --view needle ."],
+        ALL,
+    );
 }
 
 /// ugrep `-Q`/`--query` starts the interactive TUI, which runs `$PAGER`/`$EDITOR` on a key press.
 #[test]
 fn u35_ugrep_query_tui_runs_a_program() {
-    assert_requires_approval(&["grep -Q needle .", "grep -rnQ needle .", "grep -Q=5 needle .", "grep --query needle ."], ALL);
+    assert_requires_approval(
+        &[
+            "grep -Q needle .",
+            "grep -rnQ needle .",
+            "grep -Q=5 needle .",
+            "grep --query needle .",
+        ],
+        ALL,
+    );
     // A `Q` inside an option value is not the option.
     let floored = |cmd: &str| {
         evaluate_bash(cmd, &PermissionState::default(), true)
@@ -1309,7 +1648,12 @@ fn u35_ugrep_query_tui_runs_a_program() {
 #[test]
 fn u35_ugrep_config_file_loads_options() {
     assert_requires_approval(
-        &["grep --config needle .", "grep --config=evil needle .", "grep ---evil needle .", "grep -e ---evil ."],
+        &[
+            "grep --config needle .",
+            "grep --config=evil needle .",
+            "grep ---evil needle .",
+            "grep -e ---evil .",
+        ],
         ALL,
     );
 }
@@ -1317,13 +1661,22 @@ fn u35_ugrep_config_file_loads_options() {
 /// ugrep `--save-config[=FILE]` writes a configuration file (`.ugrep` by default).
 #[test]
 fn u35_ugrep_save_config_writes_a_file() {
-    assert_requires_approval(&["grep --save-config needle .", "grep --save-config=notes.txt needle ."], ALL);
+    assert_requires_approval(
+        &[
+            "grep --save-config needle .",
+            "grep --save-config=notes.txt needle .",
+        ],
+        ALL,
+    );
 }
 
 /// ugrep `--from=FILE` (or `--from FILE`) searches the paths listed in FILE, which the command line never names.
 #[test]
 fn u35_ugrep_from_file_searches_unnamed_paths() {
-    assert_requires_approval(&["grep --from=list.txt needle", "grep --from list.txt needle"], ALL);
+    assert_requires_approval(
+        &["grep --from=list.txt needle", "grep --from list.txt needle"],
+        ALL,
+    );
 }
 
 /// bfs `-rm` is an alias of `-delete`.
@@ -1335,7 +1688,10 @@ fn u35_bfs_rm_deletes() {
 /// bfs `-f PATH` (also at the end of a flag group such as `-Lf`) is a starting path given as an option value.
 #[test]
 fn u35_bfs_f_names_a_starting_path() {
-    assert_requires_approval(&["find -f /etc -name passwd", "find -Lf /etc -name passwd"], ALL);
+    assert_requires_approval(
+        &["find -f /etc -name passwd", "find -Lf /etc -name passwd"],
+        ALL,
+    );
 }
 
 /// `-files0-from FILE` reads the starting paths from a file.
@@ -1354,7 +1710,11 @@ fn u35_bfs_help_runs_a_pager() {
 #[test]
 fn u35_bfs_path_after_expression_is_searched() {
     assert_requires_approval(
-        &["find . -name passwd /etc", "find src -type f -newer Cargo.toml /etc", "find . -name a -o -name b /etc"],
+        &[
+            "find . -name passwd /etc",
+            "find src -type f -newer Cargo.toml /etc",
+            "find . -name a -o -name b /etc",
+        ],
         ALL,
     );
 }
@@ -1389,7 +1749,11 @@ fn u35_search_shadows_keep_ordinary_use() {
             closed.push(format!("AutoFast no longer approves {cmd:?}"));
         }
     }
-    assert!(closed.is_empty(), "ordinary search must stay auto-allowed:\n{}", closed.join("\n"));
+    assert!(
+        closed.is_empty(),
+        "ordinary search must stay auto-allowed:\n{}",
+        closed.join("\n")
+    );
 }
 
 /// Every program the classifier approves by name alone (the Ask-mode read-only lists, the Auto mode routine list and
@@ -1401,11 +1765,19 @@ fn u35_search_shadows_keep_ordinary_use() {
 #[cfg(unix)]
 #[test]
 fn u35_classifier_safe_names_are_runner_protected() {
-    use fuigo_tools::computer::local::restore_guard::{PERMISSION_SAFE_PROGRAMS, PERMISSION_SAFE_PROGRAM_FAMILIES};
+    use fuigo_tools::computer::local::restore_guard::{
+        PERMISSION_SAFE_PROGRAM_FAMILIES, PERMISSION_SAFE_PROGRAMS,
+    };
     const DOCUMENTED_SHADOWS: &[&str] = &["grep", "find"];
     // Named branches of the Auto mode routine check (`bash_command_is_routine`) that are not in `ROUTINE_PREFIXES`.
     const ROUTINE_NAMED: &[&str] = &["find", "git", "gh", "tree", "kubectl"];
-    let head = |entry: &str| entry.split_whitespace().next().unwrap_or_default().to_owned();
+    let head = |entry: &str| {
+        entry
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
     let names: std::collections::BTreeSet<String> = ALWAYS_SAFE_COMMANDS
         .iter()
         .chain(SAFE_COMMAND_PREFIXES)
@@ -1425,9 +1797,15 @@ fn u35_classifier_safe_names_are_runner_protected() {
             })
     };
     let missing: Vec<&String> = names.iter().filter(|name| !covered(name)).collect();
-    assert!(missing.is_empty(), "classifier-approved names the runner does not protect: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "classifier-approved names the runner does not protect: {missing:?}"
+    );
     for shadow in DOCUMENTED_SHADOWS {
-        assert!(names.contains(*shadow), "{shadow} is no longer classifier-approved; update the shadow list");
+        assert!(
+            names.contains(*shadow),
+            "{shadow} is no longer classifier-approved; update the shadow list"
+        );
     }
 }
 
@@ -1519,7 +1897,10 @@ fn u35_kubectl_resources_from_a_file() {
         ALL,
     );
     assert_requires_approval(
-        &["kubectl get pods --cache-dir=/tmp/kcache", "kubectl get pods -o go-template-file=/etc/hostname"],
+        &[
+            "kubectl get pods --cache-dir=/tmp/kcache",
+            "kubectl get pods -o go-template-file=/etc/hostname",
+        ],
         IDENTITY,
     );
 }
@@ -1750,7 +2131,11 @@ fn u35_audited_programs_keep_ordinary_forms() {
             closed.push(format!("AutoFast no longer approves {cmd:?}"));
         }
     }
-    assert!(closed.is_empty(), "ordinary forms must stay auto-allowed:\n{}", closed.join("\n"));
+    assert!(
+        closed.is_empty(),
+        "ordinary forms must stay auto-allowed:\n{}",
+        closed.join("\n")
+    );
 }
 
 /// Astra r3 H: an interpreter shell's end of options (`--` or `-`) followed by a stdin or descriptor path is still a
@@ -1772,7 +2157,12 @@ fn u35_shell_end_of_options_stdin_script() {
 #[test]
 fn u35_wildcard_only_glob_components_can_name_environ() {
     assert_requires_approval(
-        &["head -c 4096 /pr?c/????/???????", "cat /????/self/*", "cat /*/*/*", "head -c 100 /pr?c/[0-9]*/???????"],
+        &[
+            "head -c 4096 /pr?c/????/???????",
+            "cat /????/self/*",
+            "cat /*/*/*",
+            "head -c 100 /pr?c/[0-9]*/???????",
+        ],
         ALL,
     );
 }
@@ -1786,9 +2176,19 @@ fn u35_glob_matcher_work_is_bounded() {
     std::thread::spawn(move || {
         let _ = done.send(names_environ_file(&stars));
     });
-    assert_eq!(finished.recv_timeout(std::time::Duration::from_secs(10)), Ok(false), "matcher must finish quickly");
-    assert!(names_environ_file(&format!("/tmp/{}", "a?".repeat(3000))), "over the step limit counts as a match");
-    assert!(!names_environ_file("src/*/mod.rs"), "an ordinary glob is not floored");
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_secs(10)),
+        Ok(false),
+        "matcher must finish quickly"
+    );
+    assert!(
+        names_environ_file(&format!("/tmp/{}", "a?".repeat(3000))),
+        "over the step limit counts as a match"
+    );
+    assert!(
+        !names_environ_file("src/*/mod.rs"),
+        "an ordinary glob is not floored"
+    );
 }
 
 // ---- g5b: repository-controlled configuration under the threat model ----
@@ -1827,20 +2227,35 @@ fn u35_repo_alias_for_a_non_builtin_verb_asks() {
         "[alias]\n\tlol = -c core.fsmonitor=./payload status\n\twipe = reset --hard\n\tLg = log --oneline\n",
     );
     let open = approving_paths_in(
-        &["git lol", "git wipe", "git --no-pager lol", "git -C . wipe", "git lg"],
+        &[
+            "git lol",
+            "git wipe",
+            "git --no-pager lol",
+            "git -C . wipe",
+            "git lg",
+        ],
         ALL,
         repo.path(),
     );
-    assert!(open.is_empty(), "must require approval:\n{}", open.join("\n"));
+    assert!(
+        open.is_empty(),
+        "must require approval:\n{}",
+        open.join("\n")
+    );
 }
 
 /// Grok r4 High, probe: git runs its own subcommand before any alias of the same name (git 2.43, 2.50, 2.55), so an
 /// alias named like a read-only verb changes nothing and the verb keeps its approval.
 #[test]
 fn u35_repo_alias_cannot_shadow_a_builtin_verb() {
-    let repo = repo_with_included_config("[alias]\n\tstatus = reset --hard\n\tlog = -c core.pager=./payload log\n");
+    let repo = repo_with_included_config(
+        "[alias]\n\tstatus = reset --hard\n\tlog = -c core.pager=./payload log\n",
+    );
     for cmd in ["git status", "git log -1"] {
-        assert!(approves(Path::Ask, cmd, repo.path()), "{cmd} must stay approved");
+        assert!(
+            approves(Path::Ask, cmd, repo.path()),
+            "{cmd} must stay approved"
+        );
     }
 }
 
@@ -1871,7 +2286,10 @@ fn u35_npm_options_are_approved_by_exact_spelling() {
         "yarn install --frozen-lockfile",
         "npm ls --depth=0",
     ] {
-        assert!(approves(Path::AutoFast, cmd, cwd.path()), "{cmd} must stay routine");
+        assert!(
+            approves(Path::AutoFast, cmd, cwd.path()),
+            "{cmd} must stay routine"
+        );
     }
 }
 
@@ -1883,13 +2301,19 @@ fn u35_npm_options_are_approved_by_exact_spelling() {
 fn grant_regressions(env: &[(&str, &str)], cmd: &str, cwd: &std::path::Path) -> Vec<String> {
     use crate::permission::exec_risk::with_inherited_env;
     let listed = with_inherited_env(&[], || approves(Path::Ask, cmd, cwd));
-    [Path::Blanket, Path::Sandbox, Path::CatchAllRule, Path::Prefix, Path::Glob]
-        .into_iter()
-        .filter(|path| !(listed && matches!(path, Path::Prefix | Path::Glob)))
-        .filter(|path| with_inherited_env(&[], || approves(*path, cmd, cwd)))
-        .filter(|path| !with_inherited_env(env, || approves(*path, cmd, cwd)))
-        .map(|path| format!("{env:?}: {path:?} stopped approving {cmd:?}"))
-        .collect()
+    [
+        Path::Blanket,
+        Path::Sandbox,
+        Path::CatchAllRule,
+        Path::Prefix,
+        Path::Glob,
+    ]
+    .into_iter()
+    .filter(|path| !(listed && matches!(path, Path::Prefix | Path::Glob)))
+    .filter(|path| with_inherited_env(&[], || approves(*path, cmd, cwd)))
+    .filter(|path| !with_inherited_env(env, || approves(*path, cmd, cwd)))
+    .map(|path| format!("{env:?}: {path:?} stopped approving {cmd:?}"))
+    .collect()
 }
 
 /// `(environment, command)` pairs that must ask on every path, grants included: the ambient git scan cannot vet the
@@ -1905,7 +2329,11 @@ fn assert_env_cases_ask_everywhere(cases: &[(&[(&str, &str)], &str)], cwd: &std:
         let found = with_inherited_env(env, || approving_paths_in(&[*cmd], ALL, cwd));
         open.extend(found.into_iter().map(|line| format!("{env:?}: {line}")));
     }
-    assert!(open.is_empty(), "must require approval:\n{}", open.join("\n"));
+    assert!(
+        open.is_empty(),
+        "must require approval:\n{}",
+        open.join("\n")
+    );
 }
 
 /// `(environment, command)` pairs that must ask on every path that approves without a grant ([`IDENTITY`]) in `cwd`.
@@ -1924,7 +2352,11 @@ fn assert_env_cases_ask(cases: &[(&[(&str, &str)], &str)], cwd: &std::path::Path
         open.extend(found.into_iter().map(|line| format!("{env:?}: {line}")));
         open.extend(grant_regressions(env, cmd, cwd));
     }
-    assert!(open.is_empty(), "must require approval without a grant, and grants must still apply:\n{}", open.join("\n"));
+    assert!(
+        open.is_empty(),
+        "must require approval without a grant, and grants must still apply:\n{}",
+        open.join("\n")
+    );
 }
 
 /// `(environment, command)` pairs the user's own settings leave approved on the Ask path.
@@ -1933,7 +2365,10 @@ fn assert_env_cases_approved(cases: &[(&[(&str, &str)], &str)], cwd: &std::path:
     use crate::permission::exec_risk::with_inherited_env;
     for (env, cmd) in cases {
         let approved = with_inherited_env(env, || approves(Path::Ask, cmd, cwd));
-        assert!(approved, "{env:?} {cmd}: the user's own setting keeps approval");
+        assert!(
+            approved,
+            "{env:?} {cmd}: the user's own setting keeps approval"
+        );
     }
 }
 
@@ -1946,9 +2381,17 @@ fn u35_rg_reads_a_repo_controlled_config_file() {
     let outside = tempfile::tempdir().unwrap();
     let own = outside.path().join("ripgreprc");
     std::fs::write(&own, "--smart-case\n").unwrap();
-    for value in [".ripgreprc", "sub/../.ripgreprc", inside.to_str().unwrap(), own.to_str().unwrap()] {
+    for value in [
+        ".ripgreprc",
+        "sub/../.ripgreprc",
+        inside.to_str().unwrap(),
+        own.to_str().unwrap(),
+    ] {
         let env = [("RIPGREP_CONFIG_PATH", value)];
-        assert_env_cases_ask(&[(&env, "rg needle README.md"), (&env, "rg -n needle")], repo.path());
+        assert_env_cases_ask(
+            &[(&env, "rg needle README.md"), (&env, "rg -n needle")],
+            repo.path(),
+        );
     }
 }
 
@@ -1961,10 +2404,30 @@ fn u35_inherited_git_variables_ask_whatever_their_value() {
     let cfg = format!("{root}/tools.cfg");
     let own_git = format!("{root}/.git");
     let cases: &[(&[(&str, &str)], &str)] = &[
-        (&[("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "core.fsmonitor"), ("GIT_CONFIG_VALUE_0", "./payload")], "git status -s"),
-        (&[("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "core.pager"), ("GIT_CONFIG_VALUE_0", "less -R")], "git log -1"),
-        (&[("GIT_CONFIG_PARAMETERS", "'core.pager'='sh ./payload'")], "git log -1"),
-        (&[("GIT_EXTERNAL_DIFF", "/bin/sh ./tools/diff.sh")], "git diff"),
+        (
+            &[
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
+                ("GIT_CONFIG_VALUE_0", "./payload"),
+            ],
+            "git status -s",
+        ),
+        (
+            &[
+                ("GIT_CONFIG_COUNT", "1"),
+                ("GIT_CONFIG_KEY_0", "core.pager"),
+                ("GIT_CONFIG_VALUE_0", "less -R"),
+            ],
+            "git log -1",
+        ),
+        (
+            &[("GIT_CONFIG_PARAMETERS", "'core.pager'='sh ./payload'")],
+            "git log -1",
+        ),
+        (
+            &[("GIT_EXTERNAL_DIFF", "/bin/sh ./tools/diff.sh")],
+            "git diff",
+        ),
         (&[("GIT_EXTERNAL_DIFF", "/usr/local/bin/difft")], "git diff"),
         (&[("GIT_PAGER", "less -R")], "git log -1"),
         (&[("GIT_SSH_COMMAND", "/usr/bin/ssh -4")], "git status -s"),
@@ -1984,8 +2447,10 @@ fn u35_inherited_git_variables_ask_whatever_their_value() {
     ];
     assert_env_cases_ask(cases, repo.path());
     // u35 g8: a value git cannot read stops the ambient scan, which fails closed for grants too.
-    let unreadable: &[(&[(&str, &str)], &str)] =
-        &[(&[("GIT_CONFIG_COUNT", "x")], "git status -s"), (&[("GIT_CONFIG", "tools.cfg")], "git status -s")];
+    let unreadable: &[(&[(&str, &str)], &str)] = &[
+        (&[("GIT_CONFIG_COUNT", "x")], "git status -s"),
+        (&[("GIT_CONFIG", "tools.cfg")], "git status -s"),
+    ];
     assert_env_cases_ask_everywhere(unreadable, repo.path());
 }
 
@@ -2012,18 +2477,45 @@ fn u35_commonly_set_variables_get_a_simple_check() {
     ];
     assert_env_cases_ask(cases, repo.path());
     let user: &[(&[(&str, &str)], &str)] = &[
-        (&[("PAGER", "less"), ("EDITOR", "vim"), ("VISUAL", "/usr/bin/nvim")], "git log -1"),
-        (&[("XDG_CONFIG_HOME", "/nonexistent-home/.config")], "git status -s"),
-        (&[("HOME", "/nonexistent-home"), ("ZDOTDIR", "/nonexistent-home/.zsh")], "ls -la"),
+        (
+            &[
+                ("PAGER", "less"),
+                ("EDITOR", "vim"),
+                ("VISUAL", "/usr/bin/nvim"),
+            ],
+            "git log -1",
+        ),
+        (
+            &[("XDG_CONFIG_HOME", "/nonexistent-home/.config")],
+            "git status -s",
+        ),
+        (
+            &[
+                ("HOME", "/nonexistent-home"),
+                ("ZDOTDIR", "/nonexistent-home/.zsh"),
+            ],
+            "ls -la",
+        ),
     ];
     assert_env_cases_approved(user, repo.path());
     let routine: &[(&[(&str, &str)], &str)] = &[
-        (&[("CARGO_HOME", "/nonexistent-home/.cargo"), ("RUSTUP_HOME", "/nonexistent-home/.rustup")], "cargo build"),
+        (
+            &[
+                ("CARGO_HOME", "/nonexistent-home/.cargo"),
+                ("RUSTUP_HOME", "/nonexistent-home/.rustup"),
+            ],
+            "cargo build",
+        ),
         (&[("GOROOT", "/usr/local/go")], "go build ./..."),
     ];
     for (env, cmd) in routine {
-        let fast = crate::permission::exec_risk::with_inherited_env(env, || approves(Path::AutoFast, cmd, repo.path()));
-        assert!(fast, "{env:?} {cmd}: the user's own directory stays routine");
+        let fast = crate::permission::exec_risk::with_inherited_env(env, || {
+            approves(Path::AutoFast, cmd, repo.path())
+        });
+        assert!(
+            fast,
+            "{env:?} {cmd}: the user's own directory stays routine"
+        );
     }
 }
 
@@ -2033,9 +2525,18 @@ fn u35_commonly_set_variables_get_a_simple_check() {
 fn u35_literal_tilde_and_dollar_in_env_values_are_relative() {
     let repo = repo_with_included_config("");
     let cases: &[(&[(&str, &str)], &str)] = &[
-        (&[("RIPGREP_CONFIG_PATH", "~/.ripgreprc")], "rg needle README.md"),
-        (&[("RIPGREP_CONFIG_PATH", "$HOME/.ripgreprc")], "rg needle README.md"),
-        (&[("GIT_CONFIG_GLOBAL", "${HOME}/.gitconfig")], "git status -s"),
+        (
+            &[("RIPGREP_CONFIG_PATH", "~/.ripgreprc")],
+            "rg needle README.md",
+        ),
+        (
+            &[("RIPGREP_CONFIG_PATH", "$HOME/.ripgreprc")],
+            "rg needle README.md",
+        ),
+        (
+            &[("GIT_CONFIG_GLOBAL", "${HOME}/.gitconfig")],
+            "git status -s",
+        ),
         (&[("KUBECONFIG", "~/.kube/config")], "kubectl get pods"),
         (&[("XDG_CONFIG_HOME", "$HOME/.config")], "git status -s"),
     ];
@@ -2053,16 +2554,31 @@ fn u35_kubeconfig_inside_the_repo_asks() {
         (&[("KUBECONFIG", "kubeconfig")], "kubectl get pods"),
         (&[("KUBECONFIG", &inside)], "kubectl logs pod/x"),
         (&[("KUBECONFIG", &listed)], "kubectl describe pod x"),
-        (&[("KUBECONFIG", "/nonexistent-home/.kube/config:kc")], "kubectl get pods"),
-        (&[("KUBECONFIG", "/nonexistent-home/.kube/config:")], "kubectl get pods"),
+        (
+            &[("KUBECONFIG", "/nonexistent-home/.kube/config:kc")],
+            "kubectl get pods",
+        ),
+        (
+            &[("KUBECONFIG", "/nonexistent-home/.kube/config:")],
+            "kubectl get pods",
+        ),
     ];
     assert_env_cases_ask(cases, repo.path());
-    let own = [("KUBECONFIG", "/nonexistent-home/.kube/config:/nonexistent-home/.kube/other")];
-    let user: &[(&[(&str, &str)], &str)] =
-        &[(&own, "kubectl get pods"), (&own, "kubectl logs pod/x"), (&own, "kubectl describe pod x")];
+    let own = [(
+        "KUBECONFIG",
+        "/nonexistent-home/.kube/config:/nonexistent-home/.kube/other",
+    )];
+    let user: &[(&[(&str, &str)], &str)] = &[
+        (&own, "kubectl get pods"),
+        (&own, "kubectl logs pod/x"),
+        (&own, "kubectl describe pod x"),
+    ];
     assert_env_cases_approved(user, repo.path());
     crate::permission::exec_risk::with_inherited_env(&own, || {
-        assert!(approves(Path::AutoFast, "kubectl get pods", repo.path()), "the user's kubeconfig stays routine");
+        assert!(
+            approves(Path::AutoFast, "kubectl get pods", repo.path()),
+            "the user's kubeconfig stays routine"
+        );
     });
 }
 
@@ -2085,8 +2601,10 @@ fn u35_unclean_path_asks_for_every_command() {
         (&[("PATH", "bin:/usr/bin")], "cd sub && cd .. && rg needle"),
     ];
     assert_env_cases_ask(cases, repo.path());
-    let user: &[(&[(&str, &str)], &str)] =
-        &[(&[("PATH", "/usr/local/bin:/usr/bin")], "ls -la"), (&[("PATH", "/usr/local/bin:/usr/bin")], "git status -s")];
+    let user: &[(&[(&str, &str)], &str)] = &[
+        (&[("PATH", "/usr/local/bin:/usr/bin")], "ls -la"),
+        (&[("PATH", "/usr/local/bin:/usr/bin")], "git status -s"),
+    ];
     assert_env_cases_approved(user, repo.path());
 }
 
@@ -2096,7 +2614,10 @@ fn u35_loader_and_shell_env_ask_whatever_their_value() {
     let repo = repo_with_included_config("");
     let cases: &[(&[(&str, &str)], &str)] = &[
         (&[("LD_LIBRARY_PATH", "lib")], "ls -la"),
-        (&[("LD_LIBRARY_PATH", "/opt/none::/usr/local/lib")], "cat README.md"),
+        (
+            &[("LD_LIBRARY_PATH", "/opt/none::/usr/local/lib")],
+            "cat README.md",
+        ),
         (&[("LD_PRELOAD", "libjemalloc.so.2")], "ls -la"),
         (&[("LD_AUDIT", "/usr/lib/audit.so")], "ls -la"),
         (&[("GCONV_PATH", "/usr/lib/gconv")], "ls -la"),
@@ -2108,16 +2629,30 @@ fn u35_loader_and_shell_env_ask_whatever_their_value() {
     ];
     assert_env_cases_ask(cases, repo.path());
     // Set but empty is unset.
-    assert_env_cases_approved(&[(&[("LD_PRELOAD", ""), ("BASH_ENV", "")], "ls -la")], repo.path());
+    assert_env_cases_approved(
+        &[(&[("LD_PRELOAD", ""), ("BASH_ENV", "")], "ls -la")],
+        repo.path(),
+    );
     // u35 g8 (release gate): library search paths outside the project are the user's (CUDA, conda, cargo's own)
     let user: &[(&[(&str, &str)], &str)] = &[
-        (&[("LD_LIBRARY_PATH", "/opt/none:/usr/local/lib")], "cat README.md"),
+        (
+            &[("LD_LIBRARY_PATH", "/opt/none:/usr/local/lib")],
+            "cat README.md",
+        ),
         (&[("DYLD_FALLBACK_LIBRARY_PATH", "/opt/none/lib")], "ls -la"),
-        (&[("RUSTUP_TOOLCHAIN", "stable-x86_64-unknown-linux-gnu")], "cargo build"),
+        (
+            &[("RUSTUP_TOOLCHAIN", "stable-x86_64-unknown-linux-gnu")],
+            "cargo build",
+        ),
     ];
     for (env, cmd) in user {
-        let open = crate::permission::exec_risk::with_inherited_env(env, || approving_paths_in(&[*cmd], ALL, repo.path()));
-        assert!(!open.is_empty(), "{env:?} {cmd}: the user's own setting keeps approval");
+        let open = crate::permission::exec_risk::with_inherited_env(env, || {
+            approving_paths_in(&[*cmd], ALL, repo.path())
+        });
+        assert!(
+            !open.is_empty(),
+            "{env:?} {cmd}: the user's own setting keeps approval"
+        );
     }
 }
 
@@ -2165,8 +2700,13 @@ fn u35_every_steering_variable_asks_through_the_manager() {
     }
     // u35 g8: git cannot read these values, so the ambient scan fails closed (grants too); the rest keep grants.
     let unreadable = ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG"];
-    let cases: Vec<(&[(&str, &str)], &str)> = cases.iter().map(|(env, cmd)| (env.as_slice(), *cmd)).collect();
-    let (everywhere, cases): (Vec<_>, Vec<_>) = cases.into_iter().partition(|(env, _)| unreadable.contains(&env[0].0));
+    let cases: Vec<(&[(&str, &str)], &str)> = cases
+        .iter()
+        .map(|(env, cmd)| (env.as_slice(), *cmd))
+        .collect();
+    let (everywhere, cases): (Vec<_>, Vec<_>) = cases
+        .into_iter()
+        .partition(|(env, _)| unreadable.contains(&env[0].0));
     assert_env_cases_ask(&cases, repo.path());
     assert_eq!(everywhere.len(), unreadable.len());
     assert_env_cases_ask_everywhere(&everywhere, repo.path());
@@ -2178,11 +2718,18 @@ fn u35_repo_trace2_target_asks() {
     for target in ["/tmp/trace.json", "af_unix:/tmp/sock"] {
         let repo = repo_with_included_config(&format!("[trace2]\n\teventTarget = {target}\n"));
         let open = approving_paths_in(&["git status -s"], ALL, repo.path());
-        assert!(open.is_empty(), "{target}: must require approval:\n{}", open.join("\n"));
+        assert!(
+            open.is_empty(),
+            "{target}: must require approval:\n{}",
+            open.join("\n")
+        );
     }
     for target in ["true", "2", "false"] {
         let repo = repo_with_included_config(&format!("[trace2]\n\tnormalTarget = {target}\n"));
-        assert!(approves(Path::Ask, "git status", repo.path()), "{target}: stderr or a descriptor writes no file");
+        assert!(
+            approves(Path::Ask, "git status", repo.path()),
+            "{target}: stderr or a descriptor writes no file"
+        );
     }
 }
 
@@ -2192,16 +2739,28 @@ fn u35_repo_trace2_target_asks() {
 fn u35_repo_file_included_from_the_users_config_asks() {
     let repo = tempfile::tempdir().unwrap();
     git2::Repository::init(repo.path()).unwrap();
-    std::fs::write(repo.path().join("tools.cfg"), "[core]\n\tfsmonitor = ./payload\n").unwrap();
+    std::fs::write(
+        repo.path().join("tools.cfg"),
+        "[core]\n\tfsmonitor = ./payload\n",
+    )
+    .unwrap();
     let home = tempfile::tempdir().unwrap();
     let gitconfig = home.path().join(".gitconfig");
-    std::fs::write(&gitconfig, format!("[include]\n\tpath = {}/tools.cfg\n", repo.path().display())).unwrap();
+    std::fs::write(
+        &gitconfig,
+        format!("[include]\n\tpath = {}/tools.cfg\n", repo.path().display()),
+    )
+    .unwrap();
     let env = [("HOME", home.path().to_str().unwrap())];
     // Repository content the scan finds is a floor of its own: grants ask too.
     assert_env_cases_ask_everywhere(&[(&env, "git status -s")], repo.path());
     let elsewhere = home.path().join("own.cfg");
     std::fs::write(&elsewhere, "[core]\n\tpager = less -R\n").unwrap();
-    std::fs::write(&gitconfig, format!("[include]\n\tpath = {}\n", elsewhere.display())).unwrap();
+    std::fs::write(
+        &gitconfig,
+        format!("[include]\n\tpath = {}\n", elsewhere.display()),
+    )
+    .unwrap();
     assert_env_cases_approved(&[(&env, "git status")], repo.path());
 }
 
@@ -2222,7 +2781,10 @@ fn u35_home_directory_is_not_a_repository() {
     let repo = home.path().join("proj");
     git2::Repository::init(&repo).unwrap();
     let inside = format!("{}/bin:/usr/bin", repo.display());
-    assert_env_cases_ask(&[(&[("HOME", &h), ("PATH", &inside)], "rg needle README.md")], &repo);
+    assert_env_cases_ask(
+        &[(&[("HOME", &h), ("PATH", &inside)], "rg needle README.md")],
+        &repo,
+    );
 }
 
 // ---- u35 g7: review r6 Highs (value parsing replaced by presence) ----
@@ -2233,9 +2795,15 @@ fn u35_whitespace_env_values_ask() {
     let repo = repo_with_included_config("");
     let cases: &[(&[(&str, &str)], &str)] = &[
         (&[("RIPGREP_CONFIG_PATH", " ")], "rg needle README.md"),
-        (&[("RIPGREP_CONFIG_PATH", " .ripgreprc")], "rg needle README.md"),
+        (
+            &[("RIPGREP_CONFIG_PATH", " .ripgreprc")],
+            "rg needle README.md",
+        ),
         (&[("KUBECONFIG", " ")], "kubectl get pods"),
-        (&[("KUBECONFIG", " /nonexistent-home/.kube/config")], "kubectl get pods"),
+        (
+            &[("KUBECONFIG", " /nonexistent-home/.kube/config")],
+            "kubectl get pods",
+        ),
         (&[("PAGER", " ")], "git log -1"),
         (&[("PATH", " /usr/bin")], "ls -la"),
     ];
@@ -2249,11 +2817,20 @@ fn u35_quoted_command_lines_ask() {
     let repo = repo_with_included_config("");
     std::fs::write(repo.path().join("payload file"), "").unwrap();
     let cases: &[(&[(&str, &str)], &str)] = &[
-        (&[("GIT_EXTERNAL_DIFF", "/bin/sh 'payload file'")], "git diff"),
-        (&[("GIT_EXTERNAL_DIFF", "/bin/sh payload\\ file")], "git diff"),
+        (
+            &[("GIT_EXTERNAL_DIFF", "/bin/sh 'payload file'")],
+            "git diff",
+        ),
+        (
+            &[("GIT_EXTERNAL_DIFF", "/bin/sh payload\\ file")],
+            "git diff",
+        ),
         (&[("PAGER", "/bin/sh 'payload file'")], "git log -1"),
         (&[("EDITOR", "'/usr/bin/vim'")], "git status -s"),
-        (&[("KUBECONFIG", "\"/nonexistent-home/.kube/config\"")], "kubectl get pods"),
+        (
+            &[("KUBECONFIG", "\"/nonexistent-home/.kube/config\"")],
+            "kubectl get pods",
+        ),
     ];
     assert_env_cases_ask(cases, repo.path());
 }
@@ -2281,9 +2858,17 @@ fn u35_windows_style_path_lists_are_split_by_the_platform() {
     std::fs::create_dir_all(repo.path().join("bin")).unwrap();
     std::fs::write(repo.path().join("bin/rg.exe"), "").unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let joined = |entries: &[std::path::PathBuf]| std::env::join_paths(entries).unwrap().into_string().unwrap();
+    let joined = |entries: &[std::path::PathBuf]| {
+        std::env::join_paths(entries)
+            .unwrap()
+            .into_string()
+            .unwrap()
+    };
     let path = joined(&[repo.path().join("bin"), outside.path().to_path_buf()]);
-    let kube = joined(&[outside.path().join("config"), repo.path().join("kubeconfig")]);
+    let kube = joined(&[
+        outside.path().join("config"),
+        repo.path().join("kubeconfig"),
+    ]);
     let mut cases: Vec<(&[(&str, &str)], &str)> = Vec::new();
     let path_env = [("PATH", path.as_str())];
     let kube_env = [("KUBECONFIG", kube.as_str())];
@@ -2311,14 +2896,21 @@ fn u35_ambient_scan_never_runs_an_untrusted_git() {
     let inside_path = format!("{}/bin:/usr/bin", repo.path().display());
     let inside_bin = git.to_str().unwrap().to_owned();
     // The scan skips `PATH` entries that are relative or in the tree and runs the first outside git; grants apply.
-    let cases: &[(&[(&str, &str)], &str)] =
-        &[(&[("PATH", "bin:/usr/bin")], "git status -s"), (&[("PATH", &inside_path)], "git status -s")];
+    let cases: &[(&[(&str, &str)], &str)] = &[
+        (&[("PATH", "bin:/usr/bin")], "git status -s"),
+        (&[("PATH", &inside_path)], "git status -s"),
+    ];
     assert_env_cases_ask(cases, repo.path());
     // An untrusted `GIT_BIN_PATH` leaves no git to scan with: everything asks.
-    let cases: &[(&[(&str, &str)], &str)] =
-        &[(&[("GIT_BIN_PATH", "bin/git")], "git status -s"), (&[("GIT_BIN_PATH", &inside_bin)], "git status -s")];
+    let cases: &[(&[(&str, &str)], &str)] = &[
+        (&[("GIT_BIN_PATH", "bin/git")], "git status -s"),
+        (&[("GIT_BIN_PATH", &inside_bin)], "git status -s"),
+    ];
     assert_env_cases_ask_everywhere(cases, repo.path());
-    assert!(!marker.exists(), "the planted git ran during classification");
+    assert!(
+        !marker.exists(),
+        "the planted git ran during classification"
+    );
 }
 
 /// Astra r6 High: a preload without a slash is found through the library search path; any loader variable asks.
@@ -2328,7 +2920,10 @@ fn u35_slashless_preload_asks() {
     std::fs::create_dir_all(repo.path().join("lib")).unwrap();
     std::fs::write(repo.path().join("lib/payload"), "").unwrap();
     let cases: &[(&[(&str, &str)], &str)] = &[
-        (&[("LD_PRELOAD", "payload"), ("LD_LIBRARY_PATH", "./lib")], "ls -la"),
+        (
+            &[("LD_PRELOAD", "payload"), ("LD_LIBRARY_PATH", "./lib")],
+            "ls -la",
+        ),
         (&[("LD_PRELOAD", "payload")], "cat README.md"),
     ];
     assert_env_cases_ask(cases, repo.path());
@@ -2343,10 +2938,25 @@ fn u35_bare_words_in_inherited_command_lines_ask() {
     std::fs::create_dir_all(repo.path().join("bin")).unwrap();
     std::fs::write(repo.path().join("bin/payload"), "").unwrap();
     let cases: &[(&[(&str, &str)], &str)] = &[
-        (&[("PATH", "bin:/usr/bin"), ("GIT_EXTERNAL_DIFF", "/bin/sh -c payload")], "git diff"),
+        (
+            &[
+                ("PATH", "bin:/usr/bin"),
+                ("GIT_EXTERNAL_DIFF", "/bin/sh -c payload"),
+            ],
+            "git diff",
+        ),
         (&[("GIT_EXTERNAL_DIFF", "/usr/bin/env payload")], "git diff"),
-        (&[("GIT_SSH_COMMAND", "ssh -o ProxyCommand=payload")], "git fetch"),
-        (&[("PATH", "bin:/usr/bin"), ("GIT_SSH_COMMAND", "ssh -o ProxyCommand=payload")], "git fetch"),
+        (
+            &[("GIT_SSH_COMMAND", "ssh -o ProxyCommand=payload")],
+            "git fetch",
+        ),
+        (
+            &[
+                ("PATH", "bin:/usr/bin"),
+                ("GIT_SSH_COMMAND", "ssh -o ProxyCommand=payload"),
+            ],
+            "git fetch",
+        ),
     ];
     assert_env_cases_ask(cases, repo.path());
 }
@@ -2366,8 +2976,14 @@ fn u35_fuigo_tool_selectors_ask() {
     let home = format!("{root}/.fuigo");
     let config = format!("{root}/fuigo.toml");
     let cases: &[(&[(&str, &str)], &str)] = &[
-        (&[("FUIGO_TOOLS_UGREP_PATH", &ugrep)], "grep needle README.md"),
-        (&[("FUIGO_TOOLS_UGREP_PATH", "tools/ugrep")], "grep needle README.md"),
+        (
+            &[("FUIGO_TOOLS_UGREP_PATH", &ugrep)],
+            "grep needle README.md",
+        ),
+        (
+            &[("FUIGO_TOOLS_UGREP_PATH", "tools/ugrep")],
+            "grep needle README.md",
+        ),
         (&[("FUIGO_TOOLS_BFS_PATH", &bfs)], "find . -name x"),
         (&[("SHELL", &shell)], "ls -la"),
         (&[("FUIGO_SHELL", "tools/bash")], "ls -la"),
@@ -2378,14 +2994,25 @@ fn u35_fuigo_tool_selectors_ask() {
     ];
     assert_env_cases_ask(cases, repo.path());
     let user: &[(&[(&str, &str)], &str)] = &[
-        (&[("FUIGO_TOOLS_UGREP_PATH", "/opt/ugrep/bin/ugrep")], "grep needle README.md"),
-        (&[("SHELL", "/bin/zsh"), ("FUIGO_SHELL", "bash"), ("FUIGO_HOME", "/nonexistent-home/.fuigo")], "ls -la"),
+        (
+            &[("FUIGO_TOOLS_UGREP_PATH", "/opt/ugrep/bin/ugrep")],
+            "grep needle README.md",
+        ),
+        (
+            &[
+                ("SHELL", "/bin/zsh"),
+                ("FUIGO_SHELL", "bash"),
+                ("FUIGO_HOME", "/nonexistent-home/.fuigo"),
+            ],
+            "ls -la",
+        ),
     ];
     assert_env_cases_approved(user, repo.path());
     // `find` is approved on the grant paths only; the user's own bfs keeps those approvals
-    let own_bfs = crate::permission::exec_risk::with_inherited_env(&[("FUIGO_TOOLS_BFS_PATH", "/opt/bfs/bin/bfs")], || {
-        approving_paths_in(&["find . -name x"], ALL, repo.path())
-    });
+    let own_bfs = crate::permission::exec_risk::with_inherited_env(
+        &[("FUIGO_TOOLS_BFS_PATH", "/opt/bfs/bin/bfs")],
+        || approving_paths_in(&["find . -name x"], ALL, repo.path()),
+    );
     assert!(!own_bfs.is_empty(), "the user's own bfs keeps approval");
 }
 
@@ -2404,7 +3031,10 @@ fn u35_g9_interpreter_queries_under_option_variables_ask() {
         cwd.path(),
     );
     assert_requires_approval(&["pypy3 --version", "pypy -V", "pypy3 --help"], IDENTITY);
-    assert!(approves(Path::Ask, "python3 --version", cwd.path()) || approves(Path::AutoFast, "python3 --version", cwd.path()));
+    assert!(
+        approves(Path::Ask, "python3 --version", cwd.path())
+            || approves(Path::AutoFast, "python3 --version", cwd.path())
+    );
 }
 
 /// Astra r7 High, u35 g9 (lead decision after r8; Fable r8 Low): the shell runner judges the exact environment it builds
@@ -2428,7 +3058,11 @@ fn u35_g9_runner_judges_the_child_environment_for_the_command_programs() {
     let steering: &[Case<'_>] = &[
         (&[("PATH", &dirty)], "ls -la", "PATH"),
         (&[("PATH", "./bin:/usr/bin")], "rg needle README.md", "PATH"),
-        (&[("GIT_SSH_COMMAND", "/usr/bin/ssh -4")], "git status -s", "GIT_SSH_COMMAND"),
+        (
+            &[("GIT_SSH_COMMAND", "/usr/bin/ssh -4")],
+            "git status -s",
+            "GIT_SSH_COMMAND",
+        ),
         (&[("LD_PRELOAD", "payload")], "cat README.md", "LD_PRELOAD"),
         (&[("DYLD_INSERT_LIBRARIES", "payload")], "ls -la", "DYLD_*"),
         (&[("PAGER", "sh pager.sh")], "git log -1", "PAGER"),
@@ -2447,7 +3081,9 @@ fn u35_g9_runner_judges_the_child_environment_for_the_command_programs() {
         (&[][..], "git status -s"),
     ] {
         if let Some(var) = super::child_env_steers(cmd, &env(extra), repo.path()) {
-            wrong.push(format!("{extra:?} {cmd:?}: {var} steers, but not this command"));
+            wrong.push(format!(
+                "{extra:?} {cmd:?}: {var} steers, but not this command"
+            ));
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
@@ -2464,9 +3100,18 @@ fn u35_grants_still_apply_under_a_steering_environment() {
     let dirty = format!("{}/bin:/usr/bin", repo.path().display());
     type Env<'a> = &'a [(&'a str, &'a str)];
     let cases: &[(Env, &[&str])] = &[
-        (&[("GIT_ASKPASS", "/opt/askpass")], &["git status -s", "git log -1"]),
-        (&[("LD_PRELOAD", "payload.so")], &["cat README.md", "ls -la", "python3 x.py"]),
-        (&[("PATH", &dirty)], &["cat README.md", "rg needle README.md", "python3 x.py"]),
+        (
+            &[("GIT_ASKPASS", "/opt/askpass")],
+            &["git status -s", "git log -1"],
+        ),
+        (
+            &[("LD_PRELOAD", "payload.so")],
+            &["cat README.md", "ls -la", "python3 x.py"],
+        ),
+        (
+            &[("PATH", &dirty)],
+            &["cat README.md", "rg needle README.md", "python3 x.py"],
+        ),
         (&[("RUSTUP_TOOLCHAIN", "./tc")], &["cargo build"]),
     ];
     let mut wrong = Vec::new();
@@ -2487,7 +3132,9 @@ fn u35_grants_still_apply_under_a_steering_environment() {
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     // The catch-all rule covers cargo under a toolchain override (the release-gate case).
-    assert!(with_inherited_env(&[("RUSTUP_TOOLCHAIN", "./tc")], || approves(Path::CatchAllRule, "cargo build", repo.path())));
+    assert!(with_inherited_env(&[("RUSTUP_TOOLCHAIN", "./tc")], || {
+        approves(Path::CatchAllRule, "cargo build", repo.path())
+    }));
 }
 
 /// Astra r7 High: a `git` found in a `PATH` directory outside the work tree may be a symlink into it; the ambient scan
@@ -2506,10 +3153,15 @@ fn u35_trusted_git_symlink_into_the_tree_is_not_run() {
     std::os::unix::fs::symlink(&git, outside.path().join("git")).unwrap();
     let path = format!("{}:/usr/bin", outside.path().display());
     let bin = outside.path().join("git").to_str().unwrap().to_owned();
-    let cases: &[(&[(&str, &str)], &str)] =
-        &[(&[("PATH", &path)], "git status -s"), (&[("GIT_BIN_PATH", &bin)], "git status -s")];
+    let cases: &[(&[(&str, &str)], &str)] = &[
+        (&[("PATH", &path)], "git status -s"),
+        (&[("GIT_BIN_PATH", &bin)], "git status -s"),
+    ];
     assert_env_cases_ask_everywhere(cases, repo.path());
-    assert!(!marker.exists(), "the planted git ran during classification");
+    assert!(
+        !marker.exists(),
+        "the planted git ran during classification"
+    );
 }
 
 /// Grok r7 High: a repository hook runs on a no-grant `git status` (`post-index-change` on the index refresh). Any
@@ -2520,13 +3172,24 @@ fn u35_repository_hooks_make_git_ask() {
     let hooks = samples.path().join(".git/hooks");
     std::fs::create_dir_all(&hooks).unwrap();
     std::fs::write(hooks.join("pre-commit.sample"), "#!/bin/sh\n").unwrap();
-    assert!(approves(Path::Ask, "git status -s", samples.path()), "samples alone keep approval");
+    assert!(
+        approves(Path::Ask, "git status -s", samples.path()),
+        "samples alone keep approval"
+    );
     let hooked = repo_with_included_config("");
     let hooks = hooked.path().join(".git/hooks");
     std::fs::create_dir_all(&hooks).unwrap();
     write_hook(&hooks.join("post-index-change"), true);
-    let open = approving_paths_in(&["git status -s", "git log -1", "git diff"], ALL, hooked.path());
-    assert!(open.is_empty(), "must require approval:\n{}", open.join("\n"));
+    let open = approving_paths_in(
+        &["git status -s", "git log -1", "git diff"],
+        ALL,
+        hooked.path(),
+    );
+    assert!(
+        open.is_empty(),
+        "must require approval:\n{}",
+        open.join("\n")
+    );
 }
 
 /// A hook file, executable or not (unix only; elsewhere git runs any hook file).
@@ -2550,13 +3213,22 @@ fn u35_g9_ordinary_hooks_keep_git_approved() {
     let repo = repo_with_included_config("");
     let hooks = repo.path().join(".git/hooks");
     std::fs::create_dir_all(&hooks).unwrap();
-    for hook in ["pre-commit", "post-checkout", "post-commit", "post-merge", "pre-push"] {
+    for hook in [
+        "pre-commit",
+        "post-checkout",
+        "post-commit",
+        "post-merge",
+        "pre-push",
+    ] {
         write_hook(&hooks.join(hook), true);
     }
     #[cfg(unix)]
     write_hook(&hooks.join("post-index-change"), false);
     for path in [Path::Ask, Path::CatchAllRule, Path::Blanket] {
-        assert!(approves(path, "git status -s", repo.path()), "{path:?}: ordinary hooks keep git status approved");
+        assert!(
+            approves(path, "git status -s", repo.path()),
+            "{path:?}: ordinary hooks keep git status approved"
+        );
     }
 }
 
@@ -2574,7 +3246,10 @@ fn u35_g10_repository_hooks_make_mutating_git_ask_without_a_grant() {
     #[cfg(unix)]
     write_hook(&hooks.join("post-checkout"), false);
     for cmd in MUTATING {
-        assert!(approves(Path::AutoFast, cmd, clean.path()), "{cmd}: the routine check approves it without hooks");
+        assert!(
+            approves(Path::AutoFast, cmd, clean.path()),
+            "{cmd}: the routine check approves it without hooks"
+        );
     }
     let hooked = repo_with_included_config("");
     let hooks = hooked.path().join(".git/hooks");
@@ -2583,14 +3258,32 @@ fn u35_g10_repository_hooks_make_mutating_git_ask_without_a_grant() {
         write_hook(&hooks.join(hook), true);
     }
     for cmd in MUTATING {
-        assert!(!approves(Path::AutoFast, cmd, hooked.path()), "{cmd}: the repository's hooks run");
+        assert!(
+            !approves(Path::AutoFast, cmd, hooked.path()),
+            "{cmd}: the repository's hooks run"
+        );
         let evaluation = evaluation_in(cmd, &PermissionState::default(), hooked.path());
-        assert!(evaluation.assessment.contains(ClassifierSecurityFinding::RepositoryHook), "{cmd}");
-        assert!(approves(Path::Blanket, cmd, hooked.path()), "{cmd}: \"allow all commands\" still applies");
+        assert!(
+            evaluation
+                .assessment
+                .contains(ClassifierSecurityFinding::RepositoryHook),
+            "{cmd}"
+        );
+        assert!(
+            approves(Path::Blanket, cmd, hooked.path()),
+            "{cmd}: \"allow all commands\" still applies"
+        );
     }
-    assert!(approves(Path::Ask, "git status -s", hooked.path()), "a read-only query runs none of them");
+    assert!(
+        approves(Path::Ask, "git status -s", hooked.path()),
+        "a read-only query runs none of them"
+    );
     let status = evaluation_in("git status -s", &PermissionState::default(), hooked.path());
-    assert!(!status.assessment.contains(ClassifierSecurityFinding::RepositoryHook));
+    assert!(
+        !status
+            .assessment
+            .contains(ClassifierSecurityFinding::RepositoryHook)
+    );
 }
 
 /// Grok r7 Medium: `log.showSignature` makes `git log` / `git show` run `gpg`.
@@ -2598,9 +3291,16 @@ fn u35_g10_repository_hooks_make_mutating_git_ask_without_a_grant() {
 fn u35_repo_log_showsignature_asks() {
     let signing = repo_with_included_config("[log]\n\tshowSignature = true\n");
     let open = approving_paths_in(&["git log -1", "git show HEAD"], ALL, signing.path());
-    assert!(open.is_empty(), "must require approval:\n{}", open.join("\n"));
+    assert!(
+        open.is_empty(),
+        "must require approval:\n{}",
+        open.join("\n")
+    );
     let off = repo_with_included_config("[log]\n\tshowSignature = false\n");
-    assert!(approves(Path::Ask, "git log -1", off.path()), "false keeps approval");
+    assert!(
+        approves(Path::Ask, "git log -1", off.path()),
+        "false keeps approval"
+    );
 }
 
 /// Astra r7 High (selectors): Fuigo's grep tool runs `RG_BIN_PATH` (or an `rg` under `RUNFILES_DIR`) in a build without
@@ -2609,10 +3309,19 @@ fn u35_repo_log_showsignature_asks() {
 fn u35_grep_tool_program_from_the_environment_asks() {
     use crate::permission::exec_risk::with_inherited_env;
     let repo = repo_with_included_config("");
-    let access = AccessKind::Grep { path: None, glob: None };
+    let access = AccessKind::Grep {
+        path: None,
+        glob: None,
+    };
     let inside = format!("{}/bin/rg", repo.path().display());
-    for env in [[("RG_BIN_PATH", inside.as_str())], [("RG_BIN_PATH", "bin/rg")], [("RUNFILES_DIR", ".")]] {
-        let asks = with_inherited_env(&env, || hub_needs_default_prompt(&access, None, false, repo.path()));
+    for env in [
+        [("RG_BIN_PATH", inside.as_str())],
+        [("RG_BIN_PATH", "bin/rg")],
+        [("RUNFILES_DIR", ".")],
+    ] {
+        let asks = with_inherited_env(&env, || {
+            hub_needs_default_prompt(&access, None, false, repo.path())
+        });
         assert!(asks, "{env:?}");
     }
     let own = with_inherited_env(&[("RG_BIN_PATH", "/usr/bin/rg")], || {
@@ -2624,13 +3333,24 @@ fn u35_grep_tool_program_from_the_environment_asks() {
 /// Fable r7 Medium: the prompt for a command asked about because of the environment names the variable.
 #[test]
 fn u35_env_steering_names_the_variable_in_the_prompt_title() {
-    let mut update =
-        acp::ToolCallUpdate::new(acp::ToolCallId::new(Arc::from("tc")), acp::ToolCallUpdateFields::default());
+    let mut update = acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(Arc::from("tc")),
+        acp::ToolCallUpdateFields::default(),
+    );
     update.fields.title = Some("git status".to_owned());
     let noted = with_env_steering_note(&update, Some("GIT_ASKPASS"));
     let title = noted.fields.title.unwrap();
-    assert!(title.contains("git status") && title.contains("GIT_ASKPASS"), "{title}");
-    assert_eq!(with_env_steering_note(&update, None).fields.title.as_deref(), Some("git status"));
+    assert!(
+        title.contains("git status") && title.contains("GIT_ASKPASS"),
+        "{title}"
+    );
+    assert_eq!(
+        with_env_steering_note(&update, None)
+            .fields
+            .title
+            .as_deref(),
+        Some("git status")
+    );
 }
 
 // ---- u35 g11: review r10 and the owner decision on Windows shells ----
@@ -2642,23 +3362,45 @@ fn u35_env_steering_names_the_variable_in_the_prompt_title() {
 #[test]
 fn u35_g11_powershell_and_cmd_approve_nothing_without_a_grant() {
     use fuigo_config::shell::WindowsShellFamily as F;
-    const CASES: &[&str] = &["ls -la", "git status -s", "echo 'x & echo owned>marker & rem x'", "true", "cat README.md"];
+    const CASES: &[&str] = &[
+        "ls -la",
+        "git status -s",
+        "echo 'x & echo owned>marker & rem x'",
+        "true",
+        "cat README.md",
+    ];
     let cwd = tempfile::tempdir().unwrap();
     for shell in [F::Pwsh, F::PowerShell, F::Cmd] {
         let _shell = TestRunnerShell::set(Some(shell));
         let open = approving_paths_in(CASES, &[Path::Ask, Path::AutoFast], cwd.path());
         assert!(open.is_empty(), "{shell:?} must ask:\n{}", open.join("\n"));
-        assert!(approves(Path::Prefix, "ls -la", cwd.path()), "{shell:?}: a remembered `ls` grant still applies");
-        assert!(approves(Path::Blanket, "ls -la", cwd.path()), "{shell:?}: \"allow all commands\" still applies");
-        assert!(approves(Path::CatchAllRule, "ls -la", cwd.path()), "{shell:?}: `--allow Bash` still applies");
-        let partly = evaluation_in("cat README.md && ls -la", &grant_state(Path::Prefix), cwd.path());
+        assert!(
+            approves(Path::Prefix, "ls -la", cwd.path()),
+            "{shell:?}: a remembered `ls` grant still applies"
+        );
+        assert!(
+            approves(Path::Blanket, "ls -la", cwd.path()),
+            "{shell:?}: \"allow all commands\" still applies"
+        );
+        assert!(
+            approves(Path::CatchAllRule, "ls -la", cwd.path()),
+            "{shell:?}: `--allow Bash` still applies"
+        );
+        let partly = evaluation_in(
+            "cat README.md && ls -la",
+            &grant_state(Path::Prefix),
+            cwd.path(),
+        );
         assert!(partly.all_segments_granted, "both segments are granted");
         assert_eq!(unvouched_shell(Some(shell)), Some(shell.name()));
     }
     for shell in [Some(F::GitBash), None] {
         let _shell = TestRunnerShell::set(shell);
         for cmd in ["ls -la", "git status -s", "true"] {
-            assert!(approves(Path::Ask, cmd, cwd.path()) || approves(Path::AutoFast, cmd, cwd.path()), "{shell:?}: {cmd}");
+            assert!(
+                approves(Path::Ask, cmd, cwd.path()) || approves(Path::AutoFast, cmd, cwd.path()),
+                "{shell:?}: {cmd}"
+            );
         }
         assert_eq!(unvouched_shell(shell), None);
     }
@@ -2669,15 +3411,29 @@ fn u35_g11_powershell_and_cmd_approve_nothing_without_a_grant() {
 #[test]
 fn u35_g11_safe_verb_hooks_match_as_git_finds_them() {
     use crate::git_content_filters::names_safe_verb_hook;
-    for name in ["post-index-change", "Post-Index-Change", "POST-INDEX-CHANGE", "FSMonitor-Watchman"] {
+    for name in [
+        "post-index-change",
+        "Post-Index-Change",
+        "POST-INDEX-CHANGE",
+        "FSMonitor-Watchman",
+    ] {
         assert!(names_safe_verb_hook(name, false), "{name}");
         assert!(names_safe_verb_hook(name, true), "{name} on Windows");
     }
-    for name in ["post-index-change.exe", "Post-Index-Change.EXE", "post-index-change.sh", "fsmonitor-watchman.bat"] {
+    for name in [
+        "post-index-change.exe",
+        "Post-Index-Change.EXE",
+        "post-index-change.sh",
+        "fsmonitor-watchman.bat",
+    ] {
         assert!(names_safe_verb_hook(name, true), "{name} on Windows");
         assert!(!names_safe_verb_hook(name, false), "{name} elsewhere");
     }
-    for name in ["post-index-change.sample", "pre-commit", "post-index-changes"] {
+    for name in [
+        "post-index-change.sample",
+        "pre-commit",
+        "post-index-changes",
+    ] {
         assert!(!names_safe_verb_hook(name, true), "{name}");
     }
     let repo = repo_with_included_config("");
@@ -2685,7 +3441,11 @@ fn u35_g11_safe_verb_hooks_match_as_git_finds_them() {
     std::fs::create_dir_all(&hooks).unwrap();
     write_hook(&hooks.join("Post-Index-Change"), true);
     let open = approving_paths_in(&["git status -s", "git log -1"], ALL, repo.path());
-    assert!(open.is_empty(), "must require approval:\n{}", open.join("\n"));
+    assert!(
+        open.is_empty(),
+        "must require approval:\n{}",
+        open.join("\n")
+    );
 }
 
 /// u35 g11 (Fable r10 Low): with the repository's hooks present a mutating git command keeps the user's grants (a
@@ -2699,21 +3459,41 @@ fn u35_g11_repository_hooks_keep_grants_and_follow_core_hookspath() {
     std::fs::create_dir_all(&hooks).unwrap();
     write_hook(&hooks.join("pre-commit"), true);
     let evaluation = evaluation_in(cmd, &PermissionState::default(), hooked.path());
-    assert!(evaluation.assessment.contains(ClassifierSecurityFinding::RepositoryHook));
+    assert!(
+        evaluation
+            .assessment
+            .contains(ClassifierSecurityFinding::RepositoryHook)
+    );
     // u35 t1 (design d2 D3): in a trusted folder the hooks no longer stop the model's allow; outside one it asks.
-    assert!(!classifier_allow_needs_user(Some(&evaluation)), "the model's allow stands in a trusted folder");
+    assert!(
+        !classifier_allow_needs_user(Some(&evaluation)),
+        "the model's allow stands in a trusted folder"
+    );
     {
         let _untrusted = crate::folder_trust::TestFolderTrust::untrusted();
         let evaluation = evaluation_in(cmd, &PermissionState::default(), hooked.path());
-        assert!(classifier_allow_needs_user(Some(&evaluation)), "a classifier allow asks outside a trusted folder");
+        assert!(
+            classifier_allow_needs_user(Some(&evaluation)),
+            "a classifier allow asks outside a trusted folder"
+        );
     }
     assert!(!approves(Path::AutoFast, cmd, hooked.path()));
-    assert!(approves(Path::Sandbox, cmd, hooked.path()), "sandbox auto-allow is the user's override");
+    assert!(
+        approves(Path::Sandbox, cmd, hooked.path()),
+        "sandbox auto-allow is the user's override"
+    );
     let mut state = PermissionState::default();
     state.allowed_bash_commands.insert("git commit".to_owned());
     let granted = evaluation_in(cmd, &state, hooked.path());
-    assert!(granted.assessment.contains(ClassifierSecurityFinding::RepositoryHook));
-    assert!(!classifier_allow_needs_user(Some(&granted)), "granted in full");
+    assert!(
+        granted
+            .assessment
+            .contains(ClassifierSecurityFinding::RepositoryHook)
+    );
+    assert!(
+        !classifier_allow_needs_user(Some(&granted)),
+        "granted in full"
+    );
     assert!(
         matches!(
             bash_grant_pre_decision(cmd, &granted, &state, None, BashGrantOpts::PRE_CLASSIFIER),
@@ -2726,8 +3506,16 @@ fn u35_g11_repository_hooks_keep_grants_and_follow_core_hookspath() {
     let hooks = custom.path().join("custom-hooks");
     std::fs::create_dir_all(&hooks).unwrap();
     write_hook(&hooks.join("pre-commit"), true);
-    let open = approving_paths_in(&[cmd], &[Path::Ask, Path::AutoFast, Path::Blanket, Path::Sandbox], custom.path());
-    assert!(open.is_empty(), "must require approval:\n{}", open.join("\n"));
+    let open = approving_paths_in(
+        &[cmd],
+        &[Path::Ask, Path::AutoFast, Path::Blanket, Path::Sandbox],
+        custom.path(),
+    );
+    assert!(
+        open.is_empty(),
+        "must require approval:\n{}",
+        open.join("\n")
+    );
 }
 
 /// u35 g11 (Astra r10 High): the directories a bash request is judged in: the request's, and the tool's own working
@@ -2736,14 +3524,20 @@ fn u35_g11_repository_hooks_keep_grants_and_follow_core_hookspath() {
 fn u35_g11_bash_run_dirs_include_the_tool_workdir() {
     let session = std::path::Path::new("/work/session");
     assert_eq!(bash_run_dirs(session, None), vec![session.to_path_buf()]);
-    assert_eq!(bash_run_dirs(session, Some(std::path::Path::new("/work/session"))), vec![session.to_path_buf()]);
+    assert_eq!(
+        bash_run_dirs(session, Some(std::path::Path::new("/work/session"))),
+        vec![session.to_path_buf()]
+    );
     assert_eq!(
         bash_run_dirs(session, Some(std::path::Path::new("nested"))),
         vec![session.to_path_buf(), session.join("nested")]
     );
     assert_eq!(
         bash_run_dirs(session, Some(std::path::Path::new("/elsewhere"))),
-        vec![session.to_path_buf(), std::path::PathBuf::from("/elsewhere")]
+        vec![
+            session.to_path_buf(),
+            std::path::PathBuf::from("/elsewhere")
+        ]
     );
     let input = |workdir: Option<&str>| {
         fuigo_tools::types::ToolInput::Bash(fuigo_tools::implementations::BashToolInput {
@@ -2756,8 +3550,14 @@ fn u35_g11_bash_run_dirs_include_the_tool_workdir() {
         })
     };
     use crate::permission::types::bash_exec_cwd_for;
-    assert_eq!(bash_exec_cwd_for(&input(Some("nested")), session), Some(session.join("nested")));
-    assert_eq!(bash_exec_cwd_for(&input(Some("/abs")), session), Some(std::path::PathBuf::from("/abs")));
+    assert_eq!(
+        bash_exec_cwd_for(&input(Some("nested")), session),
+        Some(session.join("nested"))
+    );
+    assert_eq!(
+        bash_exec_cwd_for(&input(Some("/abs")), session),
+        Some(std::path::PathBuf::from("/abs"))
+    );
     assert_eq!(bash_exec_cwd_for(&input(Some("")), session), None);
     assert_eq!(bash_exec_cwd_for(&input(None), session), None);
 }
@@ -2783,12 +3583,24 @@ fn u35_g12_each_repository_execution_kind_makes_a_classifier_allow_ask() {
         );
         let _untrusted = crate::folder_trust::TestFolderTrust::untrusted();
         let evaluation = evaluation_in(cmd, &none, cwd);
-        assert!(classifier_allow_needs_user(Some(&evaluation)), "{cmd}: a classifier allow must ask when untrusted");
+        assert!(
+            classifier_allow_needs_user(Some(&evaluation)),
+            "{cmd}: a classifier allow must ask when untrusted"
+        );
     };
     // Repository git configuration that runs a program, through `.git/config` and through an included file.
     let fsmonitor = tempfile::tempdir().unwrap();
-    git2::Repository::init(fsmonitor.path()).unwrap().config().unwrap().set_str("core.fsmonitor", "./payload").unwrap();
-    asks("git status", fsmonitor.path(), RepositoryExecution::GitConfig);
+    git2::Repository::init(fsmonitor.path())
+        .unwrap()
+        .config()
+        .unwrap()
+        .set_str("core.fsmonitor", "./payload")
+        .unwrap();
+    asks(
+        "git status",
+        fsmonitor.path(),
+        RepositoryExecution::GitConfig,
+    );
     let alias = repo_with_included_config("[alias]\n\tlol = reset --hard\n");
     asks("git lol", alias.path(), RepositoryExecution::GitConfig);
     let signing = repo_with_included_config("[log]\n\tshowSignature = true\n");
@@ -2799,15 +3611,27 @@ fn u35_g12_each_repository_execution_kind_makes_a_classifier_allow_ask() {
     let safe_verb = repo_with_included_config("");
     std::fs::create_dir_all(safe_verb.path().join(".git/hooks")).unwrap();
     write_hook(&safe_verb.path().join(".git/hooks/Post-Index-Change"), true);
-    asks("git status -s", safe_verb.path(), RepositoryExecution::GitConfig);
+    asks(
+        "git status -s",
+        safe_verb.path(),
+        RepositoryExecution::GitConfig,
+    );
     // The repository's other hooks, for a command that is not a read-only query.
     let hooked = repo_with_included_config("");
     std::fs::create_dir_all(hooked.path().join(".git/hooks")).unwrap();
     write_hook(&hooked.path().join(".git/hooks/pre-commit"), true);
-    asks("git commit --allow-empty -m audit", hooked.path(), RepositoryExecution::GitHooks);
+    asks(
+        "git commit --allow-empty -m audit",
+        hooked.path(),
+        RepositoryExecution::GitHooks,
+    );
     // git in a repository the ambient scan did not read.
     let clean = repo_with_included_config("");
-    for cmd in ["GIT_DIR=other/.git git status", "cd sub || true; git status", "git log $(echo HEAD)"] {
+    for cmd in [
+        "GIT_DIR=other/.git git status",
+        "cd sub || true; git status",
+        "git log $(echo HEAD)",
+    ] {
         asks(cmd, clean.path(), RepositoryExecution::UnscannedGit);
     }
     // No git Fuigo trusts to scan with (fail closed).
@@ -2816,8 +3640,18 @@ fn u35_g12_each_repository_execution_kind_makes_a_classifier_allow_ask() {
     });
     // An environment that steers what runs: an in-project `PATH` entry, a relative one, an in-project selector.
     let in_tree = format!("{}/bin:/usr/bin", clean.path().display());
-    for env in [vec![("PATH", in_tree.as_str())], vec![("PATH", "bin:/usr/bin")], vec![("PATH", "/usr/bin"), ("CARGO_HOME", ".cargo")]] {
-        with_inherited_env(&env, || asks("cargo build", clean.path(), RepositoryExecution::Environment));
+    for env in [
+        vec![("PATH", in_tree.as_str())],
+        vec![("PATH", "bin:/usr/bin")],
+        vec![("PATH", "/usr/bin"), ("CARGO_HOME", ".cargo")],
+    ] {
+        with_inherited_env(&env, || {
+            asks(
+                "cargo build",
+                clean.path(),
+                RepositoryExecution::Environment,
+            )
+        });
     }
 }
 
@@ -2827,24 +3661,51 @@ fn u35_g12_each_repository_execution_kind_makes_a_classifier_allow_ask() {
 #[test]
 fn u35_g12_grants_and_the_models_own_judgement_are_unchanged() {
     let fsmonitor = tempfile::tempdir().unwrap();
-    git2::Repository::init(fsmonitor.path()).unwrap().config().unwrap().set_str("core.fsmonitor", "./payload").unwrap();
+    git2::Repository::init(fsmonitor.path())
+        .unwrap()
+        .config()
+        .unwrap()
+        .set_str("core.fsmonitor", "./payload")
+        .unwrap();
     let mut state = PermissionState::default();
     state.allowed_bash_commands.insert("git status".to_owned());
     let granted = evaluation_in("git status", &state, fsmonitor.path());
-    assert_eq!(repository_execution(&granted), Some(RepositoryExecution::GitConfig));
-    assert!(!classifier_allow_needs_user(Some(&granted)), "an exact grant covers it in full");
+    assert_eq!(
+        repository_execution(&granted),
+        Some(RepositoryExecution::GitConfig)
+    );
+    assert!(
+        !classifier_allow_needs_user(Some(&granted)),
+        "an exact grant covers it in full"
+    );
     assert!(
         matches!(
-            bash_grant_pre_decision("git status", &granted, &state, None, BashGrantOpts::PRE_CLASSIFIER),
+            bash_grant_pre_decision(
+                "git status",
+                &granted,
+                &state,
+                None,
+                BashGrantOpts::PRE_CLASSIFIER
+            ),
             Some((Decision::Allow, _))
         ),
         "the grant still approves"
     );
     let clean = repo_with_included_config("");
-    for cmd in ["bash -c \"$X\"", "for f in *.rs; do wc -l \"$f\"; done", "cargo build", "make all", "git status", "git commit -m x"] {
+    for cmd in [
+        "bash -c \"$X\"",
+        "for f in *.rs; do wc -l \"$f\"; done",
+        "cargo build",
+        "make all",
+        "git status",
+        "git commit -m x",
+    ] {
         let evaluation = evaluation_in(cmd, &PermissionState::default(), clean.path());
         assert_eq!(repository_execution(&evaluation), None, "{cmd}");
-        assert!(!classifier_allow_needs_user(Some(&evaluation)), "{cmd}: the model's allow stands");
+        assert!(
+            !classifier_allow_needs_user(Some(&evaluation)),
+            "{cmd}: the model's allow stands"
+        );
     }
 }
 
@@ -2858,10 +3719,16 @@ fn u35_g12_hub_on_powershell_or_cmd_asks_without_a_grant() {
     let access = AccessKind::Bash("ls -la".to_owned());
     for shell in [F::Pwsh, F::PowerShell, F::Cmd] {
         let _shell = TestRunnerShell::set(Some(shell));
-        assert!(hub_needs_default_prompt(&access, None, false, cwd.path()), "{shell:?}");
+        assert!(
+            hub_needs_default_prompt(&access, None, false, cwd.path()),
+            "{shell:?}"
+        );
     }
     let _shell = TestRunnerShell::set(None);
-    assert!(!hub_needs_default_prompt(&access, None, false, cwd.path()), "a Unix hub approves `ls -la`");
+    assert!(
+        !hub_needs_default_prompt(&access, None, false, cwd.path()),
+        "a Unix hub approves `ls -la`"
+    );
 }
 
 /// u37: on Windows an empty `PATH` segment (a trailing `;`, as stock user `PATH`s end, or `;;`) names nothing and the
@@ -2874,11 +3741,20 @@ fn u37_windows_path_empty_segments_do_not_steer() {
     let _shell = TestRunnerShell::set(Some(fuigo_config::shell::WindowsShellFamily::GitBash));
     let repo = repo_with_included_config("");
     let dir = repo.path();
-    let steering = |path: &str, cmd: &str| with_inherited_env(&[("PATH", path)], || env_steering_of(cmd, dir));
+    let steering =
+        |path: &str, cmd: &str| with_inherited_env(&[("PATH", path)], || env_steering_of(cmd, dir));
     let stock = r"C:\Windows\system32;C:\Users\u\AppData\Local\Microsoft\WindowsApps;";
-    for path in [stock, r"C:\Windows\system32;;C:\Windows", r";C:\Windows\system32"] {
+    for path in [
+        stock,
+        r"C:\Windows\system32;;C:\Windows",
+        r";C:\Windows\system32",
+    ] {
         for cmd in ["ls -la", "git status"] {
-            assert_eq!(steering(path, cmd), None, "{path:?} {cmd}: an empty segment does not steer");
+            assert_eq!(
+                steering(path, cmd),
+                None,
+                "{path:?} {cmd}: an empty segment does not steer"
+            );
         }
     }
     assert!(
@@ -2886,8 +3762,17 @@ fn u37_windows_path_empty_segments_do_not_steer() {
         "a stock Windows PATH keeps read-only `ls` approved"
     );
     let inside = format!(r"{};C:\Windows\system32", dir.join("bin").display());
-    for path in [r"bin;C:\Windows\system32;", r".;C:\Windows\system32", inside.as_str(), ";"] {
-        assert_eq!(steering(path, "ls -la"), Some("PATH"), "{path:?}: still asks");
+    for path in [
+        r"bin;C:\Windows\system32;",
+        r".;C:\Windows\system32",
+        inside.as_str(),
+        ";",
+    ] {
+        assert_eq!(
+            steering(path, "ls -la"),
+            Some("PATH"),
+            "{path:?}: still asks"
+        );
     }
 }
 
@@ -2901,12 +3786,27 @@ fn u37_windows_path_quoted_semicolons_are_judged_as_git_bash_reads() {
     let _shell = TestRunnerShell::set(Some(fuigo_config::shell::WindowsShellFamily::GitBash));
     let repo = repo_with_included_config("");
     let dir = repo.path();
-    let steering = |path: &str| with_inherited_env(&[("PATH", path)], || env_steering_of("ls -la", dir));
-    let inside = format!(r#"C:\Windows\system32;"C:\safe;{};"C:\safe"#, dir.join("bin").display());
-    for path in [r#"C:\Windows\System32;"C:\safe;.;"C:\safe;"#, r#""C:\a;;b""#, inside.as_str()] {
-        assert_eq!(steering(path), Some("PATH"), "{path:?}: Git Bash reads an entry the split_paths reading hides");
+    let steering =
+        |path: &str| with_inherited_env(&[("PATH", path)], || env_steering_of("ls -la", dir));
+    let inside = format!(
+        r#"C:\Windows\system32;"C:\safe;{};"C:\safe"#,
+        dir.join("bin").display()
+    );
+    for path in [
+        r#"C:\Windows\System32;"C:\safe;.;"C:\safe;"#,
+        r#""C:\a;;b""#,
+        inside.as_str(),
+    ] {
+        assert_eq!(
+            steering(path),
+            Some("PATH"),
+            "{path:?}: Git Bash reads an entry the split_paths reading hides"
+        );
     }
-    for path in [r#"C:\Windows\System32;"C:\Program Files\x";"#, r"C:\Windows\System32;C:\Windows;"] {
+    for path in [
+        r#"C:\Windows\System32;"C:\Program Files\x";"#,
+        r"C:\Windows\System32;C:\Windows;",
+    ] {
         assert_eq!(steering(path), None, "{path:?}: still clean");
     }
 }

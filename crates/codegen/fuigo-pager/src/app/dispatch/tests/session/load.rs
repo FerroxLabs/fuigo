@@ -4564,7 +4564,11 @@ fn resume_with_text_naming_one_session_opens_it_directly() {
     }
     let mut fx = crate::test_util::FuigoHomeFixture::new();
     let mut app = test_app_with_agent();
-    let cwd = app.agents[&AgentId(0)].session.cwd.to_string_lossy().to_string();
+    let cwd = app.agents[&AgentId(0)]
+        .session
+        .cwd
+        .to_string_lossy()
+        .to_string();
     write_resume_fixture(&mut fx, &cwd);
     let effects = dispatch(Action::ResumeByQuery("billing refactor".into()), &mut app);
     assert!(
@@ -4575,7 +4579,10 @@ fn resume_with_text_naming_one_session_opens_it_directly() {
         "exactly one title matches, so it loads without the picker"
     );
     assert!(
-        !matches!(app.agents[&AgentId(0)].active_modal, Some(ActiveModal::SessionPicker { .. })),
+        !matches!(
+            app.agents[&AgentId(0)].active_modal,
+            Some(ActiveModal::SessionPicker { .. })
+        ),
         "no picker for a unique match"
     );
 }
@@ -4588,13 +4595,19 @@ fn resume_with_a_session_id_opens_it_directly() {
     }
     let mut fx = crate::test_util::FuigoHomeFixture::new();
     let mut app = test_app_with_agent();
-    let cwd = app.agents[&AgentId(0)].session.cwd.to_string_lossy().to_string();
+    let cwd = app.agents[&AgentId(0)]
+        .session
+        .cwd
+        .to_string_lossy()
+        .to_string();
     write_resume_fixture(&mut fx, &cwd);
     let id = "11111111-1111-4111-8111-111111111111";
     let effects = dispatch(Action::ResumeByQuery(id.into()), &mut app);
-    assert!(effects.iter().any(
-        |e| matches!(e, Effect::LoadSession { session_id, .. } if session_id == id)
-    ));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadSession { session_id, .. } if session_id == id))
+    );
 }
 
 #[serial_test::serial(FUIGO_HOME)]
@@ -4605,16 +4618,26 @@ fn resume_with_text_naming_several_sessions_opens_the_picker_filtered_by_it() {
     }
     let mut fx = crate::test_util::FuigoHomeFixture::new();
     let mut app = test_app_with_agent();
-    let cwd = app.agents[&AgentId(0)].session.cwd.to_string_lossy().to_string();
+    let cwd = app.agents[&AgentId(0)]
+        .session
+        .cwd
+        .to_string_lossy()
+        .to_string();
     write_resume_fixture(&mut fx, &cwd);
     let effects = dispatch(Action::ResumeByQuery("login".into()), &mut app);
     assert!(
-        !effects.iter().any(|e| matches!(e, Effect::LoadSession { .. })),
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadSession { .. })),
         "two sessions match, so none loads on its own"
     );
     match &app.agents[&AgentId(0)].active_modal {
         Some(ActiveModal::SessionPicker { state, .. }) => {
-            assert_eq!(state.query(), "login", "the picker starts filtered by the text");
+            assert_eq!(
+                state.query(),
+                "login",
+                "the picker starts filtered by the text"
+            );
         }
         _ => panic!("expected the session picker"),
     }
@@ -4628,10 +4651,18 @@ fn resume_with_text_naming_nothing_opens_the_picker_filtered_by_it() {
     }
     let mut fx = crate::test_util::FuigoHomeFixture::new();
     let mut app = test_app_with_agent();
-    let cwd = app.agents[&AgentId(0)].session.cwd.to_string_lossy().to_string();
+    let cwd = app.agents[&AgentId(0)]
+        .session
+        .cwd
+        .to_string_lossy()
+        .to_string();
     write_resume_fixture(&mut fx, &cwd);
     let effects = dispatch(Action::ResumeByQuery("kubernetes".into()), &mut app);
-    assert!(!effects.iter().any(|e| matches!(e, Effect::LoadSession { .. })));
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadSession { .. }))
+    );
     match &app.agents[&AgentId(0)].active_modal {
         Some(ActiveModal::SessionPicker { state, .. }) => assert_eq!(state.query(), "kubernetes"),
         _ => panic!("expected the session picker"),

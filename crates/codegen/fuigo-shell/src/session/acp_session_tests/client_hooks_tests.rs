@@ -1514,13 +1514,16 @@ fn pre_tool_use_command_registry(script: &str) -> fuigo_hooks::discovery::HookRe
     registry
 }
 
-async fn prepare_use_tool_call_with_pre_tool_use_command(script: &str) -> Result<PreparedToolCall, ToolLoop> {
+async fn prepare_use_tool_call_with_pre_tool_use_command(
+    script: &str,
+) -> Result<PreparedToolCall, ToolLoop> {
     let (mut actor, _gateway_rx, _persistence_rx) = test_actor().await;
     actor.hook_resolved_workspace_root = "/tmp".to_string();
-    *actor.agent.borrow_mut() = test_agent_with_tools(vec![fuigo_tools::registry::types::ToolConfig::for_tool::<
-        fuigo_tools::implementations::use_tool::UseTool,
-    >()])
-    .await;
+    *actor.agent.borrow_mut() =
+        test_agent_with_tools(vec![fuigo_tools::registry::types::ToolConfig::for_tool::<
+            fuigo_tools::implementations::use_tool::UseTool,
+        >()])
+        .await;
     *actor.hook_registry.borrow_mut() = Some(Arc::new(pre_tool_use_command_registry(script)));
     let call = ToolCallResponse {
         id: "call_1".to_string(),
@@ -1531,10 +1534,13 @@ async fn prepare_use_tool_call_with_pre_tool_use_command(script: &str) -> Result
         ),
     };
     let mut deferred = Vec::new();
-    tokio::time::timeout(std::time::Duration::from_secs(10), actor.prepare_tool_call(call, &mut deferred))
-        .await
-        .expect("prepare_tool_call must not hang")
-        .expect("prepare_tool_call must not error")
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        actor.prepare_tool_call(call, &mut deferred),
+    )
+    .await
+    .expect("prepare_tool_call must not hang")
+    .expect("prepare_tool_call must not error")
 }
 
 /// Row 59.7: a PreToolUse command hook answering `continue: false` ends the turn (`HookStop`), not just the call.
@@ -1550,9 +1556,16 @@ async fn pre_tool_use_continue_false_ends_the_turn_with_the_stop_reason() {
             match result {
                 Err(ToolLoop::HookStop { hook_name, reason }) => {
                     assert_eq!(hook_name, "test/pretool-stopper");
-                    assert_eq!(reason.as_deref(), Some("budget spent"), "the stop reason reaches the user");
+                    assert_eq!(
+                        reason.as_deref(),
+                        Some("budget spent"),
+                        "the stop reason reaches the user"
+                    );
                 }
-                other => panic!("continue:false at PreToolUse must stop the turn, got {:?}", other.map(|_| "prepared")),
+                other => panic!(
+                    "continue:false at PreToolUse must stop the turn, got {:?}",
+                    other.map(|_| "prepared")
+                ),
             }
         })
         .await;
@@ -1564,8 +1577,15 @@ async fn pre_tool_use_plain_deny_still_lets_the_turn_continue() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let result = prepare_use_tool_call_with_pre_tool_use_command(r#"echo '{"decision":"deny","reason":"no"}'"#).await;
-            assert!(matches!(result, Err(ToolLoop::HookDenied { .. })), "got {:?}", result.map(|_| "prepared"));
+            let result = prepare_use_tool_call_with_pre_tool_use_command(
+                r#"echo '{"decision":"deny","reason":"no"}'"#,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(ToolLoop::HookDenied { .. })),
+                "got {:?}",
+                result.map(|_| "prepared")
+            );
         })
         .await;
 }

@@ -47,6 +47,16 @@ pub(crate) async fn discover_metadata_bounded(
         })
 }
 
+fn discovery_cause_is_retryable(cause: &str) -> bool {
+    [
+        "unexpected HTTP status",
+        "error sending request",
+        "timed out",
+    ]
+    .iter()
+    .any(|needle| cause.contains(needle))
+}
+
 /// Whether a discovery failure means the authorization server metadata could not be FETCHED (an HTTP error status such
 /// as 500, a network failure, the bounded timeout): a passing problem to retry. Every other failure (an issuer or
 /// resource mismatch, a missing issuer, no OAuth at all) is a verdict about the metadata itself.
@@ -58,12 +68,16 @@ pub(crate) fn metadata_unavailable(error: &AuthError) -> bool {
         // address or an oversized body is a verdict, not a blip (Astra r1).
         AuthError::MetadataError(message) => {
             message.starts_with("OAuth metadata discovery failed for")
-                && ["unexpected HTTP status", "error sending request", "timed out"]
-                    .iter()
-                    .any(|cause| message.contains(cause))
+                && discovery_cause_is_retryable(message)
+        }
+        // rmcp 3.9+ reports the same failure structurally; the transport cause is the error source.
+        AuthError::DiscoveryRequestFailed { source, .. } => {
+            discovery_cause_is_retryable(&source.to_string())
         }
         // `discover_metadata_bounded`'s own timeout.
-        AuthError::InternalError(message) => message.starts_with("OAuth metadata discovery timed out"),
+        AuthError::InternalError(message) => {
+            message.starts_with("OAuth metadata discovery timed out")
+        }
         _ => false,
     }
 }
@@ -545,14 +559,13 @@ async fn exchange_callback(
     mgr: &AuthorizationManager,
     callback: &OAuthCallbackPayload,
 ) -> Result<(), String> {
-    let (result, refusal) = crate::http_policy::capture_refusal(
-        mgr.exchange_code_for_token_with_issuer(
+    let (result, refusal) =
+        crate::http_policy::capture_refusal(mgr.exchange_code_for_token_with_issuer(
             &callback.code,
             &callback.state,
             callback.issuer.as_deref(),
-        ),
-    )
-    .await;
+        ))
+        .await;
     result.map(|_| ()).map_err(|e| {
         format!(
             "Token exchange failed: {}",
@@ -939,7 +952,9 @@ mod tests {
             .await
             .unwrap();
         configure_from_discovery(&mut mgr).await;
-        exchange(&mgr, &rig.issuer()).await.expect("same-origin code exchange");
+        exchange(&mgr, &rig.issuer())
+            .await
+            .expect("same-origin code exchange");
         assert_eq!(rig.as_token_hits.load(Ordering::SeqCst), 1);
         mgr.refresh_token().await.expect("same-origin refresh");
         assert_eq!(rig.as_token_hits.load(Ordering::SeqCst), 2);
@@ -948,7 +963,8 @@ mod tests {
 
     /// A resource server R whose protected-resource document carries a stray `token_endpoint` and names no
     /// authorization server; every other discovery URL is 404. Its `/token` records what it receives.
-    async fn resource_server_with_stray_token_endpoint() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    async fn resource_server_with_stray_token_endpoint()
+    -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         use axum::{Router, routing::post};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let hits = Arc::new(AtomicUsize::new(0));
@@ -989,7 +1005,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stored_refresh_token_for_another_issuer_never_reaches_synthesized_fallback_endpoints() {
+    async fn stored_refresh_token_for_another_issuer_never_reaches_synthesized_fallback_endpoints()
+    {
         // Astra r3 HIGH: with no usable AS metadata rmcp's hydration re-resolves and synthesizes `{base}/token`.
         use crate::rmcp::transport::auth::InMemoryCredentialStore;
         use std::sync::atomic::Ordering;
@@ -1000,7 +1017,9 @@ mod tests {
             .unwrap();
         first.set_credential_store(store.clone());
         configure_from_discovery(&mut first).await;
-        exchange(&first, &rig.issuer()).await.expect("legitimate exchange stores credentials for issuer A");
+        exchange(&first, &rig.issuer())
+            .await
+            .expect("legitimate exchange stores credentials for issuer A");
 
         let (resource_base, resource_hits) = resource_server_with_stray_token_endpoint().await;
         let mut second = crate::http_policy::auth_manager(&format!("{resource_base}/mcp"))
@@ -1011,16 +1030,25 @@ mod tests {
         let (refreshed, _refusal) = if ready.hydrated {
             crate::http_policy::capture_refusal(second.refresh_token()).await
         } else {
-            (Err(crate::rmcp::transport::auth::AuthError::NoAuthorizationSupport), None)
+            (
+                Err(crate::rmcp::transport::auth::AuthError::NoAuthorizationSupport),
+                None,
+            )
         };
-        assert!(refreshed.is_err(), "no refresh may succeed against unvalidated metadata");
+        assert!(
+            refreshed.is_err(),
+            "no refresh may succeed against unvalidated metadata"
+        );
         assert_eq!(
             resource_hits.load(Ordering::SeqCst),
             0,
             "issuer A's refresh token reached the resource server (hydrated={})",
             ready.hydrated
         );
-        assert!(!ready.hydrated, "hydration must not run on synthesized fallback metadata");
+        assert!(
+            !ready.hydrated,
+            "hydration must not run on synthesized fallback metadata"
+        );
     }
 
     #[tokio::test]
@@ -1046,7 +1074,10 @@ mod tests {
             err.contains("origin"),
             "must say why (the endpoint is not on the authorization server's origin): {err}"
         );
-        assert!(!err.contains("auth-code"), "no credential in the message: {err}");
+        assert!(
+            !err.contains("auth-code"),
+            "no credential in the message: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1057,7 +1088,9 @@ mod tests {
             .await
             .unwrap();
         configure_from_discovery(&mut mgr).await;
-        exchange(&mgr, &rig.issuer()).await.expect("legitimate first exchange");
+        exchange(&mgr, &rig.issuer())
+            .await
+            .expect("legitimate first exchange");
 
         // The metadata later turns hostile (a changed or compromised server); the next refresh must not follow it.
         rig.hostile.store(true, Ordering::SeqCst);
@@ -1075,7 +1108,10 @@ mod tests {
         );
         assert!(err.contains("refus"), "must say it refused: {err}");
         assert!(err.contains("origin"), "must say why: {err}");
-        assert!(!err.contains("rt-ok"), "no credential in the message: {err}");
+        assert!(
+            !err.contains("rt-ok"),
+            "no credential in the message: {err}"
+        );
     }
 
     #[tokio::test]

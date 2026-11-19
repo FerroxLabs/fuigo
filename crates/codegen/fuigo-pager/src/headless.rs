@@ -236,10 +236,9 @@ fn writes_file_by_redirect(title: &str) -> bool {
         }
         let rest = &title[j..];
         let is_null = rest.strip_prefix("/dev/null").is_some_and(|after| {
-            after
-                .chars()
-                .next()
-                .is_none_or(|c| c.is_whitespace() || matches!(c, ';' | '|' | '&' | ')' | '"' | '\'' | '`' | '”'))
+            after.chars().next().is_none_or(|c| {
+                c.is_whitespace() || matches!(c, ';' | '|' | '&' | ')' | '"' | '\'' | '`' | '”')
+            })
         });
         if !is_null {
             return true;
@@ -320,7 +319,12 @@ impl HeadlessDenial {
             // A command that redirects into a file is the one shell command no --allow rule can pre-approve (the
             // permission layer keeps a write by redirect behind a prompt), so naming an --allow rule there would send
             // the operator to a fix that cannot work. The title is the agent's wording of the command.
-            Some("execute") if self.tool_title.as_deref().is_some_and(writes_file_by_redirect) => {
+            Some("execute")
+                if self
+                    .tool_title
+                    .as_deref()
+                    .is_some_and(writes_file_by_redirect) =>
+            {
                 "re-run with --always-approve: no --allow rule covers a shell command that writes a \
                  file by redirect (`> file`), and --permission-mode acceptEdits approves file edits, \
                  not shell commands; deny rules still apply"
@@ -772,7 +776,10 @@ impl HeadlessEmitter {
             // stdout stays one JSON document; a refused reference to the saved key is a warning for the person at the
             // terminal, so it goes to stderr (the other lifecycle events have no stderr line in these formats).
             OutputFormat::Json => {
-                if let Some(line) = config_notice_stderr_line(&event, fuigo_sandbox::unavailable_warning().as_deref()) {
+                if let Some(line) = config_notice_stderr_line(
+                    &event,
+                    fuigo_sandbox::unavailable_warning().as_deref(),
+                ) {
                     crate::best_effort_stderr::eprint_line(&line);
                 }
             }
@@ -780,7 +787,10 @@ impl HeadlessEmitter {
                 self.reduce_and_emit(StreamEvent::Lifecycle(event));
             }
             OutputFormat::StreamingMessagesJson => {
-                if let Some(line) = config_notice_stderr_line(&event, fuigo_sandbox::unavailable_warning().as_deref()) {
+                if let Some(line) = config_notice_stderr_line(
+                    &event,
+                    fuigo_sandbox::unavailable_warning().as_deref(),
+                ) {
                     crate::best_effort_stderr::eprint_line(&line);
                 }
                 self.reduce_and_emit(StreamEvent::Lifecycle(event));
@@ -2147,11 +2157,9 @@ fn spawn_interrupt_watcher(tx: tokio::sync::watch::Sender<Option<i32>>) {
             #[cfg(not(unix))]
             let mut signals = CtrlC;
             let _ = ready_tx.send(());
-            runtime.block_on(latch_then_force_exit(
-                &mut signals,
-                tx_for_thread,
-                |code| crate::app::signal_handler::force_exit(code),
-            ));
+            runtime.block_on(latch_then_force_exit(&mut signals, tx_for_thread, |code| {
+                crate::app::signal_handler::force_exit(code)
+            }));
         });
     if thread.is_ok() && ready_rx.recv().is_ok() {
         return;
@@ -2277,11 +2285,16 @@ async fn run_single_turn_inner(
         fuigo_workspace::folder_trust::TrustDecision::Untrusted(reason) => {
             fuigo_tty_utils::cli_eprintln!(
                 "fuigo: {}",
-                fuigo_tty_utils::untrusted(fuigo_workspace::folder_trust::untrusted_session_notice(&reason))
+                fuigo_tty_utils::untrusted(
+                    fuigo_workspace::folder_trust::untrusted_session_notice(&reason)
+                )
             );
         }
         _ if fuigo_workspace::folder_trust::folder_trust_disabled() => {
-            fuigo_tty_utils::cli_eprintln!("fuigo: {}", fuigo_workspace::folder_trust::DISABLED_WARNING);
+            fuigo_tty_utils::cli_eprintln!(
+                "fuigo: {}",
+                fuigo_workspace::folder_trust::DISABLED_WARNING
+            );
         }
         _ => {}
     }
@@ -3844,7 +3857,10 @@ fn plain_lifecycle_line(
 /// The stderr line the `json` and `streaming-messages-json` formats print for a lifecycle event: only a config notice
 /// has one, and the startup sandbox warning is not repeated (`apply_sandbox` already printed it on stderr, so the
 /// warning appears exactly once per process in every format).
-fn config_notice_stderr_line(event: &Lifecycle, startup_sandbox_warning: Option<&str>) -> Option<String> {
+fn config_notice_stderr_line(
+    event: &Lifecycle,
+    startup_sandbox_warning: Option<&str>,
+) -> Option<String> {
     if matches!(event, Lifecycle::ConfigNotice { .. }) {
         plain_lifecycle_line(event, startup_sandbox_warning)
     } else {

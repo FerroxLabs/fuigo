@@ -143,8 +143,14 @@ impl WorkflowRegistry {
             // Project workflows are repository content: pin the project root once and read every script contained to it
             let root = project_root(cwd);
             match fuigo_dirs::contained::PinnedRoot::pin(&root) {
-                Ok(pinned) => dirs.push((root.join(".fuigo").join("workflows"), "project", Some(pinned))),
-                Err(error) => tracing::debug!(%error, "cannot pin project root; skipping project workflows"),
+                Ok(pinned) => dirs.push((
+                    root.join(".fuigo").join("workflows"),
+                    "project",
+                    Some(pinned),
+                )),
+                Err(error) => {
+                    tracing::debug!(%error, "cannot pin project root; skipping project workflows")
+                }
             }
         }
         dirs.push((user_workflow_dir(), "user", None));
@@ -428,7 +434,9 @@ pub(crate) fn resolve_by_path(
     // A project-only path is read contained to the pinned project root, so an ancestor swapped for a link after the
     // checks above cannot redirect the read
     let contain = match (&project, in_project && !in_user_or_session) {
-        (Some(root), true) => Some(fuigo_dirs::contained::PinnedRoot::from_canonical(root.clone())),
+        (Some(root), true) => Some(fuigo_dirs::contained::PinnedRoot::from_canonical(
+            root.clone(),
+        )),
         _ => None,
     };
     let script = read_trusted_source_in(&canonical, contain.as_ref())?;
@@ -629,7 +637,10 @@ pub(crate) fn save_project_workflow(
     Ok(canonical_target)
 }
 
-#[allow(clippy::disallowed_methods, reason = "saves a workflow script to <workspace>/.fuigo/workflows/<name>.rhai (project tree); not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "saves a workflow script to <workspace>/.fuigo/workflows/<name>.rhai (project tree); not inside a session folder"
+)]
 fn create_contained_workflow_dir(root: &Path, dir: &Path) -> Result<(), ResolveError> {
     let root = dunce::canonicalize(root).map_err(|error| ResolveError::Io {
         path: root.display().to_string(),
@@ -687,7 +698,10 @@ fn create_contained_workflow_dir(root: &Path, dir: &Path) -> Result<(), ResolveE
     Ok(())
 }
 
-#[allow(clippy::disallowed_methods, reason = "saves a workflow script to <workspace>/.fuigo/workflows/<name>.rhai (project tree); not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "saves a workflow script to <workspace>/.fuigo/workflows/<name>.rhai (project tree); not inside a session folder"
+)]
 fn atomic_create_new(target: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = target
         .parent()
@@ -751,7 +765,10 @@ pub(crate) fn workflow_snapshot(
     (registry, listings)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,7 +934,11 @@ mod tests {
         std::fs::create_dir_all(&workflows).unwrap();
         let script = "let meta = #{ name: \"deep-research\", description: \"from-bundle\" };\ncomplete(\"ok\");";
         std::fs::write(workflows.join("deep-research.rhai"), script).unwrap();
-        std::fs::write(workflows.join("bundle-only.rhai"), self::script("bundle-only")).unwrap();
+        std::fs::write(
+            workflows.join("bundle-only.rhai"),
+            self::script("bundle-only"),
+        )
+        .unwrap();
 
         // No manifest record: an unmanaged file shadowing a compiled-in name is named; a bundle-only one is not.
         let entries = scan_directory(&workflows, "bundled");

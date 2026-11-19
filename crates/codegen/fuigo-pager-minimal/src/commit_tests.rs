@@ -4,11 +4,11 @@
 //! The `#[path]` attribute there keeps this a plain child module (`super::*` still reaches the private items under test).
 
 use super::*;
-use ratatui::style::Color;
 use fuigo_pager::scrollback::block::RenderBlock;
 use fuigo_pager::scrollback::entry::ScrollbackEntry;
 use fuigo_pager::scrollback::state::ScrollbackState;
 use fuigo_pager_diff::DiffLine;
+use ratatui::style::Color;
 
 fn test_cwd() -> &'static std::path::Path {
     std::path::Path::new("/test/session")
@@ -627,8 +627,8 @@ fn committed_blocks_fit_desired_height() {
 /// That washed out assistant/thinking markdown body text on light terminals; `highlight_bash_command` leaked raw syntect RGB.
 #[test]
 fn terminal_native_lock_paints_only_native_colors() {
-    use ratatui::buffer::Buffer;
     use fuigo_pager::theme::cache as theme_cache;
+    use ratatui::buffer::Buffer;
 
     let _guard = theme_cache::test_lock()
         .lock()
@@ -951,10 +951,10 @@ fn only_thinking_spends_the_accent_column() {
 
 #[test]
 fn committed_thinking_paints_a_dim_rail_in_column_zero() {
+    use fuigo_pager::theme::cache as theme_cache;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
-    use fuigo_pager::theme::cache as theme_cache;
 
     let _guard = theme_cache::test_lock()
         .lock()

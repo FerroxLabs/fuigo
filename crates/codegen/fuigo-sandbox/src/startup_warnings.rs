@@ -26,6 +26,7 @@ pub unsafe fn consume_startup_warnings() {
         // Initialize deduplication before removing the inherited diagnostic state.
         // Library callers may still initialize it lazily, without mutating the env.
         let _ = emitted();
+        crate::consume_bwrap_handoff();
         // SAFETY: the caller guarantees single-threaded process startup.
         unsafe { std::env::remove_var(HANDOFF) };
     });

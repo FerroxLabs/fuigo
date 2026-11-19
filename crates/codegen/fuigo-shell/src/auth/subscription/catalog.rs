@@ -86,7 +86,10 @@ pub fn cached_model_ids(home: &Path, provider: SubscriptionProvider) -> Vec<Stri
         .unwrap_or_default()
 }
 
-#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder"
+)]
 pub fn write_cached_model_ids(
     home: &Path,
     provider: SubscriptionProvider,
@@ -240,7 +243,10 @@ pub(crate) async fn test_sign_in(
     write_cached_model_ids(home, provider, &ids).expect("fixture cache written");
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,8 +254,15 @@ mod tests {
     #[test]
     fn ids_are_sanitised_deduped_and_bounded() {
         let ids = sanitize_ids(
-            ["grok-4", "grok-4", "bad id", "", "gpt-5.1-codex", "x\u{1b}[31m"]
-                .map(String::from),
+            [
+                "grok-4",
+                "grok-4",
+                "bad id",
+                "",
+                "gpt-5.1-codex",
+                "x\u{1b}[31m",
+            ]
+            .map(String::from),
         );
         assert_eq!(ids, vec!["grok-4", "gpt-5.1-codex"]);
         let many = sanitize_ids((0..500).map(|i| format!("m{i}")));
@@ -259,12 +272,19 @@ mod tests {
     #[tokio::test]
     async fn cache_round_trips_owner_only_and_never_holds_a_credential() {
         let dir = tempfile::tempdir().unwrap();
-        test_sign_in(dir.path(), SubscriptionProvider::Xai, "acct-1", &["grok-4", "grok-3"]).await;
+        test_sign_in(
+            dir.path(),
+            SubscriptionProvider::Xai,
+            "acct-1",
+            &["grok-4", "grok-3"],
+        )
+        .await;
         assert_eq!(
             cached_model_ids(dir.path(), SubscriptionProvider::Xai),
             vec!["grok-4", "grok-3"]
         );
-        let raw = std::fs::read_to_string(cache_path(dir.path(), SubscriptionProvider::Xai)).unwrap();
+        let raw =
+            std::fs::read_to_string(cache_path(dir.path(), SubscriptionProvider::Xai)).unwrap();
         assert!(!raw.contains("fake-access-token") && !raw.contains("fake-refresh-token"));
         #[cfg(unix)]
         {
@@ -288,8 +308,15 @@ mod tests {
         let store = SubscriptionStore::new(dir.path());
         store.logout(SubscriptionProvider::Xai, None).await.unwrap();
         assert!(cached_model_ids(dir.path(), SubscriptionProvider::Xai).is_empty());
-        assert_eq!(cached_model_ids(dir.path(), SubscriptionProvider::Chatgpt), vec!["gpt-5"]);
-        assert!(signed_in(dir.path()).iter().all(|s| s.provider == SubscriptionProvider::Chatgpt));
+        assert_eq!(
+            cached_model_ids(dir.path(), SubscriptionProvider::Chatgpt),
+            vec!["gpt-5"]
+        );
+        assert!(
+            signed_in(dir.path())
+                .iter()
+                .all(|s| s.provider == SubscriptionProvider::Chatgpt)
+        );
         store.logout_all().await.unwrap();
         assert!(cached_model_ids(dir.path(), SubscriptionProvider::Chatgpt).is_empty());
         assert!(signed_in(dir.path()).is_empty());
@@ -325,8 +352,19 @@ mod tests {
     async fn stale_catalogs_are_refreshed_and_fresh_ones_are_not() {
         let dir = tempfile::tempdir().unwrap();
         test_sign_in(dir.path(), SubscriptionProvider::Xai, "a", &["grok-old"]).await;
-        test_sign_in(dir.path(), SubscriptionProvider::Chatgpt, "b", &["gpt-fresh"]).await;
-        write_aged(dir.path(), SubscriptionProvider::Xai, CATALOG_STALE_SECS + 60, &["grok-old"]);
+        test_sign_in(
+            dir.path(),
+            SubscriptionProvider::Chatgpt,
+            "b",
+            &["gpt-fresh"],
+        )
+        .await;
+        write_aged(
+            dir.path(),
+            SubscriptionProvider::Xai,
+            CATALOG_STALE_SECS + 60,
+            &["grok-old"],
+        );
         let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = asked.clone();
         let n = refresh_stale_catalogs_with(dir.path(), move |p| {
@@ -336,8 +374,14 @@ mod tests {
         .await;
         assert_eq!(n, 1);
         assert_eq!(*asked.lock().unwrap(), vec![SubscriptionProvider::Xai]);
-        assert_eq!(cached_model_ids(dir.path(), SubscriptionProvider::Xai), vec!["grok-5", "grok-4"]);
-        assert_eq!(cached_model_ids(dir.path(), SubscriptionProvider::Chatgpt), vec!["gpt-fresh"]);
+        assert_eq!(
+            cached_model_ids(dir.path(), SubscriptionProvider::Xai),
+            vec!["grok-5", "grok-4"]
+        );
+        assert_eq!(
+            cached_model_ids(dir.path(), SubscriptionProvider::Chatgpt),
+            vec!["gpt-fresh"]
+        );
         assert!(!catalog_is_stale(dir.path(), SubscriptionProvider::Xai));
     }
 
@@ -345,10 +389,20 @@ mod tests {
     async fn a_failed_refresh_keeps_the_old_cache() {
         let dir = tempfile::tempdir().unwrap();
         test_sign_in(dir.path(), SubscriptionProvider::Xai, "a", &["grok-old"]).await;
-        write_aged(dir.path(), SubscriptionProvider::Xai, CATALOG_STALE_SECS + 60, &["grok-old"]);
-        let n = refresh_stale_catalogs_with(dir.path(), |_| async { Err(SubscriptionError::Network) }).await;
+        write_aged(
+            dir.path(),
+            SubscriptionProvider::Xai,
+            CATALOG_STALE_SECS + 60,
+            &["grok-old"],
+        );
+        let n =
+            refresh_stale_catalogs_with(dir.path(), |_| async { Err(SubscriptionError::Network) })
+                .await;
         assert_eq!(n, 0);
-        assert_eq!(cached_model_ids(dir.path(), SubscriptionProvider::Xai), vec!["grok-old"]);
+        assert_eq!(
+            cached_model_ids(dir.path(), SubscriptionProvider::Xai),
+            vec!["grok-old"]
+        );
     }
 
     #[tokio::test]
@@ -363,7 +417,10 @@ mod tests {
 
     #[test]
     fn startup_refresh_never_runs_in_a_debug_build_or_when_disabled() {
-        assert!(!startup_refresh_allowed(true, false), "tests are debug builds");
+        assert!(
+            !startup_refresh_allowed(true, false),
+            "tests are debug builds"
+        );
         assert!(!startup_refresh_allowed(false, true));
         assert!(startup_refresh_allowed(false, false));
     }

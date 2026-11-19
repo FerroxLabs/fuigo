@@ -296,13 +296,23 @@ pub(super) fn format_hooks_section(hooks: &[fuigo_hooks_plugins_types::HookInfo]
             untrusted(hook.event.to_string()),
             untrusted(command)
         ));
-        if let Some(reason) = hook.health.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+        if let Some(reason) = hook
+            .health
+            .reason
+            .as_deref()
+            .filter(|r| !r.trim().is_empty())
+        {
             out.push_str(&format!(
                 "           why: {}\n",
                 untrusted(reason.lines().next().unwrap_or(reason))
             ));
         }
-        if let Some(hint) = hook.health.fix_hint.as_deref().filter(|h| !h.trim().is_empty()) {
+        if let Some(hint) = hook
+            .health
+            .fix_hint
+            .as_deref()
+            .filter(|h| !h.trim().is_empty())
+        {
             out.push_str(&format!("           fix: {}\n", untrusted(hint)));
         }
     }

@@ -40,7 +40,9 @@ pub enum WireError {
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::FrameTooLarge { len } => write!(f, "frame is {len} bytes, the cap is {MAX_FRAME_BYTES}"),
+            Self::FrameTooLarge { len } => {
+                write!(f, "frame is {len} bytes, the cap is {MAX_FRAME_BYTES}")
+            }
             Self::Bounds(e) => e.fmt(f),
             Self::OutOfRange { field } => write!(f, "`{field}` is out of range"),
         }
@@ -57,7 +59,11 @@ impl From<BoundsError> for WireError {
 
 /// The frame-size check, run on the 4-byte length before any allocation (S3.2).
 pub const fn check_wire_frame(len: usize) -> Result<(), WireError> {
-    if len <= MAX_FRAME_BYTES { Ok(()) } else { Err(WireError::FrameTooLarge { len }) }
+    if len <= MAX_FRAME_BYTES {
+        Ok(())
+    } else {
+        Err(WireError::FrameTooLarge { len })
+    }
 }
 
 /// A host id: exactly 32 lower-case hex characters. It can never hold `/`, `.` or anything but hex, so it is
@@ -68,7 +74,9 @@ pub struct HostId(String);
 
 impl HostId {
     pub fn new(text: &str) -> Result<Self, WireError> {
-        if text.len() != HOST_ID_LEN || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        if text.len() != HOST_ID_LEN
+            || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
             return Err(WireError::OutOfRange { field: "host_id" });
         }
         Ok(Self(text.to_owned()))
@@ -156,7 +164,10 @@ pub struct Hello {
 
 impl Hello {
     pub fn new(host_id: HostId) -> Self {
-        Self { version: WIRE_VERSION, host_id }
+        Self {
+            version: WIRE_VERSION,
+            host_id,
+        }
     }
 
     /// True only for exactly [`WIRE_VERSION`]. No range, no "newer is fine".
@@ -182,7 +193,10 @@ pub enum NoticeKind {
 /// `deny_unknown_fields` applies (see `DeliveryOutcome`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-#[allow(clippy::large_enum_variant, reason = "one short-lived value per connection; boxing would change the public shape for nothing")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one short-lived value per connection; boxing would change the public shape for nothing"
+)]
 pub enum Op {
     /// One page of the host's sessions, 0-based.
     List { page: u32 },
@@ -197,14 +211,19 @@ pub enum Op {
         watch: bool,
     },
     /// A delivery notice for a message id the receiver has an outstanding record for (S9.3).
-    Notice { message_id: BoundedId, kind: NoticeKind },
+    Notice {
+        message_id: BoundedId,
+        kind: NoticeKind,
+    },
 }
 
 impl Op {
     /// Checks beyond what decoding already enforces (the page range).
     pub fn validate(&self) -> Result<(), WireError> {
         match self {
-            Self::List { page } if *page >= MAX_LIST_PAGES => Err(WireError::OutOfRange { field: "page" }),
+            Self::List { page } if *page >= MAX_LIST_PAGES => {
+                Err(WireError::OutOfRange { field: "page" })
+            }
             Self::Send { envelope, .. } => Ok(envelope.validate()?),
             _ => Ok(()),
         }
@@ -225,12 +244,19 @@ pub struct SessionRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reply {
-    List { rows: Vec<SessionRow>, more: bool },
-    Send { outcome: DeliveryOutcome },
+    List {
+        rows: Vec<SessionRow>,
+        more: bool,
+    },
+    Send {
+        outcome: DeliveryOutcome,
+    },
     /// Acknowledges a notice. Carries nothing.
     Notice {},
     /// The host cannot serve this (feature off, version mismatch, sandbox, stale incarnation).
-    Unavailable { reason: ReasonText },
+    Unavailable {
+        reason: ReasonText,
+    },
 }
 
 impl Reply {
@@ -238,7 +264,12 @@ impl Reply {
     pub fn validate(&self) -> Result<(), WireError> {
         if let Self::List { rows, .. } = self {
             if rows.len() > LIST_PAGE_ROWS {
-                return Err(BoundsError::TooMany { field: "rows", max: LIST_PAGE_ROWS, got: rows.len() }.into());
+                return Err(BoundsError::TooMany {
+                    field: "rows",
+                    max: LIST_PAGE_ROWS,
+                    got: rows.len(),
+                }
+                .into());
             }
             for r in rows {
                 if !is_valid_display_name(&r.name) {

@@ -501,7 +501,9 @@ pub fn skill_md_paths_in(skill_dirs: &[PathBuf], walk: &mut SkillWalk) -> Vec<Pa
 /// The `.md` files directly in `dirs` that the walk admits (commands, agents).
 fn md_files_in(dirs: &[PathBuf], walk: &mut SkillWalk) -> Vec<PathBuf> {
     use fuigo_tools::implementations::skills::discovery::scan_md_files_in;
-    dirs.iter().flat_map(|dir| scan_md_files_in(dir, walk)).collect()
+    dirs.iter()
+        .flat_map(|dir| scan_md_files_in(dir, walk))
+        .collect()
 }
 
 fn md_stems(files: &[PathBuf]) -> Vec<String> {

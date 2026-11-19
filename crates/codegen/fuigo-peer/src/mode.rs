@@ -79,7 +79,11 @@ impl PartialEq for PeerMode {
 
 impl PeerMode {
     pub fn new(plan_active: bool, base: PeerBase, session_edit_grant: bool) -> Self {
-        Self::Known(KnownPeerMode { plan_active, base, session_edit_grant })
+        Self::Known(KnownPeerMode {
+            plan_active,
+            base,
+            session_edit_grant,
+        })
     }
 
     pub fn known(&self) -> Option<KnownPeerMode> {
@@ -93,7 +97,9 @@ impl PeerMode {
     pub fn all_known() -> impl Iterator<Item = PeerMode> {
         PeerBase::ALL.into_iter().flat_map(|base| {
             [false, true].into_iter().flat_map(move |plan| {
-                [false, true].into_iter().map(move |grant| PeerMode::new(plan, base, grant))
+                [false, true]
+                    .into_iter()
+                    .map(move |grant| PeerMode::new(plan, base, grant))
             })
         })
     }

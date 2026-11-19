@@ -138,7 +138,10 @@ async fn fetch_login_device_flow_sends_only_unauthenticated_headers() {
     // P43 hostile: the mock is loopback, not FluxRouter-operated, so the persisted machine id
     // and the client labels are withheld. `login_config_request_carries_identity_only_to_fluxrouter`
     // pins that FluxRouter still gets them.
-    assert_eq!(h.agent_id, None, "a non-FluxRouter destination got x-fuigo-agent-id");
+    assert_eq!(
+        h.agent_id, None,
+        "a non-FluxRouter destination got x-fuigo-agent-id"
+    );
     assert_eq!(
         h.client_identifier, None,
         "a non-FluxRouter destination got x-fuigo-client-identifier"
@@ -155,22 +158,36 @@ async fn fetch_login_device_flow_sends_only_unauthenticated_headers() {
 #[test]
 fn login_config_request_carries_identity_only_to_fluxrouter() {
     let client = crate::http::shared_client();
-    let fluxrouter = login_config_request(&client, "https://api.fluxrouter.ai/v1/login-config", "agent-7")
-        .build()
-        .unwrap();
+    let fluxrouter = login_config_request(
+        &client,
+        "https://api.fluxrouter.ai/v1/login-config",
+        "agent-7",
+    )
+    .build()
+    .unwrap();
     assert_eq!(fluxrouter.headers()["x-fuigo-agent-id"], "agent-7");
     assert!(fluxrouter.headers().contains_key("x-fuigo-client-version"));
-    assert!(fluxrouter.headers().contains_key("x-fuigo-client-identifier"));
+    assert!(
+        fluxrouter
+            .headers()
+            .contains_key("x-fuigo-client-identifier")
+    );
     for url in [
         "https://cli-proxy.example/v1/login-config",
         "http://api.fluxrouter.ai/v1/login-config",
         "http://127.0.0.1:9/v1/login-config",
     ] {
-        let request = login_config_request(&client, url, "agent-7").build().unwrap();
+        let request = login_config_request(&client, url, "agent-7")
+            .build()
+            .unwrap();
         for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
             assert!(!request.headers().contains_key(name), "{url} got {name}");
         }
-        assert!(request.headers().contains_key(crate::http::CLIENT_MODE_HEADER));
+        assert!(
+            request
+                .headers()
+                .contains_key(crate::http::CLIENT_MODE_HEADER)
+        );
     }
 }
 /// Mock cli-chat-proxy serving `GET /settings` with a fixed status and body.
@@ -482,7 +499,10 @@ async fn archive_bundle_fetch_sends_no_identity_to_a_non_fluxrouter_proxy() {
     let am = test_auth_manager();
     let fetched = fetch_bundle(&base, Some(&am), None, None).await;
     handle.abort();
-    assert!(matches!(fetched, Ok(FetchedBundle::Archive(_))), "{fetched:?}");
+    assert!(
+        matches!(fetched, Ok(FetchedBundle::Archive(_))),
+        "{fetched:?}"
+    );
     crate::remote::identity_tests::assert_no_identity_headers(&seen, "bundle_archive");
 }
 /// P43. The blocking cli-chat-proxy helper (settings fetch): FluxRouter gets identity, a
@@ -1240,7 +1260,8 @@ async fn backend_client_resolves_auth_from_auth_manager() {
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let am = test_auth_manager();
-    let client = BackendClient::with_base_url(front.front(&format!("http://{addr}"))).with_auth_manager(am);
+    let client =
+        BackendClient::with_base_url(front.front(&format!("http://{addr}"))).with_auth_manager(am);
     client
         .save_session_data("test-session", &[], None)
         .await
@@ -1315,7 +1336,11 @@ async fn backend_requests_carry_identity_only_to_fluxrouter() {
     assert_eq!(request.headers()["x-email"], "test@example.com");
     assert!(request.headers().contains_key("x-fuigo-client-version"));
     assert!(request.headers().contains_key("x-fuigo-client-identifier"));
-    for base in ["https://backend.example", "http://127.0.0.1:9", "http://api.fluxrouter.ai"] {
+    for base in [
+        "https://backend.example",
+        "http://127.0.0.1:9",
+        "http://api.fluxrouter.ai",
+    ] {
         let client = BackendClient::with_base_url(base).with_auth_manager(test_auth_manager());
         let request = client
             .authed_request(http.get(format!("{base}/sessions")))
@@ -1379,14 +1404,22 @@ async fn session_upsert_sends_no_machine_id_to_a_non_fluxrouter_backend() {
         .upsert_session("s1", &upsert_test_metadata(), MACHINE_ID)
         .await
         .unwrap();
-    let body = bodies.lock().unwrap().first().cloned().expect("backend saw the upsert");
+    let body = bodies
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("backend saw the upsert");
     assert!(!body.contains(MACHINE_ID), "machine id on the wire: {body}");
     let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
         sent["agentId"].as_str(),
         Some(
-            fuigo_extra_ca::fluxrouter::destination_pseudonym(&format!("{base}/sessions/s1"), MACHINE_ID)
-                .as_str()
+            fuigo_extra_ca::fluxrouter::destination_pseudonym(
+                &format!("{base}/sessions/s1"),
+                MACHINE_ID
+            )
+            .as_str()
         )
     );
     assert_eq!(sent["session"]["cwd"], "/repo");
@@ -1396,8 +1429,15 @@ async fn session_upsert_sends_no_machine_id_to_a_non_fluxrouter_backend() {
         MACHINE_ID,
     );
     assert_eq!(flux.agent_id, MACHINE_ID);
-    for other in ["https://backend.example/sessions/s1", "http://api.fluxrouter.ai/sessions/s1"] {
-        assert_ne!(upsert_session_request(other, &upsert_test_metadata(), MACHINE_ID).agent_id, MACHINE_ID, "{other}");
+    for other in [
+        "https://backend.example/sessions/s1",
+        "http://api.fluxrouter.ai/sessions/s1",
+    ] {
+        assert_ne!(
+            upsert_session_request(other, &upsert_test_metadata(), MACHINE_ID).agent_id,
+            MACHINE_ID,
+            "{other}"
+        );
     }
     server.abort();
 }
@@ -1442,7 +1482,10 @@ async fn backend_client_without_backend_url_fails_closed_with_a_true_message() {
     let _unset = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_BACKEND_URL");
     let client = BackendClient::new().with_auth_manager(test_auth_manager());
     assert_eq!(client.base_url(), None);
-    let err = client.list_sessions().await.expect_err("no backend, no request");
+    let err = client
+        .list_sessions()
+        .await
+        .expect_err("no backend, no request");
     let shown = err.to_string();
     assert!(matches!(err, BackendError::NotConfigured(_)), "{shown}");
     assert!(shown.contains("FUIGO_CODE_BACKEND_URL"), "{shown}");
@@ -1479,18 +1522,36 @@ fn p54_default_install_has_no_body_identity_destination() {
     let _otel_traces = fuigo_test_support::EnvGuard::unset("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
     assert!(crate::agent::config::CLI_CHAT_PROXY_BASE_URL_DEFAULT.is_empty());
     let endpoints = crate::agent::config::EndpointsConfig::default();
-    assert!(!endpoints.has_proxy(), "registry / storage proxy / internal OTLP have a default host");
+    assert!(
+        !endpoints.has_proxy(),
+        "registry / storage proxy / internal OTLP have a default host"
+    );
     // The storage proxy (feedback archives, review comments) and the internal OTLP firehose resolve
     // through their own settings too; with nothing configured neither names a host.
-    assert!(endpoints.resolve_trace_upload_url().is_empty(), "storage proxy has a default host");
-    assert_eq!(endpoints.resolve_otlp_traces_endpoint(), "/traces", "internal OTLP has a default host");
-    assert_eq!(BackendClient::new().base_url(), None, "session backend has a default host");
+    assert!(
+        endpoints.resolve_trace_upload_url().is_empty(),
+        "storage proxy has a default host"
+    );
+    assert_eq!(
+        endpoints.resolve_otlp_traces_endpoint(),
+        "/traces",
+        "internal OTLP has a default host"
+    );
+    assert_eq!(
+        BackendClient::new().base_url(),
+        None,
+        "session backend has a default host"
+    );
     let telemetry = fuigo_telemetry::config::TelemetryConfig::default();
     // This pins the mechanism (Mixpanel is on only with a build-time token), not that no public
     // build bakes one: that is a release-pipeline fact (`fuigo-shell/README.md`, "defaults can be
     // baked ... by setting FUIGO_TELEMETRY_BUILD_MIXPANEL_TOKEN") a unit test cannot see.
-    let baked = option_env!("FUIGO_TELEMETRY_BUILD_MIXPANEL_TOKEN").is_some_and(|t| !t.trim().is_empty());
-    assert_eq!(telemetry.mixpanel_enabled, baked, "Mixpanel is on without a build-time token");
+    let baked =
+        option_env!("FUIGO_TELEMETRY_BUILD_MIXPANEL_TOKEN").is_some_and(|t| !t.trim().is_empty());
+    assert_eq!(
+        telemetry.mixpanel_enabled, baked,
+        "Mixpanel is on without a build-time token"
+    );
     assert_eq!(telemetry.mixpanel_token.is_some(), baked);
     // Inference itself is FluxRouter-operated, so identity there is unchanged by P54.
     assert!(fuigo_extra_ca::fluxrouter::is_fluxrouter_operated_url(
@@ -1551,7 +1612,8 @@ fn share_link_origin_fails_closed_on_either_missing_half() {
         .share_link_origin()
         .expect_err("no backend");
     assert!(err.to_string().contains("FUIGO_CODE_BACKEND_URL"), "{err}");
-    let _backend = fuigo_test_support::EnvGuard::set("FUIGO_CODE_BACKEND_URL", "http://b.example.test");
+    let _backend =
+        fuigo_test_support::EnvGuard::set("FUIGO_CODE_BACKEND_URL", "http://b.example.test");
     let err = BackendClient::new()
         .share_link_origin()
         .expect_err("backend but no web origin");
@@ -1567,7 +1629,12 @@ fn share_link_origin_fails_closed_on_either_missing_half() {
 /// Mock backend that rejects any save whose body names the checkpoint method with `reject`, and stores the rest.
 async fn start_checkpoint_rejecting_server(
     reject: StatusCode,
-) -> (String, Arc<Mutex<Vec<String>>>, Arc<Mutex<u32>>, tokio::task::JoinHandle<()>) {
+) -> (
+    String,
+    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<u32>>,
+    tokio::task::JoinHandle<()>,
+) {
     let stored = Arc::new(Mutex::new(Vec::<String>::new()));
     let posts = Arc::new(Mutex::new(0u32));
     let (s2, p2) = (stored.clone(), posts.clone());
@@ -1580,7 +1647,9 @@ async fn start_checkpoint_rejecting_server(
             }
             let v: serde_json::Value = serde_json::from_str(&body).unwrap();
             for m in v["messages"].as_array().unwrap() {
-                s2.lock().unwrap().push(m["content"].as_str().unwrap().to_owned());
+                s2.lock()
+                    .unwrap()
+                    .push(m["content"].as_str().unwrap().to_owned());
             }
             StatusCode::OK
         }),
@@ -1591,11 +1660,18 @@ async fn start_checkpoint_rejecting_server(
     (format!("http://{addr}"), stored, posts, server)
 }
 fn checkpoint_upload_batch() -> Vec<ExportedMessage> {
-    let (marker, file) = crate::session::export::checkpoint_upload_tests::marker_and_file("cp-1", "SUMMARY");
+    let (marker, file) =
+        crate::session::export::checkpoint_upload_tests::marker_and_file("cp-1", "SUMMARY");
     vec![
-        ExportedMessage { content: "{\"method\":\"session/update\",\"n\":1}".into(), timestamp: None },
+        ExportedMessage {
+            content: "{\"method\":\"session/update\",\"n\":1}".into(),
+            timestamp: None,
+        },
         ExportedMessage::compaction_checkpoint(&marker, &file).unwrap(),
-        ExportedMessage { content: "{\"method\":\"session/update\",\"n\":2}".into(), timestamp: None },
+        ExportedMessage {
+            content: "{\"method\":\"session/update\",\"n\":2}".into(),
+            timestamp: None,
+        },
     ]
 }
 #[tokio::test(flavor = "current_thread")]
@@ -1605,22 +1681,46 @@ async fn save_retries_without_checkpoints_when_backend_rejects_them() {
     ) else {
         return;
     };
-    for (i, status) in [StatusCode::BAD_REQUEST, StatusCode::PAYLOAD_TOO_LARGE, StatusCode::UNPROCESSABLE_ENTITY]
-        .into_iter()
-        .enumerate()
+    for (i, status) in [
+        StatusCode::BAD_REQUEST,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    ]
+    .into_iter()
+    .enumerate()
     {
         let (url, stored, posts, server) = start_checkpoint_rejecting_server(status).await;
         super::CHECKPOINTS_REFUSED.store(false, std::sync::atomic::Ordering::Relaxed);
-        let client = BackendClient::with_base_url(front.front(&url)).with_auth_manager(test_auth_manager());
+        let client =
+            BackendClient::with_base_url(front.front(&url)).with_auth_manager(test_auth_manager());
         let batch = checkpoint_upload_batch();
-        client.save_session_data("s", &batch, None).await.unwrap_or_else(|e| panic!("{status}: {e:?}"));
-        assert_eq!(stored.lock().unwrap().len(), 2, "normal messages must be stored ({status})");
-        assert_eq!(*posts.lock().unwrap(), 2, "one failed attempt, one retry ({status})");
+        client
+            .save_session_data("s", &batch, None)
+            .await
+            .unwrap_or_else(|e| panic!("{status}: {e:?}"));
+        assert_eq!(
+            stored.lock().unwrap().len(),
+            2,
+            "normal messages must be stored ({status})"
+        );
+        assert_eq!(
+            *posts.lock().unwrap(),
+            2,
+            "one failed attempt, one retry ({status})"
+        );
         // The refusal is remembered: the next save goes out once, without checkpoints.
         client.save_session_data("s", &batch, None).await.unwrap();
         // A 413 may be this one checkpoint being too large, so it is not latched: the next save tries again.
-        let expected = if status == StatusCode::PAYLOAD_TOO_LARGE { 4 } else { 3 };
-        assert_eq!(*posts.lock().unwrap(), expected, "later saves must not fail twice ({i})");
+        let expected = if status == StatusCode::PAYLOAD_TOO_LARGE {
+            4
+        } else {
+            3
+        };
+        assert_eq!(
+            *posts.lock().unwrap(),
+            expected,
+            "later saves must not fail twice ({i})"
+        );
         assert_eq!(stored.lock().unwrap().len(), 4);
         server.abort();
     }
@@ -1635,9 +1735,15 @@ async fn save_auth_failure_is_not_treated_as_checkpoint_refusal() {
     for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
         let (url, stored, posts, server) = start_checkpoint_rejecting_server(status).await;
         super::CHECKPOINTS_REFUSED.store(false, std::sync::atomic::Ordering::Relaxed);
-        let client = BackendClient::with_base_url(front.front(&url)).with_auth_manager(test_auth_manager());
-        let err = client.save_session_data("s", &checkpoint_upload_batch(), None).await.unwrap_err();
-        assert!(matches!(err, BackendError::RequestFailed { status: s, .. } if s == status.as_u16()));
+        let client =
+            BackendClient::with_base_url(front.front(&url)).with_auth_manager(test_auth_manager());
+        let err = client
+            .save_session_data("s", &checkpoint_upload_batch(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::RequestFailed { status: s, .. } if s == status.as_u16())
+        );
         assert_eq!(*posts.lock().unwrap(), 1, "no retry on {status}");
         assert!(stored.lock().unwrap().is_empty());
         assert!(!super::CHECKPOINTS_REFUSED.load(std::sync::atomic::Ordering::Relaxed));
@@ -1646,7 +1752,9 @@ async fn save_auth_failure_is_not_treated_as_checkpoint_refusal() {
 }
 
 /// Mock backend that rejects EVERY save (an empty one too) with `reject` and counts the POSTs.
-async fn start_always_rejecting_server(reject: StatusCode) -> (String, Arc<Mutex<u32>>, tokio::task::JoinHandle<()>) {
+async fn start_always_rejecting_server(
+    reject: StatusCode,
+) -> (String, Arc<Mutex<u32>>, tokio::task::JoinHandle<()>) {
     let posts = Arc::new(Mutex::new(0u32));
     let p2 = posts.clone();
     let app = Router::new().route(
@@ -1675,15 +1783,26 @@ async fn checkpoint_only_batch_refused_is_dropped_and_remembered() {
     for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
         let (url, posts, server) = start_always_rejecting_server(status).await;
         super::CHECKPOINTS_REFUSED.store(false, std::sync::atomic::Ordering::Relaxed);
-        let client = BackendClient::with_base_url(front.front(&url)).with_auth_manager(test_auth_manager());
-        client.save_session_data("s", &only_checkpoint(), None).await.unwrap_or_else(|e| panic!("{status}: {e:?}"));
+        let client =
+            BackendClient::with_base_url(front.front(&url)).with_auth_manager(test_auth_manager());
+        client
+            .save_session_data("s", &only_checkpoint(), None)
+            .await
+            .unwrap_or_else(|e| panic!("{status}: {e:?}"));
         assert_eq!(*posts.lock().unwrap(), 1, "no empty-body retry ({status})");
         assert!(
             super::CHECKPOINTS_REFUSED.load(std::sync::atomic::Ordering::Relaxed),
             "the refusal must be remembered ({status})"
         );
-        client.save_session_data("s", &only_checkpoint(), None).await.unwrap();
-        assert_eq!(*posts.lock().unwrap(), 1, "a remembered refusal sends nothing for a checkpoint-only batch ({status})");
+        client
+            .save_session_data("s", &only_checkpoint(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            *posts.lock().unwrap(),
+            1,
+            "a remembered refusal sends nothing for a checkpoint-only batch ({status})"
+        );
         server.abort();
     }
 }
@@ -1697,13 +1816,21 @@ async fn checkpoint_only_batch_too_large_is_dropped_but_not_latched() {
     };
     let (url, posts, server) = start_always_rejecting_server(StatusCode::PAYLOAD_TOO_LARGE).await;
     super::CHECKPOINTS_REFUSED.store(false, std::sync::atomic::Ordering::Relaxed);
-    let client = BackendClient::with_base_url(front.front(&url)).with_auth_manager(test_auth_manager());
+    let client =
+        BackendClient::with_base_url(front.front(&url)).with_auth_manager(test_auth_manager());
     let batch = vec![checkpoint_upload_batch().remove(1)];
     client.save_session_data("s", &batch, None).await.unwrap();
     assert_eq!(*posts.lock().unwrap(), 1, "no empty-body retry");
-    assert!(!super::CHECKPOINTS_REFUSED.load(std::sync::atomic::Ordering::Relaxed), "413 is not latched");
+    assert!(
+        !super::CHECKPOINTS_REFUSED.load(std::sync::atomic::Ordering::Relaxed),
+        "413 is not latched"
+    );
     client.save_session_data("s", &batch, None).await.unwrap();
-    assert_eq!(*posts.lock().unwrap(), 2, "the next checkpoint is tried again");
+    assert_eq!(
+        *posts.lock().unwrap(),
+        2,
+        "the next checkpoint is tried again"
+    );
     server.abort();
 }
 
@@ -1713,15 +1840,26 @@ fn a_published_price_is_read_and_a_bad_one_is_ignored() {
         "id": "m1", "baseUrl": "https://default.url",
         "pricing": { "inputPerMillion": 2.5, "outputPerMillion": 10 }
     });
-    let price = parse_remote_model_value(&ok, "https://default.url").unwrap().price.expect("price");
-    assert_eq!((price.input_per_million, price.output_per_million), (2.5, 10.0));
+    let price = parse_remote_model_value(&ok, "https://default.url")
+        .unwrap()
+        .price
+        .expect("price");
+    assert_eq!(
+        (price.input_per_million, price.output_per_million),
+        (2.5, 10.0)
+    );
     assert_eq!(price.summary(), "$2.5 in / $10 out per 1M tokens");
     // Snake-case spelling, under `_meta`.
     let meta = serde_json::json!({
         "id": "m2", "baseUrl": "https://default.url",
         "_meta": { "pricing": { "input_per_million": 0.25, "output_per_million": 1.0 } }
     });
-    assert!(parse_remote_model_value(&meta, "https://default.url").unwrap().price.is_some());
+    assert!(
+        parse_remote_model_value(&meta, "https://default.url")
+            .unwrap()
+            .price
+            .is_some()
+    );
     // Missing half, negative, or not a number: no price rather than a wrong one.
     for bad in [
         serde_json::json!({ "inputPerMillion": 2.5 }),
@@ -1729,11 +1867,21 @@ fn a_published_price_is_read_and_a_bad_one_is_ignored() {
         serde_json::json!({ "inputPerMillion": "2", "outputPerMillion": 1 }),
     ] {
         let v = serde_json::json!({ "id": "m3", "baseUrl": "https://default.url", "pricing": bad });
-        assert!(parse_remote_model_value(&v, "https://default.url").unwrap().price.is_none());
+        assert!(
+            parse_remote_model_value(&v, "https://default.url")
+                .unwrap()
+                .price
+                .is_none()
+        );
     }
     // No pricing object: none.
     let none = serde_json::json!({ "id": "m4", "baseUrl": "https://default.url" });
-    assert!(parse_remote_model_value(&none, "https://default.url").unwrap().price.is_none());
+    assert!(
+        parse_remote_model_value(&none, "https://default.url")
+            .unwrap()
+            .price
+            .is_none()
+    );
 }
 
 /// Audit S11-F1: the session the share backend receives is scrubbed like the storage copy. A credential this process
@@ -1747,7 +1895,10 @@ async fn share_session_scrubs_the_body_sent_to_the_backend() {
         return;
     };
     let recorded = "zq-recorded-credential-0123456789abcdef";
-    let shaped = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij";
+    let shaped = concat!(
+        "sk",
+        "-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij"
+    );
     fuigo_telemetry::sent_credentials::record(recorded);
     let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
     let (b1, b2) = (bodies.clone(), bodies.clone());
@@ -1774,8 +1925,8 @@ async fn share_session_scrubs_the_body_sent_to_the_backend() {
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let _web = fuigo_test_support::EnvGuard::set("FUIGO_CODE_WEB_URL", "https://w.example.test");
-    let client =
-        BackendClient::with_base_url(front.front(&format!("http://{addr}"))).with_auth_manager(test_auth_manager());
+    let client = BackendClient::with_base_url(front.front(&format!("http://{addr}")))
+        .with_auth_manager(test_auth_manager());
     let session = ExportedSession {
         session_id: "s1".to_string(),
         messages: vec![ExportedMessage {
@@ -1791,9 +1942,18 @@ async fn share_session_scrubs_the_body_sent_to_the_backend() {
     let url = client.share_session(&session, "agent").await.unwrap();
     assert!(url.ends_with("/build/share/p1"), "{url}");
     let seen = bodies.lock().unwrap().join("\n");
-    assert!(seen.contains("env echoed"), "the messages were sent: {seen}");
-    assert!(!seen.contains(recorded), "recorded credential reached the share backend");
-    assert!(!seen.contains(shaped), "secret-shaped string reached the share backend");
+    assert!(
+        seen.contains("env echoed"),
+        "the messages were sent: {seen}"
+    );
+    assert!(
+        !seen.contains(recorded),
+        "recorded credential reached the share backend"
+    );
+    assert!(
+        !seen.contains(shaped),
+        "secret-shaped string reached the share backend"
+    );
     server.abort();
 }
 
@@ -1801,7 +1961,9 @@ async fn share_session_scrubs_the_body_sent_to_the_backend() {
 #[tokio::test(flavor = "current_thread")]
 async fn read_body_capped_refuses_a_body_over_the_cap() {
     let response = |body: Vec<u8>| reqwest::Response::from(axum::http::Response::new(body));
-    let ok = read_body_capped(response(vec![7u8; 100]), 100).await.unwrap();
+    let ok = read_body_capped(response(vec![7u8; 100]), 100)
+        .await
+        .unwrap();
     assert_eq!(ok.len(), 100, "a body exactly at the cap is accepted");
     let err = read_body_capped(response(vec![7u8; 101]), 100)
         .await

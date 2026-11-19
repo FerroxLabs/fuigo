@@ -52,7 +52,8 @@ fn run_child(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[allow(clippy::disallowed_methods)] // test-owned child, waited on (or killed and reaped) in this function
+    #[allow(clippy::disallowed_methods)]
+    // test-owned child, waited on (or killed and reaped) in this function
     let mut child = cmd.spawn().expect("spawn fuigo-pager");
     let mut so = child.stdout.take().unwrap();
     let mut se = child.stderr.take().unwrap();
@@ -102,7 +103,9 @@ fn run_child(
 /// A mock inference server whose first streamed chunk is held for two minutes: the session starts
 /// normally, then the turn hangs until a timeout or a signal ends the run.
 async fn hung_turn_server() -> std::sync::Arc<MockInferenceServer> {
-    let server = MockInferenceServer::start().await.expect("start the mock inference server");
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start the mock inference server");
     server.preset_allow_access();
     server.set_chunk_delay(Some(Duration::from_secs(120)));
     let _ = (
@@ -110,14 +113,22 @@ async fn hung_turn_server() -> std::sync::Arc<MockInferenceServer> {
             "hung turn (responses)",
             InferenceRequestMatcher::foreground(InferenceEndpoint::Responses),
             ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
-                "", "call-1", TOOL, "{}", "test-model",
+                "",
+                "call-1",
+                TOOL,
+                "{}",
+                "test-model",
             )),
         ),
         server.expect_response(
             "hung turn (chat completions)",
             InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
             ScriptedResponse::sse(sse::chat_completions_reasoning_then_tool_call_events(
-                "", "call-1", TOOL, "{}", "test-model",
+                "",
+                "call-1",
+                TOOL,
+                "{}",
+                "test-model",
             )),
         ),
     );
@@ -158,8 +169,15 @@ fn json_lines(format: &str, stdout: &str) -> Vec<serde_json::Value> {
 
 /// The text after `Error: ` on the one stderr line `main` writes for the returned `Err`.
 fn main_error_message(stderr: &str) -> String {
-    let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with("Error: ")).collect();
-    assert_eq!(lines.len(), 1, "main must write exactly one `Error:` line\nstderr:\n{stderr}");
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("Error: "))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "main must write exactly one `Error:` line\nstderr:\n{stderr}"
+    );
     lines[0]["Error: ".len()..].to_string()
 }
 
@@ -174,7 +192,13 @@ enum Terminal {
 
 /// The one-failure contract for a run that exits non-zero with `main`'s `Error:` line.
 fn assert_reported_once(format: &str, out: &Out, needle: &str, exit_code: i32, terminal: Terminal) {
-    assert_eq!(out.code, Some(exit_code), "{format}: exit code\nstdout:\n{}\nstderr:\n{}", out.stdout, out.stderr);
+    assert_eq!(
+        out.code,
+        Some(exit_code),
+        "{format}: exit code\nstdout:\n{}\nstderr:\n{}",
+        out.stdout,
+        out.stderr
+    );
     let msg = main_error_message(&out.stderr);
     assert!(msg.contains(needle), "{format}: unexpected message: {msg}");
     assert_eq!(
@@ -185,12 +209,20 @@ fn assert_reported_once(format: &str, out: &Out, needle: &str, exit_code: i32, t
     );
     // Nothing else on stderr: a second differently-worded line for the same failure is a duplicate too.
     let stderr_lines = out.stderr.lines().filter(|l| !l.trim().is_empty()).count();
-    assert_eq!(stderr_lines, 1, "{format}: exactly one stderr line\nstderr:\n{}", out.stderr);
+    assert_eq!(
+        stderr_lines, 1,
+        "{format}: exactly one stderr line\nstderr:\n{}",
+        out.stderr
+    );
     let lines = json_lines_or_empty(format, &out.stdout);
     match format {
         // Plain prints a completed answer on stdout; a failure itself is never written there.
         "plain" if terminal == Terminal::OwnDocument => {}
-        "plain" => assert_eq!(out.stdout.trim(), "", "plain prints no failure text on stdout"),
+        "plain" => assert_eq!(
+            out.stdout.trim(),
+            "",
+            "plain prints no failure text on stdout"
+        ),
         "json" => {
             assert_eq!(lines.len(), 1, "{}", out.stdout);
             if terminal == Terminal::ErrorEvent {
@@ -207,25 +239,49 @@ fn assert_reported_once(format: &str, out: &Out, needle: &str, exit_code: i32, t
         }
         "streaming-messages-json" => {
             let results = lines.iter().filter(|v| v["type"] == "result").count();
-            assert_eq!(results, 1, "{format}: exactly one terminal result\n{}", out.stdout);
+            assert_eq!(
+                results, 1,
+                "{format}: exactly one terminal result\n{}",
+                out.stdout
+            );
         }
         other => panic!("unhandled format {other}"),
     }
     if format != "plain" && terminal == Terminal::ErrorEvent {
-        assert_eq!(occurrences(&out.stdout, &msg), 1, "{format}: stdout\n{}", out.stdout);
+        assert_eq!(
+            occurrences(&out.stdout, &msg),
+            1,
+            "{format}: stdout\n{}",
+            out.stdout
+        );
     }
 }
 
 fn json_lines_or_empty(format: &str, stdout: &str) -> Vec<serde_json::Value> {
-    if format == "plain" { Vec::new() } else { json_lines(format, stdout) }
+    if format == "plain" {
+        Vec::new()
+    } else {
+        json_lines(format, stdout)
+    }
 }
 
 #[test]
 fn a_connection_error_is_reported_exactly_once_in_every_format() {
     for format in FORMATS {
         let sandbox = sandbox_for(refused_loopback_url());
-        let out = run_child(&sandbox, &["-p", "say hi", "--trust", "--output-format", format], None, libc::SIGINT);
-        assert_reported_once(format, &out, "error sending request", 1, Terminal::ErrorEvent);
+        let out = run_child(
+            &sandbox,
+            &["-p", "say hi", "--trust", "--output-format", format],
+            None,
+            libc::SIGINT,
+        );
+        assert_reported_once(
+            format,
+            &out,
+            "error sending request",
+            1,
+            Terminal::ErrorEvent,
+        );
     }
 }
 
@@ -237,7 +293,15 @@ async fn a_timeout_is_reported_exactly_once_in_every_format() {
         let out = tokio::task::spawn_blocking(move || {
             run_child(
                 &sandbox,
-                &["-p", "say hi", "--trust", "--timeout", "12", "--output-format", format],
+                &[
+                    "-p",
+                    "say hi",
+                    "--trust",
+                    "--timeout",
+                    "12",
+                    "--output-format",
+                    format,
+                ],
                 None,
                 libc::SIGINT,
             )
@@ -253,7 +317,9 @@ const TOOL: &str = "search_replace";
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn max_turns_is_reported_exactly_once_in_every_format() {
     for format in FORMATS {
-        let server = MockInferenceServer::start().await.expect("start the mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("start the mock inference server");
         server.preset_allow_access();
         let sandbox = sandbox_for(server.url());
         let target = sandbox.workspace().join("edit_me.txt");
@@ -268,21 +334,38 @@ async fn max_turns_is_reported_exactly_once_in_every_format() {
             "tool call (responses)",
             InferenceRequestMatcher::foreground(InferenceEndpoint::Responses),
             ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
-                "", "call-1", TOOL, &arguments, "test-model",
+                "",
+                "call-1",
+                TOOL,
+                &arguments,
+                "test-model",
             )),
         );
         let _e2 = server.expect_response(
             "tool call (chat completions)",
             InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
             ScriptedResponse::sse(sse::chat_completions_reasoning_then_tool_call_events(
-                "", "call-1", TOOL, &arguments, "test-model",
+                "",
+                "call-1",
+                TOOL,
+                &arguments,
+                "test-model",
             )),
         );
         let fmt = format.to_string();
         let out = tokio::task::spawn_blocking(move || {
             run_child(
                 &sandbox,
-                &["-p", "edit", "--trust", "--yolo", "--max-turns", "1", "--output-format", &fmt],
+                &[
+                    "-p",
+                    "edit",
+                    "--trust",
+                    "--yolo",
+                    "--max-turns",
+                    "1",
+                    "--output-format",
+                    &fmt,
+                ],
                 None,
                 libc::SIGINT,
             )
@@ -303,7 +386,12 @@ async fn interrupted_run(format: &'static str, signal: i32) -> (Out, &'static st
     let srv = server.clone();
     let out = tokio::task::spawn_blocking(move || {
         let ready = || turn_in_flight(&srv);
-        run_child(&sandbox, &["-p", "say hi", "--trust", "--output-format", format], Some(&ready), signal)
+        run_child(
+            &sandbox,
+            &["-p", "say hi", "--trust", "--output-format", format],
+            Some(&ready),
+            signal,
+        )
     })
     .await
     .unwrap();
@@ -321,7 +409,13 @@ async fn interrupted_run(format: &'static str, signal: i32) -> (Out, &'static st
 async fn sigint_is_reported_exactly_once_and_exits_130_in_every_format() {
     for format in FORMATS {
         let (out, name) = interrupted_run(format, libc::SIGINT).await;
-        assert_reported_once(format, &out, &format!("Interrupted by {name}"), 130, Terminal::ErrorEvent);
+        assert_reported_once(
+            format,
+            &out,
+            &format!("Interrupted by {name}"),
+            130,
+            Terminal::ErrorEvent,
+        );
         if format == "streaming-json" {
             let lines = json_lines(format, &out.stdout);
             assert!(
@@ -336,13 +430,25 @@ async fn sigint_is_reported_exactly_once_and_exits_130_in_every_format() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sigterm_exits_143_with_the_one_report() {
     let (out, name) = interrupted_run("json", libc::SIGTERM).await;
-    assert_reported_once("json", &out, &format!("Interrupted by {name}"), 143, Terminal::ErrorEvent);
+    assert_reported_once(
+        "json",
+        &out,
+        &format!("Interrupted by {name}"),
+        143,
+        Terminal::ErrorEvent,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sighup_exits_129_with_the_one_report() {
     let (out, name) = interrupted_run("plain", libc::SIGHUP).await;
-    assert_reported_once("plain", &out, &format!("Interrupted by {name}"), 129, Terminal::ErrorEvent);
+    assert_reported_once(
+        "plain",
+        &out,
+        &format!("Interrupted by {name}"),
+        129,
+        Terminal::ErrorEvent,
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -360,7 +466,10 @@ fn process_is_gone(pid: i32) -> bool {
     {
         match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Err(_) => true,
-            Ok(stat) => stat.rsplit(") ").next().is_some_and(|rest| rest.starts_with('Z')),
+            Ok(stat) => stat
+                .rsplit(") ")
+                .next()
+                .is_some_and(|rest| rest.starts_with('Z')),
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -375,7 +484,9 @@ fn process_is_gone(pid: i32) -> bool {
 /// turn is then complete and the run waits on the background task, which is when the signal lands.
 async fn completed_then_interrupted(format: &'static str, signal: i32) -> (Out, i32) {
     let server = std::sync::Arc::new(
-        MockInferenceServer::start().await.expect("start the mock inference server"),
+        MockInferenceServer::start()
+            .await
+            .expect("start the mock inference server"),
     );
     server.preset_allow_access();
     let sandbox = sandbox_for(server.url());
@@ -392,16 +503,24 @@ async fn completed_then_interrupted(format: &'static str, signal: i32) -> (Out, 
             "bg tool call (responses)",
             InferenceRequestMatcher::foreground(InferenceEndpoint::Responses),
             ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
-                "", "call-bg", "run_terminal_command", &arguments, "test-model",
+                "",
+                "call-bg",
+                "run_terminal_command",
+                &arguments,
+                "test-model",
             )),
         ),
         server.expect_response(
             "bg tool call (chat completions)",
             InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
             ScriptedResponse::sse(sse::chat_completions_reasoning_then_tool_call_events(
-                "", "call-bg", "run_terminal_command", &arguments, "test-model",
+                "",
+                "call-bg",
+                "run_terminal_command",
+                &arguments,
+                "test-model",
             )),
-        )
+        ),
     ];
     let answer_turns = [
         server.expect_response(
@@ -434,12 +553,21 @@ async fn completed_then_interrupted(format: &'static str, signal: i32) -> (Out, 
         };
         let out = run_child(
             &sandbox,
-            &["-p", "start a background task, then answer", "--trust", "--yolo", "--output-format", format],
+            &[
+                "-p",
+                "start a background task, then answer",
+                "--trust",
+                "--yolo",
+                "--output-format",
+                format,
+            ],
             Some(&ready),
             signal,
         );
         // Read the pid before the sandbox (and with it the pid file) is dropped with this closure.
-        let pid = std::fs::read_to_string(&pf).ok().and_then(|t| t.trim().parse::<i32>().ok());
+        let pid = std::fs::read_to_string(&pf)
+            .ok()
+            .and_then(|t| t.trim().parse::<i32>().ok());
         (out, pid)
     })
     .await
@@ -469,8 +597,14 @@ fn assert_answer_and_usage_preserved(format: &str, out: &Out) {
         "json" => {
             let doc = &lines[0];
             assert_eq!(doc["text"], ANSWER, "json: {doc}");
-            assert!(tokens(&doc["usage"]) > 0, "json: usage of the completed turn: {doc}");
-            assert_eq!(doc["error"], "Interrupted by SIGINT; exiting 130", "json: {doc}");
+            assert!(
+                tokens(&doc["usage"]) > 0,
+                "json: usage of the completed turn: {doc}"
+            );
+            assert_eq!(
+                doc["error"], "Interrupted by SIGINT; exiting 130",
+                "json: {doc}"
+            );
         }
         "streaming-json" => {
             let text: String = lines
@@ -478,23 +612,42 @@ fn assert_answer_and_usage_preserved(format: &str, out: &Out) {
                 .filter(|v| v["type"] == "text")
                 .filter_map(|v| v["data"].as_str())
                 .collect();
-            assert_eq!(text, ANSWER, "streaming-json: streamed answer\n{}", out.stdout);
+            assert_eq!(
+                text, ANSWER,
+                "streaming-json: streamed answer\n{}",
+                out.stdout
+            );
             assert!(
-                lines.iter().any(|v| v["type"] == "usage" && tokens(&v["usage"]) > 0),
+                lines
+                    .iter()
+                    .any(|v| v["type"] == "usage" && tokens(&v["usage"]) > 0),
                 "streaming-json: usage event\n{}",
                 out.stdout
             );
             let ends: Vec<_> = lines.iter().filter(|v| v["type"] == "end").collect();
             assert_eq!(ends.len(), 1, "{}", out.stdout);
-            assert_eq!(ends[0]["error"], "Interrupted by SIGINT; exiting 130", "{}", ends[0]);
-            assert!(lines.iter().all(|v| v["type"] != "error"), "no second terminal record\n{}", out.stdout);
+            assert_eq!(
+                ends[0]["error"], "Interrupted by SIGINT; exiting 130",
+                "{}",
+                ends[0]
+            );
+            assert!(
+                lines.iter().all(|v| v["type"] != "error"),
+                "no second terminal record\n{}",
+                out.stdout
+            );
         }
         "streaming-messages-json" => {
-            let result = lines.iter().find(|v| v["type"] == "result").expect("one result");
+            let result = lines
+                .iter()
+                .find(|v| v["type"] == "result")
+                .expect("one result");
             // This format reports a turn's usage on its assistant message line; the error result
             // (no completed PromptResponse behind it) carries zeros, as it does for any error.
             assert!(
-                lines.iter().any(|v| v["type"] == "assistant" && tokens(&v["message"]["usage"]) > 0),
+                lines
+                    .iter()
+                    .any(|v| v["type"] == "assistant" && tokens(&v["message"]["usage"]) > 0),
                 "messages: usage on the assistant message\n{}",
                 out.stdout
             );
@@ -506,11 +659,20 @@ fn assert_answer_and_usage_preserved(format: &str, out: &Out) {
             let text: String = lines
                 .iter()
                 .filter(|v| v["type"] == "assistant")
-                .flat_map(|v| v["message"]["content"].as_array().cloned().unwrap_or_default())
+                .flat_map(|v| {
+                    v["message"]["content"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                })
                 .filter(|b| b["type"] == "text")
                 .filter_map(|b| b["text"].as_str().map(str::to_string))
                 .collect();
-            assert_eq!(text, ANSWER, "messages: the answer text blocks, exactly\n{}", out.stdout);
+            assert_eq!(
+                text, ANSWER,
+                "messages: the answer text blocks, exactly\n{}",
+                out.stdout
+            );
         }
         other => panic!("unhandled format {other}"),
     }
@@ -534,7 +696,10 @@ async fn an_interrupt_after_a_completed_response_keeps_the_answer_and_usage_in_e
         while !process_is_gone(pid) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(process_is_gone(pid), "{format}: background task {pid} survived the interrupted run");
+        assert!(
+            process_is_gone(pid),
+            "{format}: background task {pid} survived the interrupted run"
+        );
     }
 }
 
@@ -544,13 +709,26 @@ async fn an_interrupt_after_a_completed_response_keeps_the_answer_and_usage_in_e
 async fn sigterm_and_sighup_reap_the_runs_background_task() {
     for (format, signal, code) in [("json", libc::SIGTERM, 143), ("plain", libc::SIGHUP, 129)] {
         let (out, pid) = completed_then_interrupted(format, signal).await;
-        assert_eq!(out.code, Some(code), "{format}: exit code\nstdout:\n{}\nstderr:\n{}", out.stdout, out.stderr);
-        assert!(out.stdout.contains(ANSWER), "{format}: the completed answer survives\nstdout:\n{}", out.stdout);
+        assert_eq!(
+            out.code,
+            Some(code),
+            "{format}: exit code\nstdout:\n{}\nstderr:\n{}",
+            out.stdout,
+            out.stderr
+        );
+        assert!(
+            out.stdout.contains(ANSWER),
+            "{format}: the completed answer survives\nstdout:\n{}",
+            out.stdout
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !process_is_gone(pid) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(process_is_gone(pid), "{format}: background task {pid} survived signal {signal}");
+        assert!(
+            process_is_gone(pid),
+            "{format}: background task {pid} survived signal {signal}"
+        );
     }
 }
 
@@ -560,7 +738,9 @@ async fn sigterm_and_sighup_reap_the_runs_background_task() {
 async fn an_interrupt_mid_turn_reports_the_usage_already_spent_in_every_format() {
     for format in ["json", "streaming-json", "streaming-messages-json"] {
         let server = std::sync::Arc::new(
-            MockInferenceServer::start().await.expect("start the mock inference server"),
+            MockInferenceServer::start()
+                .await
+                .expect("start the mock inference server"),
         );
         server.preset_allow_access();
         let sandbox = sandbox_for(server.url());
@@ -574,14 +754,22 @@ async fn an_interrupt_mid_turn_reports_the_usage_already_spent_in_every_format()
                 "tool call (responses)",
                 InferenceRequestMatcher::foreground(InferenceEndpoint::Responses),
                 ScriptedResponse::sse(sse::responses_api_reasoning_then_tool_call_events(
-                    "", "call-1", "run_terminal_command", &arguments, "test-model",
+                    "",
+                    "call-1",
+                    "run_terminal_command",
+                    &arguments,
+                    "test-model",
                 )),
             ),
             server.expect_response(
                 "tool call (chat completions)",
                 InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
                 ScriptedResponse::sse(sse::chat_completions_reasoning_then_tool_call_events(
-                    "", "call-1", "run_terminal_command", &arguments, "test-model",
+                    "",
+                    "call-1",
+                    "run_terminal_command",
+                    &arguments,
+                    "test-model",
                 )),
             ),
         ];
@@ -603,20 +791,36 @@ async fn an_interrupt_mid_turn_reports_the_usage_already_spent_in_every_format()
             let posts = || {
                 srv.requests()
                     .iter()
-                    .filter(|e| e.method == "POST" && (e.path.contains("completions") || e.path.contains("responses")))
+                    .filter(|e| {
+                        e.method == "POST"
+                            && (e.path.contains("completions") || e.path.contains("responses"))
+                    })
                     .count()
             };
             let ready = || posts() >= 2;
             run_child(
                 &sandbox,
-                &["-p", "run a command", "--trust", "--yolo", "--output-format", format],
+                &[
+                    "-p",
+                    "run a command",
+                    "--trust",
+                    "--yolo",
+                    "--output-format",
+                    format,
+                ],
                 Some(&ready),
                 libc::SIGINT,
             )
         })
         .await
         .unwrap();
-        assert_eq!(out.code, Some(130), "{format}: {}\n{}", out.stdout, out.stderr);
+        assert_eq!(
+            out.code,
+            Some(130),
+            "{format}: {}\n{}",
+            out.stdout,
+            out.stderr
+        );
         let lines = json_lines(format, &out.stdout);
         let terminal = lines
             .iter()

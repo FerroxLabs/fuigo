@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use base64::Engine as _;
 use fastrace::collector::{Reporter, SpanRecord};
 use fastrace_opentelemetry::OpenTelemetryReporter;
+use fuigo_tool_protocol::{MAX_DONATION_BYTES, MAX_SPANS_PER_DONATION};
 use opentelemetry::InstrumentationScope;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
@@ -17,7 +18,6 @@ use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SpanData, SpanExporter};
 use prost::Message as _;
 use tokio::sync::mpsc;
-use fuigo_tool_protocol::{MAX_DONATION_BYTES, MAX_SPANS_PER_DONATION};
 
 use crate::donate_pump::{PENDING_FLUSHES, PumpMsg, drain_via, run_pump};
 use crate::server::ToolServer;

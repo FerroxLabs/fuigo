@@ -170,12 +170,18 @@ impl HunkTrackerActor {
     async fn reject_hunk(&mut self, path: &Path, hunk: &Arc<Hunk>) -> Result<(), HunkActionError> {
         // First, determine what action to take and collect data
         enum RejectAction {
-            RestoreDeleted { baseline: String },
+            RestoreDeleted {
+                baseline: String,
+            },
             DeleteCreated,
-            RevertChange { patched: String },
+            RevertChange {
+                patched: String,
+            },
             /// The file on disk changed behind the tracker's back (a saved edit it missed) and no longer holds this hunk where it was.
             /// Leave it untouched and re-sync, rather than overwrite what the user saved.
-            Stale { disk: String },
+            Stale {
+                disk: String,
+            },
             NoOp,
         }
 
@@ -638,7 +644,11 @@ impl HunkTrackerActor {
                         .and_then(|state| state.hunks.first())
                         .map(|h| h.source)
                         .unwrap_or(HunkSource::External);
-                    self.recompute_hunks(path, Some(FileContentState::Full(disk)), remaining_source);
+                    self.recompute_hunks(
+                        path,
+                        Some(FileContentState::Full(disk)),
+                        remaining_source,
+                    );
                     return Ok(());
                 }
                 disk

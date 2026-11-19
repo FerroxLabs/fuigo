@@ -1,0 +1,80 @@
+# cargo-deny policy (advisories, bans, licenses, sources). Run: `cargo deny check`.
+# CI runs `advisories bans sources` (.github/workflows/deny.yml); the private gate (scripts/strike/final-gate.sh)
+# runs the full `cargo deny check`, licenses included.
+
+[graph]
+# Judge the full dependency graph for every platform we ship (the lockfile carries all of them).
+all-features = true
+
+[advisories]
+# A vulnerability or an unsound/unmaintained crate fails the check unless it is listed here with a reason.
+# 1.0.46 deps lane (2026-11-16): every advisory that has a fixed, reachable version was fixed by upgrading (see
+# u46-deps NOTES). What is left has NO fixed release we can take (or the fixing release needs a major bump of an
+# upstream crate we do not own); each entry says why it is not reachable or not fixable. Any NEW advisory fails
+# the check, and an entry should be deleted the moment its crate is upgraded (`cargo deny check` warns about
+# entries that no longer match).
+ignore = [
+    # --- vulnerability: no fixed version reachable without an upstream release ---
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 (fixed 0.7.6): comes in through RustCrypto elliptic-curve 0.13 (p256/p384/ecdsa) under jsonwebtoken `rust_crypto`; the fix needs the not-yet-stable elliptic-curve 0.14 line. Fuigo only VERIFIES ES256/ES384 OIDC id-tokens with it (public key, public signature), so the secret-dependent timing the advisory describes is not exercised." },
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 (Marvin attack; no stable fixed release, 0.10 is pre-release): reached through jsonwebtoken (RS256/PS256 id-token verification uses the public key only) and gcloud-auth (signs a service-account JWT locally with the user own key; no remote caller can time or retry a private-key operation)." },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39.4 (fixed 0.41.0): reached only by the wayland-scanner proc-macro, which parses the vendored Wayland protocol XML at build time. Not linked into any shipped binary and never sees untrusted input. (The runtime copies, pptx text extraction and syntect/plist, are upgraded.)" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39.4 (fixed 0.41.0): same as RUSTSEC-2026-0194, build-time wayland-scanner only." },
+    # --- unmaintained: no fixed version exists; each needs its parent to switch crates ---
+    { id = "RUSTSEC-2025-0052", reason = "async-std 1.13.2: discontinued; pulled in only by dark-light 2.0 (terminal theme probing)." },
+    { id = "RUSTSEC-2025-0012", reason = "backoff 0.4.0: unmaintained; used only by the async-openai fork (retry loop)." },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3: unmaintained; used only by syntect to load its bundled syntax dumps." },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash 0.2.1: unmaintained; used only by bm25 and selectors (hashing, no unsafe exposure)." },
+    { id = "RUSTSEC-2024-0384", reason = "instant 0.1.12: unmaintained; used only by backoff." },
+    { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15: unmaintained proc-macro; used by ratatui 0.29 and tikv-jemalloc-ctl at build time." },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils 0.1.0: unmaintained; used by async-std and the aws-smithy crates (a trivial pin macro)." },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz 0.20.1: unmaintained; used by pdf_oxide and the vendored usvg." },
+    { id = "RUSTSEC-2026-0249", reason = "smartstring 1.0.1: unmaintained; used only by the rhai scripting engine." },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1: unmaintained; used by fontdb, pdf_oxide and rustybuzz." },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml 0.2.11: unmaintained; used only by serde_yaml 0.9." },
+    { id = "RUSTSEC-2024-0320", reason = "yaml-rust 0.4.5: unmaintained; used only by syntect (bundled theme loading)." },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names 4.3.1: unmaintained; used only by zbus (Linux desktop notifications)." },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant 5.10.0: unmaintained; used only by zbus." },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 5.10.0: unmaintained; used only by zbus." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.44: declared unmaintained 2026-11-17, all versions affected, no successor release; used across the workspace and by many dependencies for date/time types. Unmaintained, not a vulnerability; moving off it is its own change." },
+    { id = "RUSTSEC-2026-0542", reason = "humantime 2.3.0: declared unmaintained with chrono (2026-11-17), no safe upgrade; used only through humantime-serde by fuigo-workspace (duration fields in config)." },
+]
+
+[licenses]
+# Every license that appears in the shipped graph; anything new fails until a human has read it.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0", # webpki-roots
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0", # nucleo, cssparser, selectors: file-level copyleft, shipped unmodified
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# (r-efi lists LGPL-2.1-or-later only as one alternative of an OR expression; the MIT/Apache arm is what we use.)
+confidence-threshold = 0.8
+
+[bans]
+# Two versions of one crate are a size and audit cost, not a defect: warn so they stay visible.
+# Security-critical duplicates to watch in the output: ring, rustls, rustls-webpki, openssl, tokio, hyper, reqwest.
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The git dependencies we actually use (Cargo.toml `[workspace.dependencies]`, pinned by rev in Cargo.lock).
+allow-git = [
+    "https://github.com/helix-editor/nucleo.git",
+    "https://github.com/our-forks/async-openai.git",
+]

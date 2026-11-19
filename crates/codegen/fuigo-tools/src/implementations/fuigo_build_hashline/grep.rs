@@ -304,7 +304,10 @@ impl fuigo_tool_runtime::Tool for HashlineGrepTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,7 +346,10 @@ mod tests {
     fn tool_metadata() {
         use crate::types::tool_metadata::ToolMetadata;
         let tool = HashlineGrepTool;
-        assert_eq!(fuigo_tool_runtime::Tool::id(&tool).as_str(), "hashline_grep");
+        assert_eq!(
+            fuigo_tool_runtime::Tool::id(&tool).as_str(),
+            "hashline_grep"
+        );
         assert_eq!(ToolMetadata::kind(&tool), ToolKind::Search);
         assert!(fuigo_tool_runtime::Tool::capabilities(&tool).is_read_only);
         assert!(matches!(
@@ -793,12 +799,19 @@ mod tests {
             ) -> Result<(), crate::computer::types::ComputerError> {
                 Ok(())
             }
-            async fn delete_file(&self, _: &Path) -> Result<(), crate::computer::types::ComputerError> {
+            async fn delete_file(
+                &self,
+                _: &Path,
+            ) -> Result<(), crate::computer::types::ComputerError> {
                 Ok(())
             }
         }
         let tmp = tempfile::TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("test.rs"), "fn main() {\n    let x = 1;\n}\n").unwrap();
+        std::fs::write(
+            tmp.path().join("test.rs"),
+            "fn main() {\n    let x = 1;\n}\n",
+        )
+        .unwrap();
         let rg_output = format!(
             "<workspace_result workspace_path=\"{}\">\n\
              Found 1 matching lines\n\
@@ -811,7 +824,9 @@ mod tests {
         let result = inject_anchors(rg_output.as_bytes(), tmp.path(), &BoundedOnly, &*scheme).await;
         let output = String::from_utf8_lossy(&result);
         assert!(
-            output.lines().any(|l| l.starts_with('2') && l.matches(':').count() >= 3),
+            output
+                .lines()
+                .any(|l| l.starts_with('2') && l.matches(':').count() >= 3),
             "{output}"
         );
     }

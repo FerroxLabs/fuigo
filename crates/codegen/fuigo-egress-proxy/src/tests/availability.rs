@@ -6,10 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::server::{Acceptor, serve};
 
-fn options(
-    resolver: &Arc<MockResolver>,
-    connector: &Arc<MockConnector>,
-) -> EgressProxyOptions {
+fn options(resolver: &Arc<MockResolver>, connector: &Arc<MockConnector>) -> EgressProxyOptions {
     EgressProxyOptions {
         resolver: resolver.clone(),
         connector: connector.clone(),
@@ -51,7 +48,11 @@ async fn a_trickled_http_body_longer_than_the_timeout_arrives_whole() {
             peer.write_all(&[*byte]).await.unwrap();
         }
     });
-    let response = send(handle.address(), get(&handle.proxy_authorization()).as_bytes()).await;
+    let response = send(
+        handle.address(),
+        get(&handle.proxy_authorization()).as_bytes(),
+    )
+    .await;
     assert_eq!(status(&response), 200);
     assert!(
         response.ends_with(b"abcdef"),
@@ -91,8 +92,17 @@ async fn silent_connections_do_not_block_an_authenticated_request() {
             .await
             .unwrap();
     });
-    let response = send(handle.address(), get(&handle.proxy_authorization()).as_bytes()).await;
-    assert_eq!(status(&response), 200, "{:?}", String::from_utf8_lossy(&response));
+    let response = send(
+        handle.address(),
+        get(&handle.proxy_authorization()).as_bytes(),
+    )
+    .await;
+    assert_eq!(
+        status(&response),
+        200,
+        "{:?}",
+        String::from_utf8_lossy(&response)
+    );
     drop(silent);
     handle.shutdown().await.unwrap();
 }
@@ -141,7 +151,9 @@ impl Acceptor for FlakyAcceptor {
     async fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         if self
             .failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
             .is_ok()
         {
             return Err(io::Error::other("injected accept failure"));
@@ -156,8 +168,12 @@ async fn an_accept_error_does_not_stop_the_server() {
         .await
         .unwrap();
     let address = inner.local_addr().unwrap();
-    let state = ProxyState::build(allow(&[]), Arc::new(PolicyOnly), EgressProxyOptions::default())
-        .unwrap();
+    let state = ProxyState::build(
+        allow(&[]),
+        Arc::new(PolicyOnly),
+        EgressProxyOptions::default(),
+    )
+    .unwrap();
     let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
     let task = tokio::spawn(serve(
         FlakyAcceptor {
@@ -194,7 +210,11 @@ async fn the_proxy_also_answers_on_ipv6_loopback() {
         b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
     )
     .await;
-    assert_eq!(status(&response), 407, "the ::1 side reaches the same handler");
+    assert_eq!(
+        status(&response),
+        407,
+        "the ::1 side reaches the same handler"
+    );
     fixture.handle.shutdown().await.unwrap();
 }
 
@@ -236,7 +256,10 @@ async fn a_client_that_stops_reading_a_response_is_dropped() {
     // `stream` stays open and never reads: only a write deadline can end the response.
     let flood = flood_until_closed(peer);
     let ended = tokio::time::timeout(Duration::from_secs(10), flood).await;
-    assert!(ended.is_ok(), "a stalled reader must not hold the connection open");
+    assert!(
+        ended.is_ok(),
+        "a stalled reader must not hold the connection open"
+    );
     drop(stream);
     handle.shutdown().await.unwrap();
 }
@@ -272,7 +295,10 @@ async fn a_half_closed_tunnel_with_a_stalled_reader_is_closed() {
     // The client never reads: only a write deadline can end the remaining direction.
     let flood = flood_until_closed(peer);
     let ended = tokio::time::timeout(Duration::from_secs(10), flood).await;
-    assert!(ended.is_ok(), "a stalled reader must not hold a half-closed tunnel open");
+    assert!(
+        ended.is_ok(),
+        "a stalled reader must not hold a half-closed tunnel open"
+    );
     drop(stream);
     handle.shutdown().await.unwrap();
 }
@@ -312,7 +338,10 @@ async fn keepalives_keep_a_tunnel_open_past_the_idle_timeout() {
     peer.write_all(b"ok").await.unwrap();
     let mut reply = [0u8; 2];
     let read = tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut reply)).await;
-    assert!(matches!(read, Ok(Ok(_))), "the kept-alive tunnel must still carry bytes");
+    assert!(
+        matches!(read, Ok(Ok(_))),
+        "the kept-alive tunnel must still carry bytes"
+    );
     assert_eq!(&reply, b"ok");
     handle.shutdown().await.unwrap();
 }
@@ -338,14 +367,19 @@ fn transfers_do_not_arm_a_timer_per_chunk() {
         ("connect.rs", include_str!("../connect.rs"), "async fn pump"),
         ("http.rs", include_str!("../http.rs"), "async fn copy_exact"),
     ] {
-        let start = source.find(function).unwrap_or_else(|| panic!("{name}: {function} not found"));
+        let start = source
+            .find(function)
+            .unwrap_or_else(|| panic!("{name}: {function} not found"));
         let end = start + source[start..].find("\n}\n").unwrap();
         let body = &source[start..end];
         assert!(
             !body.contains("time::timeout("),
             "{name}: {function} arms a timer per chunk"
         );
-        assert!(!body.contains("write_all_idle"), "{name}: {function} arms a timer per write");
+        assert!(
+            !body.contains("write_all_idle"),
+            "{name}: {function} arms a timer per write"
+        );
     }
 }
 
@@ -353,13 +387,21 @@ fn transfers_do_not_arm_a_timer_per_chunk() {
 struct StalledIo;
 
 impl AsyncRead for StalledIo {
-    fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         Poll::Pending
     }
 }
 
 impl AsyncWrite for StalledIo {
-    fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, _bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Poll::Pending
     }
 
@@ -391,8 +433,12 @@ async fn a_request_head_to_a_stalled_upstream_is_bounded() {
         .await
         .unwrap();
     let mut response = Vec::new();
-    let answered = tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut response)).await;
-    assert!(answered.is_ok(), "a stalled upstream must not hold the connection open");
+    let answered =
+        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut response)).await;
+    assert!(
+        answered.is_ok(),
+        "a stalled upstream must not hold the connection open"
+    );
     handle.shutdown().await.unwrap();
 }
 
@@ -418,10 +464,16 @@ async fn a_tls_hello_to_a_stalled_upstream_is_bounded() {
     let mut response = Vec::new();
     read_response_head(&mut stream, &mut response).await;
     assert_eq!(status(&response), 200);
-    stream.write_all(&test_client_hello(Some("allowed.example"))).await.unwrap();
+    stream
+        .write_all(&test_client_hello(Some("allowed.example")))
+        .await
+        .unwrap();
     let mut rest = Vec::new();
     let ended = tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut rest)).await;
-    assert!(ended.is_ok(), "a stalled upstream must not hold the tunnel open");
+    assert!(
+        ended.is_ok(),
+        "a stalled upstream must not hold the tunnel open"
+    );
     handle.shutdown().await.unwrap();
 }
 
@@ -430,8 +482,15 @@ async fn a_tls_hello_to_a_stalled_upstream_is_bounded() {
 async fn an_error_answer_to_a_stalled_client_is_bounded() {
     let written = tokio::time::timeout(
         Duration::from_secs(10),
-        crate::error::write_error(&mut StalledIo, &crate::error::ProxyError::Overloaded, Duration::from_millis(100)),
+        crate::error::write_error(
+            &mut StalledIo,
+            &crate::error::ProxyError::Overloaded,
+            Duration::from_millis(100),
+        ),
     )
     .await;
-    assert!(matches!(written, Ok(Err(_))), "the write must fail at its deadline: {written:?}");
+    assert!(
+        matches!(written, Ok(Err(_))),
+        "the write must fail at its deadline: {written:?}"
+    );
 }

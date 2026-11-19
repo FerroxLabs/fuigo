@@ -248,7 +248,10 @@ impl TrustStore {
     /// the key of its nearest existing ancestor). A folder with no trust key (home, root) is covered by nothing.
     pub fn coverage_of_path(&self, path: &Path) -> Coverage {
         let physical = canonicalize_or_owned(path);
-        let existing = physical.ancestors().find(|p| p.exists()).unwrap_or(&physical);
+        let existing = physical
+            .ancestors()
+            .find(|p| p.exists())
+            .unwrap_or(&physical);
         match trust_key(existing) {
             Ok(key) => self.coverage(&physical, &key),
             Err(_) => Coverage::None,
@@ -288,12 +291,18 @@ impl TrustStore {
                 continue;
             }
             let this = if record.trusted {
-                Coverage::Trusted { consent: record.consent }
+                Coverage::Trusted {
+                    consent: record.consent,
+                }
             } else {
                 Coverage::Declined
             };
             // A key record reached without containment is the least specific: any record inside the folder wins.
-            let depth = if contains { physical.components().count() } else { 0 };
+            let depth = if contains {
+                physical.components().count()
+            } else {
+                0
+            };
             best = match best {
                 Some((d, _)) if depth < d => best,
                 Some((d, prev)) if depth == d => Some((d, merge_tie(prev, this))),
@@ -363,7 +372,9 @@ impl TrustStore {
         self.doc
             .folders
             .iter()
-            .filter(|(folder, record)| record.trusted && !is_unsafe_trust_root(Path::new(folder.as_str())))
+            .filter(|(folder, record)| {
+                record.trusted && !is_unsafe_trust_root(Path::new(folder.as_str()))
+            })
             .map(|(folder, record)| (PathBuf::from(folder), record.consent >= CONSENT_V))
             .collect()
     }
@@ -482,7 +493,12 @@ impl TrustStore {
         // Probe without following so a dangling symlink is an existing entry, not Missing.
         let link_meta = match std::fs::symlink_metadata(path) {
             Ok(meta) => meta,
-            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
                 return Ok(StoreRead::Missing);
             }
             Err(e) => return Err(e),
@@ -496,15 +512,23 @@ impl TrustStore {
         }
 
         let contents = match std::fs::read_to_string(path) {
-            Ok(c) if c.trim().is_empty() => return Ok(StoreRead::Document(TrustDocument::default())),
+            Ok(c) if c.trim().is_empty() => {
+                return Ok(StoreRead::Document(TrustDocument::default()));
+            }
             Ok(c) => c,
             // Gone between the probe and the read: Missing only if a fresh no-follow probe still finds nothing there, so a
             // regular file swapped for a dangling link in that window is an error, not an empty document (Astra r1).
             Err(e)
                 if !is_symlink
-                    && matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    )
                     && std::fs::symlink_metadata(path).is_err_and(|p| {
-                        matches!(p.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+                        matches!(
+                            p.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                        )
                     }) =>
             {
                 return Ok(StoreRead::Missing);
@@ -581,7 +605,11 @@ pub fn trust_key(cwd: &Path) -> Result<PathBuf, KeyError> {
         return Err(KeyError::Unrecordable);
     }
     let derived = physical_key(&c, 0);
-    let key = if is_unsafe_trust_root(&derived) { c } else { derived };
+    let key = if is_unsafe_trust_root(&derived) {
+        c
+    } else {
+        derived
+    };
     if is_unsafe_trust_root(&key) || key.to_str().is_none() {
         return Err(KeyError::Unrecordable);
     }
@@ -632,7 +660,11 @@ fn validated_main_checkout(repo: &git2::Repository, top: &Path) -> Option<PathBu
     }
     let backlink = std::fs::read_to_string(gitdir.join("gitdir")).ok()?;
     let backlink = Path::new(backlink.trim());
-    let backlink = if backlink.is_absolute() { backlink.to_path_buf() } else { gitdir.join(backlink) };
+    let backlink = if backlink.is_absolute() {
+        backlink.to_path_buf()
+    } else {
+        gitdir.join(backlink)
+    };
     if dunce::canonicalize(&backlink).ok()? != dunce::canonicalize(top.join(".git")).ok()? {
         return None;
     }
@@ -668,7 +700,9 @@ fn record_key(folder: &Path) -> Option<PathBuf> {
 fn merge_tie(a: Coverage, b: Coverage) -> Coverage {
     match (a, b) {
         (Coverage::Declined, _) | (_, Coverage::Declined) => Coverage::Declined,
-        (Coverage::Trusted { consent: x }, Coverage::Trusted { consent: y }) => Coverage::Trusted { consent: x.min(y) },
+        (Coverage::Trusted { consent: x }, Coverage::Trusted { consent: y }) => {
+            Coverage::Trusted { consent: x.min(y) }
+        }
         (Coverage::None, other) | (other, Coverage::None) => other,
     }
 }
@@ -859,8 +893,14 @@ mod tests {
         let migrated = migrate_legacy_hook_trust_in(&legacy, &mut store);
         assert_eq!(migrated, 1);
         // u35 t1: a migrated grant is a pre-1.0.35 record (settings only): Legacy, asked again once.
-        assert_eq!(store.coverage_of_path(&project_key), Coverage::Trusted { consent: 0 });
-        assert!(!store.is_trusted(&project_key), "a Legacy record is not trusted until asked");
+        assert_eq!(
+            store.coverage_of_path(&project_key),
+            Coverage::Trusted { consent: 0 }
+        );
+        assert!(
+            !store.is_trusted(&project_key),
+            "a Legacy record is not trusted until asked"
+        );
 
         // Legacy file renamed so it is read only once.
         assert!(!legacy.exists(), "legacy file consumed");
@@ -871,7 +911,10 @@ mod tests {
 
         // The grant persisted to disk.
         let reloaded = TrustStore::load_from(store_path);
-        assert_eq!(reloaded.coverage_of_path(&project_key), Coverage::Trusted { consent: 0 });
+        assert_eq!(
+            reloaded.coverage_of_path(&project_key),
+            Coverage::Trusted { consent: 0 }
+        );
     }
 
     #[test]
@@ -954,7 +997,10 @@ mod tests {
         std::fs::write(&legacy, format!("{}\n", project_key.display())).unwrap();
 
         let mut store = TrustStore::load_from(store_path);
-        assert!(store.disk_readable(), "the store reads (missing); only the write fails");
+        assert!(
+            store.disk_readable(),
+            "the store reads (missing); only the write fails"
+        );
         let migrated = migrate_legacy_hook_trust_in(&legacy, &mut store);
         assert_eq!(migrated, 0, "a seeding write error seeds nothing");
         assert!(
@@ -1013,9 +1059,7 @@ mod tests {
         assert!(!store.is_trusted(key), "no-home store trusts nothing");
 
         // set_trusted is a no-op that returns Ok and records nothing.
-        store
-            .grant(key)
-            .expect("no-home set_trusted is a no-op Ok");
+        store.grant(key).expect("no-home set_trusted is a no-op Ok");
         assert!(
             store.is_empty(),
             "no-home set_trusted must record nothing (in memory)"
@@ -1131,7 +1175,10 @@ mod tests {
 
             let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
             store.grant(&parent_key).unwrap();
-            assert!(store.is_trusted(&parent_key), "the granted folder stays trusted");
+            assert!(
+                store.is_trusted(&parent_key),
+                "the granted folder stays trusted"
+            );
             assert!(
                 !store.is_trusted(&nested_key),
                 "parent_is_repo={parent_is_repo}: a nested repo naming the parent as core.worktree borrowed its trust"
@@ -1531,7 +1578,12 @@ mod tests {
         assert_eq!(reloaded.trusted_records(), vec![(a, true), (b, false)]);
 
         std::fs::write(&store_path, "not = [valid").unwrap();
-        assert!(TrustStore::load_from(store_path).trusted_records().is_empty(), "unreadable store lists nothing");
+        assert!(
+            TrustStore::load_from(store_path)
+                .trusted_records()
+                .is_empty(),
+            "unreadable store lists nothing"
+        );
     }
 
     #[test]
@@ -1669,10 +1721,23 @@ mod tests {
         FAIL_PERSIST.with(|f| f.set(true));
         let result = store.record_decision_strict(&new, true);
         FAIL_PERSIST.with(|f| f.set(false));
-        assert!(matches!(result, Err(TrustPersistError::Publish(_))), "{result:?}");
-        assert!(!store.is_trusted(&new), "memory must not commit an unpublished grant");
-        assert!(store.is_trusted(&kept), "the prior grant is still in memory");
-        assert_eq!(std::fs::read(&store_path).unwrap(), before, "disk unchanged");
+        assert!(
+            matches!(result, Err(TrustPersistError::Publish(_))),
+            "{result:?}"
+        );
+        assert!(
+            !store.is_trusted(&new),
+            "memory must not commit an unpublished grant"
+        );
+        assert!(
+            store.is_trusted(&kept),
+            "the prior grant is still in memory"
+        );
+        assert_eq!(
+            std::fs::read(&store_path).unwrap(),
+            before,
+            "disk unchanged"
+        );
     }
 
     #[test]
@@ -1968,7 +2033,11 @@ mod tests {
     fn p167_corrupt_store_is_not_rewritten_by_set_trusted() {
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join(TRUST_FILE_NAME);
-        std::fs::write(&store_path, b"[folders.\"/tmp/keep\"]\ntrusted = true\n[[[ not toml").unwrap();
+        std::fs::write(
+            &store_path,
+            b"[folders.\"/tmp/keep\"]\ntrusted = true\n[[[ not toml",
+        )
+        .unwrap();
         let before = std::fs::read(&store_path).unwrap();
 
         let mut store = TrustStore::load_from(store_path.clone());
@@ -2020,15 +2089,27 @@ mod tests {
             "a dangling store link must not be treated as an absent file"
         );
         let meta = std::fs::symlink_metadata(&store_path).unwrap();
-        assert!(meta.file_type().is_symlink(), "the store link must not be replaced");
-        assert!(!target.exists(), "nothing may be written through the dangling link");
+        assert!(
+            meta.file_type().is_symlink(),
+            "the store link must not be replaced"
+        );
+        assert!(
+            !target.exists(),
+            "nothing may be written through the dangling link"
+        );
     }
 
     /// A relative home would put the store under the cwd (a cloned repo could ship it): no path at all.
     #[test]
     fn p167_default_path_in_rejects_relative_home() {
-        assert_eq!(TrustStore::default_path_in(Some(PathBuf::from(".fuigo"))), None);
-        assert_eq!(TrustStore::default_path_in(Some(PathBuf::from("repo/.fuigo"))), None);
+        assert_eq!(
+            TrustStore::default_path_in(Some(PathBuf::from(".fuigo"))),
+            None
+        );
+        assert_eq!(
+            TrustStore::default_path_in(Some(PathBuf::from("repo/.fuigo"))),
+            None
+        );
         assert_eq!(TrustStore::default_path_in(Some(PathBuf::new())), None);
     }
 
@@ -2043,12 +2124,23 @@ mod tests {
         let project = tmp.path().join("repo");
         std::fs::create_dir_all(&project).unwrap();
         let legacy = tmp.path().join("trusted-hook-projects");
-        std::fs::write(&legacy, format!("{}\n", canonicalize_or_owned(&project).display())).unwrap();
+        std::fs::write(
+            &legacy,
+            format!("{}\n", canonicalize_or_owned(&project).display()),
+        )
+        .unwrap();
 
         let mut store = TrustStore::load_from(store_path.clone());
         assert_eq!(migrate_legacy_hook_trust_in(&legacy, &mut store), 0);
-        assert!(legacy.exists(), "an unread store must not consume the legacy file");
-        assert_eq!(std::fs::read(&store_path).unwrap(), before, "the store must not be rewritten");
+        assert!(
+            legacy.exists(),
+            "an unread store must not consume the legacy file"
+        );
+        assert_eq!(
+            std::fs::read(&store_path).unwrap(),
+            before,
+            "the store must not be rewritten"
+        );
     }
 
     /// P180 (P167 Astra LOW): the read-failed-with-NotFound branch must re-probe before it says Missing. A regular file
@@ -2077,7 +2169,12 @@ mod tests {
             result.is_err(),
             "a link that appeared after the probe is an existing entry, not Missing"
         );
-        assert!(std::fs::symlink_metadata(&store_path).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&store_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert!(!target.exists());
     }
 
@@ -2097,7 +2194,10 @@ mod tests {
         match std::os::windows::fs::symlink_file(&target, &probe_link) {
             Ok(()) => std::fs::remove_file(&probe_link).unwrap(),
             // 1314 = ERROR_PRIVILEGE_NOT_HELD, which Rust 1.94 reports as `Uncategorized`, not `PermissionDenied`
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(1314) => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    || e.raw_os_error() == Some(1314) =>
+            {
                 eprintln!("skipped: no symlink privilege on this Windows host: {e}");
                 return;
             }
@@ -2119,7 +2219,12 @@ mod tests {
             result.is_err(),
             "a link that appeared after the probe is an existing entry, not Missing"
         );
-        assert!(std::fs::symlink_metadata(&store_path).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&store_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert!(!target.exists());
     }
 
@@ -2137,7 +2242,10 @@ mod tests {
         let result = TrustStore::read_doc_strict(&store_path);
         AFTER_PROBE.with(|a| *a.borrow_mut() = None);
 
-        assert!(matches!(result, Ok(StoreRead::Missing)), "removed entry must be Missing");
+        assert!(
+            matches!(result, Ok(StoreRead::Missing)),
+            "removed entry must be Missing"
+        );
     }
 
     /// A main checkout with one commit and a linked worktree OUTSIDE it: `(tempdir, main, worktree)`.
@@ -2153,7 +2261,8 @@ mod tests {
             let oid = idx.write_tree().unwrap();
             repo.find_tree(oid).unwrap()
         };
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
         let wt = root.join("wt");
         repo.worktree("wt", &wt, None).unwrap();
         (dir, main, wt)
@@ -2168,7 +2277,10 @@ mod tests {
         assert_eq!(trust_key(&wt).unwrap(), trust_key(&main).unwrap());
         store.grant(&trust_key(&main).unwrap()).unwrap();
         assert!(store.is_trusted(&main));
-        assert!(store.is_trusted(&wt), "the main checkout's grant covers its linked worktree");
+        assert!(
+            store.is_trusted(&wt),
+            "the main checkout's grant covers its linked worktree"
+        );
         let sub = wt.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
         assert!(store.is_trusted(&sub));
@@ -2183,7 +2295,11 @@ mod tests {
         // A forged worktree (its `.git` file names the main checkout, no backlink) keeps its own key: not covered.
         let forged = dir.path().join("forged");
         std::fs::create_dir_all(&forged).unwrap();
-        std::fs::write(forged.join(".git"), format!("gitdir: {}/.git/worktrees/wt\n", main.display())).unwrap();
+        std::fs::write(
+            forged.join(".git"),
+            format!("gitdir: {}/.git/worktrees/wt\n", main.display()),
+        )
+        .unwrap();
         assert_ne!(trust_key(&forged).ok(), trust_key(&main).ok());
         assert!(!store.is_trusted(&forged));
     }
@@ -2204,6 +2320,9 @@ mod tests {
         let mut store = TrustStore::load_from(root.join("store").join(TRUST_FILE_NAME));
         std::fs::create_dir_all(root.join("store")).unwrap();
         store.grant(&trust_key(&source_repo).unwrap()).unwrap();
-        assert!(store.is_trusted(&wt), "the source repository's grant covers its managed worktree");
+        assert!(
+            store.is_trusted(&wt),
+            "the source repository's grant covers its managed worktree"
+        );
     }
 }

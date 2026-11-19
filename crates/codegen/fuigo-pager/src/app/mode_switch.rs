@@ -326,7 +326,11 @@ mod tests {
         let agent = app.agents.get_mut(&agent_id).expect("agent present");
         agent.scrollback.prepare_layout(80, 40);
         let minimal_rows = agent.scrollback.content_height_for_test();
-        assert_eq!(minimal_rows + 1, fullscreen_rows, "minimal drops the copy row");
+        assert_eq!(
+            minimal_rows + 1,
+            fullscreen_rows,
+            "minimal drops the copy row"
+        );
 
         reseed_screen_mode(&mut app, ScreenMode::Fullscreen);
         let agent = app.agents.get_mut(&agent_id).expect("agent present");

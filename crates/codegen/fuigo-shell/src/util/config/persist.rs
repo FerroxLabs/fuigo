@@ -66,7 +66,10 @@ fn settings_view(
     // EIO) treated as empty would let the write replace a file this process
     // could not read, erasing every setting in it.
     let text = current_str(current).map_err(|e| {
-        anyhow::anyhow!("refusing to overwrite {}: it could not be read ({e})", path.display())
+        anyhow::anyhow!(
+            "refusing to overwrite {}: it could not be read ({e})",
+            path.display()
+        )
     })?;
     let text = text.unwrap_or_default();
     let root = parse_existing_config_toml(text).map_err(|parse_err| {
@@ -140,7 +143,12 @@ pub(crate) async fn edit_config_file<T: Send + 'static>(
     + Send
     + 'static,
 ) -> Result<T> {
-    edit_config_file_with(path, fuigo_config::fs_atomic::stage_atomically_keeping_mode, edit).await
+    edit_config_file_with(
+        path,
+        fuigo_config::fs_atomic::stage_atomically_keeping_mode,
+        edit,
+    )
+    .await
 }
 
 /// How a writer turns new contents into a staged temp beside `path`.
@@ -164,8 +172,8 @@ pub(crate) async fn edit_config_file_with<T: Send + 'static>(
         let _guard = guard;
         edit_config_file_blocking_with(&path, stage, edit)
     })
-        .await
-        .map_err(|e| anyhow::anyhow!("config write task failed: {e}"))?
+    .await
+    .map_err(|e| anyhow::anyhow!("config write task failed: {e}"))?
 }
 
 /// [`edit_config_file`] for a caller already on a blocking thread. Takes the
@@ -174,7 +182,11 @@ pub(crate) fn edit_config_file_blocking<T>(
     path: &std::path::Path,
     edit: impl FnMut(fuigo_config::fs_atomic::Current<'_>) -> Result<fuigo_config::fs_atomic::Edit<T>>,
 ) -> Result<T> {
-    edit_config_file_blocking_with(path, fuigo_config::fs_atomic::stage_atomically_keeping_mode, edit)
+    edit_config_file_blocking_with(
+        path,
+        fuigo_config::fs_atomic::stage_atomically_keeping_mode,
+        edit,
+    )
 }
 
 /// [`edit_config_file_blocking`] with the writer's own staging policy.
@@ -438,14 +450,20 @@ where
 /// Optimistic passes [`update_config`] makes before its locked cycle (as
 /// `fuigo_config::fs_atomic::edit_locked`).
 const OPTIMISTIC_SETTINGS_PASSES: usize = 2;
-#[cfg(test)]
-#[path = "persist_tests.rs"]
-mod tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "p61_cross_process_tests.rs"]
 mod p61_cross_process_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "p72_tests.rs"]
 mod p72_tests;
+#[cfg(test)]
+#[path = "persist_tests.rs"]
+mod tests;

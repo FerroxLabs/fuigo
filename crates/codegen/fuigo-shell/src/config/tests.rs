@@ -4317,7 +4317,8 @@ fn sandbox_unavailable_stderr_line_is_the_warning_with_a_prefix_and_no_control_b
     assert_eq!(
         sandbox_unavailable_stderr_line(&w),
         "warning: Sandbox profile workspace is set but sandboxing is not available on Windows: \
-         commands and file tools run unsandboxed."
+         commands and file tools run unsandboxed. The sandbox is optional and off by default. \
+         To use one, run Fuigo inside WSL2 with bubblewrap installed (sudo apt install bubblewrap)."
     );
     assert!(!sandbox_unavailable_stderr_line("a\x1b[2Jb\nc").contains(['\x1b', '\n']));
 }
@@ -4333,7 +4334,8 @@ fn wrap_prints_the_sandbox_warning_on_windows_only() {
         wrap_sandbox_warning_line_for("workspace", true).as_deref(),
         Some(
             "warning: Sandbox profile workspace is set but sandboxing is not available on Windows: \
-             commands and file tools run unsandboxed."
+             commands and file tools run unsandboxed. The sandbox is optional and off by default. \
+             To use one, run Fuigo inside WSL2 with bubblewrap installed (sudo apt install bubblewrap)."
         )
     );
     assert_eq!(wrap_sandbox_warning_line_for("workspace", false), None);

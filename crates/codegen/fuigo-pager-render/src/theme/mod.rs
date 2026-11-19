@@ -736,7 +736,13 @@ mod tests {
         // `from_name`/`available` consult the rollout gate, a process global: serialize and seed it on.
         let _guard = cache::test_lock().lock().unwrap_or_else(|e| e.into_inner());
         cache::reset_for_test();
-        for name in ["terminal", "terminal-default", "transparent", "native", "TERMINAL"] {
+        for name in [
+            "terminal",
+            "terminal-default",
+            "transparent",
+            "native",
+            "TERMINAL",
+        ] {
             assert_eq!(
                 ThemeKind::from_name(name),
                 Some(ThemeKind::Terminal),

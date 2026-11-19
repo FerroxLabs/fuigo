@@ -5,7 +5,8 @@ use std::process::{Command, Stdio};
 
 fn pager_binary() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("PAGER_BINARY") {
-        return std::path::absolute(&p).unwrap_or_else(|e| panic!("failed to absolutize PAGER_BINARY {p}: {e}"));
+        return std::path::absolute(&p)
+            .unwrap_or_else(|e| panic!("failed to absolutize PAGER_BINARY {p}: {e}"));
     }
     option_env!("CARGO_BIN_EXE_fuigo-pager")
         .map(std::path::PathBuf::from)
@@ -40,9 +41,18 @@ fn run_and_list_home(args: &[&str]) -> (bool, Vec<String>) {
 
 #[test]
 fn help_and_version_create_no_fuigo_home() {
-    for args in [&["--help"][..], &["--version"], &["-V"], &["worktree", "--help"], &["mcp", "--help"]] {
+    for args in [
+        &["--help"][..],
+        &["--version"],
+        &["-V"],
+        &["worktree", "--help"],
+        &["mcp", "--help"],
+    ] {
         let (ok, created) = run_and_list_home(args);
         assert!(ok, "{args:?} should exit 0");
-        assert!(created.is_empty(), "{args:?} left files behind: {created:?}");
+        assert!(
+            created.is_empty(),
+            "{args:?} left files behind: {created:?}"
+        );
     }
 }

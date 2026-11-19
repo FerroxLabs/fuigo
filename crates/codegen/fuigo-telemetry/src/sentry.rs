@@ -281,9 +281,8 @@ fn before_send(mut event: Event<'static>, scrubber: &Scrubber) -> Option<Event<'
         .take()
         .and_then(|trace| scrub_via_json(&trace, scrubber));
     event.threads = scrub_via_json(&event.threads, scrubber).unwrap_or_default();
-    event.debug_meta = Cow::Owned(
-        scrub_via_json(event.debug_meta.as_ref(), scrubber).unwrap_or_default(),
-    );
+    event.debug_meta =
+        Cow::Owned(scrub_via_json(event.debug_meta.as_ref(), scrubber).unwrap_or_default());
 
     event.server_name = None;
 
@@ -552,7 +551,9 @@ mod tests {
         });
         let mut other = std::collections::BTreeMap::new();
         other.insert("note".to_owned(), Value::String(secret.clone()));
-        event.contexts.insert("custom".into(), Context::Other(other));
+        event
+            .contexts
+            .insert("custom".into(), Context::Other(other));
         event.logentry = Some(LogEntry {
             message: secret.clone(),
             params: vec![Value::String(secret.clone())],
@@ -591,7 +592,10 @@ mod tests {
 
         let out = before_send(event, &make_scrubber()).unwrap();
         let json = serde_json::to_string(&out).unwrap();
-        assert!(!json.contains(&secret), "credential survived before_send: {json}");
+        assert!(
+            !json.contains(&secret),
+            "credential survived before_send: {json}"
+        );
     }
 
     /// Audit S11-F8: transactions are not wired, so none is sampled.

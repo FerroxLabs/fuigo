@@ -49,7 +49,10 @@ impl std::fmt::Debug for AuthProviderConfig {
             .field("subscription", subscription)
             .field("account", account)
             .field("command", &"<redacted>")
-            .field("args", &format_args!("<{} args redacted>", args.as_ref().map_or(0, Vec::len)))
+            .field(
+                "args",
+                &format_args!("<{} args redacted>", args.as_ref().map_or(0, Vec::len)),
+            )
             .field("token_ttl_secs", token_ttl_secs)
             .field("timeout_secs", timeout_secs)
             .field("cwd", cwd)
@@ -108,8 +111,14 @@ impl From<AuthProviderRef> for AuthProviderRefData {
 }
 
 impl AuthProviderRef {
-    pub(crate) fn subscription_provider(&self) -> Option<super::subscription::SubscriptionProvider> {
-        if self.resolved && !self.fail_closed { self.config.subscription } else { None }
+    pub(crate) fn subscription_provider(
+        &self,
+    ) -> Option<super::subscription::SubscriptionProvider> {
+        if self.resolved && !self.fail_closed {
+            self.config.subscription
+        } else {
+            None
+        }
     }
 
     /// Production uses `unresolved` and then `attach_trusted_config`.
@@ -543,7 +552,9 @@ impl AuthProviderRef {
         &self,
         current_key: Option<&str>,
     ) -> ProviderRefreshOutcome {
-        if self.subscription_provider().is_some() { return ProviderRefreshOutcome::Unchanged; }
+        if self.subscription_provider().is_some() {
+            return ProviderRefreshOutcome::Unchanged;
+        }
         let Some(mut slot) = self.locked_slot().await else {
             return ProviderRefreshOutcome::Unusable;
         };
@@ -663,7 +674,10 @@ fn test_expire_provider_token(name: &str) {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "auth_provider_tests.rs"]
 mod tests;

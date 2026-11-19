@@ -1,7 +1,6 @@
 use crate::agent::Agent;
 use crate::compaction::CompactionPolicy;
 use crate::config::{AGENT_TASK_CLASSIFIER_RE, short_tool_name, tool_id_eq, tool_id_matches};
-use fuigo_tools::implementations::fuigo_build::task::model_policy::TaskModelSelection;
 use crate::config::{AgentDefinition, BuiltinAgentName, PermissionMode, PromptMode};
 use crate::discovery::{SubagentEntry, SubagentSource};
 use crate::error::AgentBuildError;
@@ -9,6 +8,7 @@ use crate::prompt::context::{PromptAudience, PromptContext};
 use crate::system_reminder::ReminderPolicy;
 use fuigo_tools::bridge::ToolBridge;
 use fuigo_tools::computer::types::{AsyncFileSystem, TerminalBackend};
+use fuigo_tools::implementations::fuigo_build::task::model_policy::TaskModelSelection;
 use fuigo_tools::notification::ToolNotificationHandle;
 use fuigo_tools::registry::types::SessionContext;
 use fuigo_tools::types::tool::ToolKind;
@@ -119,7 +119,8 @@ pub struct AgentBuilder {
     api_key_provider: Option<fuigo_tools::types::SharedApiKeyProvider>,
     attribution_callback: Option<fuigo_tools::SharedAttributionCallback>,
     /// The session's veto over model requests made by tools.
-    dispatch_gate: Option<fuigo_tools::implementations::web_search::client::SharedModelDispatchGate>,
+    dispatch_gate:
+        Option<fuigo_tools::implementations::web_search::client::SharedModelDispatchGate>,
     /// Session-scoped MCP tool-result inline cap (bytes).
     /// When `Some`, it is seeded into the toolset's `TruncationCfg` resource after finalize.
     /// The MCP truncation path consults that resource before the process-global cap.
@@ -425,7 +426,10 @@ impl AgentBuilder {
     /// The session's writer. With one, the toolset writes the session folder (tool state, terminal logs, MCP dumps,
     /// fetched and generated files) only through it; without one (`None`, the default) it keeps writing by path under
     /// [`with_state_path`](Self::with_state_path)'s folder or the temp directory, as before.
-    pub fn with_session_writer(mut self, writer: Option<fuigo_session_writer::SessionWriter>) -> Self {
+    pub fn with_session_writer(
+        mut self,
+        writer: Option<fuigo_session_writer::SessionWriter>,
+    ) -> Self {
         self.session_writer = writer;
         self
     }
@@ -3102,7 +3106,10 @@ mod tests {
         tools: Vec<String>,
         disallowed: Vec<String>,
         selection: TaskModelSelection,
-    ) -> (crate::agent::Agent, Option<fuigo_tools::types::definition::ToolDefinition>) {
+    ) -> (
+        crate::agent::Agent,
+        Option<fuigo_tools::types::definition::ToolDefinition>,
+    ) {
         use fuigo_tools::computer::local::LocalTerminalBackend;
         use fuigo_tools::notification::ToolNotificationHandle;
         let mut def = crate::config::AgentDefinition::default_fuigo_build();
@@ -3139,9 +3146,16 @@ mod tests {
     async fn selectable_task_advertises_model_and_offers_slugs() {
         let (_agent, task) = task_definition(vec![], vec![], TaskModelSelection::Selectable).await;
         let task = task.expect("the default toolset has a task tool");
-        assert!(property_names(&task).iter().any(|name| name == "model"), "{:?}", property_names(&task));
+        assert!(
+            property_names(&task).iter().any(|name| name == "model"),
+            "{:?}",
+            property_names(&task)
+        );
         let description = task.function.description.unwrap_or_default();
-        assert!(description.contains("alpha-model") && description.contains("beta-model"), "{description}");
+        assert!(
+            description.contains("alpha-model") && description.contains("beta-model"),
+            "{description}"
+        );
     }
 
     #[tokio::test]
@@ -3152,8 +3166,14 @@ mod tests {
         assert!(!props.iter().any(|name| name == "model"), "{props:?}");
         assert!(props.iter().any(|name| name == "prompt"), "{props:?}");
         let description = task.function.description.unwrap_or_default();
-        assert!(!description.contains("alpha-model") && !description.contains("beta-model"), "{description}");
-        assert!(description.contains("same model as the parent agent"), "{description}");
+        assert!(
+            !description.contains("alpha-model") && !description.contains("beta-model"),
+            "{description}"
+        );
+        assert!(
+            description.contains("same model as the parent agent"),
+            "{description}"
+        );
         // The roster is the normal one: a model lock changes only the model part.
         assert!(description.contains("**explore**"), "{description}");
     }
@@ -3177,8 +3197,12 @@ mod tests {
     async fn allowlist_and_denylist_keep_the_task_description_and_hide_denied_tools() {
         let mut tools: Vec<String> = AGENT_TOOLS_BASE.iter().map(|s| s.to_string()).collect();
         tools.push("Agent(explore, plan)".into());
-        let (agent, task) =
-            task_definition(tools, vec!["run_terminal_cmd".into()], TaskModelSelection::Selectable).await;
+        let (agent, task) = task_definition(
+            tools,
+            vec!["run_terminal_cmd".into()],
+            TaskModelSelection::Selectable,
+        )
+        .await;
         let names: Vec<String> = agent
             .tool_definitions()
             .await
@@ -3186,10 +3210,20 @@ mod tests {
             .map(|d| d.function.name.clone())
             .collect();
         assert!(names.contains(&"read_file".to_string()), "{names:?}");
-        assert!(!names.contains(&"run_terminal_command".to_string()), "denied tool in schema: {names:?}");
+        assert!(
+            !names.contains(&"run_terminal_command".to_string()),
+            "denied tool in schema: {names:?}"
+        );
         assert!(!names.contains(&"search_replace".to_string()), "{names:?}");
-        let description = task.expect("task kept").function.description.unwrap_or_default();
-        assert!(description.contains("**explore**") && description.contains("alpha-model"), "{description}");
+        let description = task
+            .expect("task kept")
+            .function
+            .description
+            .unwrap_or_default();
+        assert!(
+            description.contains("**explore**") && description.contains("alpha-model"),
+            "{description}"
+        );
     }
 }
 

@@ -15,7 +15,10 @@ struct LaunchClient {
 
 impl LaunchClient {
     fn new(pick: acp::PermissionOptionKind) -> Self {
-        Self { pick, offered: Rc::default() }
+        Self {
+            pick,
+            offered: Rc::default(),
+        }
     }
 
     fn prompts(&self) -> usize {
@@ -29,18 +32,27 @@ impl acp::Client for LaunchClient {
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        self.offered
-            .borrow_mut()
-            .push(args.options.iter().map(|o| o.option_id.0.to_string()).collect());
+        self.offered.borrow_mut().push(
+            args.options
+                .iter()
+                .map(|o| o.option_id.0.to_string())
+                .collect(),
+        );
         let option = args
             .options
             .iter()
             .find(|o| o.kind == self.pick)
-            .or_else(|| args.options.iter().find(|o| o.kind == acp::PermissionOptionKind::AllowOnce))
+            .or_else(|| {
+                args.options
+                    .iter()
+                    .find(|o| o.kind == acp::PermissionOptionKind::AllowOnce)
+            })
             .expect("an allow option");
-        Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
-            acp::SelectedPermissionOutcome::new(option.option_id.clone()),
-        )))
+        Ok(acp::RequestPermissionResponse::new(
+            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                option.option_id.clone(),
+            )),
+        ))
     }
 
     async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
@@ -49,15 +61,26 @@ impl acp::Client for LaunchClient {
 }
 
 fn rules(texts: &[(&str, RuleAction)]) -> Vec<crate::permission::types::PermissionRule> {
-    texts.iter().map(|(t, a)| parse_permission_rule(t, *a).unwrap()).collect()
+    texts
+        .iter()
+        .map(|(t, a)| parse_permission_rule(t, *a).unwrap())
+        .collect()
 }
 
 /// A config as the resolver builds it: owner rules plus the launch rules, the launch rules also in `launch_rules`.
-fn config(owner: &[(&str, RuleAction)], launch: &[(&str, RuleAction)], prompt: PromptPolicy) -> PermissionConfig {
+fn config(
+    owner: &[(&str, RuleAction)],
+    launch: &[(&str, RuleAction)],
+    prompt: PromptPolicy,
+) -> PermissionConfig {
     let launch = rules(launch);
     let mut all = rules(owner);
     all.extend(launch.iter().cloned());
-    PermissionConfig { prompt_policy: prompt, launch_rules: launch, ..PermissionConfig::new(all) }
+    PermissionConfig {
+        prompt_policy: prompt,
+        launch_rules: launch,
+        ..PermissionConfig::new(all)
+    }
 }
 
 fn cwd() -> (tempfile::TempDir, AbsPathBuf) {
@@ -75,7 +98,13 @@ enum Mode {
     Auto,
 }
 
-const MODES: [Mode; 5] = [Mode::Default, Mode::Yolo, Mode::AlwaysAllow, Mode::DontAsk, Mode::Auto];
+const MODES: [Mode; 5] = [
+    Mode::Default,
+    Mode::Yolo,
+    Mode::AlwaysAllow,
+    Mode::DontAsk,
+    Mode::Auto,
+];
 
 /// Run one request under `mode` and return (decision, prompts, event).
 async fn run(
@@ -104,12 +133,19 @@ async fn run(
         Mode::Auto => mgr.set_auto_mode(true),
         _ => {}
     }
-    let resolution = mgr.request(PermissionRequest::new(access, tool_call())).await;
+    let resolution = mgr
+        .request(PermissionRequest::new(access, tool_call()))
+        .await;
     (resolution.decision, client.prompts(), resolution.event)
 }
 
 /// (name, owner rules, launch rules, access).
-type Case = (&'static str, Vec<(&'static str, RuleAction)>, Vec<(String, RuleAction)>, AccessKind);
+type Case = (
+    &'static str,
+    Vec<(&'static str, RuleAction)>,
+    Vec<(String, RuleAction)>,
+    AccessKind,
+);
 
 const ALLOW_ONCE: acp::PermissionOptionKind = acp::PermissionOptionKind::AllowOnce;
 
@@ -125,21 +161,62 @@ async fn launch_ask_reaches_the_client_in_every_mode() {
             let read_rule = format!("Read({}/**)", secret.display());
             let cat = format!("cat {}/id", secret.display());
             let cases: Vec<Case> = vec![
-                ("bash", vec![("Bash", RuleAction::Allow)], vec![("Bash".into(), RuleAction::Ask)], AccessKind::Bash("ls".into())),
-                ("read", vec![("Read", RuleAction::Allow)], vec![("Read".into(), RuleAction::Ask)], AccessKind::Read(Some(cwd.as_path().join("a").to_string_lossy().into_owned()))),
-                ("edit", vec![("Edit", RuleAction::Allow)], vec![("Edit".into(), RuleAction::Ask)], AccessKind::Edit(cwd.as_path().join("a").to_string_lossy().into_owned())),
-                ("webfetch", vec![("WebFetch", RuleAction::Allow)], vec![("WebFetch".into(), RuleAction::Ask)], AccessKind::WebFetch("https://example.com/".into())),
-                ("mcp", vec![("mcp__srv", RuleAction::Allow)], vec![("mcp__srv".into(), RuleAction::Ask)], AccessKind::MCPTool { name: "srv__t".into(), input: serde_json::json!({}) }),
+                (
+                    "bash",
+                    vec![("Bash", RuleAction::Allow)],
+                    vec![("Bash".into(), RuleAction::Ask)],
+                    AccessKind::Bash("ls".into()),
+                ),
+                (
+                    "read",
+                    vec![("Read", RuleAction::Allow)],
+                    vec![("Read".into(), RuleAction::Ask)],
+                    AccessKind::Read(Some(cwd.as_path().join("a").to_string_lossy().into_owned())),
+                ),
+                (
+                    "edit",
+                    vec![("Edit", RuleAction::Allow)],
+                    vec![("Edit".into(), RuleAction::Ask)],
+                    AccessKind::Edit(cwd.as_path().join("a").to_string_lossy().into_owned()),
+                ),
+                (
+                    "webfetch",
+                    vec![("WebFetch", RuleAction::Allow)],
+                    vec![("WebFetch".into(), RuleAction::Ask)],
+                    AccessKind::WebFetch("https://example.com/".into()),
+                ),
+                (
+                    "mcp",
+                    vec![("mcp__srv", RuleAction::Allow)],
+                    vec![("mcp__srv".into(), RuleAction::Ask)],
+                    AccessKind::MCPTool {
+                        name: "srv__t".into(),
+                        input: serde_json::json!({}),
+                    },
+                ),
                 // G r3 #1: a Read path ask catches a shell read of that file.
-                ("shell-file", vec![("Bash", RuleAction::Allow)], vec![(read_rule.clone(), RuleAction::Ask)], AccessKind::Bash(cat.clone())),
+                (
+                    "shell-file",
+                    vec![("Bash", RuleAction::Allow)],
+                    vec![(read_rule.clone(), RuleAction::Ask)],
+                    AccessKind::Bash(cat.clone()),
+                ),
             ];
             for (name, owner, launch, access) in &cases {
-                let launch: Vec<(&str, RuleAction)> = launch.iter().map(|(t, a)| (t.as_str(), *a)).collect();
+                let launch: Vec<(&str, RuleAction)> =
+                    launch.iter().map(|(t, a)| (t.as_str(), *a)).collect();
                 for mode in MODES {
-                    let (decision, prompts, event) = run(&cwd, mode, owner, &launch, access.clone(), ALLOW_ONCE).await;
+                    let (decision, prompts, event) =
+                        run(&cwd, mode, owner, &launch, access.clone(), ALLOW_ONCE).await;
                     assert_eq!(prompts, 1, "{name} {mode:?}: one prompt");
-                    assert!(matches!(decision, Decision::Allow), "{name} {mode:?}: the client allowed: {decision:?}");
-                    assert!(event.is_some_and(|e| e.user_prompted), "{name} {mode:?}: prompted event");
+                    assert!(
+                        matches!(decision, Decision::Allow),
+                        "{name} {mode:?}: the client allowed: {decision:?}"
+                    );
+                    assert!(
+                        event.is_some_and(|e| e.user_prompted),
+                        "{name} {mode:?}: prompted event"
+                    );
                 }
             }
         })
@@ -153,10 +230,20 @@ async fn launch_deny_stays_a_refusal_and_user_config_asks_keep_todays_result() {
         .run_until(async {
             let (_tmp, cwd) = cwd();
             for mode in MODES {
-                let (decision, prompts, _) =
-                    run(&cwd, mode, &[], &[("Bash(rm *)", RuleAction::Deny)], AccessKind::Bash("rm -rf x".into()), ALLOW_ONCE).await;
+                let (decision, prompts, _) = run(
+                    &cwd,
+                    mode,
+                    &[],
+                    &[("Bash(rm *)", RuleAction::Deny)],
+                    AccessKind::Bash("rm -rf x".into()),
+                    ALLOW_ONCE,
+                )
+                .await;
                 assert_eq!(prompts, 0, "{mode:?}");
-                assert!(matches!(decision, Decision::PolicyDeny(_)), "{mode:?}: {decision:?}");
+                assert!(
+                    matches!(decision, Decision::PolicyDeny(_)),
+                    "{mode:?}: {decision:?}"
+                );
             }
             // The same ask from user config (no launch rules): yolo still auto-approves a Read, as today.
             let (decision, prompts, _) = run(
@@ -205,17 +292,30 @@ async fn answering_a_launch_ask_remembers_nothing() {
             let client = LaunchClient::new(acp::PermissionOptionKind::AllowAlways);
             let (mgr, _events) = manager_with_recording_client_remember(
                 &cwd,
-                Some(config(&[], &[("Bash", RuleAction::Ask), ("WebFetch", RuleAction::Ask)], PromptPolicy::Ask)),
+                Some(config(
+                    &[],
+                    &[("Bash", RuleAction::Ask), ("WebFetch", RuleAction::Ask)],
+                    PromptPolicy::Ask,
+                )),
                 client.clone(),
                 ClientType::FuigoTUI,
                 true,
             );
-            for access in [AccessKind::Bash("npm test".into()), AccessKind::WebFetch("https://example.com/".into())] {
+            for access in [
+                AccessKind::Bash("npm test".into()),
+                AccessKind::WebFetch("https://example.com/".into()),
+            ] {
                 for _ in 0..2 {
-                    let resolution = mgr.request(PermissionRequest::new(access.clone(), tool_call())).await;
+                    let resolution = mgr
+                        .request(PermissionRequest::new(access.clone(), tool_call()))
+                        .await;
                     assert!(matches!(resolution.decision, Decision::Allow));
                     let event = resolution.event.unwrap();
-                    assert_eq!(event.prompt_outcome.as_deref(), Some("allow_once"), "{access:?}");
+                    assert_eq!(
+                        event.prompt_outcome.as_deref(),
+                        Some("allow_once"),
+                        "{access:?}"
+                    );
                 }
             }
             // Every request prompted again (nothing was stored), and no prompt offered an always row.
@@ -232,7 +332,8 @@ async fn answering_a_launch_ask_remembers_nothing() {
         .await;
 }
 
-const ALLOW_EDITS_SESSION_OPTION_ID_FOR_TEST: &str = crate::permission::prompter::ALLOW_EDITS_SESSION_OPTION_ID;
+const ALLOW_EDITS_SESSION_OPTION_ID_FOR_TEST: &str =
+    crate::permission::prompter::ALLOW_EDITS_SESSION_OPTION_ID;
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_pinned_policy_file_is_never_editable() {
@@ -246,14 +347,26 @@ async fn a_pinned_policy_file_is_never_editable() {
             let path = file.to_string_lossy().into_owned();
             crate::permission::launch_policy::verify_and_pin(
                 &path,
-                Some(&crate::permission::launch_policy::sha256_hex(text.as_bytes())),
+                Some(&crate::permission::launch_policy::sha256_hex(
+                    text.as_bytes(),
+                )),
             )
             .unwrap();
             for mode in [Mode::Default, Mode::Yolo, Mode::AlwaysAllow] {
-                let (decision, prompts, _) =
-                    run(&cwd, mode, &[("Edit", RuleAction::Allow)], &[], AccessKind::Edit(path.clone()), ALLOW_ONCE).await;
+                let (decision, prompts, _) = run(
+                    &cwd,
+                    mode,
+                    &[("Edit", RuleAction::Allow)],
+                    &[],
+                    AccessKind::Edit(path.clone()),
+                    ALLOW_ONCE,
+                )
+                .await;
                 assert_eq!(prompts, 0, "{mode:?}");
-                assert!(matches!(decision, Decision::PolicyDeny(_)), "{mode:?}: {decision:?}");
+                assert!(
+                    matches!(decision, Decision::PolicyDeny(_)),
+                    "{mode:?}: {decision:?}"
+                );
                 let (decision, _, _) = run(
                     &cwd,
                     mode,
@@ -263,7 +376,10 @@ async fn a_pinned_policy_file_is_never_editable() {
                     ALLOW_ONCE,
                 )
                 .await;
-                assert!(matches!(decision, Decision::PolicyDeny(_)), "redirect {mode:?}: {decision:?}");
+                assert!(
+                    matches!(decision, Decision::PolicyDeny(_)),
+                    "redirect {mode:?}: {decision:?}"
+                );
             }
             #[cfg(unix)]
             {
@@ -278,7 +394,10 @@ async fn a_pinned_policy_file_is_never_editable() {
                     ALLOW_ONCE,
                 )
                 .await;
-                assert!(matches!(decision, Decision::PolicyDeny(_)), "hard link: {decision:?}");
+                assert!(
+                    matches!(decision, Decision::PolicyDeny(_)),
+                    "hard link: {decision:?}"
+                );
             }
         })
         .await;
@@ -291,11 +410,23 @@ async fn no_launch_policy_holds_nothing() {
     local
         .run_until(async {
             let (_tmp, cwd) = cwd();
-            let read = AccessKind::Read(Some(cwd.as_path().join("a").to_string_lossy().into_owned()));
-            let (decision, prompts, event) = run(&cwd, Mode::Yolo, &[("Read", RuleAction::Ask)], &[], read, ALLOW_ONCE).await;
+            let read =
+                AccessKind::Read(Some(cwd.as_path().join("a").to_string_lossy().into_owned()));
+            let (decision, prompts, event) = run(
+                &cwd,
+                Mode::Yolo,
+                &[("Read", RuleAction::Ask)],
+                &[],
+                read,
+                ALLOW_ONCE,
+            )
+            .await;
             assert!(matches!(decision, Decision::Allow));
             assert_eq!(prompts, 0);
-            assert_eq!(event.and_then(|e| e.decision_reason).as_deref(), Some(reasons::YOLO));
+            assert_eq!(
+                event.and_then(|e| e.decision_reason).as_deref(),
+                Some(reasons::YOLO)
+            );
         })
         .await;
 }
@@ -318,12 +449,17 @@ impl acp::Client for ForcedAnswerClient {
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        self.offered
-            .borrow_mut()
-            .push(args.options.iter().map(|o| o.option_id.0.to_string()).collect());
-        Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
-            acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(self.answer)),
-        )))
+        self.offered.borrow_mut().push(
+            args.options
+                .iter()
+                .map(|o| o.option_id.0.to_string())
+                .collect(),
+        );
+        Ok(acp::RequestPermissionResponse::new(
+            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                acp::PermissionOptionId::new(self.answer),
+            )),
+        ))
     }
 
     async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
@@ -454,11 +590,19 @@ async fn launch_ask_beats_a_remembered_grant_and_another_sessions_allow_always()
                 ClientType::FuigoTUI,
                 true,
             );
-            let granted = first.request(PermissionRequest::new(npm(), tool_call())).await;
+            let granted = first
+                .request(PermissionRequest::new(npm(), tool_call()))
+                .await;
             assert!(matches!(granted.decision, Decision::Allow));
-            let remembered = first.request(PermissionRequest::new(npm(), tool_call())).await;
+            let remembered = first
+                .request(PermissionRequest::new(npm(), tool_call()))
+                .await;
             assert!(matches!(remembered.decision, Decision::Allow));
-            assert_eq!(always.prompts(), 1, "the grant answers session one's second call");
+            assert_eq!(
+                always.prompts(),
+                1,
+                "the grant answers session one's second call"
+            );
             // Session two, no launch policy: the grant answers it too (the control).
             let control_client = LaunchClient::new(ALLOW_ONCE);
             let (control, _e2) = manager_with_recording_client_remember(
@@ -468,9 +612,15 @@ async fn launch_ask_beats_a_remembered_grant_and_another_sessions_allow_always()
                 ClientType::FuigoTUI,
                 true,
             );
-            let resolution = control.request(PermissionRequest::new(npm(), tool_call())).await;
+            let resolution = control
+                .request(PermissionRequest::new(npm(), tool_call()))
+                .await;
             assert!(matches!(resolution.decision, Decision::Allow));
-            assert_eq!(control_client.prompts(), 0, "another session's grant applies without a launch policy");
+            assert_eq!(
+                control_client.prompts(),
+                0,
+                "another session's grant applies without a launch policy"
+            );
             // Session three, launch ask: the client is asked in every mode, and the answer is a once-answer.
             for mode in MODES {
                 let (decision, prompts, event) = run(
@@ -483,10 +633,17 @@ async fn launch_ask_beats_a_remembered_grant_and_another_sessions_allow_always()
                 )
                 .await;
                 assert_eq!(prompts, 1, "{mode:?}");
-                assert!(matches!(decision, Decision::Allow), "{mode:?}: {decision:?}");
+                assert!(
+                    matches!(decision, Decision::Allow),
+                    "{mode:?}: {decision:?}"
+                );
                 let event = event.expect("event");
                 assert!(event.user_prompted, "{mode:?}");
-                assert_eq!(event.prompt_outcome.as_deref(), Some("allow_once"), "{mode:?}");
+                assert_eq!(
+                    event.prompt_outcome.as_deref(),
+                    Some("allow_once"),
+                    "{mode:?}"
+                );
             }
         })
         .await;
@@ -501,7 +658,8 @@ async fn launch_ask_beats_a_hook_allow_and_merges_with_a_hook_ask() {
         .run_until(async {
             let (_tmp, cwd) = cwd();
             for mode in MODES {
-                let after_hook_allow = PermissionRequest::new(AccessKind::Bash("npm test".into()), tool_call());
+                let after_hook_allow =
+                    PermissionRequest::new(AccessKind::Bash("npm test".into()), tool_call());
                 let (decision, prompts, _) = run_request(
                     &cwd,
                     mode,
@@ -510,9 +668,16 @@ async fn launch_ask_beats_a_hook_allow_and_merges_with_a_hook_ask() {
                     after_hook_allow,
                 )
                 .await;
-                assert_eq!((prompts, matches!(decision, Decision::Allow)), (1, true), "hook allow {mode:?}");
+                assert_eq!(
+                    (prompts, matches!(decision, Decision::Allow)),
+                    (1, true),
+                    "hook allow {mode:?}"
+                );
                 let hook_ask = PermissionRequest {
-                    hook_ask: Some(crate::permission::types::HookAsk { hook_name: "h".into(), reason: None }),
+                    hook_ask: Some(crate::permission::types::HookAsk {
+                        hook_name: "h".into(),
+                        reason: None,
+                    }),
                     ..PermissionRequest::new(AccessKind::Bash("npm test".into()), tool_call())
                 };
                 let (decision, prompts, _) = run_request(
@@ -523,7 +688,11 @@ async fn launch_ask_beats_a_hook_allow_and_merges_with_a_hook_ask() {
                     hook_ask,
                 )
                 .await;
-                assert_eq!((prompts, matches!(decision, Decision::Allow)), (1, true), "hook ask {mode:?}");
+                assert_eq!(
+                    (prompts, matches!(decision, Decision::Allow)),
+                    (1, true),
+                    "hook ask {mode:?}"
+                );
             }
         })
         .await;
@@ -543,12 +712,21 @@ fn event_with(reason: &str, user_prompted: bool) -> PermissionEvent {
 #[test]
 fn the_clamp_replaces_every_allow_the_client_did_not_give() {
     for reason in reasons::ALL {
-        let unprompted = PermissionResolution { decision: Decision::Allow, event: Some(event_with(reason, false)) };
+        let unprompted = PermissionResolution {
+            decision: Decision::Allow,
+            event: Some(event_with(reason, false)),
+        };
         assert!(launch_clamp_applies(&unprompted), "{reason}");
-        let answered = PermissionResolution { decision: Decision::Allow, event: Some(event_with(reason, true)) };
+        let answered = PermissionResolution {
+            decision: Decision::Allow,
+            event: Some(event_with(reason, true)),
+        };
         assert!(!launch_clamp_applies(&answered), "{reason}");
     }
-    assert!(launch_clamp_applies(&PermissionResolution { decision: Decision::Allow, event: None }));
+    assert!(launch_clamp_applies(&PermissionResolution {
+        decision: Decision::Allow,
+        event: None
+    }));
     let dont_ask = PermissionResolution {
         decision: Decision::PolicyDeny("x".into()),
         event: Some(event_with(reasons::PROMPT_DENY, false)),
@@ -600,24 +778,48 @@ async fn an_unoffered_always_answer_remembers_nothing() {
     local
         .run_until(async {
             let (_tmp, cwd) = cwd();
-            for answer in ["allow-always", "allow-always-command", ALLOW_EDITS_SESSION_OPTION_ID_FOR_TEST, "enable-always-approve"] {
-                let client = ForcedAnswerClient { answer, offered: Rc::default() };
+            for answer in [
+                "allow-always",
+                "allow-always-command",
+                ALLOW_EDITS_SESSION_OPTION_ID_FOR_TEST,
+                "enable-always-approve",
+            ] {
+                let client = ForcedAnswerClient {
+                    answer,
+                    offered: Rc::default(),
+                };
                 let (mgr, _events) = manager_with_recording_client_remember(
                     &cwd,
-                    Some(config(&[("Bash", RuleAction::Allow)], &[("Bash", RuleAction::Ask)], PromptPolicy::Ask)),
+                    Some(config(
+                        &[("Bash", RuleAction::Allow)],
+                        &[("Bash", RuleAction::Ask)],
+                        PromptPolicy::Ask,
+                    )),
                     client.clone(),
                     ClientType::FuigoTUI,
                     true,
                 );
                 for _ in 0..2 {
-                    let resolution =
-                        mgr.request(PermissionRequest::new(AccessKind::Bash("npm test".into()), tool_call())).await;
+                    let resolution = mgr
+                        .request(PermissionRequest::new(
+                            AccessKind::Bash("npm test".into()),
+                            tool_call(),
+                        ))
+                        .await;
                     let event = resolution.event.as_ref().expect("an event");
                     if matches!(resolution.decision, Decision::Allow) {
-                        assert_eq!(event.prompt_outcome.as_deref(), Some("allow_once"), "{answer}");
+                        assert_eq!(
+                            event.prompt_outcome.as_deref(),
+                            Some("allow_once"),
+                            "{answer}"
+                        );
                     }
                 }
-                assert_eq!(client.offered.borrow().len(), 2, "{answer}: every call prompted");
+                assert_eq!(
+                    client.offered.borrow().len(),
+                    2,
+                    "{answer}: every call prompted"
+                );
             }
         })
         .await;
@@ -641,11 +843,23 @@ async fn an_unmatched_command_keeps_its_answer_under_a_launch_pattern_ask() {
                     ALLOW_ONCE,
                 )
                 .await;
-                assert_eq!((prompts, matches!(decision, Decision::Allow)), (0, true), "ls {mode:?}");
+                assert_eq!(
+                    (prompts, matches!(decision, Decision::Allow)),
+                    (0, true),
+                    "ls {mode:?}"
+                );
             }
             let script = r#"LOG=/x; ls "$LOG""#;
             for mode in [Mode::Default, Mode::Auto] {
-                let unset = run(&cwd, mode, &[("Bash", RuleAction::Allow)], &[], AccessKind::Bash(script.into()), ALLOW_ONCE).await;
+                let unset = run(
+                    &cwd,
+                    mode,
+                    &[("Bash", RuleAction::Allow)],
+                    &[],
+                    AccessKind::Bash(script.into()),
+                    ALLOW_ONCE,
+                )
+                .await;
                 let governed = run(
                     &cwd,
                     mode,
@@ -656,7 +870,11 @@ async fn an_unmatched_command_keeps_its_answer_under_a_launch_pattern_ask() {
                 )
                 .await;
                 assert_eq!(governed.1, unset.1, "{mode:?}: prompts");
-                assert_eq!(format!("{:?}", governed.0), format!("{:?}", unset.0), "{mode:?}: decision");
+                assert_eq!(
+                    format!("{:?}", governed.0),
+                    format!("{:?}", unset.0),
+                    "{mode:?}: decision"
+                );
             }
         })
         .await;

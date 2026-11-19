@@ -31,7 +31,10 @@ pub(crate) fn extract_human_rules(system: &str) -> Option<&str> {
 /// it carries THIS installation's nonce (`memory_context_nonce`, never read from the text) and the text after some
 /// point is exactly one complete such block. The head is trimmed of trailing newlines either way.
 pub(crate) fn split_memory_tail(system: &str) -> (&str, Option<&str>) {
-    split_memory_tail_with(system, crate::session::helpers::memory_context::memory_context_nonce())
+    split_memory_tail_with(
+        system,
+        crate::session::helpers::memory_context::memory_context_nonce(),
+    )
 }
 
 fn split_memory_tail_with<'a>(system: &'a str, nonce: &str) -> (&'a str, Option<&'a str>) {
@@ -165,7 +168,10 @@ mod tests {
         let block = memory_block(nonce(), "remembered fact");
         let stored = with_memory(&head, &block);
         assert_eq!(extract_human_rules(&stored), Some("session rules"));
-        assert_eq!(split_memory_tail(&stored), (head.as_str(), Some(block.as_str())));
+        assert_eq!(
+            split_memory_tail(&stored),
+            (head.as_str(), Some(block.as_str()))
+        );
         // A later turn's invalidation drops the stale block and leaves the separator.
         let dropped = format!("{head}\n\n");
         assert_eq!(extract_human_rules(&dropped), Some("session rules"));
@@ -184,12 +190,18 @@ mod tests {
         let followed = format!("{}\n\ntrailing", with_memory(&head, &block));
         assert_eq!(split_memory_tail(&followed).1, None);
         assert_eq!(extract_human_rules(&followed), None);
-        let unclosed = format!("{head}\n\n{}", fuigo_chat_state::memory_context_open_tag(nonce()));
+        let unclosed = format!(
+            "{head}\n\n{}",
+            fuigo_chat_state::memory_context_open_tag(nonce())
+        );
         assert_eq!(split_memory_tail(&unclosed).1, None);
         let mut rules_with_block = "base".to_owned();
         append_human_rules(&mut rules_with_block, &format!("r\n{block}"));
         assert_eq!(split_memory_tail(&rules_with_block).1, None);
-        assert_eq!(extract_human_rules(&rules_with_block), Some(format!("r\n{block}").as_str()));
+        assert_eq!(
+            extract_human_rules(&rules_with_block),
+            Some(format!("r\n{block}").as_str())
+        );
     }
 
     #[test]
@@ -230,9 +242,15 @@ mod tests {
         assert_eq!(keep_memory_tail("new".to_owned(), &foreign), "new");
         let own = memory_block(nonce(), "fact");
         let both = format!("{foreign}\n\n{own}");
-        assert_eq!(split_memory_tail(&both), (foreign.as_str(), Some(own.as_str())));
+        assert_eq!(
+            split_memory_tail(&both),
+            (foreign.as_str(), Some(own.as_str()))
+        );
         // The expected nonce is a parameter, never read from the text.
-        assert_eq!(split_memory_tail_with(&foreign, "x").1, Some(foreign.as_str()));
+        assert_eq!(
+            split_memory_tail_with(&foreign, "x").1,
+            Some(foreign.as_str())
+        );
     }
 
     /// A template that carries the session-rules marker itself is not taken for `_meta.rules`.

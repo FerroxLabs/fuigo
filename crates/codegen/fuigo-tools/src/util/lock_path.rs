@@ -121,7 +121,10 @@ pub(crate) async fn lock_edit_paths<P: AsRef<Path>>(
     guards
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,15 +201,20 @@ mod tests {
         }
     }
 
-
     /// Audit S4-F9: two holders of one path (however spelled) run one after the other; other paths do not wait.
     #[tokio::test]
     async fn edit_locks_serialise_one_path_and_not_others() {
         let cwd = Path::new("/cwd");
         let first = lock_edit_paths(&["a.txt", "b.txt"], cwd).await;
-        let waiter = tokio::spawn(async move { lock_edit_paths(&["./a.txt"], Path::new("/cwd")).await.len() });
+        let waiter =
+            tokio::spawn(
+                async move { lock_edit_paths(&["./a.txt"], Path::new("/cwd")).await.len() },
+            );
         tokio::task::yield_now().await;
-        assert!(lock_edit_paths(&["c.txt"], cwd).await.len() == 1, "another path is free");
+        assert!(
+            lock_edit_paths(&["c.txt"], cwd).await.len() == 1,
+            "another path is free"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!waiter.is_finished(), "the same path must wait");
         drop(first);

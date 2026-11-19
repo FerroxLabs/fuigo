@@ -50,8 +50,8 @@ use fuigo_test_support::scripted::ScriptedResponse;
 use fuigo_test_support::sse::chat_completions_reasoning_then_tool_call_events;
 use fuigo_test_support::{
     AgentSpawnSpec, FuigoStdioClient, InferenceEndpoint, InferenceRequestMatcher,
-    MockInferenceServer, MockModelEntry, RawReply, RawStdioClient, TestProcess, TestProcessConfig, TestSandbox,
-    TestStdin, fuigo_binary, scaled,
+    MockInferenceServer, MockModelEntry, RawReply, RawStdioClient, TestProcess, TestProcessConfig,
+    TestSandbox, TestStdin, fuigo_binary, scaled,
 };
 #[cfg(unix)]
 use fuigo_test_support::{PidLiveness, pid_liveness, sigkill};
@@ -156,7 +156,8 @@ fn assert_hermetic(sandbox: &TestSandbox, child_pid: Option<u32>) {
             .split(|b| *b == 0)
             .filter_map(|kv| {
                 let kv = String::from_utf8_lossy(kv);
-                kv.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned()))
+                kv.split_once('=')
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
             })
             .collect()
     };
@@ -166,12 +167,24 @@ fn assert_hermetic(sandbox: &TestSandbox, child_pid: Option<u32>) {
         sandbox
             .env()
             .into_iter()
-            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
             .collect()
     };
     for (key, path) in expected {
-        let got = observed.iter().find(|(k, _)| k == key).map(|(_, v)| Path::new(v.as_str()));
-        assert_eq!(got, Some(path), "the child's own {key} is not the sandbox's");
+        let got = observed
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| Path::new(v.as_str()));
+        assert_eq!(
+            got,
+            Some(path),
+            "the child's own {key} is not the sandbox's"
+        );
     }
     assert!(
         sandbox.fuigo_home().join("agent_id").is_file(),
@@ -236,7 +249,10 @@ impl Murage {
         self.next_id += 1;
         let id = format!("murage-{}", self.next_id);
         let reply = self.client.request(&id, method, params, RPC, answer).await;
-        assert_eq!(reply["jsonrpc"], "2.0", "{method}: not a JSON-RPC 2.0 reply: {reply}");
+        assert_eq!(
+            reply["jsonrpc"], "2.0",
+            "{method}: not a JSON-RPC 2.0 reply: {reply}"
+        );
         reply
     }
 
@@ -260,12 +276,20 @@ impl Murage {
         let init = self.initialize().await;
         assert!(init.get("result").is_some(), "initialize failed: {init}");
         let auth = self
-            .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+            .call(
+                "authenticate",
+                json!({ "methodId": "fuigo.api_key" }),
+                refuse,
+            )
             .await;
         assert_eq!(auth.get("result"), Some(&json!({})), "authenticate: {auth}");
         let ws = self.workspace.clone();
         let new = self
-            .call("session/new", json!({ "cwd": ws, "mcpServers": mcp_servers }), answer)
+            .call(
+                "session/new",
+                json!({ "cwd": ws, "mcpServers": mcp_servers }),
+                answer,
+            )
             .await;
         new["result"]["sessionId"]
             .as_str()
@@ -308,7 +332,9 @@ impl Murage {
         if let Some(found) = self.messages().into_iter().find(|m| matches(m)) {
             return Some(found);
         }
-        self.client.wait_for_message(what, timeout, &matches, answer).await
+        self.client
+            .wait_for_message(what, timeout, &matches, answer)
+            .await
     }
 
     fn methods_seen(&self) -> Vec<String> {
@@ -349,7 +375,10 @@ impl Murage {
 }
 
 /// Plant a trust-gated project config: a project `.mcp.json` declaring one stdio server.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn plant_project_mcp(sandbox: &TestSandbox) {
     std::fs::write(
         sandbox.workspace().join(".mcp.json"),
@@ -397,7 +426,9 @@ async fn murage_exact_argv_is_accepted() {
                 let response = client
                     .prompt_with_timeout(&session, "hello murage")
                     .await
-                    .unwrap_or_else(|e| panic!("{argv:?}: prompt failed: {e:?}\n{}", client.stderr()));
+                    .unwrap_or_else(|e| {
+                        panic!("{argv:?}: prompt failed: {e:?}\n{}", client.stderr())
+                    });
                 assert_eq!(response.stop_reason, acp::StopReason::EndTurn, "{argv:?}");
                 assert!(
                     client.captured_text().contains("hello murage"),
@@ -466,7 +497,8 @@ fn run_cli(args: &[&str]) -> CliRun {
 fn clap_rejected(run: &CliRun) -> bool {
     run.code == Some(2)
         && run.stderr.contains("error:")
-        && (run.stderr.contains("Usage:") || run.stderr.contains("For more information, try '--help'"))
+        && (run.stderr.contains("Usage:")
+            || run.stderr.contains("For more information, try '--help'"))
 }
 
 /// The argv parses AND the agent it starts runs cleanly: with stdin closed a healthy `agent stdio` ends on
@@ -510,42 +542,108 @@ fn assert_rejected_naming(args: &[&str], must_mention: &[&str]) {
 fn murage_argv_flags_still_exist_with_their_spellings() {
     // The full argv, as Murage builds it, parses (both modes; with and without --trust).
     assert_accepted(&[
-        "--permission-mode", "default", "--no-memory", "agent", "--no-leader", "-m", MODEL_B,
-        "--reasoning-effort", "high", "stdio",
+        "--permission-mode",
+        "default",
+        "--no-memory",
+        "agent",
+        "--no-leader",
+        "-m",
+        MODEL_B,
+        "--reasoning-effort",
+        "high",
+        "stdio",
     ]);
     assert_accepted(&[
-        "--permission-mode", "bypassPermissions", "--trust", "--no-memory", "agent", "--no-leader",
-        "-m", MODEL_B, "--reasoning-effort", "high", "stdio",
+        "--permission-mode",
+        "bypassPermissions",
+        "--trust",
+        "--no-memory",
+        "agent",
+        "--no-leader",
+        "-m",
+        MODEL_B,
+        "--reasoning-effort",
+        "high",
+        "stdio",
     ]);
     // Aliases Murage or its users may rely on.
-    assert_accepted(&["--trust-folder", "--no-memory", "agent", "--no-leader", "stdio"]);
-    assert_accepted(&["--no-memory", "agent", "--no-leader", "--model", MODEL_B, "--effort", "high", "stdio"]);
+    assert_accepted(&[
+        "--trust-folder",
+        "--no-memory",
+        "agent",
+        "--no-leader",
+        "stdio",
+    ]);
+    assert_accepted(&[
+        "--no-memory",
+        "agent",
+        "--no-leader",
+        "--model",
+        MODEL_B,
+        "--effort",
+        "high",
+        "stdio",
+    ]);
 
     // Positive control for this probe itself: a misspelled flag in Murage's position is rejected, so
     // the accepts above mean the spellings exist rather than that anything parses.
-    assert_rejected_naming(&["--no-memroy", "agent", "--no-leader", "stdio"], &["--no-memroy"]);
-    assert_rejected_naming(&["--no-memory", "agent", "--no-leaderr", "stdio"], &["--no-leaderr"]);
+    assert_rejected_naming(
+        &["--no-memroy", "agent", "--no-leader", "stdio"],
+        &["--no-memroy"],
+    );
+    assert_rejected_naming(
+        &["--no-memory", "agent", "--no-leaderr", "stdio"],
+        &["--no-leaderr"],
+    );
     // `--permission-mode` validates its value against a fixed set that still contains both Murage values.
     assert_rejected_naming(
-        &["--permission-mode", "not-a-mode", "agent", "--no-leader", "stdio"],
+        &[
+            "--permission-mode",
+            "not-a-mode",
+            "agent",
+            "--no-leader",
+            "stdio",
+        ],
         &["--permission-mode", "default", "bypassPermissions"],
     );
     // `--no-memory` is the real flag: it conflicts with its opposite.
     assert_rejected_naming(
-        &["--no-memory", "--experimental-memory", "agent", "--no-leader", "stdio"],
+        &[
+            "--no-memory",
+            "--experimental-memory",
+            "agent",
+            "--no-leader",
+            "stdio",
+        ],
         &["--no-memory"],
     );
     // `--no-leader` is the real flag: it conflicts with `--leader`.
-    assert_rejected_naming(&["agent", "--leader", "--no-leader", "stdio"], &["--no-leader"]);
+    assert_rejected_naming(
+        &["agent", "--leader", "--no-leader", "stdio"],
+        &["--no-leader"],
+    );
     // `-m` and `--reasoning-effort` take a value: without one they are a parse error.
     assert_rejected_naming(&["agent", "--no-leader", "-m"], &["--model"]);
-    assert_rejected_naming(&["agent", "--no-leader", "--reasoning-effort"], &["--reasoning-effort"]);
+    assert_rejected_naming(
+        &["agent", "--no-leader", "--reasoning-effort"],
+        &["--reasoning-effort"],
+    );
 
     // The `agent` help still documents the agent half of the argv and the `stdio` mode.
     let help = run_cli(&["agent", "--help"]);
     assert_eq!(help.code, Some(0), "agent --help: {}", help.stderr);
-    for needle in ["--no-leader", "-m, --model", "--reasoning-effort", "effort", "stdio"] {
-        assert!(help.stdout.contains(needle), "`fuigo agent --help` lost {needle:?}:\n{}", help.stdout);
+    for needle in [
+        "--no-leader",
+        "-m, --model",
+        "--reasoning-effort",
+        "effort",
+        "stdio",
+    ] {
+        assert!(
+            help.stdout.contains(needle),
+            "`fuigo agent --help` lost {needle:?}:\n{}",
+            help.stdout
+        );
     }
 }
 
@@ -571,7 +669,10 @@ fn script_terminal_call(
 /// E.1 semantics of the security-critical `--permission-mode`: under `default` a side-effecting tool call
 /// asks the client (`session/request_permission`) and a rejection stops it; under `bypassPermissions` the
 /// same call runs with no question asked.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn permission_mode_flag_governs_tool_approval() {
     for (global, expect_question) in [(GLOBAL_DEFAULT, true), (GLOBAL_BYPASS, false)] {
@@ -600,10 +701,16 @@ async fn permission_mode_flag_governs_tool_approval() {
                     .as_array()
                     .and_then(|o| o.iter().find(|o| o["kind"] == "reject_once"))
                     .unwrap_or_else(|| panic!("no reject_once option offered: {req}"));
-                Some(json!({ "outcome": { "outcome": "selected", "optionId": reject["optionId"] } }))
+                Some(
+                    json!({ "outcome": { "outcome": "selected", "optionId": reject["optionId"] } }),
+                )
             })
             .await;
-        assert!(reply.get("result").is_some(), "{global:?}: prompt failed: {reply}\n{}", m.stderr());
+        assert!(
+            reply.get("result").is_some(),
+            "{global:?}: prompt failed: {reply}\n{}",
+            m.stderr()
+        );
         scripted.assert_satisfied();
         let deleted = !m.workspace.join("p00-victim").exists();
         if expect_question {
@@ -618,7 +725,11 @@ async fn permission_mode_flag_governs_tool_approval() {
                 questions.is_empty(),
                 "{global:?}: bypassPermissions must not ask the client; asked {questions:?}"
             );
-            assert!(deleted, "{global:?}: the command did not run\n{}", m.stderr());
+            assert!(
+                deleted,
+                "{global:?}: the command did not run\n{}",
+                m.stderr()
+            );
         }
         assert_hermetic(m.sandbox(), m.child_pid());
     }
@@ -630,8 +741,16 @@ async fn permission_mode_flag_governs_tool_approval() {
 async fn model_and_reasoning_effort_flags_reach_inference() {
     let cases: [(&[&str], &str, Option<&str>); 3] = [
         (&["--no-leader", "-m", MODEL_B], MODEL_B, None),
-        (&["--no-leader", "-m", MODEL_A, "--reasoning-effort", "high"], MODEL_A, Some("high")),
-        (&["--no-leader", "-m", MODEL_A, "--effort", "high"], MODEL_A, Some("high")),
+        (
+            &["--no-leader", "-m", MODEL_A, "--reasoning-effort", "high"],
+            MODEL_A,
+            Some("high"),
+        ),
+        (
+            &["--no-leader", "-m", MODEL_A, "--effort", "high"],
+            MODEL_A,
+            Some("high"),
+        ),
     ];
     for (agent_args, model, effort) in cases {
         let mut m = Murage::spawn(
@@ -649,13 +768,24 @@ async fn model_and_reasoning_effort_flags_reach_inference() {
             "{agent_args:?}: -m must select the model reported at initialize"
         );
         let _ = m
-            .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+            .call(
+                "authenticate",
+                json!({ "methodId": "fuigo.api_key" }),
+                refuse,
+            )
             .await;
         let ws = m.workspace.clone();
         let new = m
-            .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+            .call(
+                "session/new",
+                json!({ "cwd": ws, "mcpServers": [] }),
+                refuse,
+            )
             .await;
-        let session = new["result"]["sessionId"].as_str().expect("sessionId").to_owned();
+        let session = new["result"]["sessionId"]
+            .as_str()
+            .expect("sessionId")
+            .to_owned();
         let reply = m.prompt(&session, "hello murage", refuse).await;
         assert!(reply.get("result").is_some(), "{agent_args:?}: {reply}");
         let requests = m.chat_requests();
@@ -665,14 +795,20 @@ async fn model_and_reasoning_effort_flags_reach_inference() {
             .unwrap_or_else(|| panic!("{agent_args:?}: no chat request reached the mock"));
         assert_eq!(body["model"], model, "{agent_args:?}: model on the wire");
         if let Some(effort) = effort {
-            assert_eq!(body["reasoning_effort"], effort, "{agent_args:?}: effort on the wire");
+            assert_eq!(
+                body["reasoning_effort"], effort,
+                "{agent_args:?}: effort on the wire"
+            );
         }
     }
 }
 
 /// E.1 semantics of `--no-leader`: with `[cli] use_leader = true` in the user config, `agent stdio` would
 /// attach to (or start) a shared leader. Murage's `--no-leader` must keep the process standalone.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn no_leader_flag_keeps_the_agent_standalone_when_config_enables_leader() {
     let mut m = Murage::spawn(
@@ -682,8 +818,11 @@ async fn no_leader_flag_keeps_the_agent_standalone_when_config_enables_leader() 
             ..AgentSpawnSpec::default()
         },
         |sandbox| {
-            std::fs::write(sandbox.fuigo_home().join("config.toml"), "[cli]\nuse_leader = true\n")
-                .expect("write config.toml");
+            std::fs::write(
+                sandbox.fuigo_home().join("config.toml"),
+                "[cli]\nuse_leader = true\n",
+            )
+            .expect("write config.toml");
         },
     )
     .await;
@@ -735,7 +874,11 @@ impl LeaderReaper {
             let want = format!("FUIGO_HOME={}", self.fuigo_home.display());
             let me = std::process::id();
             for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-                let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|n| n.parse::<u32>().ok())
+                else {
                     continue;
                 };
                 if pid == me || pids.contains(&pid) {
@@ -808,7 +951,9 @@ impl Drop for LeaderReaper {
                     let _ = sigkill(*pid, false);
                 }
                 if std::time::Instant::now() >= deadline {
-                    eprintln!("[p00] WARNING: process(es) {alive:?} of this sandbox still alive 10s after SIGKILL");
+                    eprintln!(
+                        "[p00] WARNING: process(es) {alive:?} of this sandbox still alive 10s after SIGKILL"
+                    );
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(20));
@@ -870,18 +1015,35 @@ async fn injected_fuigo_api_key_authenticates() {
     let init = m.initialize().await;
     let methods = &init["result"]["authMethods"];
     assert!(
-        methods.as_array().is_some_and(|a| a.iter().any(|x| x["id"] == "fuigo.api_key")),
+        methods
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x["id"] == "fuigo.api_key")),
         "fuigo.api_key not advertised with an injected key: {methods}"
     );
     let auth = m
-        .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+        .call(
+            "authenticate",
+            json!({ "methodId": "fuigo.api_key" }),
+            refuse,
+        )
         .await;
-    assert_eq!(auth.get("result"), Some(&json!({})), "authenticate must return {{}}: {auth}");
+    assert_eq!(
+        auth.get("result"),
+        Some(&json!({})),
+        "authenticate must return {{}}: {auth}"
+    );
     let ws = m.workspace.clone();
     let new = m
-        .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+        .call(
+            "session/new",
+            json!({ "cwd": ws, "mcpServers": [] }),
+            refuse,
+        )
         .await;
-    let session = new["result"]["sessionId"].as_str().expect("sessionId").to_owned();
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned();
     let reply = m.prompt(&session, "hello murage", refuse).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
     let chats = m.chat_requests();
@@ -921,7 +1083,10 @@ async fn initialize_advertises_fuigo_api_key_and_names_it_default() {
         result["_meta"]["defaultAuthMethodId"], "fuigo.api_key",
         "_meta.defaultAuthMethodId must name the method that honours the injected key"
     );
-    assert!(result.get("meta").is_none(), "`meta` (no underscore) on the wire: {result}");
+    assert!(
+        result.get("meta").is_none(),
+        "`meta` (no underscore) on the wire: {result}"
+    );
 }
 
 /// E.3: with no credential reachable at all, `authMethods` is empty and both `session/new` (Murage's
@@ -948,7 +1113,10 @@ async fn no_credential_yields_empty_auth_methods_and_minus_32000() {
     .await;
     // Every credential source is absent: no env key (either name), no auth.json / cached token and no
     // config.toml api_key (FUIGO_HOME starts empty), and the mock catalog carries no per-model keys.
-    assert!(fuigo_home_was_empty, "precondition: the sandbox FUIGO_HOME starts empty");
+    assert!(
+        fuigo_home_was_empty,
+        "precondition: the sandbox FUIGO_HOME starts empty"
+    );
     for key in ["FUIGO_API_KEY", "FUIGO_CODE_API_KEY"] {
         assert!(
             !m.sandbox().env().iter().any(|(k, _)| k == key),
@@ -957,27 +1125,55 @@ async fn no_credential_yields_empty_auth_methods_and_minus_32000() {
     }
 
     let init = m.initialize().await;
-    assert_eq!(init["result"]["authMethods"], json!([]), "authMethods must be empty: {init}");
-    assert_eq!(init["result"]["_meta"]["defaultAuthMethodId"], Value::Null, "{init}");
+    assert_eq!(
+        init["result"]["authMethods"],
+        json!([]),
+        "authMethods must be empty: {init}"
+    );
+    assert_eq!(
+        init["result"]["_meta"]["defaultAuthMethodId"],
+        Value::Null,
+        "{init}"
+    );
 
     let ws = m.workspace.clone();
     let new = m
-        .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+        .call(
+            "session/new",
+            json!({ "cwd": ws, "mcpServers": [] }),
+            refuse,
+        )
         .await;
-    assert_eq!(new["error"]["code"], -32000, "session/new without a credential: {new}");
+    assert_eq!(
+        new["error"]["code"], -32000,
+        "session/new without a credential: {new}"
+    );
     assert_eq!(new["error"]["message"], "Authentication required", "{new}");
 
     let auth = m
-        .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+        .call(
+            "authenticate",
+            json!({ "methodId": "fuigo.api_key" }),
+            refuse,
+        )
         .await;
-    assert_eq!(auth["error"]["code"], -32000, "authenticate without a credential: {auth}");
-    assert_eq!(auth["error"]["message"], "Authentication required", "{auth}");
+    assert_eq!(
+        auth["error"]["code"], -32000,
+        "authenticate without a credential: {auth}"
+    );
+    assert_eq!(
+        auth["error"]["message"], "Authentication required",
+        "{auth}"
+    );
 
     assert!(
         !m.sandbox().fuigo_home().join("auth.json").exists(),
         "a credential file appeared during the run"
     );
-    assert!(m.chat_requests().is_empty(), "inference ran without a credential");
+    assert!(
+        m.chat_requests().is_empty(),
+        "inference ran without a credential"
+    );
     assert_hermetic(m.sandbox(), m.child_pid());
 }
 
@@ -994,7 +1190,10 @@ async fn protocol_version_one_is_accepted() {
     )
     .await;
     let init = m.initialize().await;
-    assert!(init.get("error").is_none(), "initialize rejected protocolVersion 1: {init}");
+    assert!(
+        init.get("error").is_none(),
+        "initialize rejected protocolVersion 1: {init}"
+    );
     assert_eq!(init["result"]["protocolVersion"], 1, "{init}");
 }
 
@@ -1043,7 +1242,14 @@ async fn folder_trust_round_trip_without_trust_flag() {
     let params = &request["params"];
     assert_eq!(
         object_keys(params),
-        sorted(&["sessionId", "cwd", "workspace", "configKinds", "scope", "reason"]),
+        sorted(&[
+            "sessionId",
+            "cwd",
+            "workspace",
+            "configKinds",
+            "scope",
+            "reason"
+        ]),
         "folder trust params: {params}"
     );
     assert_eq!(params["scope"], "configAndCommands", "{params}");
@@ -1051,7 +1257,10 @@ async fn folder_trust_round_trip_without_trust_flag() {
     assert_eq!(params["sessionId"], session.as_str());
     let ws = m.workspace.to_string_lossy().into_owned();
     let ws_canon = dunce_canon(&m.workspace);
-    assert!(params["cwd"] == ws.as_str() || params["cwd"] == ws_canon.as_str(), "cwd: {params}");
+    assert!(
+        params["cwd"] == ws.as_str() || params["cwd"] == ws_canon.as_str(),
+        "cwd: {params}"
+    );
     assert!(
         params["workspace"] == ws.as_str() || params["workspace"] == ws_canon.as_str(),
         "workspace: {params}"
@@ -1065,21 +1274,37 @@ async fn folder_trust_round_trip_without_trust_flag() {
     m.seen_or_wait(
         "mcp ready while the trust decision is pending",
         RPC,
-        move |x| method_of(x) == Some("_fuigo/mcp_initialized") && x["params"]["sessionId"] == sid.as_str(),
+        move |x| {
+            method_of(x) == Some("_fuigo/mcp_initialized")
+                && x["params"]["sessionId"] == sid.as_str()
+        },
         &hold,
     )
     .await
-    .unwrap_or_else(|| panic!("no `_fuigo/mcp_initialized` while the decision was pending; methods seen: {:?}", m.methods_seen()));
+    .unwrap_or_else(|| {
+        panic!(
+            "no `_fuigo/mcp_initialized` while the decision was pending; methods seen: {:?}",
+            m.methods_seen()
+        )
+    });
     let premature = m
         .client
-        .wait_for_message("premature apply", Duration::from_secs(2), lists_project_server, &hold)
+        .wait_for_message(
+            "premature apply",
+            Duration::from_secs(2),
+            lists_project_server,
+            &hold,
+        )
         .await;
     assert!(
         premature.is_none() && !m.messages().iter().any(lists_project_server),
         "the project config was applied while the trust decision was still pending"
     );
     assert!(
-        !m.sandbox().fuigo_home().join("trusted_folders.toml").exists(),
+        !m.sandbox()
+            .fuigo_home()
+            .join("trusted_folders.toml")
+            .exists(),
         "a trust grant was persisted before the client decided"
     );
     assert_eq!(
@@ -1090,7 +1315,11 @@ async fn folder_trust_round_trip_without_trust_flag() {
 
     // Murage's grant. Only now may the project config apply.
     m.client
-        .respond(&request["id"], json!({ "outcome": "trust", "scope": "configAndCommands" }), RPC)
+        .respond(
+            &request["id"],
+            json!({ "outcome": "trust", "scope": "configAndCommands" }),
+            RPC,
+        )
         .await;
     let applied = m
         .seen_or_wait("project config applied", RPC, lists_project_server, &hold)
@@ -1130,7 +1359,9 @@ async fn v1_only_client_is_never_asked_and_commands_ask() {
         plant_project_mcp,
     )
     .await;
-    m.init_params = murage_initialize_params_with(serde_json::from_str(MURAGE_V1_FOLDER_TRUST).expect("v1 capability"));
+    m.init_params = murage_initialize_params_with(
+        serde_json::from_str(MURAGE_V1_FOLDER_TRUST).expect("v1 capability"),
+    );
     let scripted = script_terminal_call(&m.server, "call_v1_ls", "ls");
     let mut trust_requests = Vec::new();
     let mut questions = Vec::new();
@@ -1143,7 +1374,9 @@ async fn v1_only_client_is_never_asked_and_commands_ask() {
                     .as_array()
                     .and_then(|o| o.iter().find(|o| o["kind"] == "allow_once"))
                     .unwrap_or_else(|| panic!("no allow_once option offered: {req}"));
-                return Some(json!({ "outcome": { "outcome": "selected", "optionId": allow["optionId"] } }));
+                return Some(
+                    json!({ "outcome": { "outcome": "selected", "optionId": allow["optionId"] } }),
+                );
             }
             _ => {}
         }
@@ -1151,7 +1384,12 @@ async fn v1_only_client_is_never_asked_and_commands_ask() {
     };
     let session = m.connect(&mut answer).await;
     let reply = m.prompt(&session, "list the files", &mut answer).await;
-    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}\nstderr:\n{}", m.stderr());
+    assert_eq!(
+        reply["result"]["stopReason"],
+        "end_turn",
+        "{reply}\nstderr:\n{}",
+        m.stderr()
+    );
     scripted.assert_satisfied();
     assert_eq!(
         questions.len(),
@@ -1167,7 +1405,10 @@ async fn v1_only_client_is_never_asked_and_commands_ask() {
             refuse,
         )
         .await;
-    assert!(late.is_none() && trust_requests.is_empty(), "a v1 client must never be asked; got {late:?} {trust_requests:?}");
+    assert!(
+        late.is_none() && trust_requests.is_empty(),
+        "a v1 client must never be asked; got {late:?} {trust_requests:?}"
+    );
     assert!(
         !m.methods_seen().iter().any(|n| n.contains("folder_trust")),
         "a v1 client must never be asked; methods seen: {:?}",
@@ -1178,7 +1419,10 @@ async fn v1_only_client_is_never_asked_and_commands_ask() {
         "project config applied in a folder a v1 client cannot trust"
     );
     assert!(
-        !m.sandbox().fuigo_home().join("trusted_folders.toml").exists(),
+        !m.sandbox()
+            .fuigo_home()
+            .join("trusted_folders.toml")
+            .exists(),
         "a trust grant was persisted without a v2 client"
     );
     assert_hermetic(m.sandbox(), m.child_pid());
@@ -1226,14 +1470,23 @@ async fn trust_flag_suppresses_the_round_trip() {
             refuse,
         )
         .await;
-    assert!(late.is_none(), "--trust must suppress the round-trip; got {late:?}");
-    assert!(trust_requests.is_empty(), "--trust must suppress the round-trip; got {trust_requests:?}");
+    assert!(
+        late.is_none(),
+        "--trust must suppress the round-trip; got {late:?}"
+    );
+    assert!(
+        trust_requests.is_empty(),
+        "--trust must suppress the round-trip; got {trust_requests:?}"
+    );
     let any_trust = m
         .methods_seen()
         .into_iter()
         .filter(|n| n.contains("folder_trust"))
         .collect::<Vec<_>>();
-    assert!(any_trust.is_empty(), "--trust must suppress the round-trip; the wire carried {any_trust:?}");
+    assert!(
+        any_trust.is_empty(),
+        "--trust must suppress the round-trip; the wire carried {any_trust:?}"
+    );
     assert!(
         m.messages().iter().any(lists_project_server),
         "with --trust the project config must apply without a prompt"
@@ -1269,7 +1522,8 @@ async fn mcp_ready_notification_wire_name_is_pinned() {
             "mcp ready",
             RPC,
             move |msg| {
-                method_of(msg) == Some("_fuigo/mcp_initialized") && msg["params"]["sessionId"] == sid.as_str()
+                method_of(msg) == Some("_fuigo/mcp_initialized")
+                    && msg["params"]["sessionId"] == sid.as_str()
             },
             refuse,
         )
@@ -1321,7 +1575,10 @@ done
 /// `{"action":"accept","content":…}`; (2) readiness is `_fuigo/mcp_initialized` with the server's tool
 /// counted (the background-handshake send site, not the no-server shortcut).
 /// Unix only: the fixture server is a POSIX `sh` script (Murage's own platforms run the same Fuigo path).
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn murage_mcp_server_elicit_and_ready_wire_names() {
@@ -1375,7 +1632,10 @@ async fn murage_mcp_server_elicit_and_ready_wire_names() {
                 m.stderr()
             )
         });
-    assert!(ready.get("id").is_none(), "MCP readiness must be a notification, not a request: {ready}");
+    assert!(
+        ready.get("id").is_none(),
+        "MCP readiness must be a notification, not a request: {ready}"
+    );
     assert_eq!(
         object_keys(&ready["params"]),
         sorted(&["sessionId", "mcpToolCount", "elapsedMs"]),
@@ -1384,7 +1644,12 @@ async fn murage_mcp_server_elicit_and_ready_wire_names() {
     if elicits.borrow().is_empty() {
         // Not answered during the waits above: wait for it, and answer it the way Murage does.
         if let Some(req) = m
-            .seen_or_wait("mcp elicit", RPC, |x| method_of(x) == Some("_fuigo/mcp/elicit"), &accept)
+            .seen_or_wait(
+                "mcp elicit",
+                RPC,
+                |x| method_of(x) == Some("_fuigo/mcp/elicit"),
+                &accept,
+            )
             .await
             && let Some(result) = accept(&req)
         {
@@ -1392,18 +1657,33 @@ async fn murage_mcp_server_elicit_and_ready_wire_names() {
         }
     }
     let elicits = elicits.borrow().clone();
-    assert_eq!(elicits.len(), 1, "expected one `_fuigo/mcp/elicit`; methods seen: {:?}", m.methods_seen());
+    assert_eq!(
+        elicits.len(),
+        1,
+        "expected one `_fuigo/mcp/elicit`; methods seen: {:?}",
+        m.methods_seen()
+    );
     let params = &elicits[0]["params"];
     assert_eq!(
         object_keys(params),
-        sorted(&["sessionId", "toolCallId", "serverName", "message", "mode", "requestedSchema"]),
+        sorted(&[
+            "sessionId",
+            "toolCallId",
+            "serverName",
+            "message",
+            "mode",
+            "requestedSchema"
+        ]),
         "_fuigo/mcp/elicit params: {params}"
     );
     assert_eq!(params["sessionId"], session.as_str());
     assert_eq!(params["serverName"], "p00mcp");
     assert_eq!(params["message"], "p00 asks");
     assert_eq!(params["mode"], "form");
-    assert_eq!(params["requestedSchema"]["properties"]["ok"]["type"], "boolean");
+    assert_eq!(
+        params["requestedSchema"]["properties"]["ok"]["type"],
+        "boolean"
+    );
     // The answer travels back to the MCP server asynchronously; bound the wait for the server's log.
     let deadline = std::time::Instant::now() + scaled(Duration::from_secs(10));
     let answered = loop {
@@ -1413,15 +1693,19 @@ async fn murage_mcp_server_elicit_and_ready_wire_names() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    let answered: Value = serde_json::from_str(answered.trim())
-        .unwrap_or_else(|e| panic!("the MCP server never received the elicitation answer ({e}): {answered:?}"));
+    let answered: Value = serde_json::from_str(answered.trim()).unwrap_or_else(|e| {
+        panic!("the MCP server never received the elicitation answer ({e}): {answered:?}")
+    });
     assert_eq!(
         answered["result"],
         json!({ "action": "accept", "content": { "ok": true } }),
         "Murage's accept must reach the MCP server as an MCP accept: {answered}"
     );
     for unprefixed in ["fuigo/mcp/elicit", "fuigo/mcp_initialized"] {
-        assert!(m.messages_named(unprefixed).is_empty(), "{unprefixed} leaked onto the wire un-prefixed");
+        assert!(
+            m.messages_named(unprefixed).is_empty(),
+            "{unprefixed} leaked onto the wire un-prefixed"
+        );
     }
     assert_hermetic(m.sandbox(), m.child_pid());
 }
@@ -1468,7 +1752,12 @@ async fn ask_user_question_round_trip_wire_name_is_pinned() {
         .await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
     scripted.assert_satisfied();
-    assert_eq!(asks.len(), 1, "expected one `_fuigo/ask_user_question`; methods seen: {:?}", m.methods_seen());
+    assert_eq!(
+        asks.len(),
+        1,
+        "expected one `_fuigo/ask_user_question`; methods seen: {:?}",
+        m.methods_seen()
+    );
     let params = &asks[0]["params"];
     assert_eq!(
         object_keys(params),
@@ -1482,7 +1771,12 @@ async fn ask_user_question_round_trip_wire_name_is_pinned() {
     let told: Vec<String> = m
         .chat_requests()
         .iter()
-        .filter_map(|r| r.body.as_ref().and_then(|b| b["messages"].as_array()).cloned())
+        .filter_map(|r| {
+            r.body
+                .as_ref()
+                .and_then(|b| b["messages"].as_array())
+                .cloned()
+        })
         .flatten()
         .filter(|msg| msg["role"] == "tool" && msg["tool_call_id"] == "call_ask")
         .filter_map(|msg| msg["content"].as_str().map(str::to_owned))
@@ -1491,7 +1785,10 @@ async fn ask_user_question_round_trip_wire_name_is_pinned() {
         told.iter().any(|t| t.contains("Beta")),
         "the model was not told the answer Murage sent; tool results: {told:?}"
     );
-    assert!(m.messages_named("fuigo/ask_user_question").is_empty(), "un-prefixed name leaked onto the wire");
+    assert!(
+        m.messages_named("fuigo/ask_user_question").is_empty(),
+        "un-prefixed name leaked onto the wire"
+    );
 }
 
 /// Contract E consult on P04 (`8d250586`): Fuigo caps `ask_user_question` at 30 s and answers "no operator"
@@ -1542,25 +1839,40 @@ async fn ask_user_question_waits_for_murage_past_the_non_interactive_cap() {
             refuse,
         )
         .await
-        .unwrap_or_else(|| panic!("no `_fuigo/ask_user_question`; methods seen: {:?}", m.methods_seen()));
+        .unwrap_or_else(|| {
+            panic!(
+                "no `_fuigo/ask_user_question`; methods seen: {:?}",
+                m.methods_seen()
+            )
+        });
     // Hold the owner's answer past P04's 30 s non-interactive cap. If Fuigo resolved the question on its own
     // (no-operator text, or any terminal status), the tool call would finish here.
     let resolved_early = |x: &Value| {
         method_of(x) == Some("session/update")
             && x["params"]["update"]["sessionUpdate"] == "tool_call_update"
             && x["params"]["update"]["toolCallId"] == "call_ask_late"
-            && (x["params"]["update"]["status"] == "completed" || x["params"]["update"]["status"] == "failed")
+            && (x["params"]["update"]["status"] == "completed"
+                || x["params"]["update"]["status"] == "failed")
     };
     let early = m
         .client
-        .wait_for_message("question held past the cap", Duration::from_secs(40), resolved_early, refuse)
+        .wait_for_message(
+            "question held past the cap",
+            Duration::from_secs(40),
+            resolved_early,
+            refuse,
+        )
         .await;
     assert!(
         early.is_none(),
         "Fuigo resolved the question before Murage answered (Murage would be cut off): {early:?}"
     );
     m.client
-        .respond(&ask["id"], json!({ "outcome": "accepted", "answers": { "Pick one?": ["Beta"] } }), RPC)
+        .respond(
+            &ask["id"],
+            json!({ "outcome": "accepted", "answers": { "Pick one?": ["Beta"] } }),
+            RPC,
+        )
         .await;
     let reply = m
         .client
@@ -1571,7 +1883,12 @@ async fn ask_user_question_waits_for_murage_past_the_non_interactive_cap() {
     let told: Vec<String> = m
         .chat_requests()
         .iter()
-        .filter_map(|r| r.body.as_ref().and_then(|b| b["messages"].as_array()).cloned())
+        .filter_map(|r| {
+            r.body
+                .as_ref()
+                .and_then(|b| b["messages"].as_array())
+                .cloned()
+        })
         .flatten()
         .filter(|msg| msg["role"] == "tool" && msg["tool_call_id"] == "call_ask_late")
         .filter_map(|msg| msg["content"].as_str().map(str::to_owned))
@@ -1600,7 +1917,10 @@ async fn no_memory_flag_withholds_memory_tools() {
         .await;
         let session = m.connect(refuse).await;
         let reply = m.prompt(&session, "hello murage", refuse).await;
-        assert_eq!(reply["result"]["stopReason"], "end_turn", "{global:?}: {reply}");
+        assert_eq!(
+            reply["result"]["stopReason"], "end_turn",
+            "{global:?}: {reply}"
+        );
         let tools: Vec<String> = m
             .chat_requests()
             .iter()
@@ -1611,7 +1931,13 @@ async fn no_memory_flag_withholds_memory_tools() {
         assert!(!tools.is_empty(), "{global:?}: no tools reached the mock");
         offered.push(tools);
     }
-    let memory = |tools: &[String]| tools.iter().filter(|t| t.starts_with("memory_")).cloned().collect::<Vec<_>>();
+    let memory = |tools: &[String]| {
+        tools
+            .iter()
+            .filter(|t| t.starts_with("memory_"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     assert!(
         memory(&offered[0]).is_empty(),
         "--no-memory must withhold memory tools; offered {:?}",
@@ -1634,7 +1960,8 @@ async fn no_memory_flag_withholds_memory_tools() {
 #[tokio::test(flavor = "current_thread")]
 async fn meta_model_state_matches_golden() {
     let golden: Value =
-        serde_json::from_str(include_str!("fixtures/murage_model_state_golden.json")).expect("golden");
+        serde_json::from_str(include_str!("fixtures/murage_model_state_golden.json"))
+            .expect("golden");
     let golden = &golden["modelState"];
     let mut m = Murage::spawn(
         AgentSpawnSpec {
@@ -1647,20 +1974,30 @@ async fn meta_model_state_matches_golden() {
     .await;
     let init = m.initialize().await;
     let result = &init["result"];
-    assert!(result.get("meta").is_none(), "`meta` (no underscore) on the wire: {result}");
+    assert!(
+        result.get("meta").is_none(),
+        "`meta` (no underscore) on the wire: {result}"
+    );
     let live = result
         .get("_meta")
         .and_then(|meta| meta.get("modelState"))
         .unwrap_or_else(|| panic!("no `_meta.modelState` on the initialize response: {result}"));
     // The two paths Murage reads, asserted on their own so a failure names them.
-    assert_eq!(live["currentModelId"], golden["currentModelId"], "_meta.modelState.currentModelId");
+    assert_eq!(
+        live["currentModelId"], golden["currentModelId"],
+        "_meta.modelState.currentModelId"
+    );
     let ids = |v: &Value| -> Vec<Value> {
         v["availableModels"]
             .as_array()
             .map(|a| a.iter().map(|m| m["modelId"].clone()).collect())
             .unwrap_or_default()
     };
-    assert_eq!(ids(live), ids(golden), "_meta.modelState.availableModels[].modelId");
+    assert_eq!(
+        ids(live),
+        ids(golden),
+        "_meta.modelState.availableModels[].modelId"
+    );
     assert_eq!(
         live, golden,
         "_meta.modelState drifted from the golden captured off the 1.0.20-line wire.\nlive:   {live}\ngolden: {golden}"
@@ -1693,7 +2030,10 @@ async fn murage_wire_path_fields_round_trip() {
         .map(|u| u["params"]["update"].clone())
         .collect();
     let of_kind = |kind: &str| -> Vec<&Value> {
-        updates.iter().filter(|u| u["sessionUpdate"] == kind).collect()
+        updates
+            .iter()
+            .filter(|u| u["sessionUpdate"] == kind)
+            .collect()
     };
 
     let call = of_kind("tool_call")
@@ -1706,43 +2046,78 @@ async fn murage_wire_path_fields_round_trip() {
     // `typeof === "string"`, so if they appear they must be strings.
     for optional in ["kind", "status"] {
         if let Some(v) = call.get(optional) {
-            assert!(v.is_string(), "tool_call.{optional} must be a string when present: {call}");
+            assert!(
+                v.is_string(),
+                "tool_call.{optional} must be a string when present: {call}"
+            );
         }
     }
     // Murage accepts the stamp as its tool identity only with `version === 1` and a string `namespace`.
     let stamp = &call["_meta"]["fuigo/tool"];
-    assert_eq!(stamp["version"], 1, "tool_call._meta[\"fuigo/tool\"].version: {call}");
-    assert_eq!(stamp["name"], "run_terminal_command", "tool_call._meta[\"fuigo/tool\"]: {call}");
-    assert!(stamp["namespace"].is_string(), "tool_call._meta[\"fuigo/tool\"].namespace: {call}");
-    assert!(stamp["kind"].is_string(), "tool_call._meta[\"fuigo/tool\"].kind: {call}");
-    assert_eq!(call["rawInput"]["command"], "printf p00-wire", "tool_call.rawInput: {call}");
-    assert!(call.get("tool_call_id").is_none() && call.get("raw_input").is_none(), "{call}");
+    assert_eq!(
+        stamp["version"], 1,
+        "tool_call._meta[\"fuigo/tool\"].version: {call}"
+    );
+    assert_eq!(
+        stamp["name"], "run_terminal_command",
+        "tool_call._meta[\"fuigo/tool\"]: {call}"
+    );
+    assert!(
+        stamp["namespace"].is_string(),
+        "tool_call._meta[\"fuigo/tool\"].namespace: {call}"
+    );
+    assert!(
+        stamp["kind"].is_string(),
+        "tool_call._meta[\"fuigo/tool\"].kind: {call}"
+    );
+    assert_eq!(
+        call["rawInput"]["command"], "printf p00-wire",
+        "tool_call.rawInput: {call}"
+    );
+    assert!(
+        call.get("tool_call_id").is_none() && call.get("raw_input").is_none(),
+        "{call}"
+    );
 
     let done = of_kind("tool_call_update")
         .into_iter()
-        .find(|u| u["toolCallId"] == "call_wire" && (u["status"] == "completed" || u["status"] == "failed"))
-        .unwrap_or_else(|| panic!("no terminal tool_call_update for call_wire; updates: {updates:?}"));
+        .find(|u| {
+            u["toolCallId"] == "call_wire"
+                && (u["status"] == "completed" || u["status"] == "failed")
+        })
+        .unwrap_or_else(|| {
+            panic!("no terminal tool_call_update for call_wire; updates: {updates:?}")
+        });
     assert_eq!(done["status"], "completed", "{done}");
 
     let chunks = of_kind("agent_message_chunk");
-    assert!(!chunks.is_empty(), "no agent_message_chunk; updates: {updates:?}");
+    assert!(
+        !chunks.is_empty(),
+        "no agent_message_chunk; updates: {updates:?}"
+    );
     for chunk in chunks {
         assert_eq!(chunk["content"]["type"], "text", "{chunk}");
         assert!(chunk["content"]["text"].is_string(), "{chunk}");
     }
     let commands = of_kind("available_commands_update");
-    assert!(!commands.is_empty(), "no available_commands_update; updates: {updates:?}");
+    assert!(
+        !commands.is_empty(),
+        "no available_commands_update; updates: {updates:?}"
+    );
     for update in commands {
-        let list = update["availableCommands"]
-            .as_array()
-            .unwrap_or_else(|| panic!("available_commands_update without availableCommands: {update}"));
+        let list = update["availableCommands"].as_array().unwrap_or_else(|| {
+            panic!("available_commands_update without availableCommands: {update}")
+        });
         assert!(!list.is_empty(), "empty availableCommands: {update}");
-        assert!(list.iter().all(|c| c["name"].is_string()), "availableCommands[].name: {update}");
+        assert!(
+            list.iter().all(|c| c["name"].is_string()),
+            "availableCommands[].name: {update}"
+        );
     }
     assert!(
-        updates.iter().all(|u| u["sessionUpdate"].as_str().is_some_and(|t| t
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c == '_'))),
+        updates.iter().all(|u| u["sessionUpdate"]
+            .as_str()
+            .is_some_and(|t| t.chars().all(|c| c.is_ascii_lowercase() || c == '_'))),
         "every sessionUpdate tag stays snake_case: {updates:?}"
     );
 }
@@ -1805,10 +2180,24 @@ fn assert_key_nowhere(m: &Murage, key: &str) {
     let tail: String = chars[chars.len() - 8..].iter().collect();
     for needle in [key, head.as_str(), tail.as_str()] {
         let files = files_containing(m.sandbox().root(), needle);
-        assert!(files.is_empty(), "the runtime key (or its fragment {needle:?}) reached disk: {files:?}");
-        let lines: Vec<&String> = m.client.transcript().iter().filter(|l| l.contains(needle)).collect();
-        assert!(lines.is_empty(), "the runtime key (or {needle:?}) went back over the wire: {lines:?}");
-        assert!(!m.stderr().contains(needle), "the runtime key (or {needle:?}) reached the agent's stderr");
+        assert!(
+            files.is_empty(),
+            "the runtime key (or its fragment {needle:?}) reached disk: {files:?}"
+        );
+        let lines: Vec<&String> = m
+            .client
+            .transcript()
+            .iter()
+            .filter(|l| l.contains(needle))
+            .collect();
+        assert!(
+            lines.is_empty(),
+            "the runtime key (or {needle:?}) went back over the wire: {lines:?}"
+        );
+        assert!(
+            !m.stderr().contains(needle),
+            "the runtime key (or {needle:?}) reached the agent's stderr"
+        );
     }
 }
 
@@ -1836,23 +2225,43 @@ async fn runtime_api_key_authenticates_with_no_env_or_config_key() {
     let auth_json = m.sandbox().fuigo_home().join("auth.json");
     assert!(!auth_json.exists(), "precondition: no auth.json");
     let init = m.initialize().await;
-    assert_eq!(init["result"]["authMethods"], json!([]), "E.3: no credential, no advert: {init}");
+    assert_eq!(
+        init["result"]["authMethods"],
+        json!([]),
+        "E.3: no credential, no advert: {init}"
+    );
     assert_eq!(
         runtime_key_advert(&init)["metaKey"],
         API_KEY_META,
         "the runtime-key channel must be advertised: {init}"
     );
     let auth = m
-        .call("authenticate", authenticate_with_runtime_key(RUNTIME_KEY, None), refuse)
+        .call(
+            "authenticate",
+            authenticate_with_runtime_key(RUNTIME_KEY, None),
+            refuse,
+        )
         .await;
-    assert_eq!(auth["result"]["_meta"][API_KEY_META]["persisted"], false, "authenticate: {auth}");
+    assert_eq!(
+        auth["result"]["_meta"][API_KEY_META]["persisted"], false,
+        "authenticate: {auth}"
+    );
     let ws = m.workspace.clone();
     let new = m
-        .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+        .call(
+            "session/new",
+            json!({ "cwd": ws, "mcpServers": [] }),
+            refuse,
+        )
         .await;
     let session = new["result"]["sessionId"]
         .as_str()
-        .unwrap_or_else(|| panic!("session/new after a runtime-key authenticate: {new}\n{}", m.stderr()))
+        .unwrap_or_else(|| {
+            panic!(
+                "session/new after a runtime-key authenticate: {new}\n{}",
+                m.stderr()
+            )
+        })
         .to_owned();
     let reply = m.prompt(&session, "hello p08", refuse).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
@@ -1865,7 +2274,10 @@ async fn runtime_api_key_authenticates_with_no_env_or_config_key() {
             "inference must bill the key the client supplied"
         );
     }
-    assert!(!auth_json.exists(), "a session-only authenticate wrote auth.json");
+    assert!(
+        !auth_json.exists(),
+        "a session-only authenticate wrote auth.json"
+    );
     // The credential readers a client can call never hand the runtime key back (checked by the transcript scan).
     for method in ["_fuigo/getApiKey", "_fuigo/auth/getBearerToken"] {
         let read = m.call(method, json!({}), refuse).await;
@@ -1878,7 +2290,10 @@ async fn runtime_api_key_authenticates_with_no_env_or_config_key() {
 /// P08 acceptance 2, strong form: an `auth.json` that already exists (holding another key) is byte-for-byte
 /// unchanged by a session-only `authenticate`, and the key the client supplied, not the one on disk (which
 /// the agent loads at `initialize`), is the one inference bills.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_api_key_leaves_an_existing_auth_json_byte_identical() {
     let seeded = json!({
@@ -1899,7 +2314,8 @@ async fn runtime_api_key_leaves_an_existing_auth_json_byte_identical() {
             ..AgentSpawnSpec::default()
         },
         |sandbox| {
-            std::fs::write(sandbox.fuigo_home().join("auth.json"), &seeded).expect("seed auth.json");
+            std::fs::write(sandbox.fuigo_home().join("auth.json"), &seeded)
+                .expect("seed auth.json");
         },
     )
     .await;
@@ -1907,14 +2323,25 @@ async fn runtime_api_key_leaves_an_existing_auth_json_byte_identical() {
     let before = std::fs::read(&auth_json).expect("read seeded auth.json");
     let _ = m.initialize().await;
     let auth = m
-        .call("authenticate", authenticate_with_runtime_key(RUNTIME_KEY, Some(false)), refuse)
+        .call(
+            "authenticate",
+            authenticate_with_runtime_key(RUNTIME_KEY, Some(false)),
+            refuse,
+        )
         .await;
     assert!(auth.get("result").is_some(), "authenticate: {auth}");
     let ws = m.workspace.clone();
     let new = m
-        .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+        .call(
+            "session/new",
+            json!({ "cwd": ws, "mcpServers": [] }),
+            refuse,
+        )
         .await;
-    let session = new["result"]["sessionId"].as_str().expect("sessionId").to_owned();
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned();
     let reply = m.prompt(&session, "hello p08", refuse).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
     let chats = m.chat_requests();
@@ -1927,7 +2354,10 @@ async fn runtime_api_key_leaves_an_existing_auth_json_byte_identical() {
         );
     }
     let after = std::fs::read(&auth_json).expect("auth.json still exists");
-    assert!(before == after, "a session-only authenticate changed auth.json");
+    assert!(
+        before == after,
+        "a session-only authenticate changed auth.json"
+    );
     assert_key_nowhere(&m, RUNTIME_KEY);
 }
 
@@ -1947,18 +2377,40 @@ async fn runtime_api_key_is_persisted_when_the_client_opts_in() {
     .await;
     let _ = m.initialize().await;
     let auth = m
-        .call("authenticate", authenticate_with_runtime_key(RUNTIME_KEY, Some(true)), refuse)
+        .call(
+            "authenticate",
+            authenticate_with_runtime_key(RUNTIME_KEY, Some(true)),
+            refuse,
+        )
         .await;
-    assert_eq!(auth["result"]["_meta"][API_KEY_META]["persisted"], true, "authenticate: {auth}");
+    assert_eq!(
+        auth["result"]["_meta"][API_KEY_META]["persisted"], true,
+        "authenticate: {auth}"
+    );
     let stored: Value = serde_json::from_slice(
-        &std::fs::read(m.sandbox().fuigo_home().join("auth.json")).expect("persist: true writes auth.json"),
+        &std::fs::read(m.sandbox().fuigo_home().join("auth.json"))
+            .expect("persist: true writes auth.json"),
     )
     .expect("auth.json is JSON");
-    assert_eq!(stored["fuigo::api_key"]["key"], RUNTIME_KEY, "the persisted key");
+    assert_eq!(
+        stored["fuigo::api_key"]["key"], RUNTIME_KEY,
+        "the persisted key"
+    );
     // Opting in to disk is not opting in to the wire or the logs.
-    let lines: Vec<&String> = m.client.transcript().iter().filter(|l| l.contains(RUNTIME_KEY)).collect();
-    assert!(lines.is_empty(), "the runtime key went back over the wire: {lines:?}");
-    assert!(!m.stderr().contains(RUNTIME_KEY), "the runtime key reached the agent's stderr");
+    let lines: Vec<&String> = m
+        .client
+        .transcript()
+        .iter()
+        .filter(|l| l.contains(RUNTIME_KEY))
+        .collect();
+    assert!(
+        lines.is_empty(),
+        "the runtime key went back over the wire: {lines:?}"
+    );
+    assert!(
+        !m.stderr().contains(RUNTIME_KEY),
+        "the runtime key reached the agent's stderr"
+    );
 }
 
 /// P08 acceptance 4: a runtime-store credential is not visible to a child the agent spawns. The child's
@@ -1980,22 +2432,40 @@ async fn runtime_api_key_is_invisible_to_child_processes() {
     let scripted = script_terminal_call(&m.server, "call_env", "env > p08-child-env.txt");
     let _ = m.initialize().await;
     let auth = m
-        .call("authenticate", authenticate_with_runtime_key(RUNTIME_KEY, None), refuse)
+        .call(
+            "authenticate",
+            authenticate_with_runtime_key(RUNTIME_KEY, None),
+            refuse,
+        )
         .await;
     assert!(auth.get("result").is_some(), "authenticate: {auth}");
     let ws = m.workspace.clone();
     let new = m
-        .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+        .call(
+            "session/new",
+            json!({ "cwd": ws, "mcpServers": [] }),
+            refuse,
+        )
         .await;
-    let session = new["result"]["sessionId"].as_str().expect("sessionId").to_owned();
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned();
     let reply = m.prompt(&session, "dump the environment", refuse).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
     scripted.assert_satisfied();
-    let dump = std::fs::read_to_string(m.workspace.join("p08-child-env.txt")).expect("the child ran");
-    assert!(dump.lines().any(|l| l.starts_with("HOME=")), "control: the dump is the child's env:\n{dump}");
+    let dump =
+        std::fs::read_to_string(m.workspace.join("p08-child-env.txt")).expect("the child ran");
+    assert!(
+        dump.lines().any(|l| l.starts_with("HOME=")),
+        "control: the dump is the child's env:\n{dump}"
+    );
     assert!(!dump.contains(RUNTIME_KEY), "a child saw the runtime key");
     for name in NO_ENV_KEY {
-        assert!(!dump.lines().any(|l| l.starts_with(&format!("{name}="))), "a child got {name}");
+        assert!(
+            !dump.lines().any(|l| l.starts_with(&format!("{name}="))),
+            "a child got {name}"
+        );
     }
     // The bearer proves the key was live in the agent while the child ran.
     assert!(
@@ -2030,20 +2500,41 @@ async fn runtime_api_key_never_reaches_errors_logs_or_disk() {
             refuse,
         )
         .await;
-    assert_eq!(bad["error"]["code"], -32602, "a malformed carrier is invalid params: {bad}");
-    assert!(!bad.to_string().contains(RUNTIME_KEY), "the error echoed the key: {bad}");
+    assert_eq!(
+        bad["error"]["code"], -32602,
+        "a malformed carrier is invalid params: {bad}"
+    );
+    assert!(
+        !bad.to_string().contains(RUNTIME_KEY),
+        "the error echoed the key: {bad}"
+    );
     let none = m
-        .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+        .call(
+            "authenticate",
+            json!({ "methodId": "fuigo.api_key" }),
+            refuse,
+        )
         .await;
     assert_eq!(none["error"]["code"], -32000, "{none}");
-    assert_eq!(none["error"]["message"], "Authentication required", "E.3 pins the message: {none}");
+    assert_eq!(
+        none["error"]["message"], "Authentication required",
+        "E.3 pins the message: {none}"
+    );
     assert_eq!(
         none["error"]["data"]["metaKey"], API_KEY_META,
         "the failure must tell the client where to put a key: {none}"
     );
-    let text = none["error"]["data"]["message"].as_str().unwrap_or_default();
-    assert!(text.contains(API_KEY_META), "data.message must name the _meta key: {none}");
-    assert!(!text.contains("config.toml"), "data.message is addressed to a human: {none}");
+    let text = none["error"]["data"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        text.contains(API_KEY_META),
+        "data.message must name the _meta key: {none}"
+    );
+    assert!(
+        !text.contains("config.toml"),
+        "data.message is addressed to a human: {none}"
+    );
     assert_key_nowhere(&m, RUNTIME_KEY);
     assert!(!m.sandbox().fuigo_home().join("auth.json").exists());
 
@@ -2060,17 +2551,37 @@ async fn runtime_api_key_never_reaches_errors_logs_or_disk() {
     .await;
     let _ = m.initialize().await;
     let refused = m
-        .call("authenticate", authenticate_with_runtime_key(RUNTIME_KEY, Some(true)), refuse)
+        .call(
+            "authenticate",
+            authenticate_with_runtime_key(RUNTIME_KEY, Some(true)),
+            refuse,
+        )
         .await;
-    assert_eq!(refused["error"]["code"], -32000, "the kill switch refuses a runtime key: {refused}");
+    assert_eq!(
+        refused["error"]["code"], -32000,
+        "the kill switch refuses a runtime key: {refused}"
+    );
     let ws = m.workspace.clone();
     let new = m
-        .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+        .call(
+            "session/new",
+            json!({ "cwd": ws, "mcpServers": [] }),
+            refuse,
+        )
         .await;
-    assert!(new.get("error").is_some(), "a refused key must not authenticate a session: {new}");
-    assert!(m.chat_requests().is_empty(), "inference ran on a refused key");
+    assert!(
+        new.get("error").is_some(),
+        "a refused key must not authenticate a session: {new}"
+    );
+    assert!(
+        m.chat_requests().is_empty(),
+        "inference ran on a refused key"
+    );
     assert_key_nowhere(&m, RUNTIME_KEY);
-    assert!(!m.sandbox().fuigo_home().join("auth.json").exists(), "a refused key was persisted");
+    assert!(
+        !m.sandbox().fuigo_home().join("auth.json").exists(),
+        "a refused key was persisted"
+    );
 }
 
 /// Contract E.2 under P08: the key Murage injects through the CHILD's environment still authenticates
@@ -2133,7 +2644,11 @@ async fn p08_auth_wire() -> Value {
     .await;
     let bare_init = bare.initialize().await;
     let no_credential = bare
-        .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+        .call(
+            "authenticate",
+            json!({ "methodId": "fuigo.api_key" }),
+            refuse,
+        )
         .await;
     let request = authenticate_with_runtime_key(RUNTIME_KEY, Some(false));
     let reply = bare.call("authenticate", request.clone(), refuse).await;
@@ -2164,7 +2679,11 @@ async fn p08_auth_wire_matches_golden() {
     let golden: Value =
         serde_json::from_str(include_str!("fixtures/p08_auth_wire_golden.json")).expect("golden");
     let live = p08_auth_wire().await;
-    assert_eq!(live, golden["wire"], "P08 auth surface drifted from the golden.\nlive:   {live}\ngolden: {}", golden["wire"]);
+    assert_eq!(
+        live, golden["wire"],
+        "P08 auth surface drifted from the golden.\nlive:   {live}\ngolden: {}",
+        golden["wire"]
+    );
 }
 
 /// P08 acceptance 5 on the SUCCESS path with every log turned up: `RUST_LOG=trace` on stderr and the
@@ -2184,18 +2703,32 @@ async fn runtime_api_key_survives_debug_logging_on_the_success_path() {
     .await;
     let _ = m.initialize().await;
     let auth = m
-        .call("authenticate", authenticate_with_runtime_key(RUNTIME_KEY, None), refuse)
+        .call(
+            "authenticate",
+            authenticate_with_runtime_key(RUNTIME_KEY, None),
+            refuse,
+        )
         .await;
     assert!(auth.get("result").is_some(), "authenticate: {auth}");
     let ws = m.workspace.clone();
     let new = m
-        .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+        .call(
+            "session/new",
+            json!({ "cwd": ws, "mcpServers": [] }),
+            refuse,
+        )
         .await;
-    let session = new["result"]["sessionId"].as_str().expect("sessionId").to_owned();
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned();
     let reply = m.prompt(&session, "hello p08", refuse).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
     // Control: the logs really were on (trace reached stderr; the firehose wrote under FUIGO_HOME/debug).
-    assert!(m.stderr().contains("TRACE"), "control: RUST_LOG=trace produced no trace output");
+    assert!(
+        m.stderr().contains("TRACE"),
+        "control: RUST_LOG=trace produced no trace output"
+    );
     assert!(
         !files_containing(&m.sandbox().fuigo_home().join("debug"), "session").is_empty(),
         "control: FUIGO_DEBUG_LOG wrote no session log"
@@ -2220,18 +2753,42 @@ async fn set_api_key_clear_drops_the_runtime_key() {
     .await;
     let _ = m.initialize().await;
     let auth = m
-        .call("authenticate", authenticate_with_runtime_key(RUNTIME_KEY, None), refuse)
+        .call(
+            "authenticate",
+            authenticate_with_runtime_key(RUNTIME_KEY, None),
+            refuse,
+        )
         .await;
     assert!(auth.get("result").is_some(), "authenticate: {auth}");
-    let cleared = m.call("_fuigo/setApiKey", json!({ "key": "" }), refuse).await;
-    assert!(cleared.get("result").is_some(), "setApiKey clear: {cleared}");
-    let again = m
-        .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+    let cleared = m
+        .call("_fuigo/setApiKey", json!({ "key": "" }), refuse)
         .await;
-    assert_eq!(again["error"]["code"], -32000, "authenticate after clearing the only key: {again}");
-    assert_eq!(again["error"]["message"], "Authentication required", "{again}");
-    let bearer = m.call("_fuigo/auth/getBearerToken", json!({}), refuse).await;
-    assert!(bearer.get("result").is_some(), "getBearerToken after clear: {bearer}");
+    assert!(
+        cleared.get("result").is_some(),
+        "setApiKey clear: {cleared}"
+    );
+    let again = m
+        .call(
+            "authenticate",
+            json!({ "methodId": "fuigo.api_key" }),
+            refuse,
+        )
+        .await;
+    assert_eq!(
+        again["error"]["code"], -32000,
+        "authenticate after clearing the only key: {again}"
+    );
+    assert_eq!(
+        again["error"]["message"], "Authentication required",
+        "{again}"
+    );
+    let bearer = m
+        .call("_fuigo/auth/getBearerToken", json!({}), refuse)
+        .await;
+    assert!(
+        bearer.get("result").is_some(),
+        "getBearerToken after clear: {bearer}"
+    );
     assert_key_nowhere(&m, RUNTIME_KEY);
 }
 
@@ -2263,17 +2820,30 @@ async fn malformed_wire_lines_carrying_the_key_reach_no_log() {
         .await;
     // Barrier: a later request is answered, so both lines were read and handled first.
     let barrier = m
-        .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+        .call(
+            "authenticate",
+            json!({ "methodId": "fuigo.api_key" }),
+            refuse,
+        )
         .await;
-    assert_eq!(barrier["error"]["code"], -32000, "the malformed lines must not authenticate: {barrier}");
-    assert!(m.stderr().contains("TRACE"), "control: RUST_LOG=trace produced no trace output");
+    assert_eq!(
+        barrier["error"]["code"], -32000,
+        "the malformed lines must not authenticate: {barrier}"
+    );
+    assert!(
+        m.stderr().contains("TRACE"),
+        "control: RUST_LOG=trace produced no trace output"
+    );
     assert_key_nowhere(&m, RUNTIME_KEY);
 }
 
 /// Astra r4: with a model whose `env_key` names `FUIGO_API_KEY`, a runtime key also reaches the AuthManager's
 /// process static key (via `sync_process_static_api_key`). Clearing through `fuigo/setApiKey` must re-derive that
 /// copy too, or `getBearerToken` hands the cleared key out (the transcript scan in `assert_key_nowhere` sees it).
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn set_api_key_clear_with_a_mapped_model_hands_out_nothing() {
     let mut m = Murage::spawn(
@@ -2286,7 +2856,9 @@ async fn set_api_key_clear_with_a_mapped_model_hands_out_nothing() {
         |sandbox| {
             std::fs::write(
                 sandbox.fuigo_home().join("config.toml"),
-                format!("[model.\"{MODEL_B}\"]\nmodel = \"{MODEL_B}\"\nenv_key = \"FUIGO_API_KEY\"\n"),
+                format!(
+                    "[model.\"{MODEL_B}\"]\nmodel = \"{MODEL_B}\"\nenv_key = \"FUIGO_API_KEY\"\n"
+                ),
             )
             .expect("write config.toml");
         },
@@ -2294,13 +2866,27 @@ async fn set_api_key_clear_with_a_mapped_model_hands_out_nothing() {
     .await;
     let _ = m.initialize().await;
     let auth = m
-        .call("authenticate", authenticate_with_runtime_key(RUNTIME_KEY, None), refuse)
+        .call(
+            "authenticate",
+            authenticate_with_runtime_key(RUNTIME_KEY, None),
+            refuse,
+        )
         .await;
     assert!(auth.get("result").is_some(), "authenticate: {auth}");
-    let cleared = m.call("_fuigo/setApiKey", json!({ "key": "" }), refuse).await;
-    assert!(cleared.get("result").is_some(), "setApiKey clear: {cleared}");
-    let bearer = m.call("_fuigo/auth/getBearerToken", json!({}), refuse).await;
-    assert!(bearer.get("result").is_some(), "getBearerToken after clear: {bearer}");
+    let cleared = m
+        .call("_fuigo/setApiKey", json!({ "key": "" }), refuse)
+        .await;
+    assert!(
+        cleared.get("result").is_some(),
+        "setApiKey clear: {cleared}"
+    );
+    let bearer = m
+        .call("_fuigo/auth/getBearerToken", json!({}), refuse)
+        .await;
+    assert!(
+        bearer.get("result").is_some(),
+        "getBearerToken after clear: {bearer}"
+    );
     assert_key_nowhere(&m, RUNTIME_KEY);
 }
 
@@ -2313,7 +2899,10 @@ const P70_DISK_KEY: &str = "p70-disk-key-FAKE-4e9a1c7d2b";
 /// An innocuous variable in the agent's environment: the control that the child really inherits the agent's env.
 const P70_CANARY: (&str, &str) = ("P70_INHERITED_CANARY", "p70-canary-present");
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn seed_auth_json(sandbox: &TestSandbox, key: &str) {
     let seeded = json!({
         "fuigo::api_key": {
@@ -2324,7 +2913,8 @@ fn seed_auth_json(sandbox: &TestSandbox, key: &str) {
             "email": null
         }
     });
-    std::fs::write(sandbox.fuigo_home().join("auth.json"), seeded.to_string()).expect("seed auth.json");
+    std::fs::write(sandbox.fuigo_home().join("auth.json"), seeded.to_string())
+        .expect("seed auth.json");
 }
 
 /// P70 (P08 proposal 4): `initialize` used to copy a key saved in `auth.json` into `FUIGO_API_KEY`, the agent's own
@@ -2338,7 +2928,10 @@ fn seed_auth_json(sandbox: &TestSandbox, key: &str) {
 /// passes with the old `set_var` too (Astra r1). `client_terminal_child_does_not_inherit_the_saved_key` below and
 /// `auth_method`'s unit tests are the ones that fail when the key is put back into the environment.
 /// Controls: the dump holds the child's `HOME` and the canary the agent was given.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn auth_json_key_authenticates_and_reaches_no_tool_child() {
     let mut m = Murage::spawn(
@@ -2367,12 +2960,24 @@ async fn auth_json_key_authenticates_and_reaches_no_tool_child() {
         "the saved key must still be advertised: {init}"
     );
     let auth = m
-        .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+        .call(
+            "authenticate",
+            json!({ "methodId": "fuigo.api_key" }),
+            refuse,
+        )
         .await;
-    assert_eq!(auth.get("result"), Some(&json!({})), "Murage's plain authenticate: {auth}");
+    assert_eq!(
+        auth.get("result"),
+        Some(&json!({})),
+        "Murage's plain authenticate: {auth}"
+    );
     let ws = m.workspace.clone();
     let new = m
-        .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+        .call(
+            "session/new",
+            json!({ "cwd": ws, "mcpServers": [] }),
+            refuse,
+        )
         .await;
     let session = new["result"]["sessionId"]
         .as_str()
@@ -2381,15 +2986,26 @@ async fn auth_json_key_authenticates_and_reaches_no_tool_child() {
     let reply = m.prompt(&session, "dump the environment", refuse).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
     scripted.assert_satisfied();
-    let dump = std::fs::read_to_string(m.workspace.join("p70-child-env.txt")).expect("the child ran");
-    assert!(dump.lines().any(|l| l.starts_with("HOME=")), "control: the dump is the child's env:\n{dump}");
+    let dump =
+        std::fs::read_to_string(m.workspace.join("p70-child-env.txt")).expect("the child ran");
     assert!(
-        dump.lines().any(|l| l == format!("{}={}", P70_CANARY.0, P70_CANARY.1)),
+        dump.lines().any(|l| l.starts_with("HOME=")),
+        "control: the dump is the child's env:\n{dump}"
+    );
+    assert!(
+        dump.lines()
+            .any(|l| l == format!("{}={}", P70_CANARY.0, P70_CANARY.1)),
         "control: the permissive policy passes the agent's environment through:\n{dump}"
     );
-    assert!(!dump.contains(P70_DISK_KEY), "a child inherited the auth.json key from the agent's environment");
+    assert!(
+        !dump.contains(P70_DISK_KEY),
+        "a child inherited the auth.json key from the agent's environment"
+    );
     for name in NO_ENV_KEY {
-        assert!(!dump.lines().any(|l| l.starts_with(&format!("{name}="))), "a child got {name}");
+        assert!(
+            !dump.lines().any(|l| l.starts_with(&format!("{name}="))),
+            "a child got {name}"
+        );
     }
     let chats = m.chat_requests();
     assert!(!chats.is_empty(), "no inference request was made");
@@ -2401,7 +3017,10 @@ async fn auth_json_key_authenticates_and_reaches_no_tool_child() {
         );
     }
     let read = m.call("_fuigo/getApiKey", json!({}), refuse).await;
-    assert_eq!(read["result"]["result"]["key"], P70_DISK_KEY, "getApiKey still returns the user's saved key: {read}");
+    assert_eq!(
+        read["result"]["result"]["key"], P70_DISK_KEY,
+        "getApiKey still returns the user's saved key: {read}"
+    );
 }
 
 /// P70 / Contract E.2: a key Murage injects into the agent's environment still outranks a key saved in
@@ -2439,7 +3058,10 @@ async fn injected_env_key_outranks_the_auth_json_key() {
 /// holds its value under no name. Like the test above it passes with the old `set_var` too (the shell tool strips the
 /// name unconditionally); `client_terminal_child_does_not_inherit_the_saved_key` and `auth_method`'s unit tests are
 /// the ones that fail when the key is put back into the environment.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 async fn set_api_key_key_authenticates_and_reaches_no_tool_child() {
     const SET_KEY: &str = "p70-setapikey-FAKE-8c3f0e1a6d";
@@ -2461,15 +3083,29 @@ async fn set_api_key_key_authenticates_and_reaches_no_tool_child() {
     .await;
     let scripted = script_terminal_call(&m.server, "call_env", "env > p70-child-env.txt");
     let _ = m.initialize().await;
-    let set = m.call("_fuigo/setApiKey", json!({ "key": SET_KEY }), refuse).await;
+    let set = m
+        .call("_fuigo/setApiKey", json!({ "key": SET_KEY }), refuse)
+        .await;
     assert_eq!(set["result"]["result"]["ok"], true, "setApiKey: {set}");
     let auth = m
-        .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+        .call(
+            "authenticate",
+            json!({ "methodId": "fuigo.api_key" }),
+            refuse,
+        )
         .await;
-    assert_eq!(auth.get("result"), Some(&json!({})), "authenticate after setApiKey: {auth}");
+    assert_eq!(
+        auth.get("result"),
+        Some(&json!({})),
+        "authenticate after setApiKey: {auth}"
+    );
     let ws = m.workspace.clone();
     let new = m
-        .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+        .call(
+            "session/new",
+            json!({ "cwd": ws, "mcpServers": [] }),
+            refuse,
+        )
         .await;
     let session = new["result"]["sessionId"]
         .as_str()
@@ -2478,12 +3114,17 @@ async fn set_api_key_key_authenticates_and_reaches_no_tool_child() {
     let reply = m.prompt(&session, "dump the environment", refuse).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
     scripted.assert_satisfied();
-    let dump = std::fs::read_to_string(m.workspace.join("p70-child-env.txt")).expect("the child ran");
+    let dump =
+        std::fs::read_to_string(m.workspace.join("p70-child-env.txt")).expect("the child ran");
     assert!(
-        dump.lines().any(|l| l == format!("{}={}", P70_CANARY.0, P70_CANARY.1)),
+        dump.lines()
+            .any(|l| l == format!("{}={}", P70_CANARY.0, P70_CANARY.1)),
         "control: the permissive policy passes the agent's environment through:\n{dump}"
     );
-    assert!(!dump.contains(SET_KEY), "a child inherited the setApiKey key from the agent's environment");
+    assert!(
+        !dump.contains(SET_KEY),
+        "a child inherited the setApiKey key from the agent's environment"
+    );
     let chats = m.chat_requests();
     assert!(!chats.is_empty(), "no inference request was made");
     for r in &chats {
@@ -2507,7 +3148,11 @@ async fn set_api_key_key_authenticates_and_reaches_no_tool_child() {
 async fn client_terminal_child_does_not_inherit_the_saved_key() {
     const SET_KEY: &str = "p70a-setapikey-FAKE-5b2d9e7c1f";
     for via_set_api_key in [false, true] {
-        let key = if via_set_api_key { SET_KEY } else { P70_DISK_KEY };
+        let key = if via_set_api_key {
+            SET_KEY
+        } else {
+            P70_DISK_KEY
+        };
         let mut m = Murage::spawn(
             AgentSpawnSpec {
                 leading_args: GLOBAL_BYPASS,
@@ -2524,16 +3169,26 @@ async fn client_terminal_child_does_not_inherit_the_saved_key() {
         .await;
         let _ = m.initialize().await;
         if via_set_api_key {
-            let set = m.call("_fuigo/setApiKey", json!({ "key": SET_KEY }), refuse).await;
+            let set = m
+                .call("_fuigo/setApiKey", json!({ "key": SET_KEY }), refuse)
+                .await;
             assert_eq!(set["result"]["result"]["ok"], true, "setApiKey: {set}");
         }
         let auth = m
-            .call("authenticate", json!({ "methodId": "fuigo.api_key" }), refuse)
+            .call(
+                "authenticate",
+                json!({ "methodId": "fuigo.api_key" }),
+                refuse,
+            )
             .await;
         assert_eq!(auth.get("result"), Some(&json!({})), "authenticate: {auth}");
         let ws = m.workspace.clone();
         let new = m
-            .call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse)
+            .call(
+                "session/new",
+                json!({ "cwd": ws, "mcpServers": [] }),
+                refuse,
+            )
             .await;
         let session = new["result"]["sessionId"]
             .as_str()
@@ -2562,14 +3217,25 @@ async fn client_terminal_child_does_not_inherit_the_saved_key() {
                 refuse,
             )
             .await;
-        assert!(exited.get("result").is_some(), "terminal/wait_for_exit: {exited}");
-        let dump = std::fs::read_to_string(m.workspace.join("p70a-client-env.txt")).expect("the child ran");
-        assert!(dump.lines().any(|l| l.starts_with("HOME=")), "control: the dump is the child's env:\n{dump}");
         assert!(
-            dump.lines().any(|l| l == format!("{}={}", P70_CANARY.0, P70_CANARY.1)),
+            exited.get("result").is_some(),
+            "terminal/wait_for_exit: {exited}"
+        );
+        let dump = std::fs::read_to_string(m.workspace.join("p70a-client-env.txt"))
+            .expect("the child ran");
+        assert!(
+            dump.lines().any(|l| l.starts_with("HOME=")),
+            "control: the dump is the child's env:\n{dump}"
+        );
+        assert!(
+            dump.lines()
+                .any(|l| l == format!("{}={}", P70_CANARY.0, P70_CANARY.1)),
             "control: this child inherits the agent's environment unfiltered:\n{dump}"
         );
-        assert!(!dump.contains(key), "a client terminal inherited the saved key (setApiKey: {via_set_api_key})");
+        assert!(
+            !dump.contains(key),
+            "a client terminal inherited the saved key (setApiKey: {via_set_api_key})"
+        );
         for name in NO_ENV_KEY {
             assert!(
                 !dump.lines().any(|l| l.starts_with(&format!("{name}="))),
@@ -2635,19 +3301,34 @@ async fn session_new_mcp_header_and_env_secrets_reach_no_log() {
     let reply = m.prompt(&session, "hello p70", refuse).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
     let log = std::fs::read_to_string(&log_file).expect("FUIGO_LOG_FILE was written");
-    assert!(log.contains("Received new session request"), "control: the full log holds the session/new event");
-    assert!(log.contains("TRACE"), "control: RUST_LOG=trace reached the log file");
+    assert!(
+        log.contains("Received new session request"),
+        "control: the full log holds the session/new event"
+    );
+    assert!(
+        log.contains("TRACE"),
+        "control: RUST_LOG=trace reached the log file"
+    );
     let home = m.sandbox().fuigo_home().to_path_buf();
     for secret in [HDR_SECRET, ENV_SECRET] {
         let chars: Vec<char> = secret.chars().collect();
         let head: String = chars[..8].iter().collect();
         let tail: String = chars[chars.len() - 8..].iter().collect();
         for needle in [secret, head.as_str(), tail.as_str()] {
-            assert!(!log.contains(needle), "an MCP secret (or {needle:?}) reached the trace log");
-            assert!(!m.stderr().contains(needle), "an MCP secret (or {needle:?}) reached the agent's stderr");
+            assert!(
+                !log.contains(needle),
+                "an MCP secret (or {needle:?}) reached the trace log"
+            );
+            assert!(
+                !m.stderr().contains(needle),
+                "an MCP secret (or {needle:?}) reached the agent's stderr"
+            );
             for dir in [home.join("debug"), home.join("logs")] {
                 let files = files_containing(&dir, needle);
-                assert!(files.is_empty(), "an MCP secret (or {needle:?}) reached a log file: {files:?}");
+                assert!(
+                    files.is_empty(),
+                    "an MCP secret (or {needle:?}) reached a log file: {files:?}"
+                );
             }
         }
     }
@@ -2722,11 +3403,22 @@ fn recording_http_listener() -> RecordingHttpListener {
                     Ok(n) => head.extend_from_slice(&chunk[..n]),
                 }
             }
-            recorded.lock().unwrap().push(String::from_utf8_lossy(&head).into_owned());
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            recorded
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&head).into_owned());
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
         }
     });
-    RecordingHttpListener { url: format!("http://{addr}/mcp"), heads, addr, stop, thread: Some(thread) }
+    RecordingHttpListener {
+        url: format!("http://{addr}/mcp"),
+        heads,
+        addr,
+        stop,
+        thread: Some(thread),
+    }
 }
 
 /// Poll `read` until it returns `Some` or `timeout` (scaled) passes.
@@ -2757,7 +3449,10 @@ async fn poll_for<T>(timeout: Duration, mut read: impl FnMut() -> Option<T>) -> 
 /// canary is the control), so they also show the key never entered the agent's own environment.
 /// `/proc/<agent>/environ` (Linux) is checked too; it shows the environment the agent was STARTED with, so it is a
 /// control on the launch, not a detector of a later `set_var`.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn explicit_key_references_in_config_reach_only_their_own_destination() {
@@ -2826,43 +3521,84 @@ command = "/bin/sh '{hook_script}'"
     .await;
     let session = m.connect(refuse).await;
     let ws = m.workspace.clone();
-    let read = |name: &str| std::fs::read_to_string(ws.join(name)).ok().filter(|s| !s.is_empty());
+    let read = |name: &str| {
+        std::fs::read_to_string(ws.join(name))
+            .ok()
+            .filter(|s| !s.is_empty())
+    };
 
     // The stdio MCP server's own environment.
     let mcp_env = poll_for(RPC, || read("p70a-mcp-env.txt"))
         .await
-        .unwrap_or_else(|| panic!("the stdio MCP server never started; methods: {:?}\n{}", m.methods_seen(), m.stderr()));
-    assert!(mcp_env.lines().any(|l| l == "P70A_PLAIN=p70a-plain"), "control: the server got its configured env:\n{mcp_env}");
+        .unwrap_or_else(|| {
+            panic!(
+                "the stdio MCP server never started; methods: {:?}\n{}",
+                m.methods_seen(),
+                m.stderr()
+            )
+        });
     assert!(
-        mcp_env.lines().any(|l| l == format!("FUIGO_API_KEY={P70_DISK_KEY}")),
+        mcp_env.lines().any(|l| l == "P70A_PLAIN=p70a-plain"),
+        "control: the server got its configured env:\n{mcp_env}"
+    );
+    assert!(
+        mcp_env
+            .lines()
+            .any(|l| l == format!("FUIGO_API_KEY={P70_DISK_KEY}")),
         "an MCP server env naming ${{FUIGO_API_KEY}} did not get the saved key"
     );
     // Astra f4 #1, f7: an escaped `$${FUIGO_API_KEY}` is text: kept through both expansion passes MCP strings get, then
     // read as an escape at spawn, so the server receives the text `${FUIGO_API_KEY}` (as before P70a), not the key.
     assert!(
-        mcp_env.lines().any(|l| l == "P70A_ESCAPED=${FUIGO_API_KEY}"),
+        mcp_env
+            .lines()
+            .any(|l| l == "P70A_ESCAPED=${FUIGO_API_KEY}"),
         "an escaped reference was resolved or rewritten:\n{}",
-        mcp_env.lines().filter(|l| l.starts_with("P70A_ESCAPED=")).collect::<Vec<_>>().join("\n")
+        mcp_env
+            .lines()
+            .filter(|l| l.starts_with("P70A_ESCAPED="))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
-    let mcp_args = poll_for(RPC, || read("p70a-mcp-args.txt")).await.expect("the MCP server wrote its args");
-    assert_eq!(mcp_args.lines().collect::<Vec<_>>(), ["--key", P70_DISK_KEY], "MCP args naming ${{FUIGO_API_KEY}}");
+    let mcp_args = poll_for(RPC, || read("p70a-mcp-args.txt"))
+        .await
+        .expect("the MCP server wrote its args");
+    assert_eq!(
+        mcp_args.lines().collect::<Vec<_>>(),
+        ["--key", P70_DISK_KEY],
+        "MCP args naming ${{FUIGO_API_KEY}}"
+    );
 
     // The HTTP MCP server's request.
     let head = poll_for(RPC, || {
-        http_heads.lock().unwrap().iter().find(|h| h.to_ascii_lowercase().contains("authorization:")).cloned()
+        http_heads
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.to_ascii_lowercase().contains("authorization:"))
+            .cloned()
     })
     .await
-    .unwrap_or_else(|| panic!("no request with an Authorization header reached the HTTP MCP server; {} request(s)", http_heads.lock().unwrap().len()));
+    .unwrap_or_else(|| {
+        panic!(
+            "no request with an Authorization header reached the HTTP MCP server; {} request(s)",
+            http_heads.lock().unwrap().len()
+        )
+    });
     assert!(
-        head.lines().any(|l| l.to_ascii_lowercase().starts_with("authorization:")
-            && l.split_once(':').is_some_and(|(_, v)| v.trim() == format!("Bearer {P70_DISK_KEY}"))),
+        head.lines()
+            .any(|l| l.to_ascii_lowercase().starts_with("authorization:")
+                && l.split_once(':')
+                    .is_some_and(|(_, v)| v.trim() == format!("Bearer {P70_DISK_KEY}"))),
         "an MCP header naming ${{FUIGO_API_KEY}} did not carry the saved key"
     );
     // An MCP URL is an identifier (logged, persisted, listed): an unexported reference in it is deliberately NOT
     // resolved from the saved key (put the key in a header).
     assert!(
-        head.lines().next().is_some_and(|l| l.contains("/mcp?ref=") && !l.contains(P70_DISK_KEY)),
+        head.lines()
+            .next()
+            .is_some_and(|l| l.contains("/mcp?ref=") && !l.contains(P70_DISK_KEY)),
         "an MCP URL reference was resolved: {head:?}"
     );
 
@@ -2870,13 +3606,30 @@ command = "/bin/sh '{hook_script}'"
     let reply = m.prompt(&session, "hello p70a", refuse).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
     let explicit = poll_for(RPC, || read("p70a-hook-explicit.txt")).await;
-    assert_eq!(explicit.as_deref(), Some(P70_DISK_KEY), "a hook command naming $FUIGO_API_KEY did not get the saved key\n{}", m.stderr());
+    assert_eq!(
+        explicit.as_deref(),
+        Some(P70_DISK_KEY),
+        "a hook command naming $FUIGO_API_KEY did not get the saved key\n{}",
+        m.stderr()
+    );
     let via_env = poll_for(RPC, || read("p70a-hook-via-env.txt")).await;
-    assert_eq!(via_env.as_deref(), Some(P70_DISK_KEY), "a hook env value naming ${{FUIGO_API_KEY}} did not get the saved key");
+    assert_eq!(
+        via_env.as_deref(),
+        Some(P70_DISK_KEY),
+        "a hook env value naming ${{FUIGO_API_KEY}} did not get the saved key"
+    );
     let inherited = poll_for(RPC, || read("p70a-hook-inherited.txt")).await;
-    assert_eq!(inherited.as_deref(), Some("unset"), "a hook script without an explicit reference got FUIGO_API_KEY");
-    let inherited_env = read("p70a-hook-inherited-env.txt").expect("the inherited-env hook dumped its env");
-    assert!(!inherited_env.contains(P70_DISK_KEY), "a hook without an explicit reference holds the key under some name");
+    assert_eq!(
+        inherited.as_deref(),
+        Some("unset"),
+        "a hook script without an explicit reference got FUIGO_API_KEY"
+    );
+    let inherited_env =
+        read("p70a-hook-inherited-env.txt").expect("the inherited-env hook dumped its env");
+    assert!(
+        !inherited_env.contains(P70_DISK_KEY),
+        "a hook without an explicit reference holds the key under some name"
+    );
 
     // A `!` (bash mode) command.
     let bang = m
@@ -2894,7 +3647,9 @@ command = "/bin/sh '{hook_script}'"
         )
         .await;
     assert!(bang.get("result").is_some(), "bash-mode prompt: {bang}");
-    let bang_env = poll_for(RPC, || read("p70a-bang-env.txt")).await.expect("the ! command ran");
+    let bang_env = poll_for(RPC, || read("p70a-bang-env.txt"))
+        .await
+        .expect("the ! command ran");
     // A client terminal.
     let created = m
         .call(
@@ -2908,24 +3663,42 @@ command = "/bin/sh '{hook_script}'"
         .unwrap_or_else(|| panic!("terminal/create: {created}\n{}", m.stderr()))
         .to_owned();
     let exited = m
-        .call("_fuigo/terminal/wait_for_exit", json!({ "sessionId": session, "terminalId": terminal }), refuse)
+        .call(
+            "_fuigo/terminal/wait_for_exit",
+            json!({ "sessionId": session, "terminalId": terminal }),
+            refuse,
+        )
         .await;
-    assert!(exited.get("result").is_some(), "terminal/wait_for_exit: {exited}");
+    assert!(
+        exited.get("result").is_some(),
+        "terminal/wait_for_exit: {exited}"
+    );
     let term_env = read("p70a-term-env.txt").expect("the client terminal ran");
     for (what, dump) in [("a ! command", &bang_env), ("a client terminal", &term_env)] {
-        assert!(dump.lines().any(|l| l.starts_with("HOME=")), "control: {what}'s dump is its env:\n{dump}");
         assert!(
-            dump.lines().any(|l| l == format!("{}={}", P70_CANARY.0, P70_CANARY.1)),
+            dump.lines().any(|l| l.starts_with("HOME=")),
+            "control: {what}'s dump is its env:\n{dump}"
+        );
+        assert!(
+            dump.lines()
+                .any(|l| l == format!("{}={}", P70_CANARY.0, P70_CANARY.1)),
             "control: {what} inherits the agent's environment:\n{dump}"
         );
-        assert!(!dump.contains(P70_DISK_KEY), "{what} inherited the saved key");
+        assert!(
+            !dump.contains(P70_DISK_KEY),
+            "{what} inherited the saved key"
+        );
         for name in NO_ENV_KEY {
-            assert!(!dump.lines().any(|l| l.starts_with(&format!("{name}="))), "{what} got {name}");
+            assert!(
+                !dump.lines().any(|l| l.starts_with(&format!("{name}="))),
+                "{what} got {name}"
+            );
         }
     }
     #[cfg(target_os = "linux")]
     if let Some(pid) = m.child_pid() {
-        let environ = std::fs::read(format!("/proc/{pid}/environ")).expect("the agent's /proc environ");
+        let environ =
+            std::fs::read(format!("/proc/{pid}/environ")).expect("the agent's /proc environ");
         assert!(
             !String::from_utf8_lossy(&environ).contains(P70_DISK_KEY),
             "the agent was started with the saved key in its environment"
@@ -2936,13 +3709,21 @@ command = "/bin/sh '{hook_script}'"
     let chats = m.chat_requests();
     assert!(!chats.is_empty(), "no inference request was made");
     for r in &chats {
-        assert_eq!(r.authorization.as_deref(), Some(format!("Bearer {P70_DISK_KEY}").as_str()));
+        assert_eq!(
+            r.authorization.as_deref(),
+            Some(format!("Bearer {P70_DISK_KEY}").as_str())
+        );
     }
 
     // The MCP catalog a client reads (Astra f2 #1): `servers_updated` was pushed already; ask for `mcp/list` too.
-    let listed = m.call("_fuigo/mcp/list", json!({ "sessionId": session }), refuse).await;
+    let listed = m
+        .call("_fuigo/mcp/list", json!({ "sessionId": session }), refuse)
+        .await;
     assert!(listed.get("result").is_some(), "mcp/list: {listed}");
-    assert!(listed.to_string().contains("${FUIGO_API_KEY}"), "control: the catalog shows the reference: {listed}");
+    assert!(
+        listed.to_string().contains("${FUIGO_API_KEY}"),
+        "control: the catalog shows the reference: {listed}"
+    );
 
     // The key went where the config named it and into no record of it (Astra f1 #1, f2): no file under FUIGO_HOME
     // other than `auth.json` (session events, logs, MCP state), no line the agent wrote to the client, not its stderr.
@@ -2951,10 +3732,24 @@ command = "/bin/sh '{hook_script}'"
         .into_iter()
         .filter(|p| p.file_name().is_none_or(|n| n != "auth.json"))
         .collect();
-    assert!(on_disk.is_empty(), "the saved key reached a file under FUIGO_HOME: {on_disk:?}");
-    let wire: Vec<&String> = m.client.transcript().iter().filter(|l| l.contains(P70_DISK_KEY)).collect();
-    assert!(wire.is_empty(), "the saved key went to the client: {wire:?}");
-    assert!(!m.stderr().contains(P70_DISK_KEY), "the saved key reached the agent's stderr");
+    assert!(
+        on_disk.is_empty(),
+        "the saved key reached a file under FUIGO_HOME: {on_disk:?}"
+    );
+    let wire: Vec<&String> = m
+        .client
+        .transcript()
+        .iter()
+        .filter(|l| l.contains(P70_DISK_KEY))
+        .collect();
+    assert!(
+        wire.is_empty(),
+        "the saved key went to the client: {wire:?}"
+    );
+    assert!(
+        !m.stderr().contains(P70_DISK_KEY),
+        "the saved key reached the agent's stderr"
+    );
 }
 
 /// P190: `initialize` advertises `interject` and `queue` in `agentCapabilities._meta["fuigo/capabilities"]` so a client need not feature-detect
@@ -2983,13 +3778,28 @@ async fn initialize_advertises_interject_and_queue_flags() {
         .map(|x| x.as_str().expect("queue method is a string"))
         .collect();
     methods.sort_unstable();
-    let mut want = ["_fuigo/queue/remove", "_fuigo/queue/reorder", "_fuigo/queue/clear", "_fuigo/queue/edit",
-        "_fuigo/queue/interject", "_fuigo/queue/hold_edit", "_fuigo/queue/release_edit"];
+    let mut want = [
+        "_fuigo/queue/remove",
+        "_fuigo/queue/reorder",
+        "_fuigo/queue/clear",
+        "_fuigo/queue/edit",
+        "_fuigo/queue/interject",
+        "_fuigo/queue/hold_edit",
+        "_fuigo/queue/release_edit",
+    ];
     want.sort_unstable();
     assert_eq!(methods, want, "init: {init}");
     // The capabilities that were there before keep their exact shape (Astra r2 LOW).
-    assert_eq!(caps["retryDiscard"], json!({ "version": 1 }), "init: {init}");
-    assert_eq!(caps["authenticateApiKey"], json!({ "metaKey": API_KEY_META, "persistOptIn": true }), "init: {init}");
+    assert_eq!(
+        caps["retryDiscard"],
+        json!({ "version": 1 }),
+        "init: {init}"
+    );
+    assert_eq!(
+        caps["authenticateApiKey"],
+        json!({ "metaKey": API_KEY_META, "persistOptIn": true }),
+        "init: {init}"
+    );
     assert_eq!(
         caps["toolOverrides"],
         json!({ "x_keyword_search": true, "x_semantic_search": true, "x_user_search": false, "x_thread_fetch": false }),
@@ -2997,9 +3807,18 @@ async fn initialize_advertises_interject_and_queue_flags() {
     );
     // Unchanged fields.
     assert_eq!(init["result"]["authMethods"], json!([]), "init: {init}");
-    assert_eq!(init["result"]["agentCapabilities"]["loadSession"], true, "init: {init}");
-    assert!(init["result"]["_meta"]["fuigoShell"] == true, "init: {init}");
-    assert!(!runtime_key_advert(&init).is_null(), "fuigo/capabilities still advertised: {init}");
+    assert_eq!(
+        init["result"]["agentCapabilities"]["loadSession"], true,
+        "init: {init}"
+    );
+    assert!(
+        init["result"]["_meta"]["fuigoShell"] == true,
+        "init: {init}"
+    );
+    assert!(
+        !runtime_key_advert(&init).is_null(),
+        "fuigo/capabilities still advertised: {init}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3008,7 +3827,10 @@ async fn initialize_advertises_interject_and_queue_flags() {
 
 /// The keys of a JSON object, sorted (`[]` for anything else).
 fn sorted_keys(value: &Value) -> Vec<String> {
-    let mut keys: Vec<String> = value.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    let mut keys: Vec<String> = value
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
     keys.sort();
     keys
 }
@@ -3018,18 +3840,35 @@ fn sorted_keys(value: &Value) -> Vec<String> {
 /// result's keys and `_meta` keys (values there are per-session).
 async fn u36_unset_wire() -> Value {
     let mut wire = serde_json::Map::new();
-    for (name, leading) in [("default", GLOBAL_DEFAULT), ("bypassPermissions", GLOBAL_BYPASS), ("defaultTrust", GLOBAL_DEFAULT_TRUST)] {
+    for (name, leading) in [
+        ("default", GLOBAL_DEFAULT),
+        ("bypassPermissions", GLOBAL_BYPASS),
+        ("defaultTrust", GLOBAL_DEFAULT_TRUST),
+    ] {
         let mut m = Murage::spawn(
-            AgentSpawnSpec { leading_args: leading, agent_args: AGENT_MURAGE, ..AgentSpawnSpec::default() },
+            AgentSpawnSpec {
+                leading_args: leading,
+                agent_args: AGENT_MURAGE,
+                ..AgentSpawnSpec::default()
+            },
             |_| {},
         )
         .await;
         let init = m.initialize().await;
         let result = &init["result"];
         let ws = m.workspace.clone();
-        let new = m.call("session/new", json!({ "cwd": ws, "mcpServers": [] }), refuse).await;
+        let new = m
+            .call(
+                "session/new",
+                json!({ "cwd": ws, "mcpServers": [] }),
+                refuse,
+            )
+            .await;
         let new_result = &new["result"];
-        assert!(new_result.get("sessionId").is_some(), "{name}: session/new: {new}");
+        assert!(
+            new_result.get("sessionId").is_some(),
+            "{name}: session/new: {new}"
+        );
         wire.insert(
             name.to_owned(),
             json!({
@@ -3065,9 +3904,15 @@ async fn u36_unset_wire_matches_v1035() {
             "{name}: permissionPolicy advertised with no policy: {entry}"
         );
         assert!(
-            !entry["sessionNewMetaKeys"].as_array().is_some_and(|k| k.contains(&json!("fuigo/permissionPolicy"))),
+            !entry["sessionNewMetaKeys"]
+                .as_array()
+                .is_some_and(|k| k.contains(&json!("fuigo/permissionPolicy"))),
             "{name}: ack key with no policy: {entry}"
         );
     }
-    assert_eq!(live, golden["wire"], "the unset wire drifted from v1.0.35.\nlive:   {live}\ngolden: {}", golden["wire"]);
+    assert_eq!(
+        live, golden["wire"],
+        "the unset wire drifted from v1.0.35.\nlive:   {live}\ngolden: {}",
+        golden["wire"]
+    );
 }

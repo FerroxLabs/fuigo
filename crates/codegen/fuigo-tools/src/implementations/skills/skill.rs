@@ -532,7 +532,10 @@ pub async fn load_skill_with_body(skill: &SkillInfo) -> Result<SkillInfo, String
     Ok(loaded)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,11 +1296,9 @@ Review code.
         assert!(result.starts_with("<skill_information>\n"));
         assert!(result.ends_with("\n</skill_information>"));
         assert!(result.contains("<skills_referenced>\n"));
-        assert!(
-            result.contains(
-                "<skill name=\"commit\" path=\"/home/user/.fuigo/skills/commit/SKILL.md\"/>"
-            )
-        );
+        assert!(result.contains(
+            "<skill name=\"commit\" path=\"/home/user/.fuigo/skills/commit/SKILL.md\"/>"
+        ));
         assert!(result.contains("<skill name=\"commit\" args=\"fix typo\">"));
     }
 

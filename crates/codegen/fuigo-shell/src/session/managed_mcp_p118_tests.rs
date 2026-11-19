@@ -17,18 +17,31 @@ fn a_plugin_mcp_server_cannot_name_the_saved_key() {
             }
         }
     });
-    let (servers, _oauth) = load_plugin_mcp_servers_from_value(&root, "acme", "/plugins/acme", "/data/acme");
-    assert_eq!(servers.len(), 2, "both servers still load; only the references are refused");
+    let (servers, _oauth) =
+        load_plugin_mcp_servers_from_value(&root, "acme", "/plugins/acme", "/data/acme");
+    assert_eq!(
+        servers.len(),
+        2,
+        "both servers still load; only the references are refused"
+    );
     for server in &servers {
         match server {
             acp::McpServer::Stdio(s) => {
-                assert!(s.args.iter().all(|a| !a.contains("FUIGO_API_KEY")), "{:?}", s.args);
+                assert!(
+                    s.args.iter().all(|a| !a.contains("FUIGO_API_KEY")),
+                    "{:?}",
+                    s.args
+                );
                 let token = s.env.iter().find(|e| e.name == "TOKEN").expect("TOKEN");
                 assert_eq!(token.value, "");
                 assert!(s.env.iter().any(|e| e.name == "OTHER" && e.value == "ok"));
             }
             acp::McpServer::Http(h) => {
-                let auth = h.headers.iter().find(|x| x.name == "Authorization").expect("Authorization");
+                let auth = h
+                    .headers
+                    .iter()
+                    .find(|x| x.name == "Authorization")
+                    .expect("Authorization");
                 assert_eq!(auth.value, "Bearer ");
             }
             _ => {}
@@ -36,7 +49,9 @@ fn a_plugin_mcp_server_cannot_name_the_saved_key() {
     }
     let notes = fuigo_config::key_naming::refusal_notes();
     assert!(
-        notes.iter().any(|n| n.contains("plugin:acme") && n.contains("mcpServers.p118-plugin-stdio.env.TOKEN") && n.contains("FUIGO_API_KEY")),
+        notes.iter().any(|n| n.contains("plugin:acme")
+            && n.contains("mcpServers.p118-plugin-stdio.env.TOKEN")
+            && n.contains("FUIGO_API_KEY")),
         "no note naming the plugin and the key: {notes:?}"
     );
 }
@@ -56,8 +71,16 @@ fn a_plugin_mcp_file_under_the_user_home_is_still_refused() {
         r#"{"mcpServers":{"p118-dev":{"command":"x","env":{"TOKEN":"${FUIGO_API_KEY}","OTHER":"ok"}}}}"#,
     )
     .unwrap();
-    let (servers, _) = load_plugin_mcp_servers(&path, &fuigo_dirs::contained::PinnedRoot::pin(&dir).unwrap(), "acme", "/plugins/acme", "/data/acme");
-    let acp::McpServer::Stdio(s) = &servers[0] else { panic!("stdio") };
+    let (servers, _) = load_plugin_mcp_servers(
+        &path,
+        &fuigo_dirs::contained::PinnedRoot::pin(&dir).unwrap(),
+        "acme",
+        "/plugins/acme",
+        "/data/acme",
+    );
+    let acp::McpServer::Stdio(s) = &servers[0] else {
+        panic!("stdio")
+    };
     assert_eq!(s.env.iter().find(|e| e.name == "TOKEN").unwrap().value, "");
 }
 
@@ -71,10 +94,18 @@ fn an_inline_plugin_refusal_names_the_manifest_path() {
     let label = plugin_manifest_label(dir.path(), "acme7");
     assert_eq!(label, manifest.display().to_string());
     let root = serde_json::json!({"mcpServers": {"p118-r27": {"command": "x", "env": {"TOKEN": "${FUIGO_API_KEY}"}}}});
-    let _ = load_plugin_mcp_servers_from_value_labelled(&root, &label, "acme7", "/plugins/acme7", "/data/acme7");
+    let _ = load_plugin_mcp_servers_from_value_labelled(
+        &root,
+        &label,
+        "acme7",
+        "/plugins/acme7",
+        "/data/acme7",
+    );
     let notes = fuigo_config::key_naming::refusal_notes();
     assert!(
-        notes.iter().any(|n| n.starts_with(&label) && n.contains("mcpServers.p118-r27.env.TOKEN")),
+        notes
+            .iter()
+            .any(|n| n.starts_with(&label) && n.contains("mcpServers.p118-r27.env.TOKEN")),
         "no note naming {label}: {notes:?}"
     );
 }

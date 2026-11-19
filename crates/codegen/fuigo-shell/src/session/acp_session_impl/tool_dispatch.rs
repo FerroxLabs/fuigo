@@ -298,7 +298,13 @@ impl SessionActor {
         // bang-controls (decision 40): denials apply before the command runs. A refusal never prompts.
         let hook_tool_name = exec_wire.clone().unwrap_or_else(|| "Bash".to_owned());
         if let Some(refusal) = self
-            .bang_refusal(_prompt_id, &command, &tool_call_id, &hook_tool_name, &tool_input)
+            .bang_refusal(
+                _prompt_id,
+                &command,
+                &tool_call_id,
+                &hook_tool_name,
+                &tool_input,
+            )
             .await
         {
             return self
@@ -314,7 +320,7 @@ impl SessionActor {
             env: self.tool_context.session_env.as_ref().clone(),
             timeout: BASH_MODE_TIMEOUT,
             output_byte_limit: BASH_MODE_OUTPUT_BYTE_LIMIT,
-            stream: true,      // Enable streaming for bash mode
+            stream: true,     // Enable streaming for bash mode
             output_log: None, // No file logging for interactive bash mode
         };
 
@@ -522,7 +528,8 @@ impl SessionActor {
                 },
             );
             let ctx = self.hook_run_ctx();
-            let pre = fuigo_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx).await;
+            let pre =
+                fuigo_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx).await;
             self.send_hook_execution(
                 "pre_tool_use",
                 Some(hook_tool_name),
@@ -649,7 +656,8 @@ impl SessionActor {
             },
         );
         let ctx = self.hook_run_ctx();
-        let post = fuigo_hooks::dispatcher::dispatch_post_tool_use(&registry, &envelope, &ctx).await;
+        let post =
+            fuigo_hooks::dispatcher::dispatch_post_tool_use(&registry, &envelope, &ctx).await;
         self.send_hook_execution(
             "post_tool_use",
             Some(hook_tool_name),
@@ -859,7 +867,10 @@ mod tests {
 /// the scrollback block had nothing more to show. These tests pin both halves of the contract: the ACP
 /// `ToolCallUpdate.raw_output.output` (what the pager renders) is the full output, and the chat-history user message
 /// plus `output_for_prompt` (what the model sees next turn) stay the `... (N lines)` + last-10 tail.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod bash_mode_output_tests {
     use super::super::support::*;

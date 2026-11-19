@@ -358,7 +358,13 @@ mod tests {
         assert_eq!(scrub("p119-tls-pass"), "p119-tls-pass");
         // NO_PROXY is not consulted: the HTTP stack matches its entries its own way, and a guess that differs would
         // leave a sent credential unrecorded.
-        for no_proxy in ["*", "example.invalid", ".example.invalid", "*.invalid", "10.0.0.0/8"] {
+        for no_proxy in [
+            "*",
+            "example.invalid",
+            ".example.invalid",
+            "*.invalid",
+            "10.0.0.0/8",
+        ] {
             clear_for_tests();
             let with_no_proxy = |var: &str| match var {
                 "NO_PROXY" => Some(no_proxy.to_owned()),

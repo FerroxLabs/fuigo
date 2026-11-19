@@ -373,7 +373,10 @@ mod tests {
 
 /// P120: the external sign-in command and the identity command are user-configured programs; they must not inherit
 /// Fuigo's own secrets.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(all(test, unix))]
 mod p120_tests {
     use super::*;
@@ -381,7 +384,8 @@ mod p120_tests {
 
     #[tokio::test]
     async fn p120_shell_c_commands_do_not_inherit_fuigo_secrets() {
-        const NAME: &str = "util::subprocess::p120_tests::p120_shell_c_commands_do_not_inherit_fuigo_secrets";
+        const NAME: &str =
+            "util::subprocess::p120_tests::p120_shell_c_commands_do_not_inherit_fuigo_secrets";
         const REGISTERED: &str = "P120_SIGNIN_BEARER";
         if probe::in_parent(NAME, &[REGISTERED]) {
             return;
@@ -389,7 +393,10 @@ mod p120_tests {
         fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
         let dir = probe::scratch_dir("p120-shell-c");
         let out = dir.join("env.txt");
-        let status = shell_c(&format!("env > '{}'", out.display())).status().await.unwrap();
+        let status = shell_c(&format!("env > '{}'", out.display()))
+            .status()
+            .await
+            .unwrap();
         assert!(status.success());
         let dump = std::fs::read_to_string(&out).unwrap();
         probe::assert_clean(&dump, &[]);
@@ -399,7 +406,10 @@ mod p120_tests {
         cmd.env("FUIGO_AGENT_SECRET", "explicit");
         assert!(cmd.status().await.unwrap().success());
         let dump = std::fs::read_to_string(&out).unwrap();
-        assert!(dump.lines().any(|l| l == "FUIGO_AGENT_SECRET=explicit"), "an explicit entry must arrive");
+        assert!(
+            dump.lines().any(|l| l == "FUIGO_AGENT_SECRET=explicit"),
+            "an explicit entry must arrive"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

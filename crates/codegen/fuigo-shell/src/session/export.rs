@@ -81,16 +81,25 @@ impl ExportedMessage {
         };
         let content = serde_json::to_string(&wrapper).ok()?;
         if content.len() > MAX_CHECKPOINT_UPLOAD_BYTES {
-            tracing::warn!(bytes = content.len(), "compaction checkpoint too large to upload; a pulled copy resumes without its summary");
+            tracing::warn!(
+                bytes = content.len(),
+                "compaction checkpoint too large to upload; a pulled copy resumes without its summary"
+            );
             return None;
         }
-        Some(Self { content, timestamp: None })
+        Some(Self {
+            content,
+            timestamp: None,
+        })
     }
 
     /// True for the upload message built by [`Self::compaction_checkpoint`] (its `method` is serialized first).
     pub(crate) fn is_compaction_checkpoint(&self) -> bool {
-        self.content
-            .starts_with(concat!(r#"{"method":""#, "_fuigo/compaction_checkpoint", r#"""#))
+        self.content.starts_with(concat!(
+            r#"{"method":""#,
+            "_fuigo/compaction_checkpoint",
+            r#"""#
+        ))
     }
 
     pub(crate) fn from_fuigo_notification(
@@ -194,7 +203,9 @@ impl ExportedSession {
 
     pub(crate) async fn from_local_session(info: &Info) -> std::io::Result<Self> {
         let storage = JsonlStorageAdapter::new();
-        let data = storage.load_session(info, crate::session::storage::Access::Reader).await?;
+        let data = storage
+            .load_session(info, crate::session::storage::Access::Reader)
+            .await?;
         Ok(Self::from_persisted_data(info, &data))
     }
 
@@ -384,7 +395,10 @@ pub(crate) mod checkpoint_upload_tests {
     use super::*;
     use crate::extensions::notification as n;
 
-    pub(crate) fn marker_and_file(id: &str, text: &str) -> (n::SessionNotification, n::CompactionCheckpointFile) {
+    pub(crate) fn marker_and_file(
+        id: &str,
+        text: &str,
+    ) -> (n::SessionNotification, n::CompactionCheckpointFile) {
         let marker = n::SessionNotification {
             session_id: acp::SessionId::new("s"),
             update: n::SessionUpdate::CompactionCheckpoint(Box::new(n::CompactionCheckpointInfo {
@@ -414,7 +428,8 @@ pub(crate) mod checkpoint_upload_tests {
     #[test]
     fn checkpoint_message_uses_a_method_old_clients_do_not_replay() {
         let (marker, file) = marker_and_file("cp-1", "SUMMARY");
-        let msg = ExportedMessage::compaction_checkpoint(&marker, &file).expect("small checkpoint is uploaded");
+        let msg = ExportedMessage::compaction_checkpoint(&marker, &file)
+            .expect("small checkpoint is uploaded");
         let v: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
         let method = v["method"].as_str().unwrap();
         assert_eq!(method, COMPACTION_CHECKPOINT_METHOD);
@@ -424,7 +439,8 @@ pub(crate) mod checkpoint_upload_tests {
 
     #[test]
     fn oversized_checkpoint_is_not_uploaded() {
-        let (marker, file) = marker_and_file("cp-big", &"x".repeat(MAX_CHECKPOINT_UPLOAD_BYTES + 1));
+        let (marker, file) =
+            marker_and_file("cp-big", &"x".repeat(MAX_CHECKPOINT_UPLOAD_BYTES + 1));
         assert!(ExportedMessage::compaction_checkpoint(&marker, &file).is_none());
     }
 }

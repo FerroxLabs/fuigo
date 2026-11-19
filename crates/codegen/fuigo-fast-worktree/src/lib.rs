@@ -51,6 +51,7 @@ pub use api::gc::{
     GcOptions, GcReport, InUse, KeptWorktree, gc_worktrees, gc_worktrees_with_delegate,
     worktree_in_use,
 };
+pub use api::is_copy_abort;
 pub use api::{
     BtrfsDelegate, BtrfsMode, CleanupReport, CopyReport, CreationMode, DelegateSnapshotResult,
     DirtyFilesReport, ENOSPC_OS_MESSAGE, IgnoredFilesMode, OUT_OF_DISK_CONTEXT, RemoveReport,
@@ -63,6 +64,7 @@ pub use auto_gc::{
     ENV_AUTO_GC_REBUILD, ResolvedWorktreeAutoGc, WorktreeAutoGcLayer, clear_auto_gc_env_for_test,
     maybe_auto_gc, resolve_worktree_auto_gc_from_layers, run_auto_gc_pass,
 };
+pub use copy::TrackedCopyError;
 #[cfg(feature = "metadata")]
 pub use db::{
     DbStats, ListFilter, META_KEY_LABEL, RegistryOpen, SqliteFailureKind, WorktreeDb, WorktreeKind,
@@ -74,8 +76,6 @@ pub use discovery::{
     managed_worktree_roots, path_under_managed_worktree_roots, path_under_worktree_roots,
     rebuild_worktree_db, rebuild_worktree_db_with_grove_data,
 };
-pub use api::is_copy_abort;
-pub use copy::TrackedCopyError;
 /// Test seams for the disk-full classifier (probe and tree-walk overrides).
 #[cfg(any(test, feature = "test-support"))]
 pub use git::space::seam as storage_seam;
@@ -91,11 +91,13 @@ pub mod enospc_box {
         FitCheck, add_fs_paths, classify_lines, git_write_failure, line_rule, probe, tree_need,
     };
 }
-pub use git::operand::{
-    parse_git_ref_arg, parse_worktree_name_arg, validate_git_operand, validate_git_ref, validate_worktree_name,
-};
 pub use git::checkout::{
-    dropped_uninitialised_gitlinks, parse_gitlinks, rehydrate_worktree_from_ref, snapshot_worktree_to_ref, transfer_snapshot_to_repo,
+    dropped_uninitialised_gitlinks, parse_gitlinks, rehydrate_worktree_from_ref,
+    snapshot_worktree_to_ref, transfer_snapshot_to_repo,
+};
+pub use git::operand::{
+    parse_git_ref_arg, parse_worktree_name_arg, validate_git_operand, validate_git_ref,
+    validate_worktree_name,
 };
 pub use git::{
     KeepReason, Reclaim, reclaimable_after_snapshot, remove_stale_worktree_registration,

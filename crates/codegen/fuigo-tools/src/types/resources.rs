@@ -706,7 +706,10 @@ fn normalize_lexically(path: &std::path::Path) -> std::path::PathBuf {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                if !matches!(out.components().next_back(), None | Some(Component::RootDir | Component::Prefix(_))) {
+                if !matches!(
+                    out.components().next_back(),
+                    None | Some(Component::RootDir | Component::Prefix(_))
+                ) {
                     out.pop();
                 }
             }

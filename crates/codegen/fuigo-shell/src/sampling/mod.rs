@@ -9,8 +9,8 @@ pub use self::conversation::*;
 pub use self::error::{ResponseModelMetadata, Result, SamplingError};
 pub use self::types::*;
 pub use fuigo_sampler::ApiBackend;
-pub use fuigo_sampler::execution_budget;
 pub use fuigo_sampler::SamplingClient as Client;
+pub use fuigo_sampler::execution_budget;
 
 // Re-export async-openai Responses API types under `rs` namespace
 pub use async_openai::types::responses as rs;

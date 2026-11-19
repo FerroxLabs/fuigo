@@ -45,12 +45,21 @@ impl Raw {
     async fn connect(sock: &Path, name: &'static str) -> Self {
         let conn = tokio::time::timeout(
             RPC,
-            LeaderClient::connect(sock.to_path_buf(), name, ClientMode::Stdio, ClientCapabilities::default()),
+            LeaderClient::connect(
+                sock.to_path_buf(),
+                name,
+                ClientMode::Stdio,
+                ClientCapabilities::default(),
+            ),
         )
         .await
         .expect("leader connect timed out")
         .expect("leader connect");
-        let mut raw = Self { conn, next: 0, name };
+        let mut raw = Self {
+            conn,
+            next: 0,
+            name,
+        };
         let init = raw
             .call(
                 "initialize",
@@ -65,11 +74,20 @@ impl Raw {
                 }),
             )
             .await;
-        assert!(init.get("result").is_some(), "{name}: initialize failed: {init}");
+        assert!(
+            init.get("result").is_some(),
+            "{name}: initialize failed: {init}"
+        );
         let auth = raw
-            .call("authenticate", json!({ "methodId": "fuigo.api_key", "_meta": { "headless": true } }))
+            .call(
+                "authenticate",
+                json!({ "methodId": "fuigo.api_key", "_meta": { "headless": true } }),
+            )
             .await;
-        assert!(auth.get("result").is_some(), "{name}: authenticate failed: {auth}");
+        assert!(
+            auth.get("result").is_some(),
+            "{name}: authenticate failed: {auth}"
+        );
         raw
     }
 
@@ -78,14 +96,19 @@ impl Raw {
         self.next += 1;
         let id = self.next;
         self.conn
-            .send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string())
+            .send(
+                json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+                    .to_string(),
+            )
             .expect("send to leader");
         let deadline = tokio::time::Instant::now() + RPC;
         loop {
             let line = tokio::time::timeout_at(deadline, self.conn.recv())
                 .await
                 .unwrap_or_else(|_| panic!("{}: {method} timed out", self.name))
-                .unwrap_or_else(|| panic!("{}: leader connection closed during {method}", self.name));
+                .unwrap_or_else(|| {
+                    panic!("{}: leader connection closed during {method}", self.name)
+                });
             let Ok(msg) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -105,7 +128,10 @@ impl Raw {
 
     async fn new_session(&mut self, cwd: &Path) -> String {
         let r = self
-            .call("session/new", json!({ "cwd": cwd, "mcpServers": [], "_meta": { "modelId": "test-model" } }))
+            .call(
+                "session/new",
+                json!({ "cwd": cwd, "mcpServers": [], "_meta": { "modelId": "test-model" } }),
+            )
             .await;
         r["result"]["sessionId"]
             .as_str()
@@ -115,7 +141,10 @@ impl Raw {
 
     async fn prompt(&mut self, sid: &str) {
         let r = self
-            .call("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "hello" }] }))
+            .call(
+                "session/prompt",
+                json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "hello" }] }),
+            )
             .await;
         assert_eq!(
             r["result"]["stopReason"].as_str(),
@@ -128,7 +157,12 @@ impl Raw {
     /// `session/load` must succeed; a refusal (`still closing`, `HELD_ELSEWHERE`, anything) fails the case.
     async fn load_ok(&mut self, case: &str, sid: &str, cwd: &Path) -> Duration {
         let started = Instant::now();
-        let r = self.call("session/load", json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] })).await;
+        let r = self
+            .call(
+                "session/load",
+                json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }),
+            )
+            .await;
         let took = started.elapsed();
         assert!(
             r.get("error").is_none() && r.get("result").is_some(),
@@ -139,7 +173,8 @@ impl Raw {
     }
 
     async fn close(&mut self, sid: &str) -> Value {
-        self.call("_fuigo/session/close", json!({ "sessionId": sid })).await
+        self.call("_fuigo/session/close", json!({ "sessionId": sid }))
+            .await
     }
 
     fn disconnect(self) {
@@ -168,7 +203,10 @@ async fn opened(sock: &Path, cwd: &Path, name: &'static str) -> (Raw, String) {
     let mut a = Raw::connect(sock, name).await;
     let sid = a.new_session(cwd).await;
     a.prompt(&sid).await;
-    assert!(!SessionWriter::is_free(&sid), "{name}: a live session holds its writer");
+    assert!(
+        !SessionWriter::is_free(&sid),
+        "{name}: a live session holds its writer"
+    );
     (a, sid)
 }
 
@@ -221,24 +259,37 @@ fn f5c2_leader_session_load_after_client_disconnect_never_refuses() {
         let mut b = Raw::connect(&sock, "a1-other").await;
         let took = b.load_ok("a1", &sid, &cwd).await;
         b.prompt(&sid).await;
-        assert!(!SessionWriter::is_free(&sid), "a1: the loaded session holds one writer");
-        report(format!("a1 immediate load after disconnect: ok in {took:?}, turn ok"));
+        assert!(
+            !SessionWriter::is_free(&sid),
+            "a1: the loaded session holds one writer"
+        );
+        report(format!(
+            "a1 immediate load after disconnect: ok in {took:?}, turn ok"
+        ));
         let closed = b.close(&sid).await;
         let freed = wait_free(&sid, RELEASE_BUDGET).await;
-        assert!(freed.is_some(), "a1: close never released the writer: {closed}");
+        assert!(
+            freed.is_some(),
+            "a1: close never released the writer: {closed}"
+        );
         b.disconnect();
 
         // (a2) B loads after the detach unloaded the idle session.
         let (a, sid) = opened(&sock, &cwd, "a2-owner").await;
         a.disconnect();
         let released = wait_free(&sid, RELEASE_BUDGET).await;
-        report(format!("a2 writer after disconnect-detach: released after {released:?}"));
+        report(format!(
+            "a2 writer after disconnect-detach: released after {released:?}"
+        ));
         let mut b = Raw::connect(&sock, "a2-other").await;
         let took = b.load_ok("a2", &sid, &cwd).await;
         b.prompt(&sid).await;
         report(format!("a2 load after detach: ok in {took:?}, turn ok"));
         b.close(&sid).await;
-        assert!(wait_free(&sid, RELEASE_BUDGET).await.is_some(), "a2: close never released the writer");
+        assert!(
+            wait_free(&sid, RELEASE_BUDGET).await.is_some(),
+            "a2: close never released the writer"
+        );
         b.disconnect();
 
         // (a3) A reconnects and loads its own session.
@@ -249,7 +300,10 @@ fn f5c2_leader_session_load_after_client_disconnect_never_refuses() {
         again.prompt(&sid).await;
         report(format!("a3 owner reconnect load: ok in {took:?}, turn ok"));
         again.close(&sid).await;
-        assert!(wait_free(&sid, RELEASE_BUDGET).await.is_some(), "a3: close never released the writer");
+        assert!(
+            wait_free(&sid, RELEASE_BUDGET).await.is_some(),
+            "a3: close never released the writer"
+        );
         again.disconnect();
 
         // (b1) After A's disconnect, B closes the session, then loads it.
@@ -260,13 +314,23 @@ fn f5c2_leader_session_load_after_client_disconnect_never_refuses() {
         let closed = b.close(&sid).await;
         assert!(closed.get("error").is_none(), "b1: close refused: {closed}");
         let freed = wait_free(&sid, RELEASE_BUDGET).await;
-        assert!(freed.is_some(), "b1: close never released the writer: {closed}");
-        report(format!("b1 close by the other client: {} in {:?}", closed["result"], started.elapsed()));
+        assert!(
+            freed.is_some(),
+            "b1: close never released the writer: {closed}"
+        );
+        report(format!(
+            "b1 close by the other client: {} in {:?}",
+            closed["result"],
+            started.elapsed()
+        ));
         let took = b.load_ok("b1", &sid, &cwd).await;
         b.prompt(&sid).await;
         report(format!("b1 load after close: ok in {took:?}, turn ok"));
         b.close(&sid).await;
-        assert!(wait_free(&sid, RELEASE_BUDGET).await.is_some(), "b1: final close never released the writer");
+        assert!(
+            wait_free(&sid, RELEASE_BUDGET).await.is_some(),
+            "b1: final close never released the writer"
+        );
         b.disconnect();
 
         // (b2) A and B both attached; A disconnects; B closes, then loads again.
@@ -278,12 +342,20 @@ fn f5c2_leader_session_load_after_client_disconnect_never_refuses() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let closed = b.close(&sid).await;
         assert!(closed.get("error").is_none(), "b2: close refused: {closed}");
-        assert!(wait_free(&sid, RELEASE_BUDGET).await.is_some(), "b2: close never released the writer: {closed}");
+        assert!(
+            wait_free(&sid, RELEASE_BUDGET).await.is_some(),
+            "b2: close never released the writer: {closed}"
+        );
         let took = b.load_ok("b2", &sid, &cwd).await;
         b.prompt(&sid).await;
-        report(format!("b2 load after A gone and B's close: ok in {took:?}, turn ok"));
+        report(format!(
+            "b2 load after A gone and B's close: ok in {took:?}, turn ok"
+        ));
         b.close(&sid).await;
-        assert!(wait_free(&sid, RELEASE_BUDGET).await.is_some(), "b2: final close never released the writer");
+        assert!(
+            wait_free(&sid, RELEASE_BUDGET).await.is_some(),
+            "b2: final close never released the writer"
+        );
         b.disconnect();
 
         cancel.cancel();

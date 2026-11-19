@@ -402,8 +402,14 @@ mod tests {
         let mut cmd = portable_pty::CommandBuilder::new("true");
         let nonce = apply_session_nonce(&mut cmd);
         assert!(nonce.len() >= 32);
-        assert_eq!(env_str(&cmd, "FUIGO_WRAP_NONCE").as_deref(), Some(nonce.as_str()));
-        assert_eq!(env_str(&cmd, "LC_FUIGO_WRAP_NONCE").as_deref(), Some(nonce.as_str()));
+        assert_eq!(
+            env_str(&cmd, "FUIGO_WRAP_NONCE").as_deref(),
+            Some(nonce.as_str())
+        );
+        assert_eq!(
+            env_str(&cmd, "LC_FUIGO_WRAP_NONCE").as_deref(),
+            Some(nonce.as_str())
+        );
         // Source guard: the reply worker never appends a newline to the frame
         let source = include_str!("pty_wrap.rs");
         let worker = &source[source.find("host_clipboard_image_frame()").unwrap()..];

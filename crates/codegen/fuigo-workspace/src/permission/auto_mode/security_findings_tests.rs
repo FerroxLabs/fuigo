@@ -62,7 +62,10 @@ fn descriptions_are_fixed_per_variant() {
             UnparseableShell,
             "shell structure could not be fully parsed",
         ),
-        (UnresolvedArgument, "argument values depend on shell expansion"),
+        (
+            UnresolvedArgument,
+            "argument values depend on shell expansion",
+        ),
         (
             OpaqueShell,
             "invokes a nested or dynamically supplied shell command",

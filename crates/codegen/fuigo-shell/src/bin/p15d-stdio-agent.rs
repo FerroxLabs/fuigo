@@ -20,6 +20,11 @@ fn run() -> anyhow::Result<()> {
     let mut config = Config::default();
     // No title requests: they would add model calls the test does not script.
     config.session.title_policy = Some(TitlePolicy::Local);
-    let runtime = tokio::runtime::Builder::new_multi_thread().thread_stack_size(16 * 1024 * 1024).enable_all().build()?;
-    runtime.block_on(fuigo_shell::agent::app::run_stdio_agent(&config, None, None))
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()?;
+    runtime.block_on(fuigo_shell::agent::app::run_stdio_agent(
+        &config, None, None,
+    ))
 }

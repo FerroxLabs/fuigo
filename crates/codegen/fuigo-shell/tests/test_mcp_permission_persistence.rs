@@ -25,7 +25,10 @@ fn test_home() -> &'static PathBuf {
     })
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn fresh_cwd() -> AbsPathBuf {
     let home = test_home();
     let unique = format!(
@@ -287,7 +290,10 @@ async fn fallback_client_plain_allow_always_persists_mcp_tool() {
     .await;
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test]
 #[serial]
 async fn policy_ask_suppresses_mcp_tool_allowlist() {
@@ -333,7 +339,10 @@ async fn policy_ask_suppresses_mcp_tool_allowlist() {
         .await;
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test]
 #[serial]
 async fn policy_ask_suppresses_mcp_server_allowlist() {
@@ -379,7 +388,10 @@ async fn policy_ask_suppresses_mcp_server_allowlist() {
         .await;
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test]
 #[serial]
 async fn policy_deny_takes_precedence_over_mcp_allowlist() {

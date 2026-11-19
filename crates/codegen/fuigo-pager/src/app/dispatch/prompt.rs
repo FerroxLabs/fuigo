@@ -943,7 +943,11 @@ pub(super) fn dispatch_send_prompt_inner(
             };
             let (drained_text, images, chips) = agent.prompt.drain_send_now_payload();
             // Chip ranges fit the composer text; keep them only when that is the text being sent
-            let chip_elements = if drained_text == text { chips } else { Vec::new() };
+            let chip_elements = if drained_text == text {
+                chips
+            } else {
+                Vec::new()
+            };
             if consume_input {
                 agent.prompt.set_text("");
                 agent.note_draft_consumed();

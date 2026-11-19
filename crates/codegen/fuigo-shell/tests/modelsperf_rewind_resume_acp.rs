@@ -10,8 +10,8 @@
 mod acp_harness;
 
 use acp_harness::{
-    AutoApproveClient, RPC_TIMEOUT, connect_client, ext_method, new_session, prompt_turn, run_agent_test,
-    spawn_agent_local_with_config,
+    AutoApproveClient, RPC_TIMEOUT, connect_client, ext_method, new_session, prompt_turn,
+    run_agent_test, spawn_agent_local_with_config,
 };
 use agent_client_protocol::{self as acp, Agent as _};
 use fuigo_test_support::sse::chat_completion_script_exact;
@@ -32,29 +32,49 @@ fn agent_config() -> fuigo_shell::agent::config::Config {
 
 macro_rules! timed {
     ($name:expr, $fut:expr) => {{
-        let wall = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+        let wall = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+        };
         let (w0, t) = (wall(), Instant::now());
         let out = $fut.await;
         let el = t.elapsed();
-        eprintln!("TIMING {} {} wall_us {w0} {}", $name, el.as_millis(), wall());
+        eprintln!(
+            "TIMING {} {} wall_us {w0} {}",
+            $name,
+            el.as_millis(),
+            wall()
+        );
         assert!(el < CATASTROPHIC, "{} took {el:?}", $name);
         out
     }};
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn rewind_and_resume_picker_timings() {
     run_agent_test(|cwd, mock| async move {
-        let conn = connect_client(AutoApproveClient, "modelsperf", spawn_agent_local_with_config(agent_config()))
-            .await
-            .0;
+        let conn = connect_client(
+            AutoApproveClient,
+            "modelsperf",
+            spawn_agent_local_with_config(agent_config()),
+        )
+        .await
+        .0;
         let mut turn = 0usize;
         let mut script = |mock: &fuigo_test_support::MockInferenceServer| {
             let step = mock.expect_response(
                 format!("answer-{turn}"),
                 InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-                ScriptedResponse::sse(chat_completion_script_exact(&format!("Answer {turn}."), MODEL)),
+                ScriptedResponse::sse(chat_completion_script_exact(
+                    &format!("Answer {turn}."),
+                    MODEL,
+                )),
             );
             turn += 1;
             step
@@ -68,7 +88,10 @@ fn rewind_and_resume_picker_timings() {
             prompt_turn(&conn, &s, &format!("Other {i}.")).await;
             step.assert_satisfied();
         }
-        eprintln!("TIMING fixture_{OTHER_SESSIONS}_other_sessions {}", t.elapsed().as_millis());
+        eprintln!(
+            "TIMING fixture_{OTHER_SESSIONS}_other_sessions {}",
+            t.elapsed().as_millis()
+        );
         let session = new_session(&conn, &cwd).await;
         for i in 0..TARGET_TURNS {
             let step = script(&mock);
@@ -77,15 +100,31 @@ fn rewind_and_resume_picker_timings() {
         }
 
         let sid = session.to_string();
-        let points = timed!("rewind_points", ext_method(&conn, "fuigo/rewind/points", json!({ "sessionId": sid })));
+        let points = timed!(
+            "rewind_points",
+            ext_method(&conn, "fuigo/rewind/points", json!({ "sessionId": sid }))
+        );
         assert!(points.to_string().contains("prompt_index"), "{points}");
         let list_params = json!({ "cwd": cwd.to_string_lossy(), "limit": 30, "headless": "exclude", "allowRelax": true });
-        let list = timed!("session_list_cwd_picker", ext_method(&conn, "fuigo/session/list", list_params.clone()));
-        assert!(list.to_string().contains(&sid), "the target session is listed: {list}");
-        let _ = timed!("session_list_cwd_picker_2nd", ext_method(&conn, "fuigo/session/list", list_params));
+        let list = timed!(
+            "session_list_cwd_picker",
+            ext_method(&conn, "fuigo/session/list", list_params.clone())
+        );
+        assert!(
+            list.to_string().contains(&sid),
+            "the target session is listed: {list}"
+        );
+        let _ = timed!(
+            "session_list_cwd_picker_2nd",
+            ext_method(&conn, "fuigo/session/list", list_params)
+        );
         let _ = timed!(
             "session_list_all_workspaces",
-            ext_method(&conn, "fuigo/session_summaries/workspace_list_recent", json!({ "limit": 50 }))
+            ext_method(
+                &conn,
+                "fuigo/session_summaries/workspace_list_recent",
+                json!({ "limit": 50 })
+            )
         );
         let rewound = timed!(
             "rewind_execute_conversation_only",
@@ -112,6 +151,8 @@ fn rewind_and_resume_picker_timings() {
                 conn.load_session(acp::LoadSessionRequest::new(session.clone(), cwd.clone()))
             )
         );
-        loaded.expect("load_session timed out").expect("load_session failed");
+        loaded
+            .expect("load_session timed out")
+            .expect("load_session failed");
     });
 }

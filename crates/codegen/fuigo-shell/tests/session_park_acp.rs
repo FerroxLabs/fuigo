@@ -72,9 +72,7 @@ impl Agent {
     async fn call(&mut self, method: &str, params: Value) -> Value {
         self.next_id += 1;
         let id = format!("p189-{}", self.next_id);
-        self.client
-            .request(&id, method, params, RPC, refuse)
-            .await
+        self.client.request(&id, method, params, RPC, refuse).await
     }
 
     async fn call_answering(
@@ -127,7 +125,10 @@ impl Agent {
     }
 
     /// Chat-completions requests that reached the mock after `since`.
-    fn chat_requests_after(&self, since: SystemTime) -> Vec<fuigo_test_support::mock_server::LogEntry> {
+    fn chat_requests_after(
+        &self,
+        since: SystemTime,
+    ) -> Vec<fuigo_test_support::mock_server::LogEntry> {
         self.server
             .requests()
             .into_iter()
@@ -176,7 +177,9 @@ fn script_tool_call(
 }
 
 /// Turn 1 starts a background command and a monitor that both finish `BG_SECS` later, then ends.
-fn script_background_turn(server: &MockInferenceServer) -> Vec<fuigo_test_support::InferenceExpectation> {
+fn script_background_turn(
+    server: &MockInferenceServer,
+) -> Vec<fuigo_test_support::InferenceExpectation> {
     vec![
         script_tool_call(
             server,
@@ -205,7 +208,8 @@ async fn run_background_turn(agent: &mut Agent) -> String {
     let session = agent.connect().await;
     let reply = agent.prompt(&session, "start the background work").await;
     assert_eq!(
-        reply["result"]["stopReason"], "end_turn",
+        reply["result"]["stopReason"],
+        "end_turn",
         "turn 1 did not end: {reply}\n{}",
         agent.stderr()
     );
@@ -244,7 +248,8 @@ async fn park_holds_background_wakes_and_frames_until_unpark() {
         .await;
     let parked_at = SystemTime::now();
     assert_eq!(
-        park["result"]["parked"], true,
+        park["result"]["parked"],
+        true,
         "park failed: {park}\n{}",
         agent.stderr()
     );
@@ -286,7 +291,11 @@ async fn park_holds_background_wakes_and_frames_until_unpark() {
         .call("_fuigo/session/park", json!({ "sessionId": session }))
         .await;
     assert_eq!(again["result"]["alreadyParked"], true, "{again}");
-    assert_eq!(agent.client.transcript().len(), lines_at_ack + 1, "only the reply was written");
+    assert_eq!(
+        agent.client.transcript().len(),
+        lines_at_ack + 1,
+        "only the reply was written"
+    );
 
     let unparked_at = SystemTime::now();
     let unpark = agent
@@ -324,10 +333,20 @@ async fn park_holds_background_wakes_and_frames_until_unpark() {
 }
 
 fn assert_unparked_marker(msg: &Value, session: &str, frames: u64) {
-    assert_eq!(method_of(msg), Some("_fuigo/session_notification"), "not the marker: {msg}");
+    assert_eq!(
+        method_of(msg),
+        Some("_fuigo/session_notification"),
+        "not the marker: {msg}"
+    );
     assert_eq!(msg["params"]["sessionId"], session, "{msg}");
-    assert_eq!(msg["params"]["update"]["sessionUpdate"], "unparked", "{msg}");
-    assert_eq!(msg["params"]["update"]["released"]["frames"], frames, "{msg}");
+    assert_eq!(
+        msg["params"]["update"]["sessionUpdate"], "unparked",
+        "{msg}"
+    );
+    assert_eq!(
+        msg["params"]["update"]["released"]["frames"], frames,
+        "{msg}"
+    );
 }
 
 /// Clean-park latency: nothing running, the park reply time is printed (`P189-CLEAN-PARK-MS`) and must be
@@ -342,7 +361,10 @@ async fn clean_park_is_fast() {
     for mode in ["hold"] {
         let started = std::time::Instant::now();
         let park = agent
-            .call("_fuigo/session/park", json!({ "sessionId": session, "mode": mode }))
+            .call(
+                "_fuigo/session/park",
+                json!({ "sessionId": session, "mode": mode }),
+            )
             .await;
         let ms = started.elapsed().as_millis();
         assert_eq!(park["result"]["parked"], true, "{park}");
@@ -390,7 +412,10 @@ async fn load_on_a_parked_session_writes_only_its_reply_and_stays_parked() {
     let first = agent.prompt(&session, "hello").await;
     assert_eq!(first["result"]["stopReason"], "end_turn", "{first}");
     let park = agent
-        .call("_fuigo/session/park", json!({ "sessionId": session, "mode": "hold" }))
+        .call(
+            "_fuigo/session/park",
+            json!({ "sessionId": session, "mode": "hold" }),
+        )
         .await;
     assert_eq!(park["result"]["parked"], true, "{park}");
     let at_ack = agent.client.transcript().len();
@@ -401,25 +426,43 @@ async fn load_on_a_parked_session_writes_only_its_reply_and_stays_parked() {
             json!({ "sessionId": session, "cwd": ws, "mcpServers": [], "_meta": { "noReplay": true } }),
         )
         .await;
-    assert!(load.get("result").is_some(), "load failed: {load}\n{}", agent.stderr());
+    assert!(
+        load.get("result").is_some(),
+        "load failed: {load}\n{}",
+        agent.stderr()
+    );
     assert!(
         load["result"]["_meta"]["fuigo/mcpReady"]["servers"].is_array(),
         "a parked load reply carries the MCP readiness: {load}"
     );
     let quiet = agent
         .client
-        .wait_for_message("after a parked load", Duration::from_secs(2), |_| true, |_: &Value| RawReply::Refuse)
+        .wait_for_message(
+            "after a parked load",
+            Duration::from_secs(2),
+            |_| true,
+            |_: &Value| RawReply::Refuse,
+        )
         .await;
-    assert!(quiet.is_none(), "a frame followed the parked load reply: {quiet:?}");
+    assert!(
+        quiet.is_none(),
+        "a frame followed the parked load reply: {quiet:?}"
+    );
     assert_eq!(
         frames_since(&agent, at_ack),
         Vec::<Value>::new(),
         "a parked load wrote something besides its reply"
     );
     let again = agent
-        .call("_fuigo/session/park", json!({ "sessionId": session, "mode": "hold" }))
+        .call(
+            "_fuigo/session/park",
+            json!({ "sessionId": session, "mode": "hold" }),
+        )
         .await;
-    assert_eq!(again["result"]["alreadyParked"], true, "load must not unpark: {again}");
+    assert_eq!(
+        again["result"]["alreadyParked"], true,
+        "load must not unpark: {again}"
+    );
     let before_prompt = agent.client.transcript().len();
     let next = agent.prompt(&session, "next").await;
     assert_eq!(next["result"]["stopReason"], "end_turn", "{next}");
@@ -428,8 +471,13 @@ async fn load_on_a_parked_session_writes_only_its_reply_and_stays_parked() {
         .iter()
         .position(|m| m["params"]["update"]["sessionUpdate"] == "unparked")
         .expect("the prompt writes the unparked marker");
-    let released = after[marker_at]["params"]["update"]["released"]["frames"].as_u64().unwrap_or(0);
-    assert_eq!(marker_at as u64, released, "only released frames precede the marker: {after:?}");
+    let released = after[marker_at]["params"]["update"]["released"]["frames"]
+        .as_u64()
+        .unwrap_or(0);
+    assert_eq!(
+        marker_at as u64, released,
+        "only released frames precede the marker: {after:?}"
+    );
     for frame in &after[..marker_at] {
         assert_eq!(frame["params"]["_meta"]["fuigo/released"], true, "{frame}");
     }
@@ -437,7 +485,10 @@ async fn load_on_a_parked_session_writes_only_its_reply_and_stays_parked() {
 
 /// A parked load with fresh MCP servers (one good, one that cannot start) replies only once both settled,
 /// listing each one's status, and writes nothing else (no `_fuigo/mcp_initialized`).
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn parked_load_reply_carries_mcp_readiness() {
@@ -448,7 +499,10 @@ async fn parked_load_reply_carries_mcp_readiness() {
     let first = agent.prompt(&session, "hello").await;
     assert_eq!(first["result"]["stopReason"], "end_turn", "{first}");
     let park = agent
-        .call("_fuigo/session/park", json!({ "sessionId": session, "mode": "hold" }))
+        .call(
+            "_fuigo/session/park",
+            json!({ "sessionId": session, "mode": "hold" }),
+        )
         .await;
     assert_eq!(park["result"]["parked"], true, "{park}");
     let at_ack = agent.client.transcript().len();
@@ -467,7 +521,11 @@ async fn parked_load_reply_carries_mcp_readiness() {
             }),
         )
         .await;
-    assert!(load.get("result").is_some(), "load failed: {load}\n{}", agent.stderr());
+    assert!(
+        load.get("result").is_some(),
+        "load failed: {load}\n{}",
+        agent.stderr()
+    );
     let servers = load["result"]["_meta"]["fuigo/mcpReady"]["servers"]
         .as_array()
         .unwrap_or_else(|| panic!("no fuigo/mcpReady in the parked load reply: {load}"))
@@ -483,10 +541,22 @@ async fn parked_load_reply_carries_mcp_readiness() {
     assert_eq!(status_of("p189bad"), "failed", "{servers:?}");
     let quiet = agent
         .client
-        .wait_for_message("after a parked load", Duration::from_secs(2), |_| true, |_: &Value| RawReply::Refuse)
+        .wait_for_message(
+            "after a parked load",
+            Duration::from_secs(2),
+            |_| true,
+            |_: &Value| RawReply::Refuse,
+        )
         .await;
-    assert!(quiet.is_none(), "a frame followed the parked load reply: {quiet:?}");
-    assert_eq!(frames_since(&agent, at_ack), Vec::<Value>::new(), "nothing but the reply may be written");
+    assert!(
+        quiet.is_none(),
+        "a frame followed the parked load reply: {quiet:?}"
+    );
+    assert_eq!(
+        frames_since(&agent, at_ack),
+        Vec::<Value>::new(),
+        "nothing but the reply may be written"
+    );
 }
 
 /// `session/prompt` on a parked session unparks it implicitly and runs the prompt.
@@ -503,7 +573,8 @@ async fn prompt_on_a_parked_session_unparks_it() {
     let lines_at_ack = agent.client.transcript().len();
     let second = agent.prompt(&session, "again").await;
     assert_eq!(
-        second["result"]["stopReason"], "end_turn",
+        second["result"]["stopReason"],
+        "end_turn",
         "a prompt on a parked session must run: {second}\n{}",
         agent.stderr()
     );
@@ -516,9 +587,9 @@ async fn prompt_on_a_parked_session_unparks_it() {
         .iter()
         .position(|m| m["params"]["update"]["sessionUpdate"] == "unparked")
         .expect("the implicit unpark writes the unparked marker");
-    let first_update = after
-        .iter()
-        .position(|m| method_of(m) == Some("session/update") && m["params"]["_meta"]["fuigo/released"] != true);
+    let first_update = after.iter().position(|m| {
+        method_of(m) == Some("session/update") && m["params"]["_meta"]["fuigo/released"] != true
+    });
     assert!(
         first_update.is_none_or(|i| i > marker_at),
         "the marker precedes the new turn's first frame: {after:?}"
@@ -526,7 +597,10 @@ async fn prompt_on_a_parked_session_unparks_it() {
     let unpark = agent
         .call("_fuigo/session/unpark", json!({ "sessionId": session }))
         .await;
-    assert_eq!(unpark["result"]["wasParked"], false, "the prompt already unparked: {unpark}");
+    assert_eq!(
+        unpark["result"]["wasParked"], false,
+        "the prompt already unparked: {unpark}"
+    );
 }
 
 /// Wire errors: an unknown mode and an unknown session are `-32602`; `initialize` advertises the method.
@@ -556,13 +630,22 @@ async fn park_wire_errors_and_capability() {
     let new = agent
         .call("session/new", json!({ "cwd": ws, "mcpServers": [] }))
         .await;
-    let session = new["result"]["sessionId"].as_str().expect("session id").to_owned();
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
     let bad_mode = agent
-        .call("_fuigo/session/park", json!({ "sessionId": session, "mode": "freeze" }))
+        .call(
+            "_fuigo/session/park",
+            json!({ "sessionId": session, "mode": "freeze" }),
+        )
         .await;
     assert_eq!(bad_mode["error"]["code"], -32602, "{bad_mode}");
     let unknown = agent
-        .call("_fuigo/session/park", json!({ "sessionId": "no-such-session" }))
+        .call(
+            "_fuigo/session/park",
+            json!({ "sessionId": "no-such-session" }),
+        )
         .await;
     assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
     assert!(
@@ -590,7 +673,12 @@ async fn park_folds_a_scheduler_fire_into_the_next_prompt() {
     let session = agent.connect().await;
     let created_at = std::time::Instant::now();
     let reply = agent.prompt(&session, "schedule the loop").await;
-    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}\n{}", agent.stderr());
+    assert_eq!(
+        reply["result"]["stopReason"],
+        "end_turn",
+        "{reply}\n{}",
+        agent.stderr()
+    );
     scheduled.assert_satisfied();
     let park = agent
         .call("_fuigo/session/park", json!({ "sessionId": session }))
@@ -621,19 +709,29 @@ async fn park_folds_a_scheduler_fire_into_the_next_prompt() {
     // a reminder instead of running as its own loop.
     let prompted_at = SystemTime::now();
     let reply = agent.prompt(&session, "what happened?").await;
-    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}\n{}", agent.stderr());
+    assert_eq!(
+        reply["result"]["stopReason"],
+        "end_turn",
+        "{reply}\n{}",
+        agent.stderr()
+    );
     let requests = agent.chat_requests_after(prompted_at);
     let folded = requests.iter().any(|r| {
         r.body
             .as_ref()
             .is_some_and(|b| b.to_string().contains("came due"))
     });
-    assert!(folded, "the user's turn must carry the folded scheduler fire");
+    assert!(
+        folded,
+        "the user's turn must carry the folded scheduler fire"
+    );
     assert!(
         !requests.iter().any(|r| r
             .body
             .as_ref()
-            .is_some_and(|b| b.to_string().contains("p189loop") && !b.to_string().contains("came due"))),
+            .is_some_and(
+                |b| b.to_string().contains("p189loop") && !b.to_string().contains("came due")
+            )),
         "the folded fire must not also run as a loop"
     );
 }
@@ -665,7 +763,9 @@ async fn park_with_a_client_terminal_task_replies() {
         json!({ "command": "sleep 300", "description": "p189 client terminal", "background": true }),
     );
     let session = agent
-        .connect_with(json!({ "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": true }))
+        .connect_with(
+            json!({ "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": true }),
+        )
         .await;
     let reply = agent
         .call_answering(
@@ -674,7 +774,12 @@ async fn park_with_a_client_terminal_task_replies() {
             client_terminal,
         )
         .await;
-    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}\n{}", agent.stderr());
+    assert_eq!(
+        reply["result"]["stopReason"],
+        "end_turn",
+        "{reply}\n{}",
+        agent.stderr()
+    );
     scripted.assert_satisfied();
     let started = std::time::Instant::now();
     let park = tokio::time::timeout(
@@ -686,9 +791,18 @@ async fn park_with_a_client_terminal_task_replies() {
         ),
     )
     .await
-    .unwrap_or_else(|_| panic!("the park never replied (circular wait on its own hold)\n{}", agent.stderr()));
+    .unwrap_or_else(|_| {
+        panic!(
+            "the park never replied (circular wait on its own hold)\n{}",
+            agent.stderr()
+        )
+    });
     assert_eq!(park["result"]["parked"], true, "{park}\n{}", agent.stderr());
-    assert!(started.elapsed() < Duration::from_secs(10), "park took {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "park took {:?}",
+        started.elapsed()
+    );
     let running = park["result"]["running"]["backgroundTasks"].clone();
     let again = tokio::time::timeout(
         scaled(Duration::from_secs(10)),
@@ -701,9 +815,16 @@ async fn park_with_a_client_terminal_task_replies() {
     .await
     .unwrap_or_else(|_| panic!("the idempotent park never replied\n{}", agent.stderr()));
     assert_eq!(again["result"]["alreadyParked"], true, "{again}");
-    assert_eq!(again["result"]["running"]["backgroundTasks"], running, "{again}");
+    assert_eq!(
+        again["result"]["running"]["backgroundTasks"], running,
+        "{again}"
+    );
     let unpark = agent
-        .call_answering("_fuigo/session/unpark", json!({ "sessionId": session }), client_terminal)
+        .call_answering(
+            "_fuigo/session/unpark",
+            json!({ "sessionId": session }),
+            client_terminal,
+        )
         .await;
     assert_eq!(unpark["result"]["wasParked"], true, "{unpark}");
 }
@@ -715,12 +836,16 @@ async fn park_with_a_client_terminal_task_replies() {
 async fn set_model_on_a_parked_session_is_held_and_does_not_unpark() {
     const OTHER: &str = "p189-model-b";
     let mut agent =
-        Agent::spawn_with_models(vec![MockModelEntry::new(MODEL), MockModelEntry::new(OTHER)]).await;
+        Agent::spawn_with_models(vec![MockModelEntry::new(MODEL), MockModelEntry::new(OTHER)])
+            .await;
     let session = agent.connect().await;
     let first = agent.prompt(&session, "hello").await;
     assert_eq!(first["result"]["stopReason"], "end_turn", "{first}");
     let park = agent
-        .call("_fuigo/session/park", json!({ "sessionId": session, "mode": "hold" }))
+        .call(
+            "_fuigo/session/park",
+            json!({ "sessionId": session, "mode": "hold" }),
+        )
         .await;
     assert_eq!(park["result"]["parked"], true, "{park}");
     let at_ack = agent.client.transcript().len();
@@ -731,36 +856,74 @@ async fn set_model_on_a_parked_session_is_held_and_does_not_unpark() {
             json!({ "sessionId": session, "cwd": ws, "mcpServers": [], "_meta": { "noReplay": true } }),
         )
         .await;
-    assert!(load.get("result").is_some(), "load failed: {load}\n{}", agent.stderr());
+    assert!(
+        load.get("result").is_some(),
+        "load failed: {load}\n{}",
+        agent.stderr()
+    );
     let set = agent
-        .call("session/set_model", json!({ "sessionId": session, "modelId": OTHER }))
+        .call(
+            "session/set_model",
+            json!({ "sessionId": session, "modelId": OTHER }),
+        )
         .await;
-    assert!(set.get("result").is_some(), "set_model failed while parked: {set}\n{}", agent.stderr());
+    assert!(
+        set.get("result").is_some(),
+        "set_model failed while parked: {set}\n{}",
+        agent.stderr()
+    );
     let quiet = agent
         .client
-        .wait_for_message("after a parked set_model", Duration::from_secs(2), |_| true, |_: &Value| RawReply::Refuse)
+        .wait_for_message(
+            "after a parked set_model",
+            Duration::from_secs(2),
+            |_| true,
+            |_: &Value| RawReply::Refuse,
+        )
         .await;
-    assert!(quiet.is_none(), "a frame followed the parked set_model reply: {quiet:?}");
+    assert!(
+        quiet.is_none(),
+        "a frame followed the parked set_model reply: {quiet:?}"
+    );
     assert_eq!(
         frames_since(&agent, at_ack),
         Vec::<Value>::new(),
         "a parked load + set_model wrote something besides their replies"
     );
     let again = agent
-        .call("_fuigo/session/park", json!({ "sessionId": session, "mode": "hold" }))
+        .call(
+            "_fuigo/session/park",
+            json!({ "sessionId": session, "mode": "hold" }),
+        )
         .await;
-    assert_eq!(again["result"]["alreadyParked"], true, "set_model must not unpark: {again}");
+    assert_eq!(
+        again["result"]["alreadyParked"], true,
+        "set_model must not unpark: {again}"
+    );
     let before_prompt = agent.client.transcript().len();
     let next = agent.prompt(&session, "next").await;
-    assert_eq!(next["result"]["stopReason"], "end_turn", "{next}\n{}", agent.stderr());
+    assert_eq!(
+        next["result"]["stopReason"],
+        "end_turn",
+        "{next}\n{}",
+        agent.stderr()
+    );
     let after = frames_since(&agent, before_prompt);
     let marker_at = after
         .iter()
         .position(|m| m["params"]["update"]["sessionUpdate"] == "unparked")
         .expect("the prompt writes the unparked marker");
-    let released = after[marker_at]["params"]["update"]["released"]["frames"].as_u64().unwrap_or(0);
-    assert_eq!(marker_at as u64, released, "only released frames precede the marker: {after:?}");
-    assert!(released >= 1, "set_model's frames were not held for the prompt: {after:?}");
+    let released = after[marker_at]["params"]["update"]["released"]["frames"]
+        .as_u64()
+        .unwrap_or(0);
+    assert_eq!(
+        marker_at as u64, released,
+        "only released frames precede the marker: {after:?}"
+    );
+    assert!(
+        released >= 1,
+        "set_model's frames were not held for the prompt: {after:?}"
+    );
     for frame in &after[..marker_at] {
         assert_eq!(frame["params"]["_meta"]["fuigo/released"], true, "{frame}");
     }
@@ -787,7 +950,10 @@ async fn family_switch_set_model_on_a_parked_session_is_owed_until_the_prompt() 
     let first = agent.prompt(&session, "hello").await;
     assert_eq!(first["result"]["stopReason"], "end_turn", "{first}");
     let park = agent
-        .call("_fuigo/session/park", json!({ "sessionId": session, "mode": "hold" }))
+        .call(
+            "_fuigo/session/park",
+            json!({ "sessionId": session, "mode": "hold" }),
+        )
         .await;
     assert_eq!(park["result"]["parked"], true, "{park}");
     let since = SystemTime::now();
@@ -798,17 +964,38 @@ async fn family_switch_set_model_on_a_parked_session_is_owed_until_the_prompt() 
             json!({ "sessionId": session, "cwd": ws, "mcpServers": [], "_meta": { "noReplay": true } }),
         )
         .await;
-    assert!(load.get("result").is_some(), "load failed: {load}\n{}", agent.stderr());
+    assert!(
+        load.get("result").is_some(),
+        "load failed: {load}\n{}",
+        agent.stderr()
+    );
     let set = tokio::time::timeout(
         scaled(Duration::from_secs(10)),
-        agent.call("session/set_model", json!({ "sessionId": session, "modelId": OTHER })),
+        agent.call(
+            "session/set_model",
+            json!({ "sessionId": session, "modelId": OTHER }),
+        ),
     )
     .await
-    .unwrap_or_else(|_| panic!("set_model did not reply while parked (deadlock)\n{}", agent.stderr()));
-    assert!(set.get("result").is_some(), "set_model failed while parked: {set}\n{}", agent.stderr());
+    .unwrap_or_else(|_| {
+        panic!(
+            "set_model did not reply while parked (deadlock)\n{}",
+            agent.stderr()
+        )
+    });
+    assert!(
+        set.get("result").is_some(),
+        "set_model failed while parked: {set}\n{}",
+        agent.stderr()
+    );
     let _ = agent
         .client
-        .wait_for_message("quiet after set_model", Duration::from_secs(2), |_| false, refuse)
+        .wait_for_message(
+            "quiet after set_model",
+            Duration::from_secs(2),
+            |_| false,
+            refuse,
+        )
         .await;
     assert_eq!(
         agent.chat_requests_after(since).len(),
@@ -817,9 +1004,17 @@ async fn family_switch_set_model_on_a_parked_session_is_owed_until_the_prompt() 
         agent.stderr()
     );
     let next = agent.prompt(&session, "next").await;
-    assert_eq!(next["result"]["stopReason"], "end_turn", "{next}\n{}", agent.stderr());
+    assert_eq!(
+        next["result"]["stopReason"],
+        "end_turn",
+        "{next}\n{}",
+        agent.stderr()
+    );
     let calls = agent.chat_requests_after(since).len();
-    assert!(calls >= 2, "the prompt ran no owed family-switch compaction (model calls: {calls})");
+    assert!(
+        calls >= 2,
+        "the prompt ran no owed family-switch compaction (model calls: {calls})"
+    );
 }
 
 /// P189 M3, end to end through the real binary: the PRODUCTION model dispatch gate. A background subagent's first
@@ -848,18 +1043,30 @@ async fn model_dispatch_gate_holds_a_background_subagents_retry_while_parked() {
     let parent_end = server.expect_response(
         "parent-round-2-ends",
         InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-        ScriptedResponse::sse(fuigo_test_support::sse::chat_completion_script_exact("spawned", MODEL)),
+        ScriptedResponse::sse(fuigo_test_support::sse::chat_completion_script_exact(
+            "spawned", MODEL,
+        )),
     );
-    let mut unavailable = ScriptedResponse::json(503, json!({ "error": { "message": "p189 overloaded" } }));
-    unavailable.headers.push(("retry-after".to_owned(), RETRY_AFTER_SECS.to_string()));
+    let mut unavailable =
+        ScriptedResponse::json(503, json!({ "error": { "message": "p189 overloaded" } }));
+    unavailable
+        .headers
+        .push(("retry-after".to_owned(), RETRY_AFTER_SECS.to_string()));
     let child_503 = server.expect_response(
         "child-round-1-503",
         InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
         unavailable,
     );
     let session = agent.connect().await;
-    let reply = agent.prompt(&session, "start the background subagent").await;
-    assert_eq!(reply["result"]["stopReason"], "end_turn", "turn 1 did not end: {reply}\n{}", agent.stderr());
+    let reply = agent
+        .prompt(&session, "start the background subagent")
+        .await;
+    assert_eq!(
+        reply["result"]["stopReason"],
+        "end_turn",
+        "turn 1 did not end: {reply}\n{}",
+        agent.stderr()
+    );
     spawn.assert_satisfied();
     parent_end.assert_satisfied();
     // The child's first call (the 503) must have been served before the park, so the retry is in its backoff.
@@ -870,11 +1077,22 @@ async fn model_dispatch_gate_holds_a_background_subagents_retry_while_parked() {
             .wait_for_message("drain", Duration::from_millis(200), |_| false, refuse)
             .await;
     }
-    assert!(child_503.is_satisfied(), "the child never made its first call\n{}", agent.stderr());
+    assert!(
+        child_503.is_satisfied(),
+        "the child never made its first call\n{}",
+        agent.stderr()
+    );
 
-    let park = agent.call("_fuigo/session/park", json!({ "sessionId": session })).await;
+    let park = agent
+        .call("_fuigo/session/park", json!({ "sessionId": session }))
+        .await;
     let parked_at = SystemTime::now();
-    assert_eq!(park["result"]["parked"], true, "park failed: {park}\n{}", agent.stderr());
+    assert_eq!(
+        park["result"]["parked"],
+        true,
+        "park failed: {park}\n{}",
+        agent.stderr()
+    );
 
     // The backoff ends while parked; the retry is due and must be held.
     let _ = agent
@@ -887,13 +1105,21 @@ async fn model_dispatch_gate_holds_a_background_subagents_retry_while_parked() {
         )
         .await;
     let held = agent.chat_requests_after(parked_at);
-    assert!(held.is_empty(), "{} model call(s) reached the endpoint while parked", held.len());
+    assert!(
+        held.is_empty(),
+        "{} model call(s) reached the endpoint while parked",
+        held.len()
+    );
 
     let unparked_at = SystemTime::now();
-    let unpark = agent.call("_fuigo/session/unpark", json!({ "sessionId": session })).await;
+    let unpark = agent
+        .call("_fuigo/session/unpark", json!({ "sessionId": session }))
+        .await;
     assert_eq!(unpark["result"]["wasParked"], true, "{unpark}");
     assert!(
-        agent.wait_chat_request_after(unparked_at, Duration::from_secs(20)).await,
+        agent
+            .wait_chat_request_after(unparked_at, Duration::from_secs(20))
+            .await,
         "no model call after unpark: the gate never released\n{}",
         agent.stderr()
     );
@@ -905,7 +1131,10 @@ async fn model_dispatch_gate_holds_a_background_subagents_retry_while_parked() {
 async fn park_stop_is_unadvertised_everywhere() {
     let mut agent = Agent::spawn().await;
     let init = agent
-        .call("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }))
+        .call(
+            "initialize",
+            json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+        )
         .await;
     let cap = &init["result"]["agentCapabilities"]["_meta"]["fuigo/capabilities"]["sessionPark"];
     assert_eq!(cap["modes"], json!(["hold"]), "{init}");
@@ -917,17 +1146,31 @@ async fn park_stop_is_unadvertised_everywhere() {
     let new = agent
         .call("session/new", json!({ "cwd": ws, "mcpServers": [] }))
         .await;
-    let session = new["result"]["sessionId"].as_str().expect("session id").to_owned();
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
     let stop = agent
-        .call("_fuigo/session/park", json!({ "sessionId": session, "mode": "stop" }))
+        .call(
+            "_fuigo/session/park",
+            json!({ "sessionId": session, "mode": "stop" }),
+        )
         .await;
     assert_eq!(stop["error"]["code"], -32602, "{stop}");
-    let message = stop["error"]["data"]["message"].as_str().unwrap_or_default();
-    assert!(message.contains("hold") && !message.contains("\"stop\""), "{stop}");
+    let message = stop["error"]["data"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("hold") && !message.contains("\"stop\""),
+        "{stop}"
+    );
     let unpark = agent
         .call("_fuigo/session/unpark", json!({ "sessionId": session }))
         .await;
-    assert_eq!(unpark["result"]["wasParked"], false, "a refused stop parked the session: {unpark}");
+    assert_eq!(
+        unpark["result"]["wasParked"], false,
+        "a refused stop parked the session: {unpark}"
+    );
     let prompt = agent.prompt(&session, "hello").await;
     assert_eq!(prompt["result"]["stopReason"], "end_turn", "{prompt}");
 }

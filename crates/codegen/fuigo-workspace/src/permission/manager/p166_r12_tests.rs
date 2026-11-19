@@ -21,10 +21,15 @@ fn check(rows: &[&str], blocked: bool) {
         .iter()
         .filter_map(|cmd| {
             let got = floor(project.path(), cmd);
-            (got.is_some() != blocked).then(|| format!("{cmd}: expected blocked={blocked}, got {got:?}"))
+            (got.is_some() != blocked)
+                .then(|| format!("{cmd}: expected blocked={blocked}, got {got:?}"))
         })
         .collect();
-    assert!(wrong.is_empty(), "protected floor mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "protected floor mismatches:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// Item 1 (HIGH 1): `$HOME` / `$PWD` fold on every redirect operator; an undecodable target that still shows a
@@ -75,7 +80,16 @@ fn p166_r12_item2_tilde_user_words() {
         ],
         true,
     );
-    check(&["touch ~/notes.txt", "cd ~/src && touch a", "ls ~root", "cat ~alice/notes", "ls ~"], false);
+    check(
+        &[
+            "touch ~/notes.txt",
+            "cd ~/src && touch a",
+            "ls ~root",
+            "cat ~alice/notes",
+            "ls ~",
+        ],
+        false,
+    );
     // The current user's own name is the home (whoever runs the tests; `~root` on the build box).
     for key in ["USER", "LOGNAME"] {
         if let Some(user) = std::env::var(key).ok().filter(|u| !u.is_empty()) {
@@ -133,7 +147,14 @@ fn p166_r12_sweep_redirect_targets_and_remote_destinations() {
                 format!("{base} 2> $PWD/.git/hooks/pre-commit"),
             ];
             if matches!(*program, "scp" | "rsync") && template.ends_with(" {P}") {
-                for host in ["host:", "192.168.1.5:", "foo.localhost:", "user@buildhost:", "my_host:", "scp://build.example.com/"] {
+                for host in [
+                    "host:",
+                    "192.168.1.5:",
+                    "foo.localhost:",
+                    "user@buildhost:",
+                    "my_host:",
+                    "scp://build.example.com/",
+                ] {
                     for path in [".mcp.json", ".git/hooks/pre-commit"] {
                         variants.push(template.replace("{P}", &format!("'{host}{path}'")));
                     }
@@ -148,7 +169,12 @@ fn p166_r12_sweep_redirect_targets_and_remote_destinations() {
         }
     }
     eprintln!("SWEEP r12 cases={cases} wrong={}", wrong.len());
-    assert!(wrong.is_empty(), "{} of {cases} generated cases wrong:\n{}", wrong.len(), wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "{} of {cases} generated cases wrong:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
 }
 
 fn exec(cmd: &str) -> bool {
@@ -185,7 +211,14 @@ fn p166_r12_item6_config_forms_that_set_nothing() {
     ];
     check(&quiet, false);
     check_exec(&quiet, false);
-    check(&["git config core.editor vim", "git config set core.editor vim", "git config core.hooksPath .githooks"], true);
+    check(
+        &[
+            "git config core.editor vim",
+            "git config set core.editor vim",
+            "git config core.hooksPath .githooks",
+        ],
+        true,
+    );
 }
 
 /// Item 4 (HIGH 5, MEDIUM 7, LOW 8): one predicate for every git URL; a URL that runs code is exec risk, and a SET of
@@ -288,12 +321,18 @@ fn p166_r12_item4_ambient_config_urls() {
         ("[remote \"o\"]\n\tpushurl = foo::x\n", true),
         ("[remote \"o\"]\n\turl = ssh://-oProxyCommand=x/y\n", true),
         ("[submodule \"lib\"]\n\turl = ext::sh -c id\n", true),
-        ("[url \"file:///tmp/evil.git\"]\n\tinsteadOf = https://github.com/a/b.git\n", true),
+        (
+            "[url \"file:///tmp/evil.git\"]\n\tinsteadOf = https://github.com/a/b.git\n",
+            true,
+        ),
         ("[remote \"o\"]\n\turl = https://github.com/a/b\n", false),
         ("[remote \"o\"]\n\turl = git@github.com:a/b.git\n", false),
         ("[remote \"o\"]\n\turl = ../other\n", false),
         ("[remote \"o\"]\n\turl = file:///srv/git/x.git\n", false),
-        ("[submodule \"lib\"]\n\turl = https://github.com/a/lib\n", false),
+        (
+            "[submodule \"lib\"]\n\turl = https://github.com/a/lib\n",
+            false,
+        ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         git2::Repository::init(dir.path()).unwrap();
@@ -301,6 +340,10 @@ fn p166_r12_item4_ambient_config_urls() {
         let mut text = std::fs::read_to_string(&config).unwrap();
         text.push_str(section);
         std::fs::write(&config, text).unwrap();
-        assert_eq!(local_repo_config_has_exec_risk(dir.path()), risky, "{section}");
+        assert_eq!(
+            local_repo_config_has_exec_risk(dir.path()),
+            risky,
+            "{section}"
+        );
     }
 }

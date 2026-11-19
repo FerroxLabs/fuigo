@@ -16,7 +16,15 @@ pub struct EvidenceInbox {
 
 /// Start the inbox for `host_id` with the feature forced on. `Err` is the fixed reason text.
 pub async fn start(host_id: &HostId) -> Result<EvidenceInbox, String> {
-    match WinPeerInbox::start_inner(StartOptions { enabled: true, evidence_open_acl: false }, host_id.clone()).await {
+    match WinPeerInbox::start_inner(
+        StartOptions {
+            enabled: true,
+            evidence_open_acl: false,
+        },
+        host_id.clone(),
+    )
+    .await
+    {
         Ok(inner) => Ok(EvidenceInbox { inner }),
         Err(r) => Err(r.reason_text().to_owned()),
     }
@@ -29,9 +37,19 @@ pub async fn start(host_id: &HostId) -> Result<EvidenceInbox, String> {
 #[cfg(debug_assertions)]
 pub async fn start_open_acl(host_id: &HostId) -> Result<EvidenceInbox, String> {
     if !evidence_open_acl_requested(|k| std::env::var(k).ok()) {
-        return Err(format!("set {EVIDENCE_OPEN_ACL_VAR}=1 to run the open-ACL evidence case"));
+        return Err(format!(
+            "set {EVIDENCE_OPEN_ACL_VAR}=1 to run the open-ACL evidence case"
+        ));
     }
-    match WinPeerInbox::start_inner(StartOptions { enabled: true, evidence_open_acl: true }, host_id.clone()).await {
+    match WinPeerInbox::start_inner(
+        StartOptions {
+            enabled: true,
+            evidence_open_acl: true,
+        },
+        host_id.clone(),
+    )
+    .await
+    {
         Ok(inner) => Ok(EvidenceInbox { inner }),
         Err(r) => Err(r.reason_text().to_owned()),
     }
@@ -39,7 +57,15 @@ pub async fn start_open_acl(host_id: &HostId) -> Result<EvidenceInbox, String> {
 
 /// Start with the feature off: must fail without touching the OS.
 pub async fn start_disabled(host_id: &HostId) -> Result<EvidenceInbox, String> {
-    match WinPeerInbox::start_inner(StartOptions { enabled: false, evidence_open_acl: false }, host_id.clone()).await {
+    match WinPeerInbox::start_inner(
+        StartOptions {
+            enabled: false,
+            evidence_open_acl: false,
+        },
+        host_id.clone(),
+    )
+    .await
+    {
         Ok(inner) => Ok(EvidenceInbox { inner }),
         Err(r) => Err(r.reason_text().to_owned()),
     }
@@ -51,11 +77,17 @@ impl EvidenceInbox {
     }
 
     pub fn accepted(&self) -> u64 {
-        self.inner.stats().accepted.load(std::sync::atomic::Ordering::SeqCst)
+        self.inner
+            .stats()
+            .accepted
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn refused(&self) -> u64 {
-        self.inner.stats().refused.load(std::sync::atomic::Ordering::SeqCst)
+        self.inner
+            .stats()
+            .refused
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The fixed name of the last refusal reason.

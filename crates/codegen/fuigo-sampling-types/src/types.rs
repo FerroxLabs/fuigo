@@ -538,7 +538,10 @@ impl FinishReason {
         match serde_json::to_value(self) {
             Ok(serde_json::Value::String(s)) => s,
             other => {
-                debug_assert!(false, "FinishReason must serialize to a string, got {other:?}");
+                debug_assert!(
+                    false,
+                    "FinishReason must serialize to a string, got {other:?}"
+                );
                 "stop".to_owned()
             }
         }
@@ -1282,8 +1285,20 @@ impl std::fmt::Debug for SamplingConfig {
             .field("max_retries", max_retries)
             .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
             .field("api_backend", api_backend)
-            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
-            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_headers",
+                &extra_headers
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "query_params",
+                &query_params
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
             .field("max_request_bytes", max_request_bytes)
@@ -1500,7 +1515,10 @@ mod tests {
             );
         }
         let err = serde_json::from_str::<ReasoningEffort>("\"loud\"").unwrap_err();
-        assert!(err.to_string().contains("invalid reasoning effort"), "{err}");
+        assert!(
+            err.to_string().contains("invalid reasoning effort"),
+            "{err}"
+        );
         assert!(serde_json::from_str::<ReasoningEffort>("7").is_err());
     }
 
@@ -1576,8 +1594,10 @@ mod tests {
     fn parse_reasoning_efforts_meta_absent_is_none() {
         assert!(parse_reasoning_efforts_meta(None).is_none());
         assert!(
-            parse_reasoning_efforts_meta(Some(json!({ "agentType": "fuigo" }).as_object().unwrap()))
-                .is_none()
+            parse_reasoning_efforts_meta(Some(
+                json!({ "agentType": "fuigo" }).as_object().unwrap()
+            ))
+            .is_none()
         );
     }
 
@@ -1815,7 +1835,10 @@ mod finish_reason_tests {
         assert!(matches!(parse("stop"), FinishReason::Stop));
         assert!(matches!(parse("length"), FinishReason::Length));
         assert!(matches!(parse("tool_calls"), FinishReason::ToolCalls));
-        assert!(matches!(parse("content_filter"), FinishReason::ContentFilter));
+        assert!(matches!(
+            parse("content_filter"),
+            FinishReason::ContentFilter
+        ));
         assert!(matches!(parse("function_call"), FinishReason::FunctionCall));
         match parse("guardrail_intervened") {
             FinishReason::Unknown(s) => assert_eq!(s, "guardrail_intervened"),
@@ -1842,7 +1865,10 @@ mod finish_reason_tests {
 
     #[test]
     fn context_window_meta_helpers_parse_and_round_trip() {
-        let windows = [NonZeroU64::new(100_000).unwrap(), NonZeroU64::new(400_000).unwrap()];
+        let windows = [
+            NonZeroU64::new(100_000).unwrap(),
+            NonZeroU64::new(400_000).unwrap(),
+        ];
         let meta = serde_json::json!({
             CONTEXT_WINDOWS_META_KEY: context_windows_meta_value(&windows),
             CONTEXT_WINDOW_META_KEY: context_window_meta_value(windows[1]),

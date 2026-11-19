@@ -947,7 +947,8 @@ async fn provider_command_runs_in_cwd() {
 #[tokio::test]
 async fn p120_explicit_provider_variables_survive_the_secret_filter() {
     use fuigo_secrets::test_probe as probe;
-    const NAME: &str = "auth::auth_provider::tests::p120_explicit_provider_variables_survive_the_secret_filter";
+    const NAME: &str =
+        "auth::auth_provider::tests::p120_explicit_provider_variables_survive_the_secret_filter";
     if probe::in_parent(NAME, &[]) {
         return;
     }
@@ -970,7 +971,11 @@ async fn p120_explicit_provider_variables_survive_the_secret_filter() {
     assert_eq!(first, "seen-none");
     test_expire_provider_token("test-p120-explicit");
     assert_eq!(
-        provider.ensure_fresh_token(Some(&first)).await.rotated().as_deref(),
+        provider
+            .ensure_fresh_token(Some(&first))
+            .await
+            .rotated()
+            .as_deref(),
         Some("seen-seen-none"),
         "the explicit prior token must reach the command"
     );

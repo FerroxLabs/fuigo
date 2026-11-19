@@ -102,7 +102,9 @@ impl Inner {
                 continue;
             }
             match s.class {
-                AdminFileClass::Valid => out.push(fuigo_config::admin_policy_valid_in_force_notice(&s.path)),
+                AdminFileClass::Valid => {
+                    out.push(fuigo_config::admin_policy_valid_in_force_notice(&s.path))
+                }
                 AdminFileClass::Blank => {
                     out.push(fuigo_config::admin_lockdown_emptied_notice(&s.path));
                     self.told_blank.insert(s.path.clone());
@@ -114,7 +116,10 @@ impl Inner {
         // a file the user was told "is now empty" that now reads as a valid document is in force: said once
         let emptied: Vec<PathBuf> = self.told_blank.iter().cloned().collect();
         for p in emptied {
-            if states.iter().any(|s| s.path == p && matches!(s.class, AdminFileClass::Valid)) {
+            if states
+                .iter()
+                .any(|s| s.path == p && matches!(s.class, AdminFileClass::Valid))
+            {
                 out.push(fuigo_config::admin_policy_valid_in_force_notice(&p));
                 self.told_blank.remove(&p);
             }
@@ -149,7 +154,10 @@ impl Default for AdminPolicyWatch {
 impl AdminPolicyWatch {
     #[cfg(test)]
     pub(crate) fn with_reader(reader: Reader) -> Self {
-        Self { inner: Arc::default(), reader }
+        Self {
+            inner: Arc::default(),
+            reader,
+        }
     }
 
     /// Compare the lock-downs in force now with what was told. New file or new broken version: one entering notice.
@@ -185,7 +193,10 @@ impl AdminPolicyWatch {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "admin_policy_watch_tests.rs"]
 mod tests;

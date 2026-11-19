@@ -251,7 +251,6 @@ pub fn sanitize_optional_arg(value: Option<String>) -> Option<String> {
     })
 }
 
-
 /// Capability mode controlling which tool classes a child agent can use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -367,8 +366,7 @@ impl SubagentCompletedOutput {
 /// wrappers and can make UIs hide the whole spawn result as a reminder block.
 /// Harness-owned reminders go through `format_with_reminders` with
 /// `system_reminder_tag`.
-pub const BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK: &str =
-    "Continue unfinished parent work now; when you need the child's result, fetch it once with the retrieval call above (it waits for completion); never poll.";
+pub const BACKGROUND_SUBAGENT_CONTINUE_PARENT_WORK: &str = "Continue unfinished parent work now; when you need the child's result, fetch it once with the retrieval call above (it waits for completion); never poll.";
 
 /// How many asks *before* the latest one may still count as leftover parent
 /// exec. Older implement/fix history after the user switched to review-only
@@ -1684,7 +1682,8 @@ mod tests {
     #[test]
     fn present_subagent_type_is_specified_and_replays() {
         for name in ["general-purpose", "explore", "my-custom-agent"] {
-            let json = serde_json::json!({"description": "d", "prompt": "p", "subagent_type": name});
+            let json =
+                serde_json::json!({"description": "d", "prompt": "p", "subagent_type": name});
             let input: TaskToolInput = serde_json::from_value(json).unwrap();
             assert_eq!(input.subagent_type, name);
             assert!(input.subagent_type_specified, "{name}");
@@ -1698,9 +1697,16 @@ mod tests {
     fn task_schema_leaves_subagent_type_optional_and_hides_the_flag() {
         let schema = serde_json::to_value(schemars::schema_for!(TaskToolInput)).unwrap();
         assert!(schema["properties"].get("subagent_type").is_some());
-        assert!(schema["properties"].get("subagent_type_specified").is_none());
+        assert!(
+            schema["properties"]
+                .get("subagent_type_specified")
+                .is_none()
+        );
         let required = schema["required"].as_array().cloned().unwrap_or_default();
-        assert!(!required.iter().any(|name| name == "subagent_type"), "{required:?}");
+        assert!(
+            !required.iter().any(|name| name == "subagent_type"),
+            "{required:?}"
+        );
     }
 
     #[test]
@@ -1814,7 +1820,9 @@ mod tests {
             !desc.contains("one long timeout_ms") && !desc.contains("short polls"),
             "background retrieval must be a single fetch with timeout_ms omitted, never a long poll: {desc}"
         );
-        assert!(desc.contains("The subagent_type parameter is optional: omit it for a general-purpose agent"));
+        assert!(desc.contains(
+            "The subagent_type parameter is optional: omit it for a general-purpose agent"
+        ));
         assert!(!desc.contains("you must specify"));
         assert!(desc.contains(
             "When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding."
@@ -2021,7 +2029,10 @@ mod tests {
 
     #[test]
     fn omitted_timeout_waits_and_short_waits_are_floored() {
-        assert!(task_output_waits(None), "omitted timeout_ms waits by default");
+        assert!(
+            task_output_waits(None),
+            "omitted timeout_ms waits by default"
+        );
         assert!(!task_output_waits(Some(0)), "explicit 0 stays a snapshot");
         assert!(task_output_waits(Some(1)));
         assert_eq!(
@@ -2035,7 +2046,9 @@ mod tests {
             "sub-floor polls are raised to the floor"
         );
         assert_eq!(effective_task_output_wait_ms(Some(30_000)), Some(30_000));
-        assert!(task_output_waits_from_json(&serde_json::json!({"task_ids": ["t"]})));
+        assert!(task_output_waits_from_json(
+            &serde_json::json!({"task_ids": ["t"]})
+        ));
         assert!(!task_output_waits_from_json(
             &serde_json::json!({"task_ids": ["t"], "timeout_ms": 0})
         ));
@@ -2150,7 +2163,8 @@ mod tests {
             "renamed task_ids must appear: {desc}"
         );
         assert!(
-            desc.contains("max_wait omitted or positive wait") && desc.contains("Omit max_wait to wait up to"),
+            desc.contains("max_wait omitted or positive wait")
+                && desc.contains("Omit max_wait to wait up to"),
             "renamed timeout_ms must appear: {desc}"
         );
         assert!(
@@ -2265,7 +2279,9 @@ mod tests {
             "fetch-once instruction must remain: {with_cta}"
         );
         assert!(
-            !with_cta.contains("one long") && !with_cta.contains("120000") && !with_cta.contains("short polls"),
+            !with_cta.contains("one long")
+                && !with_cta.contains("120000")
+                && !with_cta.contains("short polls"),
             "spawn notice must not suggest a long timed wait or polling: {with_cta}"
         );
         assert!(
@@ -2391,8 +2407,14 @@ mod tests {
             HandedOffSubagentState::Cancelled,
             true,
         );
-        assert!(cancelled.contains("was cancelled before its result"), "{cancelled}");
-        assert_eq!("user_sent_message", ForegroundSpawnInterrupt::UserSentMessage.as_str());
+        assert!(
+            cancelled.contains("was cancelled before its result"),
+            "{cancelled}"
+        );
+        assert_eq!(
+            "user_sent_message",
+            ForegroundSpawnInterrupt::UserSentMessage.as_str()
+        );
         assert_eq!("queued", HandedOffSubagentState::Queued.as_str());
     }
 
@@ -2473,7 +2495,9 @@ mod tests {
             subagent_background_param: Some("run_in_background"),
         });
         assert!(
-            desc.contains("task IDs from block_until_ms=0 commands or run_in_background=true subagents"),
+            desc.contains(
+                "task IDs from block_until_ms=0 commands or run_in_background=true subagents"
+            ),
             "{desc}"
         );
         let desc = build_task_output_description(&TaskOutputToolNaming {
@@ -2486,6 +2510,9 @@ mod tests {
             timeout_ms_param: "timeout_ms",
             task_id_param: "task_id",
         });
-        assert!(desc.contains("ids from block_until_ms=0 commands;"), "{desc}");
+        assert!(
+            desc.contains("ids from block_until_ms=0 commands;"),
+            "{desc}"
+        );
     }
 }

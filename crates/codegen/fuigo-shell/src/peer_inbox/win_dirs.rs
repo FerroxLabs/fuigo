@@ -22,23 +22,25 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows::Win32::Security::{
-    ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER, TokenElevation,
-    TokenGroups, TokenUser, WinBuiltinAdministratorsSid,
+    ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_ELEVATION,
+    TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenGroups, TokenUser,
+    WinBuiltinAdministratorsSid,
 };
 use windows::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_CREATION_DISPOSITION, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_INFO_BY_HANDLE_CLASS, FILE_SHARE_MODE, GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW, GetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_CREATION_DISPOSITION,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_INFO_BY_HANDLE_CLASS, FILE_SHARE_MODE,
+    GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW, GetFileInformationByHandle,
     GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationByHandleW,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::PCWSTR;
 
-use super::win_policy::{
-    DirDacl, DirKind, DirRole, RawAce, dir_dacl_acceptable, dir_kind_from_attrs, owner_acceptable, parse_home_path,
-    raw_aces_from_summary, volume_has_acls,
-};
 use super::Disabled;
+use super::win_policy::{
+    DirDacl, DirKind, DirRole, RawAce, dir_dacl_acceptable, dir_kind_from_attrs, owner_acceptable,
+    parse_home_path, raw_aces_from_summary, volume_has_acls,
+};
 use crate::leader::peer_auth::win as auth;
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -55,7 +57,8 @@ const MAX_CHAIN: usize = 64;
 const FILE_ID_INFO_CLASS: i32 = 18;
 const OPEN_EXISTING: FILE_CREATION_DISPOSITION = FILE_CREATION_DISPOSITION(3);
 // FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
-const OPEN_DIR_FLAGS: FILE_FLAGS_AND_ATTRIBUTES = FILE_FLAGS_AND_ATTRIBUTES(0x0200_0000 | 0x0020_0000);
+const OPEN_DIR_FLAGS: FILE_FLAGS_AND_ATTRIBUTES =
+    FILE_FLAGS_AND_ATTRIBUTES(0x0200_0000 | 0x0020_0000);
 
 /// An open directory handle, closed on drop.
 #[derive(Debug)]
@@ -83,7 +86,15 @@ fn open_dir(path: &str, share: FILE_SHARE_MODE) -> Result<DirHandle, u32> {
     let w = wide(path);
     // SAFETY: `w` is NUL-terminated and outlives the call; no security attributes, no template.
     let h = unsafe {
-        CreateFileW(PCWSTR(w.as_ptr()), FILE_READ_ATTRIBUTES | READ_CONTROL, share, None, OPEN_EXISTING, OPEN_DIR_FLAGS, None)
+        CreateFileW(
+            PCWSTR(w.as_ptr()),
+            FILE_READ_ATTRIBUTES | READ_CONTROL,
+            share,
+            None,
+            OPEN_EXISTING,
+            OPEN_DIR_FLAGS,
+            None,
+        )
     }
     .map_err(|e| auth::code(&e))?;
     Ok(DirHandle(h))
@@ -108,7 +119,8 @@ impl Me {
     fn current() -> Result<Me, u32> {
         let mut tok = HANDLE::default();
         // SAFETY: pseudo handle of this process needs no closing; `tok` is writable.
-        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) }.map_err(|e| auth::code(&e))?;
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) }
+            .map_err(|e| auth::code(&e))?;
         let tok = auth::Owned(tok);
         let token_user = auth::token_info_buf(tok.0, TokenUser)?;
         // SAFETY: on success the buffer starts with a TOKEN_USER whose SID points into the same buffer.
@@ -117,9 +129,21 @@ impl Me {
         let mut admins = [0u64; 9];
         let mut size = 68u32; // SECURITY_MAX_SID_SIZE
         // SAFETY: `admins` is 72 writable bytes, at least `size`.
-        unsafe { CreateWellKnownSid(WinBuiltinAdministratorsSid, None, Some(PSID(admins.as_mut_ptr().cast())), &mut size) }
-            .map_err(|e| auth::code(&e))?;
-        let mut me = Me { token_user, text, admins, admins_usable: false };
+        unsafe {
+            CreateWellKnownSid(
+                WinBuiltinAdministratorsSid,
+                None,
+                Some(PSID(admins.as_mut_ptr().cast())),
+                &mut size,
+            )
+        }
+        .map_err(|e| auth::code(&e))?;
+        let mut me = Me {
+            token_user,
+            text,
+            admins,
+            admins_usable: false,
+        };
         me.admins_usable = me.compute_admins_usable(tok.0);
         Ok(me)
     }
@@ -135,16 +159,23 @@ impl Me {
 
     /// The token is elevated AND BUILTIN\Administrators is an enabled (not deny-only) group of it.
     fn compute_admins_usable(&self, token: HANDLE) -> bool {
-        let Ok(el) = auth::token_info_buf(token, TokenElevation) else { return false };
+        let Ok(el) = auth::token_info_buf(token, TokenElevation) else {
+            return false;
+        };
         // SAFETY: on success the buffer starts with a TOKEN_ELEVATION.
         if unsafe { (*el.as_ptr().cast::<TOKEN_ELEVATION>()).TokenIsElevated } == 0 {
             return false;
         }
-        let Ok(buf) = auth::token_info_buf(token, TokenGroups) else { return false };
+        let Ok(buf) = auth::token_info_buf(token, TokenGroups) else {
+            return false;
+        };
         let g = buf.as_ptr().cast::<TOKEN_GROUPS>();
         // SAFETY: the OS filled `GroupCount` entries of `Groups` inside the buffer.
         let groups = unsafe {
-            std::slice::from_raw_parts(std::ptr::addr_of!((*g).Groups).cast::<SID_AND_ATTRIBUTES>(), (*g).GroupCount as usize)
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*g).Groups).cast::<SID_AND_ATTRIBUTES>(),
+                (*g).GroupCount as usize,
+            )
         };
         // SE_GROUP_ENABLED = 0x4, SE_GROUP_USE_FOR_DENY_ONLY = 0x10
         groups.iter().any(|sa| {
@@ -202,17 +233,32 @@ fn read_security(h: &DirHandle, me: &Me) -> Result<DirSecurity, u32> {
     let owner_is_us = unsafe { EqualSid(owner, me.user()) }.is_ok();
     let owner_is_admins = unsafe { EqualSid(owner, me.admins_sid()) }.is_ok();
     if dacl.is_null() {
-        return Ok(DirSecurity { owner_is_us, owner_is_admins, dacl: None });
+        return Ok(DirSecurity {
+            owner_is_us,
+            owner_is_admins,
+            dacl: None,
+        });
     }
     let (_owner_text, summary) = super::win_pipe::sys::read_owner_dacl(sd, owner, dacl)?;
     let parsed = raw_aces_from_summary(&summary).ok_or(0u32)?;
-    Ok(DirSecurity { owner_is_us, owner_is_admins, dacl: Some(parsed) })
+    Ok(DirSecurity {
+        owner_is_us,
+        owner_is_admins,
+        dacl: Some(parsed),
+    })
 }
 
 fn dacl_ok(sec: &DirSecurity, role: DirRole, me: &Me) -> bool {
     match &sec.dacl {
         None => dir_dacl_acceptable(role, &DirDacl::Null, &me.text),
-        Some((protected, aces)) => dir_dacl_acceptable(role, &DirDacl::Aces { protected: *protected, aces }, &me.text),
+        Some((protected, aces)) => dir_dacl_acceptable(
+            role,
+            &DirDacl::Aces {
+                protected: *protected,
+                aces,
+            },
+            &me.text,
+        ),
     }
 }
 
@@ -226,12 +272,21 @@ fn create_private_dir(path: &str, me: &Me) -> Result<(), u32> {
         .map_err(|e| e.raw_os_error().unwrap_or(0) as u32)?;
     let w = wide(path);
     // SAFETY: `w` is NUL-terminated; `sec` owns the descriptor `as_raw` points at until it drops after the call.
-    let r = unsafe { CreateDirectoryW(PCWSTR(w.as_ptr()), Some(sec.as_raw().cast::<SECURITY_ATTRIBUTES>().cast_const())) };
+    let r = unsafe {
+        CreateDirectoryW(
+            PCWSTR(w.as_ptr()),
+            Some(sec.as_raw().cast::<SECURITY_ATTRIBUTES>().cast_const()),
+        )
+    };
     match r {
         Ok(()) => Ok(()),
         Err(e) => {
             let c = auth::code(&e);
-            if c == ERROR_ALREADY_EXISTS { Ok(()) } else { Err(c) }
+            if c == ERROR_ALREADY_EXISTS {
+                Ok(())
+            } else {
+                Err(c)
+            }
         }
     }
 }
@@ -252,7 +307,10 @@ fn file_id(h: HANDLE) -> Result<(u64, [u8; 16]), u32> {
         volume: u64,
         id: [u8; 16],
     }
-    let mut info = IdInfo { volume: 0, id: [0; 16] };
+    let mut info = IdInfo {
+        volume: 0,
+        id: [0; 16],
+    };
     // SAFETY: live handle; `info` has the layout of FILE_ID_INFO (u64 + 16 bytes) and the size passed is its size.
     unsafe {
         GetFileInformationByHandleEx(
@@ -271,7 +329,8 @@ fn final_path(h: HANDLE) -> Result<Vec<u16>, u32> {
     let mut buf = vec![0u16; 1024];
     for _ in 0..2 {
         // SAFETY: live handle; `buf` is a writable slice of the length the API is told.
-        let n = unsafe { GetFinalPathNameByHandleW(h, &mut buf, GETFINALPATHNAMEBYHANDLE_FLAGS(0)) } as usize;
+        let n = unsafe { GetFinalPathNameByHandleW(h, &mut buf, GETFINALPATHNAMEBYHANDLE_FLAGS(0)) }
+            as usize;
         if n == 0 {
             return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32);
         }
@@ -304,7 +363,10 @@ impl CheckedDir {
 
     /// Tests only: `create_or_open` with the ancestors below chain index `dacl_from` trusted for their DACL (see `open_inner`).
     #[cfg(test)]
-    pub(crate) fn create_or_open_trusting(home: &Path, dacl_from: usize) -> Result<CheckedDir, Disabled> {
+    pub(crate) fn create_or_open_trusting(
+        home: &Path,
+        dacl_from: usize,
+    ) -> Result<CheckedDir, Disabled> {
         Self::open_inner(home, true, dacl_from)
     }
 
@@ -329,30 +391,52 @@ impl CheckedDir {
     #[cfg(all(test, windows))]
     pub(crate) fn mismatched_for_test(held_dir: &Path, path: PathBuf) -> CheckedDir {
         let open = || open_dir(held_dir.to_str().unwrap(), SHARE_KEPT).expect("open held dir");
-        CheckedDir { path, held: Some(Held { _ancestors: Vec::new(), _home: open(), peers: open() }) }
+        CheckedDir {
+            path,
+            held: Some(Held {
+                _ancestors: Vec::new(),
+                _home: open(),
+                peers: open(),
+            }),
+        }
     }
 
     /// Is `path` still the directory that was checked? Re-opens it (not following a final reparse point) and compares
     /// its volume serial + file id with the held handle. Any difference or failure is `PeersMoved`. Nothing held
     /// (tests of other modules) is accepted.
     pub(crate) fn verify(&self) -> Result<(), Disabled> {
-        let Some(held) = &self.held else { return Ok(()) };
-        let now = open_dir(self.path.to_str().ok_or(Disabled::PeersMoved)?, FILE_SHARE_MODE(0x1 | 0x2 | 0x4))
-            .map_err(|_| Disabled::PeersMoved)?;
+        let Some(held) = &self.held else {
+            return Ok(());
+        };
+        let now = open_dir(
+            self.path.to_str().ok_or(Disabled::PeersMoved)?,
+            FILE_SHARE_MODE(0x1 | 0x2 | 0x4),
+        )
+        .map_err(|_| Disabled::PeersMoved)?;
         let a = file_id(held.peers.0).map_err(|_| Disabled::PeersMoved)?;
         let b = file_id(now.0).map_err(|_| Disabled::PeersMoved)?;
-        if a == b { Ok(()) } else { Err(Disabled::PeersMoved) }
+        if a == b {
+            Ok(())
+        } else {
+            Err(Disabled::PeersMoved)
+        }
     }
 
     /// Does the open file `file` live directly in the held `peers` directory under the name `name`? Compares the
     /// handle's final path with the held directory's final path plus `\name` (case-insensitive).
     pub(crate) fn verify_file(&self, file: HANDLE, name: &str) -> Result<(), Disabled> {
-        let Some(held) = &self.held else { return Ok(()) };
+        let Some(held) = &self.held else {
+            return Ok(());
+        };
         let dir = final_path(held.peers.0).map_err(|_| Disabled::PeersMoved)?;
         let f = final_path(file).map_err(|_| Disabled::PeersMoved)?;
         let lower = |v: &[u16]| String::from_utf16_lossy(v).to_lowercase();
         let want = format!("{}\\{}", lower(&dir), name.to_lowercase());
-        if lower(&f) == want { Ok(()) } else { Err(Disabled::PeersMoved) }
+        if lower(&f) == want {
+            Ok(())
+        } else {
+            Err(Disabled::PeersMoved)
+        }
     }
 
     /// `dacl_from`: ancestors with a chain index below it are checked for reparse point / directory only, not for their
@@ -374,7 +458,13 @@ impl CheckedDir {
         let mut ancestors = Vec::with_capacity(last);
         for (i, p) in chain[..last].iter().enumerate() {
             // Kept open (no FILE_SHARE_DELETE) for the life of the CheckedDir: pins the ancestor against rename.
-            let h = open_dir(p, SHARE_KEPT).map_err(|c| if is_missing(c) { Disabled::AncestorMissing } else { io(c) })?;
+            let h = open_dir(p, SHARE_KEPT).map_err(|c| {
+                if is_missing(c) {
+                    Disabled::AncestorMissing
+                } else {
+                    io(c)
+                }
+            })?;
             match dir_kind_from_attrs(attributes(&h).map_err(io)?) {
                 DirKind::Reparse => return Err(Disabled::AncestorSymlink),
                 DirKind::NotDirectory => return Err(Disabled::AncestorNotDirectory),
@@ -389,7 +479,13 @@ impl CheckedDir {
             ancestors.push(h);
         }
 
-        let home_h = open_dir(&chain[last], SHARE_KEPT).map_err(|c| if is_missing(c) { Disabled::HomeMissing } else { io(c) })?;
+        let home_h = open_dir(&chain[last], SHARE_KEPT).map_err(|c| {
+            if is_missing(c) {
+                Disabled::HomeMissing
+            } else {
+                io(c)
+            }
+        })?;
         match dir_kind_from_attrs(attributes(&home_h).map_err(io)?) {
             DirKind::Reparse => return Err(Disabled::SymlinkedHome),
             DirKind::NotDirectory => return Err(Disabled::HomeNotDirectory),
@@ -397,8 +493,10 @@ impl CheckedDir {
         }
         let mut fs_flags = 0u32;
         // SAFETY: live handle; only the flags out parameter is requested.
-        unsafe { GetVolumeInformationByHandleW(home_h.0, None, None, None, Some(&mut fs_flags), None) }
-            .map_err(|e| io(auth::code(&e)))?;
+        unsafe {
+            GetVolumeInformationByHandleW(home_h.0, None, None, None, Some(&mut fs_flags), None)
+        }
+        .map_err(|e| io(auth::code(&e)))?;
         if !volume_has_acls(fs_flags) {
             return Err(Disabled::HomeWritableByOthers);
         }
@@ -435,7 +533,14 @@ impl CheckedDir {
         if !dacl_ok(&sec, DirRole::Peers, &me) {
             return Err(Disabled::PeersWrongMode);
         }
-        Ok(CheckedDir { path: PathBuf::from(peers_path), held: Some(Held { _ancestors: ancestors, _home: home_h, peers: peers_h }) })
+        Ok(CheckedDir {
+            path: PathBuf::from(peers_path),
+            held: Some(Held {
+                _ancestors: ancestors,
+                _home: home_h,
+                peers: peers_h,
+            }),
+        })
     }
 }
 
@@ -463,8 +568,13 @@ mod tests {
         let mut sec = auth::PipeSecurity::from_sddl(sddl).expect("sddl");
         let w = wide(path.to_str().unwrap());
         // SAFETY: NUL-terminated name; descriptor lives in `sec` across the call.
-        unsafe { CreateDirectoryW(PCWSTR(w.as_ptr()), Some(sec.as_raw().cast::<SECURITY_ATTRIBUTES>().cast_const())) }
-            .expect("CreateDirectoryW");
+        unsafe {
+            CreateDirectoryW(
+                PCWSTR(w.as_ptr()),
+                Some(sec.as_raw().cast::<SECURITY_ATTRIBUTES>().cast_const()),
+            )
+        }
+        .expect("CreateDirectoryW");
     }
 
     fn owner_only_home(root: &Path, name: &str) -> PathBuf {
@@ -477,7 +587,10 @@ mod tests {
     fn owner_only_home_is_accepted_and_peers_created_then_reopened() {
         let root = private_root();
         let home = owner_only_home(root.path(), "home");
-        assert!(matches!(open_in(root.path(), &home, false), Err(Disabled::PeersMissing)));
+        assert!(matches!(
+            open_in(root.path(), &home, false),
+            Err(Disabled::PeersMissing)
+        ));
         let made = open_in(root.path(), &home, true).expect("create_or_open");
         assert_eq!(made.path(), home.join("peers"));
         assert!(made.path().is_dir());
@@ -495,7 +608,13 @@ mod tests {
         let root = private_root();
         let home = root.path().join("h");
         // what a default profile directory looks like: us, SYSTEM and Administrators with full control
-        mkdir_sddl(&home, &format!("D:(A;OICI;FA;;;{})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", me_text()));
+        mkdir_sddl(
+            &home,
+            &format!(
+                "D:(A;OICI;FA;;;{})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+                me_text()
+            ),
+        );
         let r = open_in(root.path(), &home, true);
         assert!(r.is_ok(), "{r:?}");
     }
@@ -505,15 +624,27 @@ mod tests {
         let root = private_root();
         let home = root.path().join("shared");
         // Users:(M) = modify (0x1301bf) for BUILTIN\Users
-        mkdir_sddl(&home, &format!("D:P(A;OICI;FA;;;{})(A;OICI;0x1301bf;;;BU)", me_text()));
-        assert!(matches!(open_in(root.path(), &home, true), Err(Disabled::HomeWritableByOthers)));
+        mkdir_sddl(
+            &home,
+            &format!("D:P(A;OICI;FA;;;{})(A;OICI;0x1301bf;;;BU)", me_text()),
+        );
+        assert!(matches!(
+            open_in(root.path(), &home, true),
+            Err(Disabled::HomeWritableByOthers)
+        ));
     }
 
     #[test]
     fn inherit_only_and_read_only_strangers_do_not_refuse_the_home() {
         let root = private_root();
         let home = root.path().join("ro");
-        mkdir_sddl(&home, &format!("D:P(A;OICI;FA;;;{})(A;OICI;GR;;;BU)(A;OICIIO;0x1301bf;;;AU)", me_text()));
+        mkdir_sddl(
+            &home,
+            &format!(
+                "D:P(A;OICI;FA;;;{})(A;OICI;GR;;;BU)(A;OICIIO;0x1301bf;;;AU)",
+                me_text()
+            ),
+        );
         let r = open_in(root.path(), &home, true);
         assert!(r.is_ok(), "{r:?}");
     }
@@ -523,22 +654,40 @@ mod tests {
         let root = private_root();
         let home = owner_only_home(root.path(), "home");
         let peers = home.join("peers");
-        mkdir_sddl(&peers, &format!("D:P(A;OICI;FA;;;{})(A;OICI;GR;;;BU)", me_text()));
-        assert!(matches!(open_in(root.path(), &home, false), Err(Disabled::PeersWrongMode)));
+        mkdir_sddl(
+            &peers,
+            &format!("D:P(A;OICI;FA;;;{})(A;OICI;GR;;;BU)", me_text()),
+        );
+        assert!(matches!(
+            open_in(root.path(), &home, false),
+            Err(Disabled::PeersWrongMode)
+        ));
         // an inherited (unprotected) peers directory is refused too
         let home2 = owner_only_home(root.path(), "home2");
         fs::create_dir(home2.join("peers")).unwrap();
-        assert!(matches!(open_in(root.path(), &home2, true), Err(Disabled::PeersWrongMode)));
+        assert!(matches!(
+            open_in(root.path(), &home2, true),
+            Err(Disabled::PeersWrongMode)
+        ));
     }
 
     #[test]
     fn missing_and_not_directory() {
         let root = private_root();
-        assert!(matches!(open_in(root.path(), &root.path().join("nope"), false), Err(Disabled::HomeMissing)));
+        assert!(matches!(
+            open_in(root.path(), &root.path().join("nope"), false),
+            Err(Disabled::HomeMissing)
+        ));
         let file = root.path().join("f");
         fs::write(&file, b"x").unwrap();
-        assert!(matches!(open_in(root.path(), &file, false), Err(Disabled::HomeNotDirectory)));
-        assert!(matches!(open_in(root.path(), &root.path().join("nope").join("deeper"), false), Err(Disabled::AncestorMissing)));
+        assert!(matches!(
+            open_in(root.path(), &file, false),
+            Err(Disabled::HomeNotDirectory)
+        ));
+        assert!(matches!(
+            open_in(root.path(), &root.path().join("nope").join("deeper"), false),
+            Err(Disabled::AncestorMissing)
+        ));
     }
 
     #[test]
@@ -547,13 +696,22 @@ mod tests {
         let me = me_text();
         // a shared directory (Users:(M) modify) above the home: refused
         let shared = root.path().join("shared");
-        mkdir_sddl(&shared, &format!("D:P(A;OICI;FA;;;{me})(A;OICI;0x1301bf;;;BU)"));
+        mkdir_sddl(
+            &shared,
+            &format!("D:P(A;OICI;FA;;;{me})(A;OICI;0x1301bf;;;BU)"),
+        );
         let home = shared.join("home");
         mkdir_sddl(&home, &format!("D:P(A;OICI;FA;;;{me})"));
-        assert!(matches!(open_in(root.path(), &home, true), Err(Disabled::AncestorWritableByOthers)));
+        assert!(matches!(
+            open_in(root.path(), &home, true),
+            Err(Disabled::AncestorWritableByOthers)
+        ));
         // a read-only-for-others ancestor is fine
         let calm = root.path().join("calm");
-        mkdir_sddl(&calm, &format!("D:P(A;OICI;FA;;;{me})(A;OICI;GR;;;BU)(A;OICI;FA;;;SY)"));
+        mkdir_sddl(
+            &calm,
+            &format!("D:P(A;OICI;FA;;;{me})(A;OICI;GR;;;BU)(A;OICI;FA;;;SY)"),
+        );
         let home = calm.join("home");
         mkdir_sddl(&home, &format!("D:P(A;OICI;FA;;;{me})"));
         let r = open_in(root.path(), &home, true);
@@ -563,7 +721,10 @@ mod tests {
         mkdir_sddl(&del, &format!("D:P(A;OICI;FA;;;{me})(A;OICI;SDRC;;;BU)"));
         let home = del.join("home");
         mkdir_sddl(&home, &format!("D:P(A;OICI;FA;;;{me})"));
-        assert!(matches!(open_in(root.path(), &home, true), Err(Disabled::AncestorWritableByOthers)));
+        assert!(matches!(
+            open_in(root.path(), &home, true),
+            Err(Disabled::AncestorWritableByOthers)
+        ));
         // ... and, since round 1, on any higher ancestor too
         let outer = root.path().join("outer");
         mkdir_sddl(&outer, &format!("D:P(A;OICI;FA;;;{me})(A;OICI;SDRC;;;BU)"));
@@ -572,24 +733,52 @@ mod tests {
         let home = inner.join("home");
         mkdir_sddl(&home, &format!("D:P(A;OICI;FA;;;{me})"));
         let r = open_in(root.path(), &home, true);
-        assert!(matches!(r, Err(Disabled::AncestorWritableByOthers)), "{r:?}");
+        assert!(
+            matches!(r, Err(Disabled::AncestorWritableByOthers)),
+            "{r:?}"
+        );
     }
 
     #[test]
     fn bad_paths_are_refused_before_any_file_access() {
-        assert!(matches!(CheckedDir::open(Path::new(r"relative\dir")), Err(Disabled::HomeNotAbsolute)));
-        assert!(matches!(CheckedDir::open(Path::new(r"C:\Users\..\Users")), Err(Disabled::HomePathNotNormal)));
-        assert!(matches!(CheckedDir::open(Path::new(r"\\server\share\x")), Err(Disabled::HomePathNotNormal)));
-        assert!(matches!(CheckedDir::open(Path::new(r"\\?\C:\Windows")), Err(Disabled::HomePathNotNormal)));
-        assert!(matches!(CheckedDir::open(Path::new(r"\\.\C:\Windows")), Err(Disabled::HomePathNotNormal)));
-        assert!(matches!(CheckedDir::create_under(Path::new(r"C:\x"), &["a"]), Err(Disabled::RuntimeDirUnavailable)));
+        assert!(matches!(
+            CheckedDir::open(Path::new(r"relative\dir")),
+            Err(Disabled::HomeNotAbsolute)
+        ));
+        assert!(matches!(
+            CheckedDir::open(Path::new(r"C:\Users\..\Users")),
+            Err(Disabled::HomePathNotNormal)
+        ));
+        assert!(matches!(
+            CheckedDir::open(Path::new(r"\\server\share\x")),
+            Err(Disabled::HomePathNotNormal)
+        ));
+        assert!(matches!(
+            CheckedDir::open(Path::new(r"\\?\C:\Windows")),
+            Err(Disabled::HomePathNotNormal)
+        ));
+        assert!(matches!(
+            CheckedDir::open(Path::new(r"\\.\C:\Windows")),
+            Err(Disabled::HomePathNotNormal)
+        ));
+        assert!(matches!(
+            CheckedDir::create_under(Path::new(r"C:\x"), &["a"]),
+            Err(Disabled::RuntimeDirUnavailable)
+        ));
     }
 
     /// Make a junction with `cmd /C mklink /J` (no privilege needed). Fails the test when it cannot be made.
     fn junction(link: &Path, target: &Path) {
-        let out = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output();
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output();
         let ok = out.as_ref().is_ok_and(|o| o.status.success());
-        assert!(ok, "could not create a junction with `mklink /J` (a normal user can): {out:?}");
+        assert!(
+            ok,
+            "could not create a junction with `mklink /J` (a normal user can): {out:?}"
+        );
     }
 
     #[test]
@@ -599,12 +788,21 @@ mod tests {
         fs::create_dir(real.join("sub")).unwrap();
         let link = root.path().join("link");
         junction(&link, &real);
-        assert!(matches!(open_in(root.path(), &link, false), Err(Disabled::SymlinkedHome)));
-        assert!(matches!(open_in(root.path(), &link.join("sub"), false), Err(Disabled::AncestorSymlink)));
+        assert!(matches!(
+            open_in(root.path(), &link, false),
+            Err(Disabled::SymlinkedHome)
+        ));
+        assert!(matches!(
+            open_in(root.path(), &link.join("sub"), false),
+            Err(Disabled::AncestorSymlink)
+        ));
         // A directory symlink needs a privilege a normal account may lack: exercised only where it can be made.
         let sym = root.path().join("sym");
         if std::os::windows::fs::symlink_dir(&real, &sym).is_ok() {
-            assert!(matches!(open_in(root.path(), &sym, false), Err(Disabled::SymlinkedHome)));
+            assert!(matches!(
+                open_in(root.path(), &sym, false),
+                Err(Disabled::SymlinkedHome)
+            ));
         }
     }
 
@@ -636,18 +834,38 @@ mod tests {
         for i in 0..70 {
             p.push(format!("d{i}"));
         }
-        assert!(matches!(CheckedDir::open(&p), Err(Disabled::HomePathNotNormal)));
+        assert!(matches!(
+            CheckedDir::open(&p),
+            Err(Disabled::HomePathNotNormal)
+        ));
     }
 
     /// SDDL-style one-line summary of a directory's owner and DACL.
     fn summary(sec: &DirSecurity) -> String {
-        let owner = if sec.owner_is_us { "us" } else if sec.owner_is_admins { "BA" } else { "other" };
+        let owner = if sec.owner_is_us {
+            "us"
+        } else if sec.owner_is_admins {
+            "BA"
+        } else {
+            "other"
+        };
         match &sec.dacl {
             None => format!("O:{owner} D:NULL"),
             Some((protected, aces)) => {
-                let list: Vec<String> =
-                    aces.iter().map(|a| format!("({};{:#x};{:#x};{})", a.ace_type, a.flags, a.mask, a.trustee_sid)).collect();
-                format!("O:{owner} D:{}{}", if *protected { "P" } else { "" }, list.join(""))
+                let list: Vec<String> = aces
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            "({};{:#x};{:#x};{})",
+                            a.ace_type, a.flags, a.mask, a.trustee_sid
+                        )
+                    })
+                    .collect();
+                format!(
+                    "O:{owner} D:{}{}",
+                    if *protected { "P" } else { "" },
+                    list.join("")
+                )
             }
         }
     }
@@ -657,11 +875,16 @@ mod tests {
     fn os_profile_dir() -> String {
         #[link(name = "userenv")]
         unsafe extern "system" {
-            fn GetUserProfileDirectoryW(token: *mut core::ffi::c_void, dir: *mut u16, size: *mut u32) -> i32;
+            fn GetUserProfileDirectoryW(
+                token: *mut core::ffi::c_void,
+                dir: *mut u16,
+                size: *mut u32,
+            ) -> i32;
         }
         let mut tok = HANDLE::default();
         // SAFETY: the pseudo-handle of this process is always valid; `tok` is a valid out-pointer.
-        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) }.expect("process token");
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) }
+            .expect("process token");
         let mut buf = vec![0u16; 1024];
         let mut len = 1024u32;
         // SAFETY: `buf` holds `len` UTF-16 units and `len` is a valid in/out pointer; the token handle is open.
@@ -676,8 +899,17 @@ mod tests {
     fn live_levels() -> Vec<(String, String, bool)> {
         let me = Me::current().expect("token");
         let profile = os_profile_dir();
-        let drive = Path::new(&profile).ancestors().last().unwrap().to_string_lossy().into_owned();
-        let users = Path::new(&profile).parent().unwrap().to_string_lossy().into_owned();
+        let drive = Path::new(&profile)
+            .ancestors()
+            .last()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let users = Path::new(&profile)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         [drive, users, profile]
             .into_iter()
             .map(|p| {
@@ -694,7 +926,10 @@ mod tests {
     #[test]
     fn live_default_acls_pass_the_ancestor_rule() {
         for (p, sum, ok) in live_levels() {
-            assert!(ok, "the ancestor rule refuses the live default ACL of {p}: {sum}");
+            assert!(
+                ok,
+                "the ancestor rule refuses the live default ACL of {p}: {sum}"
+            );
         }
     }
 

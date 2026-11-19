@@ -205,7 +205,10 @@ pub(crate) fn load_recap_watermark(session_dir: &std::path::Path) -> usize {
 }
 
 /// Persist the watermark after a successful/suppress commit. Best-effort.
-#[allow(clippy::disallowed_methods, reason = "no non-test caller: only this file's unit tests write the recap watermark (temp dirs); a product caller must write through the session writer")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "no non-test caller: only this file's unit tests write the recap watermark (temp dirs); a product caller must write through the session writer"
+)]
 pub(crate) fn save_recap_watermark(session_dir: &std::path::Path, main_turns: usize) {
     if !session_dir.is_dir() {
         return;
@@ -300,7 +303,10 @@ pub(crate) fn clean_recap_text(raw: &str) -> String {
     out
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

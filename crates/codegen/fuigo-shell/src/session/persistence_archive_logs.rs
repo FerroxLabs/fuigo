@@ -31,7 +31,10 @@ pub(super) fn read_log_for_archive(file: File) -> io::Result<Vec<u8>> {
 }
 
 /// [`read_log_for_archive`] with a hook between the head read and the tail seek, so a test can change the file there.
-pub(super) fn read_log_with_hook(mut file: File, between_head_and_tail: impl FnOnce()) -> io::Result<Vec<u8>> {
+pub(super) fn read_log_with_hook(
+    mut file: File,
+    between_head_and_tail: impl FnOnce(),
+) -> io::Result<Vec<u8>> {
     let len = file.metadata()?.len();
     let mut data = Vec::with_capacity(len.min(MAX_ARCHIVED_LOG_BYTES) as usize + TRIM_MARKER.len());
     if len <= MAX_ARCHIVED_LOG_BYTES {
@@ -42,7 +45,9 @@ pub(super) fn read_log_with_hook(mut file: File, between_head_and_tail: impl FnO
     let half = MAX_ARCHIVED_LOG_BYTES / 2;
     (&mut file).take(half).read_to_end(&mut data)?;
     between_head_and_tail();
-    let still_long = file.metadata().is_ok_and(|m| m.len() > MAX_ARCHIVED_LOG_BYTES);
+    let still_long = file
+        .metadata()
+        .is_ok_and(|m| m.len() > MAX_ARCHIVED_LOG_BYTES);
     if still_long && file.seek(SeekFrom::End(-(half as i64))).is_ok() {
         let mut tail = Vec::with_capacity(half as usize);
         if (&mut file).take(half).read_to_end(&mut tail).is_ok() {
@@ -72,7 +77,11 @@ fn trim_split_codepoint_at_end(head: &mut Vec<u8>) {
 
 /// How many leading continuation bytes (at most 3) of `tail` belong to a codepoint the cut split, when the rest is valid UTF-8.
 fn split_codepoint_prefix(tail: &[u8]) -> usize {
-    let skip = tail.iter().take(3).take_while(|b| (**b & 0xC0) == 0x80).count();
+    let skip = tail
+        .iter()
+        .take(3)
+        .take_while(|b| (**b & 0xC0) == 0x80)
+        .count();
     if skip > 0 && std::str::from_utf8(&tail[skip..]).is_ok() {
         skip
     } else {
@@ -134,10 +143,7 @@ pub(super) fn collect_terminal_logs(base: &Path, files: &mut Vec<CopiedSessionFi
         match read_log_for_archive(file) {
             Ok(data) => {
                 budget = left;
-                files.push(CopiedSessionFile {
-                    name,
-                    data,
-                });
+                files.push(CopiedSessionFile { name, data });
             }
             Err(e) => tracing::warn!(?e, "Failed to read terminal log during session copy"),
         }

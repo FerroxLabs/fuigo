@@ -7,10 +7,7 @@ fn task_schema() -> serde_json::Value {
     serde_json::to_value(schemars::schema_for!(fuigo_tool_types::TaskToolInput)).unwrap()
 }
 
-fn definition(
-    params: &serde_json::Value,
-    param_map: &HashMap<String, String>,
-) -> ToolDefinition {
+fn definition(params: &serde_json::Value, param_map: &HashMap<String, String>) -> ToolDefinition {
     let renderer = TemplateRenderer::new(
         [(ToolKind::Task, "spawn_subagent".to_string())].into(),
         Default::default(),
@@ -47,10 +44,22 @@ fn inherited_leaves_the_model_argument_out_of_the_schema() {
     let props = properties(&def);
     assert!(!props.contains(&"model".to_string()), "{props:?}");
     // Every other argument stays.
-    for kept in ["prompt", "description", "run_in_background", "resume_from", "cwd"] {
-        assert!(props.contains(&kept.to_string()), "{kept} missing from {props:?}");
+    for kept in [
+        "prompt",
+        "description",
+        "run_in_background",
+        "resume_from",
+        "cwd",
+    ] {
+        assert!(
+            props.contains(&kept.to_string()),
+            "{kept} missing from {props:?}"
+        );
     }
-    let required = def.function.parameters["required"].as_array().cloned().unwrap_or_default();
+    let required = def.function.parameters["required"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert!(!required.iter().any(|name| name == "model"));
 }
 
@@ -59,7 +68,10 @@ fn inherited_schema_is_filtered_before_the_client_rename() {
     let map: HashMap<String, String> = [("model".to_string(), "llm".to_string())].into();
     let def = definition(&json!({"model_selection": "inherited"}), &map);
     let props = properties(&def);
-    assert!(!props.contains(&"llm".to_string()) && !props.contains(&"model".to_string()), "{props:?}");
+    assert!(
+        !props.contains(&"llm".to_string()) && !props.contains(&"model".to_string()),
+        "{props:?}"
+    );
     let renamed = definition(&json!({"model_selection": "selectable"}), &map);
     assert!(properties(&renamed).contains(&"llm".to_string()));
 }
@@ -67,7 +79,10 @@ fn inherited_schema_is_filtered_before_the_client_rename() {
 #[test]
 fn description_override_is_kept_under_inheritance() {
     let def = definition(&json!({"model_selection": "inherited"}), &HashMap::new());
-    assert_eq!(def.function.description.as_deref(), Some("Start a subagent."));
+    assert_eq!(
+        def.function.description.as_deref(),
+        Some("Start a subagent.")
+    );
 }
 
 #[test]
@@ -78,8 +93,12 @@ fn unparsable_params_keep_the_default_schema() {
 
 #[test]
 fn params_roundtrip_and_default_to_selectable() {
-    assert_eq!(TaskParams::default().model_selection, TaskModelSelection::Selectable);
-    let parsed: TaskParams = serde_json::from_value(json!({"model_selection": "inherited"})).unwrap();
+    assert_eq!(
+        TaskParams::default().model_selection,
+        TaskModelSelection::Selectable
+    );
+    let parsed: TaskParams =
+        serde_json::from_value(json!({"model_selection": "inherited"})).unwrap();
     assert_eq!(parsed.model_selection, TaskModelSelection::Inherited);
     assert_eq!(
         serde_json::to_value(TaskParams::default()).unwrap(),

@@ -120,7 +120,9 @@ impl Envelope {
         if let Some(t) = &self.from_auto_title
             && !is_valid_display_name(t)
         {
-            return Err(BoundsError::BadName { field: "from_auto_title" });
+            return Err(BoundsError::BadName {
+                field: "from_auto_title",
+            });
         }
         if self.denied_recently.len() > MAX_DENIAL_STAMPS {
             return Err(BoundsError::TooMany {
@@ -130,8 +132,16 @@ impl Envelope {
             });
         }
         for d in &self.denied_recently {
-            max_bytes("denied_recently.tool_kind", &d.tool_kind, MAX_DENIAL_FIELD_BYTES)?;
-            max_bytes("denied_recently.target_hash", &d.target_hash, MAX_DENIAL_FIELD_BYTES)?;
+            max_bytes(
+                "denied_recently.tool_kind",
+                &d.tool_kind,
+                MAX_DENIAL_FIELD_BYTES,
+            )?;
+            max_bytes(
+                "denied_recently.target_hash",
+                &d.target_hash,
+                MAX_DENIAL_FIELD_BYTES,
+            )?;
         }
         Ok(())
     }
@@ -144,7 +154,10 @@ impl fmt::Debug for Envelope {
             .field("seq", &self.seq)
             .field("from", &self.from)
             .field("from_name_len", &self.from_name.len())
-            .field("from_auto_title_len", &self.from_auto_title.as_ref().map(String::len))
+            .field(
+                "from_auto_title_len",
+                &self.from_auto_title.as_ref().map(String::len),
+            )
             .field("from_ref_len", &self.from_ref.len())
             .field("from_mode", &self.from_mode)
             .field("from_operator", &self.from_operator)

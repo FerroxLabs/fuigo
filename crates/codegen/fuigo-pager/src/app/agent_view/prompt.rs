@@ -1663,7 +1663,8 @@ mod history_browse_panel_tests {
     /// The panel is modal (its intercept runs first) and populate drops the `@` context, so Up/Down keep browsing and Down still closes.
     #[test]
     fn populated_at_token_does_not_steal_arrows() {
-        let (_workspace, mut agent) = agent_with_history(&["run a subagent for @crates/codegen", "older"]);
+        let (_workspace, mut agent) =
+            agent_with_history(&["run a subagent for @crates/codegen", "older"]);
         agent.handle_prompt_key_for_test(&key(KeyCode::Up));
         assert_eq!(agent.prompt.text(), "run a subagent for @crates/codegen");
         assert!(
@@ -2048,7 +2049,10 @@ mod apple_terminal_ctrl_o_upgrade_cta_tests {
         agent.session.state = AgentState::TurnRunning;
         agent.prompt.set_text("steer mid-turn");
         let outcome = agent.handle_prompt_key_with_registry_for_test(&ctrl_enter, &registry);
-        assert!(matches!(outcome, InputOutcome::Action(Action::SendPromptNow { .. })), "got {outcome:?}");
+        assert!(
+            matches!(outcome, InputOutcome::Action(Action::SendPromptNow { .. })),
+            "got {outcome:?}"
+        );
     }
 
     #[test]

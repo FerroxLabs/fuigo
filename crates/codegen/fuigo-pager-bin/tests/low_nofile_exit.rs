@@ -16,8 +16,8 @@ use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 
 use fuigo_test_support::{
-    InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, ScriptedResponse, TestSandbox, git_workdir,
-    run_headless_in_sandbox_borrowed_with_env, sse,
+    InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, ScriptedResponse, TestSandbox,
+    git_workdir, run_headless_in_sandbox_borrowed_with_env, sse,
 };
 
 /// The floor `fuigo` refuses to start below (`MIN_OPEN_FILES` in `main.rs`). Kept as a literal on purpose: a change
@@ -109,7 +109,9 @@ fn run_args_with_nofile_limit(nofile: u32, args: &[&str]) -> Run {
 fn every_limit_under_the_floor_exits_four_never_an_abort() {
     let bad: Vec<String> = (LOWEST..FLOOR)
         .map(run_with_nofile_limit)
-        .filter(|run| run.code != Some(STARTUP_FAILURE_EXIT_CODE) || !run.stderr.contains("never started"))
+        .filter(|run| {
+            run.code != Some(STARTUP_FAILURE_EXIT_CODE) || !run.stderr.contains("never started")
+        })
         .map(|run| {
             format!(
                 "nofile={} exit={:?} signal={:?} stderr={:?}",
@@ -132,14 +134,28 @@ fn every_limit_under_the_floor_exits_four_never_an_abort() {
 #[test]
 fn the_refusal_names_the_limit_and_the_remedy() {
     let run = run_with_nofile_limit(FLOOR - 1);
-    assert_eq!(run.code, Some(STARTUP_FAILURE_EXIT_CODE), "stderr: {}", run.stderr);
+    assert_eq!(
+        run.code,
+        Some(STARTUP_FAILURE_EXIT_CODE),
+        "stderr: {}",
+        run.stderr
+    );
     assert!(
-        run.stderr.contains(&format!("open-file limit is {}", FLOOR - 1)),
+        run.stderr
+            .contains(&format!("open-file limit is {}", FLOOR - 1)),
         "names the limit in force: {}",
         run.stderr
     );
-    assert!(run.stderr.contains(&format!("at least {FLOOR}")), "names the floor: {}", run.stderr);
-    assert!(run.stderr.contains("ulimit -n"), "names the remedy: {}", run.stderr);
+    assert!(
+        run.stderr.contains(&format!("at least {FLOOR}")),
+        "names the floor: {}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("ulimit -n"),
+        "names the remedy: {}",
+        run.stderr
+    );
 }
 
 /// K26 (Grok r1): the subscription commands are dispatched before the agent path, so they must refuse the same way:
@@ -161,8 +177,16 @@ fn subscription_commands_under_the_floor_exit_four_with_the_line() {
                 run.signal,
                 run.stderr
             );
-            assert!(run.stderr.contains("never started"), "{args:?} nofile={nofile}: {}", run.stderr);
-            assert!(run.stderr.contains(&format!("open-file limit is {nofile}")), "{args:?}: {}", run.stderr);
+            assert!(
+                run.stderr.contains("never started"),
+                "{args:?} nofile={nofile}: {}",
+                run.stderr
+            );
+            assert!(
+                run.stderr.contains(&format!("open-file limit is {nofile}")),
+                "{args:?}: {}",
+                run.stderr
+            );
         }
     }
 }
@@ -171,7 +195,9 @@ fn subscription_commands_under_the_floor_exit_four_with_the_line() {
 /// not set so high that it refuses a limit a run can use, and the refusals above are not an artefact of the fixture.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_run_at_the_floor_starts_and_completes() {
-    let server = MockInferenceServer::start().await.expect("start the mock inference server");
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start the mock inference server");
     server.preset_allow_access();
     let workdir = git_workdir();
     let _expect = [
@@ -183,7 +209,10 @@ async fn a_run_at_the_floor_starts_and_completes() {
         server.expect_response(
             "text (chat completions)",
             InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions),
-            ScriptedResponse::sse(sse::chat_completion_script_exact("the answer", "test-model")),
+            ScriptedResponse::sse(sse::chat_completion_script_exact(
+                "the answer",
+                "test-model",
+            )),
         ),
     ];
     let sandbox = TestSandbox::builder().mock_url(server.url()).build();
@@ -191,10 +220,21 @@ async fn a_run_at_the_floor_starts_and_completes() {
     cmd.arg("-c")
         .arg(format!("ulimit -n {FLOOR} && exec \"$0\" \"$@\""))
         .arg(pager_binary())
-        .args(["-p", "say the answer", "--trust", "--yolo", "--output-format", "json"])
+        .args([
+            "-p",
+            "say the answer",
+            "--trust",
+            "--yolo",
+            "--output-format",
+            "json",
+        ])
         .current_dir(workdir.workspace());
     let result = run_headless_in_sandbox_borrowed_with_env(cmd, &sandbox, &[]).await;
-    assert!(!result.timed_out, "stdout:\n{}\nstderr:\n{}", result.stdout, result.stderr);
+    assert!(
+        !result.timed_out,
+        "stdout:\n{}\nstderr:\n{}",
+        result.stdout, result.stderr
+    );
     assert_eq!(
         result.status.code(),
         Some(0),

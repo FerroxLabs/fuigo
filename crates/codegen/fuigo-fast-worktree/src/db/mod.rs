@@ -9,9 +9,9 @@ mod schema;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use fuigo_sqlite_journal::{BUSY_RETRY_BUDGET, JournalMode};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use fuigo_sqlite_journal::{BUSY_RETRY_BUDGET, JournalMode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -480,7 +480,11 @@ fn fuigo_home_fence() -> Option<std::sync::MutexGuard<'static, ()>> {
     if crate::test_support::grove_env_held() {
         return None;
     }
-    Some(FUIGO_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()))
+    Some(
+        FUIGO_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    )
 }
 
 /// Serializes tests that mutate the process-global `FUIGO_HOME` env var so they

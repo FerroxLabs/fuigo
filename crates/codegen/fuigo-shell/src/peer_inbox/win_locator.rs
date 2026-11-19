@@ -27,10 +27,11 @@ use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
     FILE_CREATION_DISPOSITION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_INFO_BY_HANDLE_CLASS, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_MODE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK,
-    LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    OPEN_ALWAYS, OPEN_EXISTING, SetFileInformationByHandle, UnlockFileEx,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_INFO_BY_HANDLE_CLASS,
+    FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_ALWAYS, OPEN_EXISTING,
+    SetFileInformationByHandle, UnlockFileEx,
 };
 use windows::Win32::System::IO::OVERLAPPED;
 use windows::core::PCWSTR;
@@ -71,7 +72,12 @@ fn io_code(e: &std::io::Error) -> Disabled {
 
 /// Does `name` end in a Windows device name (`CON`, `NUL.txt`, `COM1`, ...)? The base is the part before the first dot.
 fn is_reserved_device(name: &str) -> bool {
-    let base = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
     match base.as_str() {
         "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$" => true,
         b => {
@@ -87,13 +93,20 @@ fn validate_name(name: &str) -> Result<(), Disabled> {
         || name.len() > 200
         || name == "."
         || name == ".."
-        || name.chars().any(|c| (c as u32) < 0x20 || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+        || name.chars().any(|c| {
+            (c as u32) < 0x20 || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
         || name.ends_with('.')
         || name.ends_with(' ')
         || name.eq_ignore_ascii_case(LOCK_NAME)
-        || name.len() >= TMP_PREFIX.len() && name[..TMP_PREFIX.len()].eq_ignore_ascii_case(TMP_PREFIX)
+        || name.len() >= TMP_PREFIX.len()
+            && name[..TMP_PREFIX.len()].eq_ignore_ascii_case(TMP_PREFIX)
         || is_reserved_device(name);
-    if bad { Err(Disabled::InvalidName) } else { Ok(()) }
+    if bad {
+        Err(Disabled::InvalidName)
+    } else {
+        Ok(())
+    }
 }
 
 fn wide(p: &Path) -> Result<Vec<u16>, Disabled> {
@@ -120,14 +133,27 @@ fn create(
     flags: FILE_FLAGS_AND_ATTRIBUTES,
 ) -> Result<OwnedHandle, i32> {
     // SAFETY: `path` is NUL-terminated; `sec`, when present, points at a live SECURITY_ATTRIBUTES owned by the caller.
-    let h = unsafe { CreateFileW(PCWSTR(path.as_ptr()), access, share, sec, disposition, flags, None) }
-        .map_err(|e| code_of(&e))?;
+    let h = unsafe {
+        CreateFileW(
+            PCWSTR(path.as_ptr()),
+            access,
+            share,
+            sec,
+            disposition,
+            flags,
+            None,
+        )
+    }
+    .map_err(|e| code_of(&e))?;
     // SAFETY: CreateFileW succeeded, so `h` is a fresh handle that nothing else owns.
     Ok(unsafe { OwnedHandle::from_raw_handle(h.0) })
 }
 
 fn retryable(code: i32) -> bool {
-    matches!(code, ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_ACCESS_DENIED)
+    matches!(
+        code,
+        ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_ACCESS_DENIED
+    )
 }
 
 /// The explicit owner-only descriptor every new file gets: owner us, PROTECTED DACL (nothing inherited), one ACE for us.
@@ -154,10 +180,18 @@ fn check_handle(h: &OwnedHandle, cap: Option<u64>) -> Result<u64, Disabled> {
 
 /// Read `<dir>\<name>`. `exclusive_share`: a writer under the lock holds the file without write or delete sharing
 /// while it reads; a plain reader lets a replace proceed (`FILE_SHARE_DELETE`).
-fn read_at(dir: &CheckedDir, name: &str, exclusive_share: bool) -> Result<Option<Vec<u8>>, Disabled> {
+fn read_at(
+    dir: &CheckedDir,
+    name: &str,
+    exclusive_share: bool,
+) -> Result<Option<Vec<u8>>, Disabled> {
     dir.verify()?;
     let w = wide(&dir.path().join(name))?;
-    let share = if exclusive_share { FILE_SHARE_READ } else { FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE };
+    let share = if exclusive_share {
+        FILE_SHARE_READ
+    } else {
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    };
     let give_up = Instant::now() + SHARING_RETRY_BOUND;
     let h = loop {
         match create(
@@ -170,14 +204,19 @@ fn read_at(dir: &CheckedDir, name: &str, exclusive_share: bool) -> Result<Option
         ) {
             Ok(h) => break h,
             Err(ERROR_FILE_NOT_FOUND) => return Ok(None),
-            Err(c) if retryable(c) && Instant::now() < give_up => std::thread::sleep(SHARING_RETRY_GAP),
+            Err(c) if retryable(c) && Instant::now() < give_up => {
+                std::thread::sleep(SHARING_RETRY_GAP)
+            }
             Err(c) => return Err(Disabled::Io(c)),
         }
     };
     dir.verify_file(HANDLE(h.as_raw_handle()), name)?;
     check_handle(&h, Some(MAX_LOCATOR_BYTES))?;
     let mut buf = Vec::new();
-    let n = std::fs::File::from(h).take(MAX_LOCATOR_BYTES + 1).read_to_end(&mut buf).map_err(|e| io_code(&e))?;
+    let n = std::fs::File::from(h)
+        .take(MAX_LOCATOR_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| io_code(&e))?;
     if n as u64 > MAX_LOCATOR_BYTES {
         return Err(Disabled::Rejected(Reject::TooLarge));
     }
@@ -222,7 +261,11 @@ fn acquire_lock(dir: &CheckedDir) -> Result<LockGuard, Disabled> {
             Ok(h) => break h,
             Err(c) if retryable(c) => {
                 if Instant::now() >= give_up {
-                    return Err(if c == ERROR_ACCESS_DENIED { Disabled::Io(c) } else { Disabled::LockBusy });
+                    return Err(if c == ERROR_ACCESS_DENIED {
+                        Disabled::Io(c)
+                    } else {
+                        Disabled::LockBusy
+                    });
                 }
                 std::thread::sleep(LOCK_RETRY_GAP);
             }
@@ -239,7 +282,14 @@ fn acquire_lock(dir: &CheckedDir) -> Result<LockGuard, Disabled> {
         let mut ov = OVERLAPPED::default();
         // SAFETY: valid handle; `ov` is a zeroed OVERLAPPED (offset 0) that lives across the call. Locks byte 0 only.
         let r = unsafe {
-            LockFileEx(HANDLE(h.as_raw_handle()), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, None, 1, 0, &mut ov)
+            LockFileEx(
+                HANDLE(h.as_raw_handle()),
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                None,
+                1,
+                0,
+                &mut ov,
+            )
         };
         match r {
             Ok(()) => return Ok(LockGuard(h)),
@@ -276,11 +326,17 @@ fn replace(from: &[u16], to: &[u16]) -> Result<(), Disabled> {
     loop {
         // SAFETY: both paths are NUL-terminated.
         let r = unsafe {
-            MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+            MoveFileExW(
+                PCWSTR(from.as_ptr()),
+                PCWSTR(to.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
         };
         match r {
             Ok(()) => return Ok(()),
-            Err(e) if retryable(code_of(&e)) && Instant::now() < give_up => std::thread::sleep(SHARING_RETRY_GAP),
+            Err(e) if retryable(code_of(&e)) && Instant::now() < give_up => {
+                std::thread::sleep(SHARING_RETRY_GAP)
+            }
             Err(e) => return Err(Disabled::Io(code_of(&e))),
         }
     }
@@ -328,7 +384,11 @@ fn write_temp_and_replace(dir: &CheckedDir, name: &str, bytes: &[u8]) -> Result<
             let _ = delete_by_handle(&h);
             return Err(e);
         }
-        let mut guard = TempGuard { dir, name: tmp_name, armed: true };
+        let mut guard = TempGuard {
+            dir,
+            name: tmp_name,
+            armed: true,
+        };
         let mut file = std::fs::File::from(h);
         file.write_all(bytes).map_err(|e| io_code(&e))?;
         // FlushFileBuffers.
@@ -404,7 +464,11 @@ fn update_impl(
 /// plain file whose name starts with the temp prefix, whose last write is older than `older`, that opens with full sharing
 /// (a file somebody still holds is skipped) and passes the owner / DACL / one-link checks (so only OUR files go), and at
 /// most `max` of them. Returns how many were removed. Never follows a link: a reparse point fails the handle check.
-pub(crate) fn sweep_stale_temps(dir: &CheckedDir, older: Duration, max: usize) -> Result<usize, Disabled> {
+pub(crate) fn sweep_stale_temps(
+    dir: &CheckedDir,
+    older: Duration,
+    max: usize,
+) -> Result<usize, Disabled> {
     let _lock = acquire_lock(dir)?;
     let mut removed = 0usize;
     let entries = std::fs::read_dir(dir.path()).map_err(|e| io_code(&e))?;
@@ -412,11 +476,19 @@ pub(crate) fn sweep_stale_temps(dir: &CheckedDir, older: Duration, max: usize) -
         if removed >= max {
             break;
         }
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
-        if !name.as_bytes().get(..TMP_PREFIX.len()).is_some_and(|b| b.eq_ignore_ascii_case(TMP_PREFIX.as_bytes())) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name
+            .as_bytes()
+            .get(..TMP_PREFIX.len())
+            .is_some_and(|b| b.eq_ignore_ascii_case(TMP_PREFIX.as_bytes()))
+        {
             continue;
         }
-        let Ok(w) = wide(&dir.path().join(&name)) else { continue };
+        let Ok(w) = wide(&dir.path().join(&name)) else {
+            continue;
+        };
         // ONE handle for the whole decision and the delete.
         let Ok(h) = create(
             &w,
@@ -444,10 +516,15 @@ fn age_of(h: &OwnedHandle) -> Option<Duration> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: live file handle; `info` is a writable out structure.
     unsafe { GetFileInformationByHandle(HANDLE(h.as_raw_handle()), &mut info) }.ok()?;
-    let ticks = (u64::from(info.ftLastWriteTime.dwHighDateTime) << 32) | u64::from(info.ftLastWriteTime.dwLowDateTime);
+    let ticks = (u64::from(info.ftLastWriteTime.dwHighDateTime) << 32)
+        | u64::from(info.ftLastWriteTime.dwLowDateTime);
     // FILETIME counts 100 ns from 1601-01-01; the Unix epoch is 11_644_473_600 s later.
     let unix_ticks = ticks.checked_sub(11_644_473_600 * 10_000_000)?;
-    let written = std::time::UNIX_EPOCH + Duration::new(unix_ticks / 10_000_000, ((unix_ticks % 10_000_000) * 100) as u32);
+    let written = std::time::UNIX_EPOCH
+        + Duration::new(
+            unix_ticks / 10_000_000,
+            ((unix_ticks % 10_000_000) * 100) as u32,
+        );
     std::time::SystemTime::now().duration_since(written).ok()
 }
 
@@ -477,9 +554,11 @@ pub(crate) fn update_locator_rewriting(
 mod tests {
     use super::*;
     use crate::peer_inbox::win_pipe::sys::owner_and_dacl;
-    use std::sync::mpsc;
     use std::sync::Arc;
-    use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW};
+    use std::sync::mpsc;
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+    };
     use windows::Win32::Storage::FileSystem::CreateHardLinkW;
 
     const NAME: &str = "hosts.json";
@@ -491,8 +570,10 @@ mod tests {
     }
 
     fn names(td: &tempfile::TempDir) -> Vec<String> {
-        let mut v: Vec<_> =
-            std::fs::read_dir(td.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        let mut v: Vec<_> = std::fs::read_dir(td.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
         v.sort();
         v
     }
@@ -560,7 +641,9 @@ mod tests {
     fn oversize_output_is_refused_and_old_content_kept() {
         let (td, dir) = setup();
         put(&dir, b"old");
-        let r = update_locator(&dir, NAME, |_| Some(vec![b'a'; MAX_LOCATOR_BYTES as usize + 1]));
+        let r = update_locator(&dir, NAME, |_| {
+            Some(vec![b'a'; MAX_LOCATOR_BYTES as usize + 1])
+        });
         assert_eq!(r, Err(Disabled::OutputTooLarge));
         assert_eq!(read_locator(&dir, NAME), Ok(Some(b"old".to_vec())));
         // exactly the cap is fine
@@ -572,8 +655,14 @@ mod tests {
     fn directory_is_not_regular() {
         let (td, dir) = setup();
         std::fs::create_dir(td.path().join(NAME)).unwrap();
-        assert_eq!(read_locator(&dir, NAME), Err(Disabled::Rejected(Reject::NotRegular)));
-        assert_eq!(update_locator(&dir, NAME, |_| panic!("f must not run")), Err(Disabled::Rejected(Reject::NotRegular)));
+        assert_eq!(
+            read_locator(&dir, NAME),
+            Err(Disabled::Rejected(Reject::NotRegular))
+        );
+        assert_eq!(
+            update_locator(&dir, NAME, |_| panic!("f must not run")),
+            Err(Disabled::Rejected(Reject::NotRegular))
+        );
     }
 
     #[test]
@@ -584,7 +673,10 @@ mod tests {
         let orig = wide_of(&td.path().join(NAME));
         // SAFETY: both paths NUL-terminated.
         unsafe { CreateHardLinkW(PCWSTR(link.as_ptr()), PCWSTR(orig.as_ptr()), None) }.unwrap();
-        assert_eq!(read_locator(&dir, NAME), Err(Disabled::Rejected(Reject::HardLinked)));
+        assert_eq!(
+            read_locator(&dir, NAME),
+            Err(Disabled::Rejected(Reject::HardLinked))
+        );
         // rewriting replaces the name, not the other link
         update_locator_rewriting(&dir, NAME, |cur| {
             assert!(cur.is_none());
@@ -598,18 +690,30 @@ mod tests {
     #[test]
     fn oversize_file_is_rejected() {
         let (td, dir) = setup();
-        std::fs::write(td.path().join(NAME), vec![b'z'; MAX_LOCATOR_BYTES as usize + 1]).unwrap();
-        assert_eq!(read_locator(&dir, NAME), Err(Disabled::Rejected(Reject::TooLarge)));
+        std::fs::write(
+            td.path().join(NAME),
+            vec![b'z'; MAX_LOCATOR_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            read_locator(&dir, NAME),
+            Err(Disabled::Rejected(Reject::TooLarge))
+        );
     }
 
     #[test]
     fn symlink_is_rejected_when_the_machine_allows_one() {
         let (td, dir) = setup();
         std::fs::write(td.path().join("target"), b"secret").unwrap();
-        if std::os::windows::fs::symlink_file(td.path().join("target"), td.path().join(NAME)).is_err() {
+        if std::os::windows::fs::symlink_file(td.path().join("target"), td.path().join(NAME))
+            .is_err()
+        {
             return; // no symlink privilege on this machine
         }
-        assert_eq!(read_locator(&dir, NAME), Err(Disabled::Rejected(Reject::Symlink)));
+        assert_eq!(
+            read_locator(&dir, NAME),
+            Err(Disabled::Rejected(Reject::Symlink))
+        );
         update_locator_rewriting(&dir, NAME, |cur| {
             assert!(cur.is_none());
             Some(b"fresh".to_vec())
@@ -624,14 +728,29 @@ mod tests {
         let (td, dir) = setup();
         put(&dir, b"x");
         let ours = our_sid().unwrap();
-        let mut sec = auth::PipeSecurity::from_sddl(&format!("O:{ours}D:P(A;;FA;;;{ours})(A;;GRGW;;;BU)")).unwrap();
+        let mut sec =
+            auth::PipeSecurity::from_sddl(&format!("O:{ours}D:P(A;;FA;;;{ours})(A;;GRGW;;;BU)"))
+                .unwrap();
         // SAFETY: `as_raw` points at the live SECURITY_ATTRIBUTES inside `sec`.
         let sd = unsafe { (*sec.as_raw().cast::<SECURITY_ATTRIBUTES>()).lpSecurityDescriptor };
         let path = wide_of(&td.path().join(NAME));
         // SAFETY: NUL-terminated path and a live descriptor.
-        unsafe { SetFileSecurityW(PCWSTR(path.as_ptr()), DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR(sd)) }.unwrap();
-        assert_eq!(read_locator(&dir, NAME), Err(Disabled::Rejected(Reject::WrongMode)));
-        assert_eq!(update_locator(&dir, NAME, |_| panic!("f must not run")), Err(Disabled::Rejected(Reject::WrongMode)));
+        unsafe {
+            SetFileSecurityW(
+                PCWSTR(path.as_ptr()),
+                DACL_SECURITY_INFORMATION,
+                PSECURITY_DESCRIPTOR(sd),
+            )
+        }
+        .unwrap();
+        assert_eq!(
+            read_locator(&dir, NAME),
+            Err(Disabled::Rejected(Reject::WrongMode))
+        );
+        assert_eq!(
+            update_locator(&dir, NAME, |_| panic!("f must not run")),
+            Err(Disabled::Rejected(Reject::WrongMode))
+        );
         // rewriting replaces the file with a fresh owner-only one
         update_locator_rewriting(&dir, NAME, |cur| {
             assert!(cur.is_none());
@@ -645,17 +764,44 @@ mod tests {
     fn invalid_names() {
         let (_td, dir) = setup();
         for n in [
-            "", ".", "..", "a:b", "hosts.json:stream", "a/b", "a\\b", "..\\x", "x.", "x ", "CON", "con", "nul.txt", "COM1",
-            "lpt9.json", "AUX", "PRN", ".lock", ".LOCK", ".tmp-1", "a*b", "a\0b",
+            "",
+            ".",
+            "..",
+            "a:b",
+            "hosts.json:stream",
+            "a/b",
+            "a\\b",
+            "..\\x",
+            "x.",
+            "x ",
+            "CON",
+            "con",
+            "nul.txt",
+            "COM1",
+            "lpt9.json",
+            "AUX",
+            "PRN",
+            ".lock",
+            ".LOCK",
+            ".tmp-1",
+            "a*b",
+            "a\0b",
         ] {
             assert_eq!(read_locator(&dir, n), Err(Disabled::InvalidName), "{n:?}");
-            assert_eq!(update_locator(&dir, n, |_| None), Err(Disabled::InvalidName), "{n:?}");
+            assert_eq!(
+                update_locator(&dir, n, |_| None),
+                Err(Disabled::InvalidName),
+                "{n:?}"
+            );
         }
         assert!(validate_name("hosts.json").is_ok());
         assert!(validate_name("console.json").is_ok());
     }
 
-    fn hold_lock(dir: std::path::PathBuf, hold: Duration) -> (mpsc::Receiver<()>, std::thread::JoinHandle<()>) {
+    fn hold_lock(
+        dir: std::path::PathBuf,
+        hold: Duration,
+    ) -> (mpsc::Receiver<()>, std::thread::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel();
         let t = std::thread::spawn(move || {
             let g = acquire_lock(&CheckedDir::for_test(dir)).unwrap();
@@ -675,7 +821,10 @@ mod tests {
         let r = update_locator(&dir, NAME, |_| Some(b"x".to_vec()));
         let took = start.elapsed();
         assert_eq!(r, Err(Disabled::LockBusy));
-        assert!(took >= Duration::from_millis(1900) && took < Duration::from_millis(2900), "{took:?}");
+        assert!(
+            took >= Duration::from_millis(1900) && took < Duration::from_millis(2900),
+            "{took:?}"
+        );
         t.join().unwrap();
         assert_eq!(read_locator(&dir, NAME), Ok(None));
     }
@@ -700,7 +849,10 @@ mod tests {
             ts.push(std::thread::spawn(move || {
                 for _ in 0..50 {
                     update_locator(&d, NAME, |cur| {
-                        let n: u64 = cur.and_then(|b| std::str::from_utf8(b).ok()).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let n: u64 = cur
+                            .and_then(|b| std::str::from_utf8(b).ok())
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
                         Some((n + 1).to_string().into_bytes())
                     })
                     .unwrap();
@@ -748,7 +900,10 @@ mod tests {
         std::fs::rename(td.path().join(NAME), td.path().join(".tmp-9-2")).unwrap();
         put(&dir, b"keep");
         // nothing is old enough yet
-        assert_eq!(sweep_stale_temps(&dir, Duration::from_secs(3600), 10), Ok(0));
+        assert_eq!(
+            sweep_stale_temps(&dir, Duration::from_secs(3600), 10),
+            Ok(0)
+        );
         assert!(td.path().join(".TMP-9-1").exists());
         assert_eq!(sweep_stale_temps(&dir, Duration::ZERO, 10), Ok(2));
         assert_eq!(names(&td), vec![".lock".to_owned(), NAME.to_owned()]);
@@ -763,13 +918,28 @@ mod tests {
         std::fs::write(other.path().join(".tmp-1-1"), b"stale").unwrap();
         let before = names(&other);
         let dir = CheckedDir::mismatched_for_test(held.path(), other.path().to_path_buf());
-        assert_eq!(update_locator(&dir, NAME, |_| Some(b"mine".to_vec())), Err(Disabled::PeersMoved));
-        assert_eq!(update_locator(&dir, NAME, |_| None), Err(Disabled::PeersMoved));
-        assert_eq!(update_locator_rewriting(&dir, NAME, |_| None), Err(Disabled::PeersMoved));
+        assert_eq!(
+            update_locator(&dir, NAME, |_| Some(b"mine".to_vec())),
+            Err(Disabled::PeersMoved)
+        );
+        assert_eq!(
+            update_locator(&dir, NAME, |_| None),
+            Err(Disabled::PeersMoved)
+        );
+        assert_eq!(
+            update_locator_rewriting(&dir, NAME, |_| None),
+            Err(Disabled::PeersMoved)
+        );
         assert_eq!(read_locator(&dir, NAME), Err(Disabled::PeersMoved));
-        assert_eq!(sweep_stale_temps(&dir, Duration::ZERO, 10), Err(Disabled::PeersMoved));
+        assert_eq!(
+            sweep_stale_temps(&dir, Duration::ZERO, 10),
+            Err(Disabled::PeersMoved)
+        );
         assert_eq!(names(&other), before);
-        assert_eq!(std::fs::read(other.path().join("hosts.json")).unwrap(), b"theirs");
+        assert_eq!(
+            std::fs::read(other.path().join("hosts.json")).unwrap(),
+            b"theirs"
+        );
         assert!(names(&held).is_empty());
     }
 }

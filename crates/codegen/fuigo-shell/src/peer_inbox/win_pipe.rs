@@ -25,15 +25,16 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::{
-    PSID, RevertToSelf, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_QUERY, TokenGroups, TokenImpersonationLevel,
+    PSID, RevertToSelf, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TOKEN_QUERY,
+    TokenGroups, TokenImpersonationLevel,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_TYPE_PIPE, GetFileType,
     PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
 };
 use windows::Win32::System::Pipes::{
-    CreateNamedPipeW, GetNamedPipeClientComputerNameW, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    CreateNamedPipeW, GetNamedPipeClientComputerNameW, ImpersonateNamedPipeClient,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 use windows::core::{PCWSTR, PWSTR};
@@ -41,9 +42,11 @@ use windows::core::{PCWSTR, PWSTR};
 use super::conn::{self, ConnError};
 use super::directory::{ConnHost, PeerDirectory};
 use super::win_policy::{
-    AceSummary, DaclSummary, Fact, RawAce, dacl_summary_from_binary, ImpLevel, MAX_INSTANCES, OurIdentity, PipePeerFacts, Refusal, ServerFacts, ServerRefusal,
-    Verdict, WinUnavailable, dacl_owner_only, evidence_open_sddl, owner_only_sddl, pipe_name, PIPE_PREFIX, sids_are_anonymous,
-    sids_are_network, sids_are_system_or_service, win_peer_verdict, win_server_verdict,
+    AceSummary, DaclSummary, Fact, ImpLevel, MAX_INSTANCES, OurIdentity, PIPE_PREFIX,
+    PipePeerFacts, RawAce, Refusal, ServerFacts, ServerRefusal, Verdict, WinUnavailable,
+    dacl_owner_only, dacl_summary_from_binary, evidence_open_sddl, owner_only_sddl, pipe_name,
+    sids_are_anonymous, sids_are_network, sids_are_system_or_service, win_peer_verdict,
+    win_server_verdict,
 };
 use crate::leader::peer_auth::win as auth;
 use crate::session::peer_message::peer_messaging_enabled;
@@ -89,7 +92,9 @@ pub(super) mod sys {
             if unsafe { RevertToSelf() }.is_err() {
                 // The thread would go back to the shared blocking pool still acting as the client, and the client
                 // chose the impersonation level. There is no safe way on: end the process. Fixed text, no peer data.
-                tracing::error!("peer inbox: could not end client impersonation; aborting the process");
+                tracing::error!(
+                    "peer inbox: could not end client impersonation; aborting the process"
+                );
                 std::process::abort();
             }
         }
@@ -100,7 +105,8 @@ pub(super) mod sys {
     fn thread_token() -> Fact<auth::Owned> {
         let mut token = HANDLE::default();
         // SAFETY: the pseudo handle of the current thread needs no closing; `token` is writable.
-        unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }.map_err(|e| auth::code(&e))?;
+        unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }
+            .map_err(|e| auth::code(&e))?;
         Ok(auth::Owned(token))
     }
 
@@ -128,7 +134,10 @@ pub(super) mod sys {
         // provenance (no reference to the one-element array). The entries' SID pointers point into the same buffer,
         // which outlives the `sid_to_string` calls below.
         let entries = unsafe {
-            std::slice::from_raw_parts(std::ptr::addr_of!((*g).Groups).cast::<SID_AND_ATTRIBUTES>(), count)
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!((*g).Groups).cast::<SID_AND_ATTRIBUTES>(),
+                count,
+            )
         };
         entries.iter().map(|e| auth::sid_to_string(e.Sid)).collect()
     }
@@ -138,8 +147,14 @@ pub(super) mod sys {
     pub(in crate::peer_inbox) fn own_token_is_network() -> Fact<bool> {
         let mut token = HANDLE::default();
         // SAFETY: the pseudo handle of the current process needs no closing; `token` is writable.
-        unsafe { windows::Win32::System::Threading::OpenProcessToken(windows::Win32::System::Threading::GetCurrentProcess(), TOKEN_QUERY, &mut token) }
-            .map_err(|e| auth::code(&e))?;
+        unsafe {
+            windows::Win32::System::Threading::OpenProcessToken(
+                windows::Win32::System::Threading::GetCurrentProcess(),
+                TOKEN_QUERY,
+                &mut token,
+            )
+        }
+        .map_err(|e| auth::code(&e))?;
         let token = auth::Owned(token);
         Ok(sids_are_network(&token_groups(token.0)?))
     }
@@ -159,7 +174,9 @@ pub(super) mod sys {
     fn client_computer_is_remote(pipe: HANDLE) -> Fact<bool> {
         let mut name = [0u16; 260];
         // SAFETY: `pipe` is a live server pipe handle; `name` is writable for `name.len()` UTF-16 units.
-        let r = unsafe { GetNamedPipeClientComputerNameW(pipe, PWSTR(name.as_mut_ptr()), name.len() as u32) };
+        let r = unsafe {
+            GetNamedPipeClientComputerNameW(pipe, PWSTR(name.as_mut_ptr()), name.len() as u32)
+        };
         match r.ok() {
             Ok(()) => Ok(true),
             Err(e) if auth::code(&e) == ERROR_PIPE_LOCAL => Ok(false),
@@ -202,13 +219,18 @@ pub(super) mod sys {
             ),
             (Err(c), _) | (_, Err(c)) => (Err(*c), Err(*c), by_name.and(Err(*c))),
         };
-        ClientPart { user, system_or_service, anonymous, level: token_level(token.0), remote }
+        ClientPart {
+            user,
+            system_or_service,
+            anonymous,
+            level: token_level(token.0),
+            remote,
+        }
     }
 
     // Moved to `fuigo-win-acl` (one reader for the pipe, directory and file checks); same names here.
     pub(in super::super) use fuigo_win_acl::owner_and_dacl;
     pub(in crate::peer_inbox) use fuigo_win_acl::read_owner_dacl;
-
 
     /// What the client learns about the server behind `handle` (no byte is sent).
     pub(super) fn server_facts(raw: std::os::windows::io::RawHandle) -> ServerFacts {
@@ -231,8 +253,14 @@ struct Readback {
 
 fn readback(server: &NamedPipeServer) -> Readback {
     match sys::owner_and_dacl(HANDLE(server.as_raw_handle())) {
-        Ok((owner, dacl)) => Readback { owner: Ok(owner), dacl: Ok(dacl) },
-        Err(c) => Readback { owner: Err(c), dacl: Err(c) },
+        Ok((owner, dacl)) => Readback {
+            owner: Ok(owner),
+            dacl: Ok(dacl),
+        },
+        Err(c) => Readback {
+            owner: Err(c),
+            dacl: Err(c),
+        },
     }
 }
 
@@ -240,7 +268,11 @@ fn readback(server: &NamedPipeServer) -> Readback {
 /// can add `FILE_FLAG_FIRST_PIPE_INSTANCE`. `READ_CONTROL` is NOT an open-mode flag (passing it is
 /// `ERROR_INVALID_PARAMETER`, verified on Windows Server 2022); a `PIPE_ACCESS_DUPLEX` server handle already carries it
 /// (GENERIC_READ includes STANDARD_RIGHTS_READ), which is what `GetSecurityInfo` needs. A failed read-back refuses start.
-fn create_raw(name: &str, first: bool, security: &mut auth::PipeSecurity) -> std::io::Result<NamedPipeServer> {
+fn create_raw(
+    name: &str,
+    first: bool,
+    security: &mut auth::PipeSecurity,
+) -> std::io::Result<NamedPipeServer> {
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let mut open = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
     if first {
@@ -251,7 +283,16 @@ fn create_raw(name: &str, first: bool, security: &mut auth::PipeSecurity) -> std
     // SAFETY: `wide` is NUL-terminated and outlives the call; `attrs` points at a SECURITY_ATTRIBUTES (inheritance
     // off) whose descriptor lives until `security` drops, after the call.
     let h = unsafe {
-        CreateNamedPipeW(PCWSTR(wide.as_ptr()), open, mode, u32::from(MAX_INSTANCES), 65536, 65536, 0, Some(attrs))
+        CreateNamedPipeW(
+            PCWSTR(wide.as_ptr()),
+            open,
+            mode,
+            u32::from(MAX_INSTANCES),
+            65536,
+            65536,
+            0,
+            Some(attrs),
+        )
     };
     if h == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error());
@@ -269,15 +310,23 @@ fn create_raw(name: &str, first: bool, security: &mut auth::PipeSecurity) -> std
 /// DACL are read back and must be exactly ours. `widen` is the debug-only evidence switch, passed through
 /// `evidence_open_sddl`, which is `None` in a release build; when it applies, the DACL fact handed on is replaced by the
 /// owner-only summary so the case reaches the client-identity checks of the verdict (see `win_evidence`).
-fn create_instance(name: &str, first: bool, sid: &str, widen: bool) -> Result<(NamedPipeServer, Readback), WinUnavailable> {
+fn create_instance(
+    name: &str,
+    first: bool,
+    sid: &str,
+    widen: bool,
+) -> Result<(NamedPipeServer, Readback), WinUnavailable> {
     let widened = evidence_open_sddl(sid, widen);
     let sddl = match &widened {
         Some(w) => w.clone(),
         None => owner_only_sddl(sid).ok_or(WinUnavailable::IdentityUnreadable)?,
     };
-    let mut security = auth::PipeSecurity::from_sddl(&sddl).map_err(|_| WinUnavailable::ReadbackFailed)?;
+    let mut security =
+        auth::PipeSecurity::from_sddl(&sddl).map_err(|_| WinUnavailable::ReadbackFailed)?;
     let server = create_raw(name, first, &mut security).map_err(|e| match e.raw_os_error() {
-        Some(ERROR_ACCESS_DENIED | ERROR_ALREADY_EXISTS | ERROR_PIPE_BUSY) if first => WinUnavailable::NameInUse,
+        Some(ERROR_ACCESS_DENIED | ERROR_ALREADY_EXISTS | ERROR_PIPE_BUSY) if first => {
+            WinUnavailable::NameInUse
+        }
         Some(c) => WinUnavailable::CreateFailed(c as u32),
         None => WinUnavailable::CreateFailed(0),
     })?;
@@ -286,10 +335,18 @@ fn create_instance(name: &str, first: bool, sid: &str, widen: bool) -> Result<(N
         // Evidence build only: the owner must still be ours; the DACL is the one we asked for, widened on purpose.
         let ok = matches!(&rb.owner, Ok(o) if o == sid);
         rb.dacl = Ok(owner_only_summary(sid));
-        return if ok { Ok((server, rb)) } else { Err(WinUnavailable::ReadbackFailed) };
+        return if ok {
+            Ok((server, rb))
+        } else {
+            Err(WinUnavailable::ReadbackFailed)
+        };
     }
     let ok = matches!((&rb.owner, &rb.dacl), (Ok(o), Ok(d)) if o == sid && dacl_owner_only(d, sid));
-    if ok { Ok((server, rb)) } else { Err(WinUnavailable::ReadbackFailed) }
+    if ok {
+        Ok((server, rb))
+    } else {
+        Err(WinUnavailable::ReadbackFailed)
+    }
 }
 
 /// What a correct owner-only read-back looks like (used only to stand in for the DACL fact in the evidence case).
@@ -315,12 +372,18 @@ pub(crate) struct Stats {
 
 impl Stats {
     pub(crate) fn last_refusal(&self) -> Option<Refusal> {
-        *self.last_refusal.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self
+            .last_refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn refuse(&self, why: Refusal) {
         self.refused.fetch_add(1, Ordering::SeqCst);
-        *self.last_refusal.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
+        *self
+            .last_refusal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
     }
 }
 
@@ -336,7 +399,8 @@ pub(crate) struct StartOptions {
 
 fn mint_host_id() -> HostId {
     let n: u128 = rand::random();
-    HostId::new(&format!("{n:032x}")).unwrap_or_else(|_| unreachable!("32 lower-case hex characters"))
+    HostId::new(&format!("{n:032x}"))
+        .unwrap_or_else(|_| unreachable!("32 lower-case hex characters"))
 }
 
 /// A running Windows inbox. Same API names as the unix `PeerInbox`: `start`, `shutdown`, `host_id`, `directory`.
@@ -353,14 +417,27 @@ pub(crate) struct WinPeerInbox {
 impl WinPeerInbox {
     /// Start with the process settings. `home` is unused here (the pipe name replaces the socket path).
     pub(crate) async fn start(home: &Path) -> Result<WinPeerInbox, WinUnavailable> {
-        Self::start_with(home, StartOptions { enabled: peer_messaging_enabled(), evidence_open_acl: false }).await
+        Self::start_with(
+            home,
+            StartOptions {
+                enabled: peer_messaging_enabled(),
+                evidence_open_acl: false,
+            },
+        )
+        .await
     }
 
-    pub(crate) async fn start_with(_home: &Path, opts: StartOptions) -> Result<WinPeerInbox, WinUnavailable> {
+    pub(crate) async fn start_with(
+        _home: &Path,
+        opts: StartOptions,
+    ) -> Result<WinPeerInbox, WinUnavailable> {
         Self::start_inner(opts, mint_host_id()).await
     }
 
-    pub(crate) async fn start_inner(opts: StartOptions, host_id: HostId) -> Result<WinPeerInbox, WinUnavailable> {
+    pub(crate) async fn start_inner(
+        opts: StartOptions,
+        host_id: HostId,
+    ) -> Result<WinPeerInbox, WinUnavailable> {
         // Before ANY OS call.
         if !opts.enabled {
             return Err(WinUnavailable::FeatureOff);
@@ -422,7 +499,12 @@ impl WinPeerInbox {
             return;
         }
         self.token.cancel();
-        if let Some(t) = self.task.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        if let Some(t) = self
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             t.abort();
         }
     }
@@ -446,7 +528,9 @@ async fn accept_loop(
     token: CancellationToken,
 ) {
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-    let ours = OurIdentity { user_sid: Ok(sid.clone()) };
+    let ours = OurIdentity {
+        user_sid: Ok(sid.clone()),
+    };
     let mut waiting: Option<(NamedPipeServer, Readback)> = Some(first);
     loop {
         let (server, rb) = match waiting.take() {
@@ -485,8 +569,13 @@ async fn accept_loop(
             drop(server);
             continue;
         };
-        let (ours, our, directory, stats, token) =
-            (ours.clone(), our.clone(), directory.clone(), stats.clone(), token.clone());
+        let (ours, our, directory, stats, token) = (
+            ours.clone(),
+            our.clone(),
+            directory.clone(),
+            stats.clone(),
+            token.clone(),
+        );
         // One task per connection; a panic stays inside it.
         tokio::spawn(async move {
             let _permit = permit;
@@ -542,11 +631,16 @@ impl From<ConnError> for WinDialError {
     }
 }
 
-async fn open_client(path: &str) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, WinDialError> {
+async fn open_client(
+    path: &str,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, WinDialError> {
     let deadline = tokio::time::Instant::now() + CONNECT_DEADLINE;
     loop {
         // SECURITY_IDENTIFICATION: the server may learn who we are, never act as us.
-        match ClientOptions::new().security_qos_flags(SECURITY_IDENTIFICATION.0).open(path) {
+        match ClientOptions::new()
+            .security_qos_flags(SECURITY_IDENTIFICATION.0)
+            .open(path)
+        {
             Ok(c) => return Ok(c),
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 if tokio::time::Instant::now() >= deadline {
@@ -554,7 +648,9 @@ async fn open_client(path: &str) -> Result<tokio::net::windows::named_pipe::Name
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound) => return Err(WinDialError::NoServer),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound) => {
+                return Err(WinDialError::NoServer);
+            }
             Err(_) => return Err(WinDialError::Other),
         }
     }
@@ -572,7 +668,12 @@ pub(crate) async fn dial(our: &HostId, host_id: &HostId, op: Op) -> Result<Reply
 /// and holds no separator after it; the prefix is re-checked here, so a path that is not under `\\.\pipe\` (a file,
 /// a junction, a UNC name) can never be opened by the production path. The open follows no filesystem path, so there
 /// is no reparse point to follow: the namespace after `\\.\pipe\` is flat.
-async fn dial_checked(path: &str, our: &HostId, host_id: &HostId, op: Op) -> Result<Reply, WinDialError> {
+async fn dial_checked(
+    path: &str,
+    our: &HostId,
+    host_id: &HostId,
+    op: Op,
+) -> Result<Reply, WinDialError> {
     if !path.starts_with(PIPE_PREFIX) {
         return Err(WinDialError::NotAPipe);
     }
@@ -582,12 +683,24 @@ async fn dial_checked(path: &str, our: &HostId, host_id: &HostId, op: Op) -> Res
 /// `dial` against an explicit path (the evidence program points it at a file, a junction or a network path to prove it
 /// is refused). DEBUG BUILDS ONLY: a release build has no way to dial a name that `pipe_name` did not build.
 #[cfg(debug_assertions)]
-pub(crate) async fn dial_at(path: &str, our: &HostId, host_id: &HostId, op: Op) -> Result<Reply, WinDialError> {
+pub(crate) async fn dial_at(
+    path: &str,
+    our: &HostId,
+    host_id: &HostId,
+    op: Op,
+) -> Result<Reply, WinDialError> {
     dial_open(path, our, host_id, op).await
 }
 
-async fn dial_open(path: &str, our: &HostId, host_id: &HostId, op: Op) -> Result<Reply, WinDialError> {
-    let ours = OurIdentity { user_sid: auth::own_sid() };
+async fn dial_open(
+    path: &str,
+    our: &HostId,
+    host_id: &HostId,
+    op: Op,
+) -> Result<Reply, WinDialError> {
+    let ours = OurIdentity {
+        user_sid: auth::own_sid(),
+    };
     let client = open_client(path).await?;
     let facts = sys::server_facts(client.as_raw_handle());
     match win_server_verdict(&facts, &ours) {

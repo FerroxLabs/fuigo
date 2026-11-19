@@ -46,7 +46,8 @@ impl SessionActor {
 
         // The turns the runtime started on its own (a finished background task, a workflow result, a goal nudge, ...) are not offered:
         // the picker lists what the user typed
-        let updates_path = crate::session::persistence::session_dir(&self.session_info).join("updates.jsonl");
+        let updates_path =
+            crate::session::persistence::session_dir(&self.session_info).join("updates.jsonl");
         let automatic = tokio::task::spawn_blocking(move || {
             crate::session::storage::collect_automatic_prompt_indices(&updates_path)
         })
@@ -170,11 +171,12 @@ impl SessionActor {
         // owes its backup that rewrite is refused, and memory and transcript would show the rewind while the file kept
         // the dropped turns (P96). Refuse before anything changes, files included.
         if wants_conversation_rewind
-            && let Some(error) = crate::session::storage::jsonl::load_repair::history_rewrite_refusal(
-                &self.session_info,
-                self.rebuild_spec.session_writer.as_ref(),
-                "rewind the conversation",
-            )
+            && let Some(error) =
+                crate::session::storage::jsonl::load_repair::history_rewrite_refusal(
+                    &self.session_info,
+                    self.rebuild_spec.session_writer.as_ref(),
+                    "rewind the conversation",
+                )
         {
             tracing::warn!(session_id = %self.session_info.id, %error, "rewind refused");
             return Ok(RewindResponse {
@@ -236,11 +238,16 @@ impl SessionActor {
             // planning from the in-memory points alone would skip the unloaded files, rewind the conversation, and a
             // later successful load inside `truncate_from` would then drop those snapshots (P111).
             // A damaged row stops only the rewinds that may need it, and the refusal says which still work (P114).
-            let all_points = match self.file_state_tracker.try_get_rewind_points_for(target_index).await {
+            let all_points = match self
+                .file_state_tracker
+                .try_get_rewind_points_for(target_index)
+                .await
+            {
                 Ok(points) => points,
                 Err(unavailable) => {
                     // FilesOnly targets are not bounded by the conversation (in bridge mode it is not even here).
-                    let valid_targets_below = (mode != RewindMode::FilesOnly).then_some(current_prompt_index);
+                    let valid_targets_below =
+                        (mode != RewindMode::FilesOnly).then_some(current_prompt_index);
                     return Ok(RewindResponse {
                         success: false,
                         target_prompt_index: target_index,
@@ -249,7 +256,11 @@ impl SessionActor {
                         clean_files: vec![],
                         conflicts: vec![],
                         prompt_text: None,
-                        error: Some(unavailable.refusal_message(target_index, valid_targets_below, true)),
+                        error: Some(unavailable.refusal_message(
+                            target_index,
+                            valid_targets_below,
+                            true,
+                        )),
                         context_tokens: None,
                     });
                 }
@@ -377,7 +388,8 @@ impl SessionActor {
         // A durable copy left by an earlier rewind that did not finish (P146): rewind_points.jsonl may have lost rows
         // only that copy still holds. Refused, with what to do, before anything changes.
         let pre_rewind = crate::session::storage::rewind_points_pre_rewind_copy(
-            &crate::session::persistence::session_dir(&self.session_info).join("rewind_points.jsonl"),
+            &crate::session::persistence::session_dir(&self.session_info)
+                .join("rewind_points.jsonl"),
         );
         // `symlink_metadata`, never `exists()`: a link planted at that path (even a dangling one) is a leftover, and is
         // never followed.
@@ -410,29 +422,31 @@ impl SessionActor {
         let marker_created_at = chrono::Utc::now().to_rfc3339();
         let conversation_commit = match &planned_conversation {
             None => None,
-            Some(plan) => match crate::session::storage::ContentFingerprint::of_jsonl(&plan.conversation) {
-                Ok(after) => Some(crate::session::storage::RewindConversation {
-                    after,
-                    marker_created_at: marker_created_at.clone(),
-                }),
-                Err(error) => {
-                    tracing::warn!(%error, target_index, "rewind refused: the rewound conversation cannot be written");
-                    return Ok(RewindResponse {
-                        success: false,
-                        target_prompt_index: target_index,
-                        mode,
-                        reverted_files: vec![],
-                        clean_files: vec![],
-                        conflicts: vec![],
-                        prompt_text: None,
-                        error: Some(format!(
-                            "Rewind to prompt #{target_index} was not started: the rewound conversation cannot be \
+            Some(plan) => {
+                match crate::session::storage::ContentFingerprint::of_jsonl(&plan.conversation) {
+                    Ok(after) => Some(crate::session::storage::RewindConversation {
+                        after,
+                        marker_created_at: marker_created_at.clone(),
+                    }),
+                    Err(error) => {
+                        tracing::warn!(%error, target_index, "rewind refused: the rewound conversation cannot be written");
+                        return Ok(RewindResponse {
+                            success: false,
+                            target_prompt_index: target_index,
+                            mode,
+                            reverted_files: vec![],
+                            clean_files: vec![],
+                            conflicts: vec![],
+                            prompt_text: None,
+                            error: Some(format!(
+                                "Rewind to prompt #{target_index} was not started: the rewound conversation cannot be \
                              written ({error}). Nothing was changed."
-                        )),
-                        context_tokens: None,
-                    });
+                            )),
+                            context_tokens: None,
+                        });
+                    }
                 }
-            },
+            }
         };
 
         // Execute file revert. A file that cannot be restored or deleted is reported, never counted as reverted (DI-02).
@@ -515,9 +529,13 @@ impl SessionActor {
         // when the rewound conversation cannot be saved below (P146, K19). Before P146 this rewrite was sent off last
         // without a reply, and a rewrite that did not land still let the rewind report success.
         let rewrite = if wants_file_revert {
-            Some(crate::session::storage::RewindPointsRewrite::TruncateFrom(target_index))
+            Some(crate::session::storage::RewindPointsRewrite::TruncateFrom(
+                target_index,
+            ))
         } else if wants_conversation_rewind {
-            Some(crate::session::storage::RewindPointsRewrite::MergeFrom(target_index))
+            Some(crate::session::storage::RewindPointsRewrite::MergeFrom(
+                target_index,
+            ))
         } else {
             None
         };
@@ -531,10 +549,17 @@ impl SessionActor {
                 format!(" Files reverted: {}.", reverted_files.join(", "))
             }
         };
-        let conversation_note = if wants_conversation_rewind { " The conversation was not rewound." } else { "" };
+        let conversation_note = if wants_conversation_rewind {
+            " The conversation was not rewound."
+        } else {
+            ""
+        };
         let mut points_kept = None;
         if let Some(rewrite) = rewrite {
-            match self.rewrite_rewind_points_for_rewind(rewrite, conversation_commit).await {
+            match self
+                .rewrite_rewind_points_for_rewind(rewrite, conversation_commit)
+                .await
+            {
                 Ok(kept) => points_kept = Some(kept),
                 Err(error) => {
                     tracing::warn!(%error, target_index, "rewind: rewind_points.jsonl could not be rewritten");
@@ -558,7 +583,9 @@ impl SessionActor {
             }
         }
         #[cfg(any(test, feature = "test-support"))]
-        if let Some(killed) = self.killed_by_seam(crate::session::storage::rewind_crash_seam::Stage::AfterPointsRewrite) {
+        if let Some(killed) = self
+            .killed_by_seam(crate::session::storage::rewind_crash_seam::Stage::AfterPointsRewrite)
+        {
             return Ok(killed);
         }
 
@@ -622,9 +649,9 @@ impl SessionActor {
                 .set(head_withheld || !self.instructions_built_trusted.get());
 
             #[cfg(any(test, feature = "test-support"))]
-            if let Some(killed) =
-                self.killed_by_seam(crate::session::storage::rewind_crash_seam::Stage::AfterConversationSaved)
-            {
+            if let Some(killed) = self.killed_by_seam(
+                crate::session::storage::rewind_crash_seam::Stage::AfterConversationSaved,
+            ) {
                 return Ok(killed);
             }
 
@@ -645,7 +672,8 @@ impl SessionActor {
                 snap.last_compaction_prompt_index = new_marker;
                 self.chat_state_handle.restore_snapshot(snap);
             }
-            self.finish_conversation_rewind(target_index, marker_created_at).await;
+            self.finish_conversation_rewind(target_index, marker_created_at)
+                .await;
         }
 
         // The rewind went through: the in-memory snapshots follow what rewind_points.jsonl now holds.
@@ -654,10 +682,14 @@ impl SessionActor {
             self.file_state_tracker.truncate_from(target_index).await;
         } else if wants_conversation_rewind {
             // ConversationOnly: files are untouched but the conversation is rewound.
-            self.file_state_tracker.merge_and_remove_from(target_index).await;
+            self.file_state_tracker
+                .merge_and_remove_from(target_index)
+                .await;
         }
         #[cfg(any(test, feature = "test-support"))]
-        if let Some(killed) = self.killed_by_seam(crate::session::storage::rewind_crash_seam::Stage::BeforeCleanup) {
+        if let Some(killed) =
+            self.killed_by_seam(crate::session::storage::rewind_crash_seam::Stage::BeforeCleanup)
+        {
             return Ok(killed);
         }
         // Done: the durable copy kept during the rewind goes, and the rewind points locks are released. A failure here
@@ -669,11 +701,16 @@ impl SessionActor {
             && let Err(error) = self.end_rewind_points_for_rewind(undo, false).await
         {
             tracing::warn!(%error, target_index, "rewind: rewind_points.jsonl.pre-rewind was not removed by the queue");
-            let points = crate::session::persistence::session_dir(&self.session_info).join("rewind_points.jsonl");
+            let points = crate::session::persistence::session_dir(&self.session_info)
+                .join("rewind_points.jsonl");
             // No-follow: a link at that path is removed as a link, a missing path is already done. The journal goes
             // after the copy (P164).
             let removed = match self.rebuild_spec.session_writer.as_ref() {
-                Some(writer) => crate::session::storage::jsonl::rewind_reconcile::remove_copy_then_journal(writer, &points),
+                Some(writer) => {
+                    crate::session::storage::jsonl::rewind_reconcile::remove_copy_then_journal(
+                        writer, &points,
+                    )
+                }
                 None => Err(crate::session::storage::jsonl::no_writer_error(&points)),
             };
             if let Err(error) = removed {
@@ -684,7 +721,9 @@ impl SessionActor {
 
         // The conversation shrank, so the footer's context usage must follow it rather than keep the pre-rewind value
         let context_tokens = if wants_conversation_rewind {
-            Some(fuigo_chat_state::estimate_conversation_tokens(&self.chat_state_handle.get_conversation_for_model().await))
+            Some(fuigo_chat_state::estimate_conversation_tokens(
+                &self.chat_state_handle.get_conversation_for_model().await,
+            ))
         } else {
             None
         };
@@ -766,8 +805,11 @@ impl SessionActor {
                         };
                         conversation = replay_result.conversation;
                         if let Some(live_head) = live_head {
-                            self.repair_legacy_browser_checkpoint_head(&mut conversation, &live_head)
-                                .await;
+                            self.repair_legacy_browser_checkpoint_head(
+                                &mut conversation,
+                                &live_head,
+                            )
+                            .await;
                         }
                     } else {
                         // Keep System (index 0)
@@ -843,7 +885,9 @@ impl SessionActor {
             |defs| {
                 let agent = self.agent.borrow();
                 (
-                    defs.iter().map(|def| agent.prompt_context_for_definition(def)).collect(),
+                    defs.iter()
+                        .map(|def| agent.prompt_context_for_definition(def))
+                        .collect(),
                     std::sync::Arc::clone(agent.tool_bridge()),
                 )
             },
@@ -936,7 +980,10 @@ impl SessionActor {
     async fn rewind_points_request<T>(
         &self,
         what: &str,
-        build: impl FnOnce(crate::session::persistence::AckGate, tokio::sync::oneshot::Sender<T>) -> PersistenceMsg,
+        build: impl FnOnce(
+            crate::session::persistence::AckGate,
+            tokio::sync::oneshot::Sender<T>,
+        ) -> PersistenceMsg,
     ) -> std::io::Result<T> {
         let gate = crate::session::persistence::AckGate::default();
         let (respond_to, mut reply) = tokio::sync::oneshot::channel();
@@ -960,7 +1007,9 @@ impl SessionActor {
 
     /// Take the rewind points rewrite lock through the persistence actor (P146). A lock file that cannot be used at
     /// all gives an empty lock, and the rewrite then runs unlocked, as a rewrite always did then.
-    async fn lock_rewind_points_for_rewind(&self) -> std::io::Result<crate::session::storage::RewindPointsRewriteLock> {
+    async fn lock_rewind_points_for_rewind(
+        &self,
+    ) -> std::io::Result<crate::session::storage::RewindPointsRewriteLock> {
         self.rewind_points_request("lock rewind_points.jsonl", |gate, respond_to| {
             PersistenceMsg::LockRewindPointsRewrite { gate, respond_to }
         })
@@ -975,7 +1024,12 @@ impl SessionActor {
         conversation: Option<crate::session::storage::RewindConversation>,
     ) -> std::io::Result<crate::session::storage::RewindPointsUndo> {
         self.rewind_points_request("rewrite rewind_points.jsonl", |gate, respond_to| {
-            PersistenceMsg::RewriteRewindPointsAndAck { rewrite, conversation, gate, respond_to }
+            PersistenceMsg::RewriteRewindPointsAndAck {
+                rewrite,
+                conversation,
+                gate,
+                respond_to,
+            }
         })
         .await?
     }
@@ -983,18 +1037,23 @@ impl SessionActor {
     /// Test seam (P164): the answer of a rewind of this session that the seam stops at `stage`, as if Fuigo were
     /// killed there. Nothing after it runs: no put-back, no cleanup.
     #[cfg(any(test, feature = "test-support"))]
-    fn killed_by_seam(&self, stage: crate::session::storage::rewind_crash_seam::Stage) -> Option<RewindResponse> {
-        crate::session::storage::rewind_crash_seam::fires(&self.session_info.id.0, stage).then(|| RewindResponse {
-            success: false,
-            target_prompt_index: 0,
-            mode: RewindMode::All,
-            reverted_files: vec![],
-            clean_files: vec![],
-            conflicts: vec![],
-            prompt_text: None,
-            error: Some(format!("killed by the test seam at {stage:?}")),
-            context_tokens: None,
-        })
+    fn killed_by_seam(
+        &self,
+        stage: crate::session::storage::rewind_crash_seam::Stage,
+    ) -> Option<RewindResponse> {
+        crate::session::storage::rewind_crash_seam::fires(&self.session_info.id.0, stage).then(
+            || RewindResponse {
+                success: false,
+                target_prompt_index: 0,
+                mode: RewindMode::All,
+                reverted_files: vec![],
+                clean_files: vec![],
+                conflicts: vec![],
+                prompt_text: None,
+                error: Some(format!("killed by the test seam at {stage:?}")),
+                context_tokens: None,
+            },
+        )
     }
 
     /// The rewind is done; `put_back`: it did not go through, so `rewind_points.jsonl` gets back what it held. The
@@ -1004,9 +1063,15 @@ impl SessionActor {
         undo: crate::session::storage::RewindPointsUndo,
         put_back: bool,
     ) -> std::io::Result<()> {
-        self.rewind_points_request("finish the rewind of rewind_points.jsonl", |gate, respond_to| {
-            PersistenceMsg::EndRewindPointsAndAck { undo, put_back, gate, respond_to }
-        })
+        self.rewind_points_request(
+            "finish the rewind of rewind_points.jsonl",
+            |gate, respond_to| PersistenceMsg::EndRewindPointsAndAck {
+                undo,
+                put_back,
+                gate,
+                respond_to,
+            },
+        )
         .await?
     }
 
@@ -1080,4 +1145,3 @@ struct PlannedConversationRewind {
     /// The text of the prompt at the target, to pre-fill the input.
     prompt_text: Option<String>,
 }
-

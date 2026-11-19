@@ -552,7 +552,12 @@ pub(super) fn dispatch_rewind_success(
             agent.prompt.restore(draft);
         }
         if app.screen_mode.is_minimal() || !response.reverted_files.is_empty() {
-            agent.scrollback.push_block(RenderBlock::system(restored_files_block(&msg, &response.reverted_files)));
+            agent
+                .scrollback
+                .push_block(RenderBlock::system(restored_files_block(
+                    &msg,
+                    &response.reverted_files,
+                )));
         } else {
             agent.show_toast(&msg);
         }
@@ -577,16 +582,20 @@ pub(super) fn dispatch_rewind_success(
         _ => None,
     });
     let sent = target_entry.and_then(|entry| {
-        agent.sent_prompt_attachments.get(&entry.id).cloned().or_else(|| {
-            target_block
-                .filter(|ub| !ub.resumed_images.is_empty())
-                .map(|ub| crate::app::agent_view::SentPromptAttachments {
-                    text: ub.text.clone(),
-                    images: ub.resumed_images.clone(),
-                    chip_elements: Vec::new(),
-                    sent_image_numbers: ub.sent_image_numbers.clone(),
-                })
-        })
+        agent
+            .sent_prompt_attachments
+            .get(&entry.id)
+            .cloned()
+            .or_else(|| {
+                target_block
+                    .filter(|ub| !ub.resumed_images.is_empty())
+                    .map(|ub| crate::app::agent_view::SentPromptAttachments {
+                        text: ub.text.clone(),
+                        images: ub.resumed_images.clone(),
+                        chip_elements: Vec::new(),
+                        sent_image_numbers: ub.sent_image_numbers.clone(),
+                    })
+            })
     });
     // A sent image whose bytes are gone cannot be re-attached: say so rather than leave a silent `[Image #N]`
     let missing: Vec<String> = target_block
@@ -605,7 +614,10 @@ pub(super) fn dispatch_rewind_success(
         .unwrap_or_default();
     let msg = match missing.len() {
         0 => msg,
-        1 => format!("{msg} · Image {} is no longer available and was not re-attached", missing[0]),
+        1 => format!(
+            "{msg} · Image {} is no longer available and was not re-attached",
+            missing[0]
+        ),
         _ => format!(
             "{msg} · Images {} are no longer available and were not re-attached",
             missing.join(", ")
@@ -624,7 +636,10 @@ pub(super) fn dispatch_rewind_success(
         // The restored files are listed in scrollback in every mode, so the user can see exactly what changed.
         agent
             .scrollback
-            .push_block(RenderBlock::system(restored_files_block(&msg, &response.reverted_files)));
+            .push_block(RenderBlock::system(restored_files_block(
+                &msg,
+                &response.reverted_files,
+            )));
     } else {
         agent.show_toast(&msg);
     }

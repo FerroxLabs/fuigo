@@ -62,8 +62,7 @@ static COLOR_LEVEL: OnceLock<ColorLevel> = OnceLock::new();
 /// level the process already latched (and an ambient `NO_COLOR` would win by scheduling luck).
 /// `u8::MAX` means unset.
 #[cfg(any(test, feature = "test-support"))]
-static TEST_LEVEL_OVERRIDE: std::sync::atomic::AtomicU8 =
-    std::sync::atomic::AtomicU8::new(u8::MAX);
+static TEST_LEVEL_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
 
 /// Pin the detected color level for the test process (see [`TEST_LEVEL_OVERRIDE`]).
 /// The terminal-native lock cap still applies on top, so minimal-mode tests keep their Basic cap.

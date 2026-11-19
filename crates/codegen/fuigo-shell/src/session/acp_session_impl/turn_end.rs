@@ -25,7 +25,11 @@ pub(crate) enum GoalTurnActivity {
 impl SessionActor {
     /// Classify a finished turn for the goal idle guard.
     pub(super) fn goal_turn_activity(result: &PromptTurnResult) -> GoalTurnActivity {
-        let Some(snapshot) = result.as_ref().ok().and_then(|ok| ok.turn_snapshot.as_ref()) else {
+        let Some(snapshot) = result
+            .as_ref()
+            .ok()
+            .and_then(|ok| ok.turn_snapshot.as_ref())
+        else {
             return GoalTurnActivity::Unknown;
         };
         if snapshot.delta.delta_tool_calls > 0 || !snapshot.delta.tools_this_turn.is_empty() {
@@ -41,7 +45,11 @@ impl SessionActor {
     /// [`GOAL_IDLE_CONTINUATION_THRESHOLD`] of those in a row end without a single tool call, the goal is not
     /// moving: it pauses (resumable with `/goal resume`) instead of paying for more empty turns. A turn that used
     /// a tool, or one the user typed, clears the streak; a turn with no signal snapshot moves nothing.
-    pub(crate) async fn note_goal_turn_activity(&self, prompt_id: &str, activity: GoalTurnActivity) {
+    pub(crate) async fn note_goal_turn_activity(
+        &self,
+        prompt_id: &str,
+        activity: GoalTurnActivity,
+    ) {
         use crate::session::goal_tracker::{
             GOAL_IDLE_CONTINUATION_THRESHOLD, GoalPauseReason, GoalStatus,
         };
@@ -258,7 +266,10 @@ impl SessionActor {
                 .claim_task_finalization(&prompt_id, epoch, task_identity)
         else {
             let state = self.state.lock().await;
-            tracing::warn!("Received stale completion for prompt: {}", crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id));
+            tracing::warn!(
+                "Received stale completion for prompt: {}",
+                crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id)
+            );
             fuigo_telemetry::unified_log::warn(
                 "shell.turn.stale_completion_dropped",
                 Some(self.session_info.id.0.as_ref()),
@@ -310,7 +321,10 @@ impl SessionActor {
             // That happens below, after `running_task` clears, so the wire's `running_prompt_id` does not advertise the finished turn
             broadcast_queue = input.queue_meta.is_some();
         } else {
-            tracing::warn!("Received completion for unknown prompt: {}", crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id));
+            tracing::warn!(
+                "Received completion for unknown prompt: {}",
+                crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id)
+            );
             fuigo_telemetry::unified_log::warn(
                 "shell.turn.stale_completion_dropped",
                 Some(self.session_info.id.0.as_ref()),
@@ -467,29 +481,57 @@ impl SessionActor {
         // handle_turn_input freezes the result and durable receipt before returning
         // to any completion rail. Cancellation already carries a non-success result.
         // Never rewrite only this notification and contradict the ACP response.
-        if let Some(execution) = crate::session::execution_state::Execution::for_prompt(&self.session_info.id.to_string(), &prompt_id) {
-            let active_goal = self.goal_tracker.lock().status() == Some(crate::session::goal_tracker::GoalStatus::Active);
+        if let Some(execution) = crate::session::execution_state::Execution::for_prompt(
+            &self.session_info.id.to_string(),
+            &prompt_id,
+        ) {
+            let active_goal = self.goal_tracker.lock().status()
+                == Some(crate::session::goal_tracker::GoalStatus::Active);
             let state = execution.snapshot().await;
-            let succeeded = mapped.as_ref().is_ok_and(|stop| *stop == acp::StopReason::EndTurn);
-            if !active_goal || !succeeded || state.as_ref().is_ok_and(|s| crate::session::execution_state::should_terminalize(active_goal, succeeded, s.phase)) {
+            let succeeded = mapped
+                .as_ref()
+                .is_ok_and(|stop| *stop == acp::StopReason::EndTurn);
+            if !active_goal
+                || !succeeded
+                || state.as_ref().is_ok_and(|s| {
+                    crate::session::execution_state::should_terminalize(
+                        active_goal,
+                        succeeded,
+                        s.phase,
+                    )
+                })
+            {
                 let terminal = async {
-                    execution.record_edited_paths(self.chat_state_handle.get_agent_edited_paths().await).await?;
+                    execution
+                        .record_edited_paths(self.chat_state_handle.get_agent_edited_paths().await)
+                        .await?;
                     // P89: a cancelled turn whose future was dropped ends here. Only the ACP stop is
                     // known, and `--max-turns` maps to `Cancelled` too; the record's own counters
                     // keep a spent `--max-turns` from reading as an interruption.
                     let end = match mapped {
-                        Ok(acp::StopReason::EndTurn) => crate::session::execution_state::TurnEnd::Succeeded,
+                        Ok(acp::StopReason::EndTurn) => {
+                            crate::session::execution_state::TurnEnd::Succeeded
+                        }
                         Ok(_) => crate::session::execution_state::TurnEnd::Interrupted,
                         Err(err) => super::turn::turn_end_of_error(err),
                     };
                     execution.terminal_after(end).await
-                }.await;
+                }
+                .await;
                 match terminal {
                     Ok(receipt) => {
-                        extra.insert("executionReceipt".into(), serde_json::to_value(receipt).unwrap_or_default());
+                        extra.insert(
+                            "executionReceipt".into(),
+                            serde_json::to_value(receipt).unwrap_or_default(),
+                        );
                         execution.release(&self.session_info.id.to_string());
                     }
-                    Err(_) => { extra.insert("executionReceiptUnavailable".into(), serde_json::json!(true)); }
+                    Err(_) => {
+                        extra.insert(
+                            "executionReceiptUnavailable".into(),
+                            serde_json::json!(true),
+                        );
+                    }
                 }
             }
         }

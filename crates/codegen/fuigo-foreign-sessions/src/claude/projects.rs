@@ -19,7 +19,7 @@ pub(super) fn scoped_project_dirs(config_dir: &Path, cwd: &Path) -> Vec<PathBuf>
             }
         }
         if let Ok(worktrees) = repository.worktrees() {
-            for name in worktrees.iter().flatten().take(MAX_PROJECT_DIRS) {
+            for name in worktrees.iter().flatten().flatten().take(MAX_PROJECT_DIRS) {
                 if let Ok(worktree) = repository.find_worktree(name) {
                     let path = worktree.path();
                     paths.push(dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));

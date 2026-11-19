@@ -220,7 +220,10 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
         sanitized_stem(&trunc_ctx.call_id),
         kind.extension()
     ));
-    let output_file_path = trunc_ctx.session_folder.as_ref().map(|folder| folder.join(&dump_rel));
+    let output_file_path = trunc_ctx
+        .session_folder
+        .as_ref()
+        .map(|folder| folder.join(&dump_rel));
 
     let file_hint = if let Some(ref path) = output_file_path {
         // The full MCP output is session content: `<session>/mcp/` 0700 and the dump 0600 (P150, S14). It replaces a
@@ -307,7 +310,11 @@ mod tests {
         McpTruncateContext {
             max_output_bytes: max,
             session_writer: Some(
-                fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), &folder).unwrap(),
+                fuigo_session_writer::SessionWriter::try_claim(
+                    uuid::Uuid::now_v7().to_string(),
+                    &folder,
+                )
+                .unwrap(),
             ),
             session_folder: Some(folder),
             shell_tool: "bash".to_string(),
@@ -426,9 +433,14 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            let mode =
+                |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode(&dump), 0o600, "the MCP dump must be owner-only");
-            assert_eq!(mode(&dir.path().join("mcp")), 0o700, "mcp/ must be owner-only");
+            assert_eq!(
+                mode(&dir.path().join("mcp")),
+                0o700,
+                "mcp/ must be owner-only"
+            );
         }
     }
 
@@ -464,7 +476,11 @@ mod tests {
             max_output_bytes: 100,
             session_folder: Some(dir.path().to_path_buf()),
             session_writer: Some(
-                fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir.path()).unwrap(),
+                fuigo_session_writer::SessionWriter::try_claim(
+                    uuid::Uuid::now_v7().to_string(),
+                    dir.path(),
+                )
+                .unwrap(),
             ),
             shell_tool: "bash".to_string(),
             call_id: "../../evil".to_string(),
@@ -734,7 +750,10 @@ mod tests {
         let mut late = "y".repeat(64);
         truncate_mcp_text(&mut late, &ctx).await;
         assert!(!late.contains("Full output written to"), "{late}");
-        assert!(!folder.exists(), "a dump after the delete recreated the session folder");
+        assert!(
+            !folder.exists(),
+            "a dump after the delete recreated the session folder"
+        );
     }
 
     /// F5-C4: with no session writer the full-output dump is skipped (nothing written by path, no folder created, no
@@ -749,6 +768,9 @@ mod tests {
         truncate_mcp_text(&mut text, &ctx).await;
         assert!(text.contains("[MCP output truncated:"), "{text}");
         assert!(!text.contains("Full output written to"), "{text}");
-        assert!(!folder.exists(), "a writer-less dump created the session folder");
+        assert!(
+            !folder.exists(),
+            "a writer-less dump created the session folder"
+        );
     }
 }

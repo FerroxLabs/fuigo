@@ -882,7 +882,10 @@ impl SkillsFileWatcher {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1805,7 +1808,10 @@ mod tests {
         while let Ok(evt) = rx.try_recv() {
             seen.push(evt);
         }
-        assert!(seen.contains(&ConfigChangeEvent::AuthChanged), "got {seen:?}");
+        assert!(
+            seen.contains(&ConfigChangeEvent::AuthChanged),
+            "got {seen:?}"
+        );
     }
 
     /// P180: `is_auth_event` matches the exact file, also through an aliased (symlinked or canonicalized) parent, and
@@ -1821,9 +1827,18 @@ mod tests {
         let auth = real.join("login.json");
 
         assert!(is_auth_event(&auth, &auth));
-        assert!(is_auth_event(&alias.join("login.json"), &auth), "aliased parent");
-        assert!(!is_auth_event(&real.join("other.json"), &auth), "sibling file");
-        assert!(!is_auth_event(&tmp.path().join("login.json"), &auth), "same name, other dir");
+        assert!(
+            is_auth_event(&alias.join("login.json"), &auth),
+            "aliased parent"
+        );
+        assert!(
+            !is_auth_event(&real.join("other.json"), &auth),
+            "sibling file"
+        );
+        assert!(
+            !is_auth_event(&tmp.path().join("login.json"), &auth),
+            "same name, other dir"
+        );
     }
 
     /// Drain `rx` until `want` shows up or `limit` passes; returns everything seen.
@@ -1871,7 +1886,9 @@ mod tests {
         // Keep writing: the watch is armed on a bounded backoff, so the first write may land before it is attached
         let deadline = std::time::Instant::now() + Duration::from_secs(12);
         let mut seen = Vec::new();
-        while std::time::Instant::now() < deadline && !seen.contains(&ConfigChangeEvent::AuthChanged) {
+        while std::time::Instant::now() < deadline
+            && !seen.contains(&ConfigChangeEvent::AuthChanged)
+        {
             wait_ms(300);
             fs::write(&auth_path, "{\"again\":true}").unwrap();
             seen.extend(p182_collect_until(
@@ -1921,8 +1938,15 @@ mod tests {
         );
 
         fs::write(&auth_path, "{\"changed\":true}").unwrap();
-        let seen = p182_collect_until(&mut rx, &ConfigChangeEvent::AuthChanged, Duration::from_secs(3));
-        assert!(seen.contains(&ConfigChangeEvent::AuthChanged), "the login itself still fires; got {seen:?}");
+        let seen = p182_collect_until(
+            &mut rx,
+            &ConfigChangeEvent::AuthChanged,
+            Duration::from_secs(3),
+        );
+        assert!(
+            seen.contains(&ConfigChangeEvent::AuthChanged),
+            "the login itself still fires; got {seen:?}"
+        );
     }
 
     /// P182: the retry delay doubles and is capped, so a missing directory is never polled tightly nor unboundedly slowly.
@@ -1934,10 +1958,20 @@ mod tests {
             d = next_arm_delay(d);
             seen.push(d);
         }
-        assert!(seen.windows(2).all(|w| w[1] >= w[0]), "never shrinks: {seen:?}");
+        assert!(
+            seen.windows(2).all(|w| w[1] >= w[0]),
+            "never shrinks: {seen:?}"
+        );
         assert_eq!(seen[1], AUTH_ARM_INITIAL_DELAY * 2);
-        assert_eq!(*seen.last().unwrap(), AUTH_ARM_MAX_DELAY, "capped: {seen:?}");
-        assert!(AUTH_ARM_INITIAL_DELAY >= Duration::from_millis(500), "not a tight poll");
+        assert_eq!(
+            *seen.last().unwrap(),
+            AUTH_ARM_MAX_DELAY,
+            "capped: {seen:?}"
+        );
+        assert!(
+            AUTH_ARM_INITIAL_DELAY >= Duration::from_millis(500),
+            "not a tight poll"
+        );
     }
 
     /// P182: a login that is already on disk when the retry finally attaches the watch is reported at once: no later
@@ -1959,7 +1993,11 @@ mod tests {
         // Created and written well before the first retry, and never touched again
         fs::create_dir_all(&auth_dir).unwrap();
         fs::write(&auth_path, "{}").unwrap();
-        let seen = p182_collect_until(&mut rx, &ConfigChangeEvent::AuthChanged, Duration::from_secs(5));
+        let seen = p182_collect_until(
+            &mut rx,
+            &ConfigChangeEvent::AuthChanged,
+            Duration::from_secs(5),
+        );
         assert!(
             seen.contains(&ConfigChangeEvent::AuthChanged),
             "a login present when the watch attaches must be reported; got {seen:?}"

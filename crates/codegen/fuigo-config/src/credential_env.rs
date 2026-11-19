@@ -115,13 +115,20 @@ pub fn read_first_party_key_references<'a>(text: &'a str, key: Option<&str>) -> 
         }
     }
     out.push_str(rest);
-    if out == text { Cow::Borrowed(text) } else { Cow::Owned(out) }
+    if out == text {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(out)
+    }
 }
 
 /// `after` (the text right after a `$`) without a leading `{FUIGO_API_KEY}`, or a leading `FUIGO_API_KEY` that ends at
 /// an identifier boundary; `None` when it starts with neither.
 fn strip_first_party_reference(after: &str) -> Option<&str> {
-    if let Some(tail) = after.strip_prefix('{').and_then(|a| a.strip_prefix(FIRST_PARTY_KEY_ENV_VAR)) {
+    if let Some(tail) = after
+        .strip_prefix('{')
+        .and_then(|a| a.strip_prefix(FIRST_PARTY_KEY_ENV_VAR))
+    {
         return tail.strip_prefix('}');
     }
     after
@@ -162,13 +169,20 @@ pub fn apply_first_party_key_defaults(text: &str) -> Cow<'_, str> {
         }
     }
     out.push_str(rest);
-    if changed { Cow::Owned(out) } else { Cow::Borrowed(text) }
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 /// `after` (the text right after a `$`) split as `{FUIGO_API_KEY:-<default>}`: the default (up to the first `}`, as the
 /// expanders read it) and the text after the `}`; `None` for any other form.
 fn strip_defaulted_first_party_reference(after: &str) -> Option<(&str, &str)> {
-    let body = after.strip_prefix('{')?.strip_prefix(FIRST_PARTY_KEY_ENV_VAR)?.strip_prefix(":-")?;
+    let body = after
+        .strip_prefix('{')?
+        .strip_prefix(FIRST_PARTY_KEY_ENV_VAR)?
+        .strip_prefix(":-")?;
     let close = body.find('}')?;
     Some((&body[..close], &body[close + 1..]))
 }
@@ -194,7 +208,10 @@ pub fn names_first_party_key(after: &str) -> bool {
 ///
 /// No masking: `input` is cut at each such run, `expand` runs on the pieces between runs and the runs are copied
 /// verbatim, so no text and no expanded value can be mistaken for a kept run.
-pub fn expand_keeping_escaped_first_party_references(input: &str, expand: impl FnMut(&str) -> String) -> String {
+pub fn expand_keeping_escaped_first_party_references(
+    input: &str,
+    expand: impl FnMut(&str) -> String,
+) -> String {
     expand_keeping_first_party_references(input, false, expand)
 }
 
@@ -295,13 +312,19 @@ mod tests {
         );
         let resolved = "p70a-resolved-FAKE:FUIGO_API_KEY";
         // Config loading: the reference survives, so no record of config holds the key.
-        assert_eq!(crate::expand_env_vars_in_string("Bearer ${FUIGO_API_KEY}"), "Bearer ${FUIGO_API_KEY}");
+        assert_eq!(
+            crate::expand_env_vars_in_string("Bearer ${FUIGO_API_KEY}"),
+            "Bearer ${FUIGO_API_KEY}"
+        );
         let mut table: toml::Value = toml::from_str(
             "[mcp_servers.s]\ncommand = \"x\"\nenv = { FUIGO_API_KEY = \"${FUIGO_API_KEY}\" }\n",
         )
         .expect("toml");
         crate::expand_env_vars_in_toml(&mut table);
-        assert_eq!(table["mcp_servers"]["s"]["env"]["FUIGO_API_KEY"].as_str(), Some("${FUIGO_API_KEY}"));
+        assert_eq!(
+            table["mcp_servers"]["s"]["env"]["FUIGO_API_KEY"].as_str(),
+            Some("${FUIGO_API_KEY}")
+        );
         // Astra f4 #1, f6, f7: a `$`-run before the name is kept as written by loading (also over a second pass, as MCP
         // strings get); at the destination `$$` there is an escape for `$`, so an even run is text and an odd run ends
         // in the key. `$$` keeps meaning `$` for every other name.
@@ -309,24 +332,44 @@ mod tests {
             ("$${FUIGO_API_KEY}", "${FUIGO_API_KEY}".to_owned()),
             ("$$FUIGO_API_KEY", "$FUIGO_API_KEY".to_owned()),
             ("x$${FUIGO_API_KEY}y", "x${FUIGO_API_KEY}y".to_owned()),
-            ("$${FUIGO_API_KEY:-fallback}", "${FUIGO_API_KEY:-fallback}".to_owned()),
+            (
+                "$${FUIGO_API_KEY:-fallback}",
+                "${FUIGO_API_KEY:-fallback}".to_owned(),
+            ),
             ("$${#FUIGO_API_KEY}", "${#FUIGO_API_KEY}".to_owned()),
             ("$$$$FUIGO_API_KEY", "$$FUIGO_API_KEY".to_owned()),
             ("$$${FUIGO_API_KEY}", format!("${resolved}")),
-            ("\u{E000}\u{F8FF} $${FUIGO_API_KEY}", "\u{E000}\u{F8FF} ${FUIGO_API_KEY}".to_owned()),
+            (
+                "\u{E000}\u{F8FF} $${FUIGO_API_KEY}",
+                "\u{E000}\u{F8FF} ${FUIGO_API_KEY}".to_owned(),
+            ),
         ] {
             let loaded = crate::expand_env_vars_in_string(written);
             assert_eq!(loaded, written, "loading changed an escaped reference");
-            assert_eq!(crate::expand_env_vars_in_string(&loaded), written, "a second pass changed it");
-            assert_eq!(resolve_first_party_key_references(&loaded), at_destination, "{written}");
+            assert_eq!(
+                crate::expand_env_vars_in_string(&loaded),
+                written,
+                "a second pass changed it"
+            );
+            assert_eq!(
+                resolve_first_party_key_references(&loaded),
+                at_destination,
+                "{written}"
+            );
         }
-        assert_eq!(crate::expand_env_vars_in_string("$$P70A_FOLLOWUP_OTHER"), "$P70A_FOLLOWUP_OTHER");
+        assert_eq!(
+            crate::expand_env_vars_in_string("$$P70A_FOLLOWUP_OTHER"),
+            "$P70A_FOLLOWUP_OTHER"
+        );
         assert_eq!(
             resolve_first_party_key_references("a$${FUIGO_API_KEY}b${FUIGO_API_KEY}"),
             format!("a${{FUIGO_API_KEY}}b{resolved}")
         );
         // The destination.
-        assert_eq!(resolve_first_party_key_references("${FUIGO_API_KEY}"), resolved);
+        assert_eq!(
+            resolve_first_party_key_references("${FUIGO_API_KEY}"),
+            resolved
+        );
         assert_eq!(
             resolve_first_party_key_references("Bearer $FUIGO_API_KEY;k=${FUIGO_API_KEY}"),
             format!("Bearer {resolved};k={resolved}")

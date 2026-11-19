@@ -2836,10 +2836,15 @@ fn resolve_api_key_used_for_a_runtime_key_alone() {
     let _unset_legacy = EnvGuard::unset("FUIGO_CODE_API_KEY");
     let endpoints = config::EndpointsConfig::default();
     let before = ModelFetchAuth::resolve(&endpoints, false);
-    let _ = crate::agent::auth_method::set_runtime_api_key(Some("p08-models-runtime-FAKE".to_owned()));
+    let _ =
+        crate::agent::auth_method::set_runtime_api_key(Some("p08-models-runtime-FAKE".to_owned()));
     let with_runtime = ModelFetchAuth::resolve(&endpoints, false);
     let _ = crate::agent::auth_method::set_runtime_api_key(None);
-    assert_eq!(before, ModelFetchAuth::Session, "precondition: nothing configured");
+    assert_eq!(
+        before,
+        ModelFetchAuth::Session,
+        "precondition: nothing configured"
+    );
     assert_eq!(with_runtime, ModelFetchAuth::ApiKey);
 }
 
@@ -2849,17 +2854,37 @@ fn resolve_api_key_used_for_a_runtime_key_alone() {
 async fn a_catalog_reload_moves_the_helper_epoch_and_a_model_switch_does_too() {
     let mgr = test_manager();
     let start = mgr.helper_epoch();
-    assert_eq!(start, mgr.helper_epoch(), "reading the epoch changes nothing");
+    assert_eq!(
+        start,
+        mgr.helper_epoch(),
+        "reading the epoch changes nothing"
+    );
     mgr.apply_config(config::Config::default());
     let after_reload = mgr.helper_epoch();
-    assert_ne!(after_reload, start, "a reloaded catalog must move the epoch");
-    assert!(after_reload.catalog_reload > start.catalog_reload, "the reload counter itself moved");
+    assert_ne!(
+        after_reload, start,
+        "a reloaded catalog must move the epoch"
+    );
+    assert!(
+        after_reload.catalog_reload > start.catalog_reload,
+        "the reload counter itself moved"
+    );
     mgr.set_current_model_id(acp::ModelId::new("grok-4"));
     let after_switch = mgr.helper_epoch();
-    assert_ne!(after_switch, after_reload, "a model switch must move the epoch");
-    assert_eq!(after_switch.catalog_reload, after_reload.catalog_reload, "it is not a reload");
+    assert_ne!(
+        after_switch, after_reload,
+        "a model switch must move the epoch"
+    );
+    assert_eq!(
+        after_switch.catalog_reload, after_reload.catalog_reload,
+        "it is not a reload"
+    );
     mgr.set_current_model_id(acp::ModelId::new("grok-4"));
-    assert_eq!(mgr.helper_epoch(), after_switch, "selecting the same model is not a switch");
+    assert_eq!(
+        mgr.helper_epoch(),
+        after_switch,
+        "selecting the same model is not a switch"
+    );
 }
 
 /// P132 (P121 follow-up): one session's `/model` is not a catalog reload. It must still move the helper epoch (the
@@ -2871,11 +2896,25 @@ async fn a_session_model_switch_does_not_look_like_a_catalog_reload() {
     let mut reloads = mgr.subscribe_catalog_reload();
     let start = mgr.helper_epoch();
     mgr.note_session_model_switch();
-    assert_ne!(mgr.helper_epoch(), start, "the helper epoch still moves, so classifier routes are rebuilt");
-    assert_eq!(mgr.catalog_reload_generation(), start.catalog_reload, "it is not a catalog reload");
-    assert!(!reloads.has_changed().unwrap(), "the all-sessions rebuild must not be woken");
+    assert_ne!(
+        mgr.helper_epoch(),
+        start,
+        "the helper epoch still moves, so classifier routes are rebuilt"
+    );
+    assert_eq!(
+        mgr.catalog_reload_generation(),
+        start.catalog_reload,
+        "it is not a catalog reload"
+    );
+    assert!(
+        !reloads.has_changed().unwrap(),
+        "the all-sessions rebuild must not be woken"
+    );
     mgr.apply_config(config::Config::default());
-    assert!(reloads.has_changed().unwrap(), "a real reload still wakes the watcher");
+    assert!(
+        reloads.has_changed().unwrap(),
+        "a real reload still wakes the watcher"
+    );
 }
 
 /// FLUX-TRAFFIC part B: a 401 on `/v1/models` must stop the background refresh from asking again every minute.
@@ -2916,12 +2955,19 @@ mod auth_reject {
         }
     }
 
-    fn rejecting_manager() -> (ModelsManager, Arc<AtomicUsize>, Arc<std::sync::atomic::AtomicBool>) {
+    fn rejecting_manager() -> (
+        ModelsManager,
+        Arc<AtomicUsize>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
         let calls = Arc::new(AtomicUsize::new(0));
         let accept = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mgr = cold_manager(
             config::Config::default(),
-            Arc::new(RejectingEndpoint { calls: calls.clone(), accept: accept.clone() }),
+            Arc::new(RejectingEndpoint {
+                calls: calls.clone(),
+                accept: accept.clone(),
+            }),
         );
         (mgr, calls, accept)
     }
@@ -2950,7 +2996,10 @@ mod auth_reject {
     async fn ten_minutes_of_401_make_at_most_four_requests() {
         let _api_key = api_key_env_unset();
         let n = requests_in(10).await;
-        assert!(n <= 4, "10 minutes against a 401 server made {n} requests; the table allows 4");
+        assert!(
+            n <= 4,
+            "10 minutes against a 401 server made {n} requests; the table allows 4"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2958,7 +3007,10 @@ mod auth_reject {
     async fn a_day_of_401_makes_at_most_fifty_two_requests() {
         let _api_key = api_key_env_unset();
         let n = requests_in(24 * 60).await;
-        assert!(n <= 52, "24 hours against a 401 server made {n} requests; the table allows 52");
+        assert!(
+            n <= 52,
+            "24 hours against a 401 server made {n} requests; the table allows 52"
+        );
     }
 
     /// The user hears about it once, however many times the refresh is woken afterwards.
@@ -2987,7 +3039,11 @@ mod auth_reject {
             notify.notify_one();
             tokio::time::sleep(std::time::Duration::from_secs(65)).await;
         }
-        assert_eq!(seen.load(Ordering::SeqCst), 1, "exactly one note for the whole rejection run");
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "exactly one note for the whole rejection run"
+        );
         assert_eq!(last.lock().as_str(), AUTH_REJECTED_NOTICE);
         assert!(AUTH_REJECTED_NOTICE.contains("sign") && AUTH_REJECTED_NOTICE.contains("401"));
     }
@@ -3007,13 +3063,21 @@ mod auth_reject {
         // Same key, a minute later is still inside the 1 minute wait: nothing is sent.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         mgr.fetch_and_apply_inner(true).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "the same rejected key waits");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the same rejected key waits"
+        );
 
         // A different key: the next fetch happens at once.
         drop(_key);
         let _key2 = EnvGuard::set("FUIGO_API_KEY", "fuigo-test-not-a-key-2");
         mgr.fetch_and_apply_inner(true).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "a credential change resets the wait");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a credential change resets the wait"
+        );
 
         // The server now accepts: after the wait, one fetch succeeds and the normal refresh is back.
         accept.store(true, Ordering::SeqCst);
@@ -3023,7 +3087,11 @@ mod auth_reject {
         assert!(rx.borrow().is_none(), "a good fetch clears the note");
         mgr.fetch_and_apply_inner(true).await;
         mgr.fetch_and_apply_inner(true).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 5, "no wait after a 200: every refresh fetches");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "no wait after a 200: every refresh fetches"
+        );
     }
 }
 
@@ -3046,7 +3114,13 @@ async fn unset_default_with_one_signed_in_subscription_starts_on_its_best_model(
     let _a = fuigo_test_support::EnvGuard::unset("FLUX_API_KEY");
     let _b = fuigo_test_support::EnvGuard::unset("FUIGO_API_KEY");
     let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_API_KEY");
-    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7", "grok-3"]).await;
+    test_sign_in(
+        home.path(),
+        SubscriptionProvider::Xai,
+        "acct",
+        &["grok-4.7", "grok-3"],
+    )
+    .await;
     let catalog = subscription_catalog();
     let (key, entry, _) = resolve_default_model(&config::Config::default(), &catalog, false);
     assert_eq!(key, "xai/grok-4.7");
@@ -3064,7 +3138,13 @@ async fn an_explicit_default_is_never_overridden_by_a_signed_in_subscription() {
     let _a = fuigo_test_support::EnvGuard::unset("FLUX_API_KEY");
     let _b = fuigo_test_support::EnvGuard::unset("FUIGO_API_KEY");
     let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_API_KEY");
-    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7"]).await;
+    test_sign_in(
+        home.path(),
+        SubscriptionProvider::Xai,
+        "acct",
+        &["grok-4.7"],
+    )
+    .await;
     let catalog = subscription_catalog();
     let mut cfg = config::Config::default();
     cfg.models.default = Some("xai/grok-4.7".to_string());
@@ -3074,7 +3154,10 @@ async fn an_explicit_default_is_never_overridden_by_a_signed_in_subscription() {
     let builtin = crate::models::default_model().to_string();
     cfg.models.default = Some(builtin.clone());
     let (key, _, src) = resolve_default_model(&cfg, &catalog, false);
-    assert_eq!(key, builtin, "an explicit default must win over the implicit one");
+    assert_eq!(
+        key, builtin,
+        "an explicit default must win over the implicit one"
+    );
     assert!(matches!(src, config::ConfigSource::Config));
 }
 
@@ -3089,10 +3172,19 @@ async fn a_flux_key_outranks_a_subscription_so_the_built_in_default_stands() {
     let _a = fuigo_test_support::EnvGuard::set("FLUX_API_KEY", "sk-flux-abcdefgh-1234");
     let _b = fuigo_test_support::EnvGuard::unset("FUIGO_API_KEY");
     let _c = fuigo_test_support::EnvGuard::unset("FUIGO_CODE_API_KEY");
-    test_sign_in(home.path(), SubscriptionProvider::Xai, "acct", &["grok-4.7"]).await;
+    test_sign_in(
+        home.path(),
+        SubscriptionProvider::Xai,
+        "acct",
+        &["grok-4.7"],
+    )
+    .await;
     let catalog = subscription_catalog();
     let (key, _, _) = resolve_default_model(&config::Config::default(), &catalog, false);
-    assert_ne!(key, "xai/grok-4.7", "Flux outranks a subscription: keep the built-in default");
+    assert_ne!(
+        key, "xai/grok-4.7",
+        "Flux outranks a subscription: keep the built-in default"
+    );
 }
 
 // ---- a catalog fetch without a Flux credential is skipped, not retried in a loop ----
@@ -3160,5 +3252,8 @@ async fn catalog_retry_runs_with_a_flux_credential() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert!(calls.load(Ordering::SeqCst) >= 1, "with a credential the fetch must be attempted");
+    assert!(
+        calls.load(Ordering::SeqCst) >= 1,
+        "with a credential the fetch must be attempted"
+    );
 }

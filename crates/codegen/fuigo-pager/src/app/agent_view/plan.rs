@@ -1308,7 +1308,10 @@ mod plan_approval_enter_tests {
             vec!["second"],
             "only the clicked comment goes"
         );
-        assert_eq!(agent.casual_editing_comment_id, None, "its edit is abandoned");
+        assert_eq!(
+            agent.casual_editing_comment_id, None,
+            "its edit is abandoned"
+        );
         assert_eq!(agent.casual_commenting_range, None);
         assert_eq!(
             agent.prompt.text(),

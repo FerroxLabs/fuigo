@@ -261,7 +261,10 @@ pub fn mark_dismissed(cwd: &Path) {
     mark_imported(cwd);
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,7 +338,15 @@ mod tests {
         let path = project.join(".mcp.json");
         let root = fuigo_dirs::contained::PinnedRoot::pin(&project).unwrap();
         let contained = compute_settings_hash(std::slice::from_ref(&path), Some(&root));
-        assert_eq!(contained, compute_settings_hash(&[], None), "outside link is not hashed");
-        assert_ne!(contained, compute_settings_hash(std::slice::from_ref(&path), None), "user scope follows links");
+        assert_eq!(
+            contained,
+            compute_settings_hash(&[], None),
+            "outside link is not hashed"
+        );
+        assert_ne!(
+            contained,
+            compute_settings_hash(std::slice::from_ref(&path), None),
+            "user scope follows links"
+        );
     }
 }

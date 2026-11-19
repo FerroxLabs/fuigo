@@ -39,6 +39,10 @@ impl TurnParkState {
 }
 
 /// Recovery decision returned by `SessionActor::handle_sampling_failure` for the sampler-based turn loop.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "SamplingError inlines the upstream classification; boxing it touches every construction site and is a separate refactor"
+)]
 pub(crate) enum SamplerFailureRecovery {
     /// Compaction ran.
     /// The turn loop should rebuild the request from the compacted conversation and resubmit.
@@ -61,6 +65,10 @@ pub(crate) enum SamplerFailureRecovery {
 
 /// Outcome of a single turn attempt via the sampler-based path.
 /// `CompactAndResubmit` short-circuits the outer turn loop with `continue` (the turn driver re-builds the request from the latest chat state).
+#[allow(
+    clippy::large_enum_variant,
+    reason = "SamplingError inlines the upstream classification; boxing it touches every construction site and is a separate refactor"
+)]
 pub(crate) enum SamplerTurnOutcome {
     /// Model responded, with per-call latency stats for `shell.turn.inference_done`.
     Response(

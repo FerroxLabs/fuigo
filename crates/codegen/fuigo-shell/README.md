@@ -2280,7 +2280,13 @@ model cannot convince the agent to relax restrictions at runtime.
 - **Platform support**: Sandbox enforcement uses Landlock on Linux (kernel ≥ 5.13)
   and Seatbelt on macOS. If the sandbox cannot be applied (e.g., unsupported
   kernel, missing entitlements), Fuigo logs a warning and continues without
-  enforcement.
+  enforcement. The sandbox is optional and off by default on every platform.
+  On Linux Fuigo launches `bwrap` from `/usr/bin`, `/bin` or `/usr/local/bin`
+  (then `PATH`, with a warning), skips any `bwrap` that your user, group or
+  others could replace (warning, naming the path), and `/status` shows which
+  `bwrap` was used.
+  **Windows:** there is no Windows sandbox. If you want one, run Fuigo inside
+  WSL2 with bubblewrap installed (`sudo apt install bubblewrap`).
 
 - **Network restrictions are partial**: Profiles with `restrict_network` block
   network in **child processes** (bash commands, scripts) via seccomp, but

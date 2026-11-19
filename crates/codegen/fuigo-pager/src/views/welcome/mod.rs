@@ -3414,6 +3414,11 @@ mod tests {
         );
         assert!(screen.contains("not available on Windows"), "{screen}");
         assert!(screen.contains("run unsandboxed"), "{screen}");
+        assert!(screen.contains("WSL2"), "{screen}");
+        assert!(screen.contains("WSL2"), "{screen}");
+        assert!(screen.contains("WSL2"), "{screen}");
+        assert!(screen.contains("WSL2"), "{screen}");
+        assert!(screen.contains("WSL2"), "{screen}");
         assert!(crate::startup::sandbox_unavailable_startup_warning(None).is_none());
     }
 

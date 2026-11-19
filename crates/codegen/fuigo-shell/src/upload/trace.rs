@@ -40,7 +40,10 @@ fn is_text_payload(content_type: &str) -> bool {
         || essence.ends_with("+json")
         || matches!(
             essence.as_str(),
-            "application/json" | "application/x-ndjson" | "application/jsonl" | "application/x-jsonlines"
+            "application/json"
+                | "application/x-ndjson"
+                | "application/jsonl"
+                | "application/x-jsonlines"
         )
 }
 /// Upload the canonical tool definitions trace and wait for completion.
@@ -281,7 +284,7 @@ pub(crate) async fn resolve_git_repo_info(cwd: &str) -> (Option<String>, Option<
         let remote_url = repo
             .find_remote("origin")
             .ok()
-            .and_then(|r| r.url().map(strip_url_credentials));
+            .and_then(|r| r.url().ok().map(strip_url_credentials));
         Some((repo_root, remote_url))
     })
     .await
@@ -1314,7 +1317,10 @@ pub(crate) async fn flush_then_write_error_manifest(
 }
 /// Delete `upload_queue/scratch` (staging copies only).
 /// Does not touch the durable queue worker's spill files under `upload_queue/` root.
-#[allow(clippy::disallowed_methods, reason = "upload_queue/scratch staging under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "upload_queue/scratch staging under FUIGO_HOME; not inside a session folder"
+)]
 pub(crate) fn purge_stale_upload_scratch_dir(scratch_dir: &Path) -> std::io::Result<bool> {
     if !scratch_dir.exists() {
         return Ok(false);
@@ -1629,13 +1635,22 @@ fn build_session_state_archive(
     }
     Ok(archive_data)
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 pub(crate) mod tests {
     /// P149 (S14/K16): the media types the upload scrub reads, including `text/*` with parameters.
     #[test]
     fn p149_text_payload_media_types() {
-        for text in ["text/plain", "text/plain; charset=utf-8", "TEXT/Markdown", "application/json", "application/x-ndjson"] {
+        for text in [
+            "text/plain",
+            "text/plain; charset=utf-8",
+            "TEXT/Markdown",
+            "application/json",
+            "application/x-ndjson",
+        ] {
             assert!(super::is_text_payload(text), "{text}");
         }
         for binary in ["image/png", "application/gzip", "application/octet-stream"] {
@@ -2173,7 +2188,10 @@ pub(crate) mod tests {
                 ..crate::auth::FuigoAuth::test_default()
             });
             manager.record_permanent_failure("p149-verdict-key".into(), reason.into());
-            assert!(manager.has_permanent_failure(), "control: {reason:?} verdict stands");
+            assert!(
+                manager.has_permanent_failure(),
+                "control: {reason:?} verdict stands"
+            );
             let resolver = DynamicResolver {
                 auth_manager: manager,
                 base_config: TraceExportConfig {
@@ -2196,14 +2214,20 @@ pub(crate) mod tests {
         let (_d1, refused) = resolver_with(RefreshTokenFailedReason::TokenEndpointRefused);
         assert!(
             refused
-                .wait_for_auth_recovery(Some("p149-verdict-key"), std::time::Duration::from_millis(1))
+                .wait_for_auth_recovery(
+                    Some("p149-verdict-key"),
+                    std::time::Duration::from_millis(1)
+                )
                 .is_some(),
             "a refusal verdict must not drop queued uploads"
         );
         let (_d2, rejected) = resolver_with(RefreshTokenFailedReason::RefreshTokenRejected);
         assert!(
             rejected
-                .wait_for_auth_recovery(Some("p149-verdict-key"), std::time::Duration::from_millis(1))
+                .wait_for_auth_recovery(
+                    Some("p149-verdict-key"),
+                    std::time::Duration::from_millis(1)
+                )
                 .is_none(),
             "control: a sign-in verdict still stops the wait"
         );
@@ -2662,7 +2686,11 @@ pub(crate) mod tests {
     #[test]
     fn classify_workspace_non_project_for_tmp() {
         let tmp = tempfile::tempdir().unwrap();
-        let stray = tmp.path().ancestors().skip(1).find(|p| p.join(".git").exists());
+        let stray = tmp
+            .path()
+            .ancestors()
+            .skip(1)
+            .find(|p| p.join(".git").exists());
         assert!(
             stray.is_none(),
             "environment: {stray:?} holds a .git above the temp dir, so every temp dir classifies as git; remove it or run the suite with a private /tmp"

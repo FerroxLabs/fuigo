@@ -31,7 +31,11 @@ fn envelope() -> HookEventEnvelope {
 }
 
 fn ctx() -> RunContext<'static> {
-    RunContext { session_id: "rowsa2", workspace_root: "/tmp", process_scope: None }
+    RunContext {
+        session_id: "rowsa2",
+        workspace_root: "/tmp",
+        process_scope: None,
+    }
 }
 
 fn spec_with(handler_type: HandlerType) -> HookSpec {
@@ -87,12 +91,16 @@ async fn http_hook_to_a_localhost_url_is_delivered() {
         let url = format!("http://{host}:{port}/hook");
         spec.url = Some(url.clone());
         spec.url_raw = Some(url);
-        let (result, _, info, _) = run_http_hook(&spec, &envelope(), &ctx(), GateKind::Observe).await;
+        let (result, _, info, _) =
+            run_http_hook(&spec, &envelope(), &ctx(), GateKind::Observe).await;
         assert!(
             matches!(result, HookRunnerResult::Success),
             "an http:// hook to {host} must run, got {result:?} ({info:?})"
         );
-        assert!(hit.load(std::sync::atomic::Ordering::SeqCst), "the {host} server never saw the request");
+        assert!(
+            hit.load(std::sync::atomic::Ordering::SeqCst),
+            "the {host} server never saw the request"
+        );
     }
 }
 
@@ -109,7 +117,8 @@ async fn http_hook_to_a_non_local_http_url_is_still_refused() {
 }
 
 fn http_hook_json(url: &str) -> String {
-    serde_json::json!({ "hooks": { "Stop": [ { "hooks": [ { "type": "http", "url": url } ] } ] } }).to_string()
+    serde_json::json!({ "hooks": { "Stop": [ { "hooks": [ { "type": "http", "url": url } ] } ] } })
+        .to_string()
 }
 
 #[test]
@@ -120,11 +129,17 @@ fn an_invalid_hook_url_is_reported_when_the_hooks_load() {
         ("http://example.com/hook", "https://"),
         ("https://", "invalid"),
     ] {
-        let (specs, errors) = parse_hook_file(&http_hook_json(url), Path::new("/tmp/rowsa2-hooks.json"));
-        assert!(specs.is_empty(), "{url}: a hook whose URL can never work must not load: {specs:?}");
+        let (specs, errors) =
+            parse_hook_file(&http_hook_json(url), Path::new("/tmp/rowsa2-hooks.json"));
+        assert!(
+            specs.is_empty(),
+            "{url}: a hook whose URL can never work must not load: {specs:?}"
+        );
         assert_eq!(errors.len(), 1, "{url}: {errors:?}");
         match &errors[0] {
-            HookError::InvalidConfig { detail, .. } => assert!(detail.contains(needle), "{url}: {detail}"),
+            HookError::InvalidConfig { detail, .. } => {
+                assert!(detail.contains(needle), "{url}: {detail}")
+            }
             other => panic!("{url}: expected InvalidConfig, got {other:?}"),
         }
     }
@@ -140,7 +155,8 @@ fn valid_and_templated_hook_urls_still_load() {
         "https://${ROWSA2_HOST_NOT_SET}/hook",
         "${ROWSA2_URL_NOT_SET}",
     ] {
-        let (specs, errors) = parse_hook_file(&http_hook_json(url), Path::new("/tmp/rowsa2-hooks.json"));
+        let (specs, errors) =
+            parse_hook_file(&http_hook_json(url), Path::new("/tmp/rowsa2-hooks.json"));
         assert!(errors.is_empty(), "{url}: {errors:?}");
         assert_eq!(specs.len(), 1, "{url}");
     }
@@ -164,7 +180,10 @@ async fn a_spawn_failure_names_the_program_that_failed() {
     let (result, _, _) = run_command_hook(&spec, &envelope(), &ctx(), GateKind::Observe).await;
     match result {
         HookRunnerResult::Failed(message) => {
-            assert!(message.contains("badshebang-hook.sh"), "the failure must name the program: {message}");
+            assert!(
+                message.contains("badshebang-hook.sh"),
+                "the failure must name the program: {message}"
+            );
         }
         other => panic!("expected Failed, got {other:?}"),
     }

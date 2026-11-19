@@ -49,7 +49,8 @@ async fn actor_blocked_in_a_spawn(
 ) -> SessionActor {
     let (gateway_tx, _gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    let (persistence_tx, _persistence_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.tool_context.subagent_event_tx = Some(tx);
     actor
@@ -99,7 +100,11 @@ async fn tool_results(actor: &SessionActor) -> Vec<(String, String)> {
         .collect()
 }
 
-async fn cancel(actor: &SessionActor, cancel_subagents: bool, trigger: crate::session::CancelTrigger) {
+async fn cancel(
+    actor: &SessionActor,
+    cancel_subagents: bool,
+    trigger: crate::session::CancelTrigger,
+) {
     let _ = actor
         .cancel_running_task(crate::session::CancelOptions {
             cancel_subagents,
@@ -125,7 +130,9 @@ async fn a_stopped_turn_tells_the_model_its_spawn_moved_to_the_background() {
                 .find(|(id, _)| id == "call-spawn")
                 .expect("the spawn call is answered");
             assert!(
-                spawn.1.contains("moved to the background because the user stopped this turn")
+                spawn
+                    .1
+                    .contains("moved to the background because the user stopped this turn")
                     && spawn.1.contains("not cancelled")
                     && spawn.1.contains("subagent_id: sa-1"),
                 "{}",

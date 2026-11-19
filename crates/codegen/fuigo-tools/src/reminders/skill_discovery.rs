@@ -174,8 +174,11 @@ impl Reminder for SkillDiscoveryReminder {
                 SkillScope::Local | SkillScope::Repo => Self::project_root_of_skill(target_path),
                 _ => None,
             };
-            let skills =
-                discovery::parse_skill_files_in(vec![(target_path.to_path_buf(), scope, content_root)]);
+            let skills = discovery::parse_skill_files_in(vec![(
+                target_path.to_path_buf(),
+                scope,
+                content_root,
+            )]);
             if !skills.is_empty() {
                 let mut res = resources.lock().await;
                 if let Some(tracker) = res.get_mut::<SkillManager>() {
@@ -248,7 +251,10 @@ impl Reminder for SkillDiscoveryReminder {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

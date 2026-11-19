@@ -112,17 +112,15 @@ impl VerbGroupKind {
     pub fn verb(self, running: bool) -> &'static str {
         let (past, present) = match self {
             VerbGroupKind::File | VerbGroupKind::Skill => ("Read", "Reading"),
-            VerbGroupKind::Search
-            | VerbGroupKind::WebSearch
-            | VerbGroupKind::MemorySearch => ("Searched", "Searching"),
+            VerbGroupKind::Search | VerbGroupKind::WebSearch | VerbGroupKind::MemorySearch => {
+                ("Searched", "Searching")
+            }
             VerbGroupKind::Dir => ("Listed", "Listing"),
             VerbGroupKind::WebFetch => ("Fetched", "Fetching"),
             VerbGroupKind::Subagent
             | VerbGroupKind::Command
             | VerbGroupKind::OtherTool
-            | VerbGroupKind::IntegrationSearch => {
-                ("Ran", "Running")
-            }
+            | VerbGroupKind::IntegrationSearch => ("Ran", "Running"),
             VerbGroupKind::Message => ("Sent", "Sending"),
             VerbGroupKind::EditFile => ("Edited", "Editing"),
             VerbGroupKind::McpCall => ("Called", "Calling"),

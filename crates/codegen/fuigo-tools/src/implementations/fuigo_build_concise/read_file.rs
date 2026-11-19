@@ -106,7 +106,10 @@ impl fuigo_tool_runtime::Tool for ReadFileConciseTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,10 +193,16 @@ mod tests {
             instruction_files: true,
         };
         let full = render(ToolMetadata::description_template(&ReadFileTool), both);
-        let concise = render(ToolMetadata::description_template(&ReadFileConciseTool), both);
+        let concise = render(
+            ToolMetadata::description_template(&ReadFileConciseTool),
+            both,
+        );
         assert!(full.contains(note), "full:\n{full}");
         assert!(concise.contains(note), "concise:\n{concise}");
-        assert!(concise.contains("SKILL.md and AGENTS.md/CLAUDE.md files"), "{concise}");
+        assert!(
+            concise.contains("SKILL.md and AGENTS.md/CLAUDE.md files"),
+            "{concise}"
+        );
         let skills_only = render(
             ToolMetadata::description_template(&ReadFileConciseTool),
             WholeReadPolicy {
@@ -201,7 +210,10 @@ mod tests {
                 instruction_files: false,
             },
         );
-        assert!(skills_only.contains("- SKILL.md files are returned whole"), "{skills_only}");
+        assert!(
+            skills_only.contains("- SKILL.md files are returned whole"),
+            "{skills_only}"
+        );
         assert!(!skills_only.contains("AGENTS.md"), "{skills_only}");
         let neither = render(
             ToolMetadata::description_template(&ReadFileConciseTool),

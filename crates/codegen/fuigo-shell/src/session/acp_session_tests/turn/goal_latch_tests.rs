@@ -16,7 +16,8 @@
 //! the next turn must say which limit stopped it and what to do.
 
 use super::disk_full_tests::{
-    actor_with_mock_sampler_configured, block_on_session, current_thread_local, spawn_persistence_stub,
+    actor_with_mock_sampler_configured, block_on_session, current_thread_local,
+    spawn_persistence_stub,
 };
 use super::support::*;
 use super::*;
@@ -24,7 +25,9 @@ use crate::acp_error::{EXECUTION_BUDGET_DENIED_CODE, ExecutionBudgetRule};
 use crate::session::execution_state::{Execution, TokenLimits};
 use crate::session::goal_tracker::GoalStatus;
 use fuigo_sampling_types::{ExecutionAdmission, RequestPurpose, TokenUsage};
-use fuigo_test_support::sse::{responses_api_reasoning_then_tool_call_events, responses_api_script_exact};
+use fuigo_test_support::sse::{
+    responses_api_reasoning_then_tool_call_events, responses_api_script_exact,
+};
 use fuigo_test_support::{MockInferenceServer, ScriptedResponse};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +36,8 @@ use std::time::Duration;
 /// turn that consumed more requests than scripted can never steal it from the resumed turn.
 const RESUMED: &str = "the resumed goal answered";
 /// A `search_replace` call: an edit, so the non-yolo permission manager always prompts for it.
-const EDIT_ARGS: &str = r#"{"file_path":"/tmp/p89-goal-latch.txt","old_string":"a","new_string":"b"}"#;
+const EDIT_ARGS: &str =
+    r#"{"file_path":"/tmp/p89-goal-latch.txt","old_string":"a","new_string":"b"}"#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cause {
@@ -98,7 +102,9 @@ async fn run_text(
         Duration::from_secs(120),
         actor.handle_prompt(
             prompt_id,
-            vec![acp::ContentBlock::Text(acp::TextContent::new(text.to_string()))],
+            vec![acp::ContentBlock::Text(acp::TextContent::new(
+                text.to_string(),
+            ))],
             PromptMode::Agent,
             None,
             None,
@@ -191,7 +197,9 @@ fn interrupted_goal_then_resume(cause: Cause, run: &'static str) -> GoalRun {
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
             let permission_gateway = if cause == Cause::UserCancel {
                 drain_gateway_cancelling_permission(gateway_rx);
-                Some(fuigo_acp_lib::AcpAgentGatewaySender::new(gateway_tx.clone()))
+                Some(fuigo_acp_lib::AcpAgentGatewaySender::new(
+                    gateway_tx.clone(),
+                ))
             } else {
                 drain_gateway(gateway_rx);
                 None
@@ -257,8 +265,12 @@ fn assert_goal_survives(cause: Cause, run: &'static str) {
     let run_result = interrupted_goal_then_resume(cause, run);
     // Fixture check: turn 1 really did end by `cause`, not normally.
     match (&run_result.first, cause) {
-        (Ok(ok), Cause::UserCancel) => assert_eq!(ok.stop_reason, acp::StopReason::Cancelled, "{cause:?}"),
-        (Ok(ok), Cause::Refusal) => assert_eq!(ok.stop_reason, acp::StopReason::Refusal, "{cause:?}"),
+        (Ok(ok), Cause::UserCancel) => {
+            assert_eq!(ok.stop_reason, acp::StopReason::Cancelled, "{cause:?}")
+        }
+        (Ok(ok), Cause::Refusal) => {
+            assert_eq!(ok.stop_reason, acp::StopReason::Refusal, "{cause:?}")
+        }
         (Ok(ok), _) => assert_ne!(
             ok.stop_reason,
             acp::StopReason::EndTurn,
@@ -287,7 +299,11 @@ fn assert_goal_survives(cause: Cause, run: &'static str) {
         panic!("{cause:?}: `/goal resume` must hand the goal back to the model, got: {message}")
     });
     assert!(!reminder.is_empty());
-    assert_eq!(run_result.status_after_resume, Some(GoalStatus::Active), "{cause:?}");
+    assert_eq!(
+        run_result.status_after_resume,
+        Some(GoalStatus::Active),
+        "{cause:?}"
+    );
     let second = run_result.second.expect("the resumed turn ran");
     let ok = second.unwrap_or_else(|err| {
         panic!(
@@ -343,7 +359,13 @@ fn a_goal_survives_a_cancel_that_dropped_the_turn() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             spawn_persistence_stub(persistence_rx, || Ok(()));
             let actor = actor_with_mock_sampler_configured(
-                &server, RUN, persistence_tx, gateway_tx, None, None, keep_goal_active,
+                &server,
+                RUN,
+                persistence_tx,
+                gateway_tx,
+                None,
+                None,
+                keep_goal_active,
             )
             .await;
             let goal_id = format!("{RUN}-goal");
@@ -400,19 +422,23 @@ fn a_goal_survives_a_cancel_that_dropped_the_turn() {
             *sink.lock().unwrap() = Some((resume, second, model_requests));
         });
     });
-    let (resume, second, model_requests) =
-        cell.lock().unwrap().take().expect("the cancel run produced a result");
+    let (resume, second, model_requests) = cell
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the cancel run produced a result");
     resume.unwrap_or_else(|message| panic!("`/goal resume` must hand the goal back: {message}"));
-    let ok = second
-        .expect("the resumed turn ran")
-        .unwrap_or_else(|err| {
-            panic!(
-                "the resumed goal's turn must run, not fail before the model: {}",
-                serde_json::to_value(&err).unwrap_or_default()
-            )
-        });
+    let ok = second.expect("the resumed turn ran").unwrap_or_else(|err| {
+        panic!(
+            "the resumed goal's turn must run, not fail before the model: {}",
+            serde_json::to_value(&err).unwrap_or_default()
+        )
+    });
     assert_eq!(ok.stop_reason, acp::StopReason::EndTurn);
-    assert!(model_requests >= 1, "the resumed turn's answer came from the model");
+    assert!(
+        model_requests >= 1,
+        "the resumed turn's answer came from the model"
+    );
 }
 
 /// The counter-test. A goal whose token budget is genuinely spent must STAY stopped -- reopening must
@@ -436,7 +462,13 @@ fn a_goal_whose_budget_is_spent_stays_stopped_and_says_how_to_continue() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             spawn_persistence_stub(persistence_rx, || Ok(()));
             let actor = actor_with_mock_sampler_configured(
-                &server, RUN, persistence_tx, gateway_tx, None, None, keep_goal_active,
+                &server,
+                RUN,
+                persistence_tx,
+                gateway_tx,
+                None,
+                None,
+                keep_goal_active,
             )
             .await;
             let goal_id = format!("{RUN}-goal");
@@ -450,15 +482,28 @@ fn a_goal_whose_budget_is_spent_stays_stopped_and_says_how_to_continue() {
                 u64::MAX,
                 None,
                 None,
-                TokenLimits { total: Some(100), output: None, initial_total: 0 },
+                TokenLimits {
+                    total: Some(100),
+                    output: None,
+                    initial_total: 0,
+                },
                 None,
             )
             .await
             .expect("execution is durable");
             let earlier = uuid::Uuid::new_v4().to_string();
-            execution.admit(RequestPurpose::Work, earlier.clone()).await.unwrap();
             execution
-                .settle(earlier, Some(TokenUsage { total_tokens: 120, ..Default::default() }))
+                .admit(RequestPurpose::Work, earlier.clone())
+                .await
+                .unwrap();
+            execution
+                .settle(
+                    earlier,
+                    Some(TokenUsage {
+                        total_tokens: 120,
+                        ..Default::default()
+                    }),
+                )
                 .await
                 .unwrap();
             drop(execution);
@@ -477,9 +522,15 @@ fn a_goal_whose_budget_is_spent_stays_stopped_and_says_how_to_continue() {
             *sink.lock().unwrap() = Some((first, resume, second, model_requests));
         });
     });
-    let (first, resume, second, model_requests) =
-        cell.lock().unwrap().take().expect("the budget run produced a result");
-    assert_eq!(model_requests, 0, "a spent budget lets nothing reach the model");
+    let (first, resume, second, model_requests) = cell
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the budget run produced a result");
+    assert_eq!(
+        model_requests, 0,
+        "a spent budget lets nothing reach the model"
+    );
     for (label, result) in [("first", &first), ("after resume", &second)] {
         let err = result
             .as_ref()
@@ -517,7 +568,10 @@ fn goal_answer_spends_budget(
     run: &'static str,
     token_budget: i64,
     headless: bool,
-) -> (Result<crate::session::commands::PromptTurnOk, acp::Error>, Option<GoalStatus>) {
+) -> (
+    Result<crate::session::commands::PromptTurnOk, acp::Error>,
+    Option<GoalStatus>,
+) {
     let cell = Arc::new(std::sync::Mutex::new(None));
     let sink = cell.clone();
     block_on_session(move || {
@@ -564,16 +618,32 @@ fn a_headless_goal_whose_answer_spends_the_token_budget_ends_as_the_token_denial
     let (result, status) = goal_answer_spends_budget("p195-goal-budget-headless", 10, true);
     let err = match result {
         Err(err) => err,
-        Ok(ok) => panic!("the budget ended this run, so it is not a success: {:?}", ok.stop_reason),
+        Ok(ok) => panic!(
+            "the budget ended this run, so it is not a success: {:?}",
+            ok.stop_reason
+        ),
     };
     let wire = serde_json::to_value(&err).expect("serialize");
     assert_eq!(wire["data"]["code"], EXECUTION_BUDGET_DENIED_CODE, "{wire}");
-    assert_eq!(wire["data"]["rule"], ExecutionBudgetRule::TotalTokensExhausted.id(), "{wire}");
+    assert_eq!(
+        wire["data"]["rule"],
+        ExecutionBudgetRule::TotalTokensExhausted.id(),
+        "{wire}"
+    );
     assert_eq!(wire["data"]["total_token_limit"], 10, "{wire}");
-    assert!(wire["data"]["total_tokens_used"].as_u64().is_some_and(|used| used >= 10), "{wire}");
+    assert!(
+        wire["data"]["total_tokens_used"]
+            .as_u64()
+            .is_some_and(|used| used >= 10),
+        "{wire}"
+    );
     // K25 (Grok r1): the headless run can tell the answer completed and keep it in its one result document
     assert_eq!(wire["data"]["answer_completed"], true, "{wire}");
-    assert_eq!(status, Some(GoalStatus::BudgetLimited), "the goal stops budget-limited, not paused");
+    assert_eq!(
+        status,
+        Some(GoalStatus::BudgetLimited),
+        "the goal stops budget-limited, not paused"
+    );
 }
 
 /// Counter-test: the same answer with budget left, headless, is a success and the goal keeps going.
@@ -614,16 +684,36 @@ fn only_an_active_goal_with_a_spent_token_budget_is_a_headless_denial() {
 
             // An active goal with no budget, and one whose budget has room.
             start_goal(&actor, "p195-goal-none", None);
-            assert!(actor.goal_budget_spent_denial().await.is_none(), "no budget");
+            assert!(
+                actor.goal_budget_spent_denial().await.is_none(),
+                "no budget"
+            );
             start_goal(&actor, "p195-goal-room", Some(1_000_000));
-            assert!(actor.goal_budget_spent_denial().await.is_none(), "budget with room");
-            assert_eq!(actor.goal_tracker.lock().status(), Some(GoalStatus::Active), "left active");
+            assert!(
+                actor.goal_budget_spent_denial().await.is_none(),
+                "budget with room"
+            );
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(GoalStatus::Active),
+                "left active"
+            );
 
             // A goal that finished (the model completed it in this very turn) is not budget-limited.
             start_goal(&actor, "p195-goal-complete", Some(10));
-            assert!(actor.goal_tracker.lock().complete(), "fixture: the goal completes");
-            assert!(actor.goal_budget_spent_denial().await.is_none(), "complete goal");
-            assert_eq!(actor.goal_tracker.lock().status(), Some(GoalStatus::Complete), "left complete");
+            assert!(
+                actor.goal_tracker.lock().complete(),
+                "fixture: the goal completes"
+            );
+            assert!(
+                actor.goal_budget_spent_denial().await.is_none(),
+                "complete goal"
+            );
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(GoalStatus::Complete),
+                "left complete"
+            );
 
             // An active goal whose budget the spend reached: the denial, and the goal stops budget-limited.
             start_goal(&actor, "p195-goal-spent", Some(10));
@@ -634,8 +724,14 @@ fn only_an_active_goal_with_a_spent_token_budget_is_a_headless_denial() {
             assert_eq!(denial.rule, ExecutionBudgetRule::TotalTokensExhausted);
             assert_eq!(denial.total_token_limit, Some(10));
             assert!(denial.total_tokens_used >= 10, "{denial:?}");
-            assert_eq!(actor.goal_tracker.lock().status(), Some(GoalStatus::BudgetLimited));
-            assert!(actor.goal_budget_spent_denial().await.is_none(), "already stopped: not active any more");
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(GoalStatus::BudgetLimited)
+            );
+            assert!(
+                actor.goal_budget_spent_denial().await.is_none(),
+                "already stopped: not active any more"
+            );
         });
     });
 }

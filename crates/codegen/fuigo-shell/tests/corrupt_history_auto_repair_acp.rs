@@ -215,9 +215,17 @@ fn chat_path(session: &acp::SessionId, cwd: &Path) -> PathBuf {
 /// A dropped connection leaves the agent's session actors running in this process, each holding the session's shared
 /// turn-owner lock, and load never repairs a session a live actor holds. The crashed process whose torn write this
 /// test stands for holds nothing, so the builder's actors have to be gone before the cold load.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn close_and_release(conn: &acp::ClientSideConnection, session: &acp::SessionId, cwd: &Path) {
-    ext_method(conn, "fuigo/session/close", json!({ "sessionId": session.to_string() })).await;
+    ext_method(
+        conn,
+        "fuigo/session/close",
+        json!({ "sessionId": session.to_string() }),
+    )
+    .await;
     let lock_path = session_dir(session, cwd).join("turn_owner.lock");
     let deadline = tokio::time::Instant::now() + RPC_TIMEOUT;
     loop {
@@ -255,7 +263,10 @@ fn line_with<'a>(bytes: &'a [u8], needle: &str) -> (usize, Vec<&'a [u8]>) {
 
 /// Cuts the first line containing `needle` in half, as a crash in the middle of an append leaves it.
 /// Returns the damaged file's bytes.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn tear_line(path: &Path, needle: &str) -> Vec<u8> {
     let bytes = std::fs::read(path).expect("read chat history");
     let (at, lines) = line_with(&bytes, needle);
@@ -273,7 +284,10 @@ fn tear_line(path: &Path, needle: &str) -> Vec<u8> {
 }
 
 /// Removes the first line containing `needle` altogether. Every remaining line still parses.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn drop_line(path: &Path, needle: &str) -> Vec<u8> {
     let bytes = std::fs::read(path).expect("read chat history");
     let (at, lines) = line_with(&bytes, needle);
@@ -311,7 +325,8 @@ async fn try_ext_method(
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
-    let raw = serde_json::value::RawValue::from_string(params.to_string()).expect("serialize ext params");
+    let raw =
+        serde_json::value::RawValue::from_string(params.to_string()).expect("serialize ext params");
     match tokio::time::timeout(
         RPC_TIMEOUT,
         conn.ext_method(acp::ExtRequest::new(method, std::sync::Arc::from(raw))),
@@ -319,8 +334,13 @@ async fn try_ext_method(
     .await
     {
         Err(_) => Err(format!("{method} timed out")),
-        Ok(Err(e)) => Err(format!("{e} {}", e.data.as_ref().map(|d| d.to_string()).unwrap_or_default())),
-        Ok(Ok(resp)) => serde_json::from_str(resp.0.get()).map_err(|e| format!("{method}: bad response: {e}")),
+        Ok(Err(e)) => Err(format!(
+            "{e} {}",
+            e.data.as_ref().map(|d| d.to_string()).unwrap_or_default()
+        )),
+        Ok(Ok(resp)) => {
+            serde_json::from_str(resp.0.get()).map_err(|e| format!("{method}: bad response: {e}"))
+        }
     }
 }
 
@@ -359,37 +379,56 @@ async fn destructive_rewrites_are_refused(
         Ok(response) if response["success"] == false => {
             let error = response["error"].as_str().unwrap_or_default();
             if !error.contains("could not be backed up") {
-                failures.push(format!("backup failed: the refused rewind does not say why: {response}"));
+                failures.push(format!(
+                    "backup failed: the refused rewind does not say why: {response}"
+                ));
             }
         }
-        other => failures.push(format!("backup failed: a rewind was not refused: {other:?}")),
+        other => failures.push(format!(
+            "backup failed: a rewind was not refused: {other:?}"
+        )),
     }
     let requests_before = mock.requests().len();
     let compact = tokio::time::timeout(
         std::time::Duration::from_secs(120),
-        try_ext_method(conn, "fuigo/compact_conversation", json!({ "sessionId": session.to_string() })),
+        try_ext_method(
+            conn,
+            "fuigo/compact_conversation",
+            json!({ "sessionId": session.to_string() }),
+        ),
     )
     .await
     .unwrap_or_else(|_| Err("fuigo/compact_conversation did not answer".into()));
     match &compact {
         Err(error) if error.contains("could not be backed up") => {}
-        other => failures.push(format!("backup failed: a compaction was not refused with the reason: {other:?}")),
+        other => failures.push(format!(
+            "backup failed: a compaction was not refused with the reason: {other:?}"
+        )),
     }
     let made = mock.requests().len() - requests_before;
     if made != 0 {
-        failures.push(format!("backup failed: the refused compaction still sent {made} request(s)"));
+        failures.push(format!(
+            "backup failed: the refused compaction still sent {made} request(s)"
+        ));
     }
     let transcript_after = std::fs::read(&updates_path).expect("read updates.jsonl");
     if String::from_utf8_lossy(&transcript_after).contains("rewind_marker") {
-        failures.push("backup failed: the transcript records a rewind the file does not have".into());
+        failures
+            .push("backup failed: the transcript records a rewind the file does not have".into());
     }
-    let added = String::from_utf8_lossy(&transcript_after[transcript_before.len().min(transcript_after.len())..])
-        .into_owned();
+    let added = String::from_utf8_lossy(
+        &transcript_after[transcript_before.len().min(transcript_after.len())..],
+    )
+    .into_owned();
     if added.contains("compaction") {
-        failures.push(format!("backup failed: the transcript records a compaction the file does not have: {added}"));
+        failures.push(format!(
+            "backup failed: the transcript records a compaction the file does not have: {added}"
+        ));
     }
     if std::fs::read(chat_path(session, cwd)).expect("read chat history") != chat_before {
-        failures.push("backup failed: a refused rewind or compaction changed chat_history.jsonl".into());
+        failures.push(
+            "backup failed: a refused rewind or compaction changed chat_history.jsonl".into(),
+        );
     }
     // Memory: the next request still carries the turn the rewind would have dropped (it asks the same question again).
     let messages = next_turn_messages(conn, mock, session).await;
@@ -401,12 +440,18 @@ async fn destructive_rewrites_are_refused(
     }
     let after_turn = std::fs::read(chat_path(session, cwd)).expect("read chat history");
     if !after_turn.starts_with(original) {
-        failures.push("backup failed: the original bytes are gone from disk after the refused rewrites".into());
+        failures.push(
+            "backup failed: the original bytes are gone from disk after the refused rewrites"
+                .into(),
+        );
     }
     failures
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_torn_chat_history_line_is_repaired_at_load() {
     run_agent_test(|cwd, mock| async move {
@@ -459,7 +504,8 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
         // The same damage, with the backup made impossible.
         let no_backup_original = tear_line(&chat_path(&no_backup, &cwd), CALL_ID);
         // A directory where the backup belongs: nothing can be published there, and a directory is not a backup.
-        std::fs::create_dir(session_dir(&no_backup, &cwd).join(BACKUP_NAME)).expect("block the backup");
+        std::fs::create_dir(session_dir(&no_backup, &cwd).join(BACKUP_NAME))
+            .expect("block the backup");
         // A torn line whose loss leaves the history valid (the final answer): nothing to repair.
         tear_line(&chat_path(&harmless_tear, &cwd), "FINAL-ANSWER-P96");
         // An orphaned result with no unreadable line: the loader skipped nothing, so load must not touch it.
@@ -467,18 +513,26 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
         let clean_original = std::fs::read(chat_path(&clean, &cwd)).expect("read chat history");
         // A session that broke before this release: its first load after the tear kept the raw file as `.corrupt`
         // and rewrote the history without the torn line. Every line parses now; the orphaned result is still there.
-        let broken_earlier_intact = std::fs::read(chat_path(&broken_earlier, &cwd)).expect("read chat history");
+        let broken_earlier_intact =
+            std::fs::read(chat_path(&broken_earlier, &cwd)).expect("read chat history");
         let broken_earlier_corrupt = tear_line(&chat_path(&broken_earlier, &cwd), CALL_ID);
-        std::fs::write(session_dir(&broken_earlier, &cwd).join(CORRUPT_NAME), &broken_earlier_corrupt)
-            .expect("write the .corrupt copy");
+        std::fs::write(
+            session_dir(&broken_earlier, &cwd).join(CORRUPT_NAME),
+            &broken_earlier_corrupt,
+        )
+        .expect("write the .corrupt copy");
         // The same line is then gone altogether (dropped from the intact file, so the right line is removed).
-        std::fs::write(chat_path(&broken_earlier, &cwd), &broken_earlier_intact).expect("restore chat history");
+        std::fs::write(chat_path(&broken_earlier, &cwd), &broken_earlier_intact)
+            .expect("restore chat history");
         let broken_earlier_original = drop_line(&chat_path(&broken_earlier, &cwd), CALL_ID);
         // A `.corrupt` copy next to a history that needs no repair.
         let corrupt_copy_only_original =
             std::fs::read(chat_path(&corrupt_copy_only, &cwd)).expect("read chat history");
-        std::fs::write(session_dir(&corrupt_copy_only, &cwd).join(CORRUPT_NAME), b"{\"torn\n")
-            .expect("write the .corrupt copy");
+        std::fs::write(
+            session_dir(&corrupt_copy_only, &cwd).join(CORRUPT_NAME),
+            b"{\"torn\n",
+        )
+        .expect("write the .corrupt copy");
 
         // ── Agent B: cold loads. ──
         let recorder = Recorder::default();
@@ -502,7 +556,9 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                         bytes.len(),
                         torn_original.len()
                     )),
-                    Err(e) => failures.push(format!("torn line: no backup at {}: {e}", backup.display())),
+                    Err(e) => {
+                        failures.push(format!("torn line: no backup at {}: {e}", backup.display()))
+                    }
                 }
                 let on_disk = std::fs::read(chat_path(&torn, &cwd)).expect("read chat history");
                 let unparseable = on_disk
@@ -511,29 +567,44 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                     .filter(|l| serde_json::from_slice::<Value>(l).is_err())
                     .count();
                 if unparseable != 0 {
-                    failures.push(format!("torn line: {unparseable} unreadable line(s) are still on disk"));
+                    failures.push(format!(
+                        "torn line: {unparseable} unreadable line(s) are still on disk"
+                    ));
                 }
                 let notices = recorder.repair_notices(&torn);
                 match notices.as_slice() {
                     [notice] => {
                         if !notice.starts_with("Session history repaired: removed 1 tool result") {
-                            failures.push(format!("torn line: the notice does not name the repair first: {notice}"));
+                            failures.push(format!(
+                                "torn line: the notice does not name the repair first: {notice}"
+                            ));
                         }
-                        for want in ["1 unreadable line", "1 tool result", &backup.display().to_string()] {
+                        for want in [
+                            "1 unreadable line",
+                            "1 tool result",
+                            &backup.display().to_string(),
+                        ] {
                             if !notice.contains(want) {
-                                failures.push(format!("torn line: the notice lacks {want:?}: {notice}"));
+                                failures.push(format!(
+                                    "torn line: the notice lacks {want:?}: {notice}"
+                                ));
                             }
                         }
                     }
-                    other => failures.push(format!("torn line: expected one repair notice, got {other:?}")),
+                    other => failures.push(format!(
+                        "torn line: expected one repair notice, got {other:?}"
+                    )),
                 }
                 // The note has its own kind; it must not arrive labelled as an image drop.
                 let as_image_drop = recorder.updates_of_kind(&torn, "image_dropped");
                 if !as_image_drop.is_empty() {
-                    failures.push(format!("torn line: an image-drop note was sent: {as_image_drop:?}"));
+                    failures.push(format!(
+                        "torn line: an image-drop note was sent: {as_image_drop:?}"
+                    ));
                 }
                 let transcript =
-                    std::fs::read_to_string(session_dir(&torn, &cwd).join("updates.jsonl")).unwrap_or_default();
+                    std::fs::read_to_string(session_dir(&torn, &cwd).join("updates.jsonl"))
+                        .unwrap_or_default();
                 if !transcript.contains(BACKUP_NAME) {
                     failures.push("torn line: the notice is not in the saved transcript".into());
                 }
@@ -554,13 +625,19 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                 }
                 let messages = next_turn_messages(&b, &mock, &clean).await;
                 if !orphaned_results(&messages).is_empty() {
-                    failures.push("clean session (fixture): its own request carries an orphaned result".into());
+                    failures.push(
+                        "clean session (fixture): its own request carries an orphaned result"
+                            .into(),
+                    );
                 }
                 if session_dir(&clean, &cwd).join(BACKUP_NAME).exists() {
                     failures.push("clean session: a backup was created".into());
                 }
                 if !recorder.repair_notices(&clean).is_empty() {
-                    failures.push(format!("clean session: a repair notice was sent: {:?}", recorder.repair_notices(&clean)));
+                    failures.push(format!(
+                        "clean session: a repair notice was sent: {:?}",
+                        recorder.repair_notices(&clean)
+                    ));
                 }
             }
             Err(e) => failures.push(format!("clean session: {e}")),
@@ -569,7 +646,8 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
         // 3. Backup impossible: the file on disk is not rewritten; the request is still well formed (repaired in memory).
         match load(&b, &no_backup, &cwd).await {
             Ok(()) => {
-                let after_load = std::fs::read(chat_path(&no_backup, &cwd)).expect("read chat history");
+                let after_load =
+                    std::fs::read(chat_path(&no_backup, &cwd)).expect("read chat history");
                 if after_load != no_backup_original {
                     failures.push(format!(
                         "backup failed: load rewrote chat_history.jsonl without a backup ({} bytes before, {} after)",
@@ -585,21 +663,36 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                     ));
                 }
                 // The turn appends its own messages; the original bytes must still be there, in place.
-                let after_turn = std::fs::read(chat_path(&no_backup, &cwd)).expect("read chat history");
+                let after_turn =
+                    std::fs::read(chat_path(&no_backup, &cwd)).expect("read chat history");
                 if !after_turn.starts_with(&no_backup_original) {
-                    failures.push("backup failed: the original bytes are gone from disk after the next turn".into());
+                    failures.push(
+                        "backup failed: the original bytes are gone from disk after the next turn"
+                            .into(),
+                    );
                 }
                 if !session_dir(&no_backup, &cwd).join(BACKUP_NAME).is_dir() {
-                    failures.push("backup failed (fixture): the directory blocking the backup is gone".into());
+                    failures.push(
+                        "backup failed (fixture): the directory blocking the backup is gone".into(),
+                    );
                 }
                 let notices = recorder.repair_notices(&no_backup);
                 if !notices.iter().any(|n| n.contains("could not be backed up")) {
-                    failures.push(format!("backup failed: no notice says the backup failed: {notices:?}"));
+                    failures.push(format!(
+                        "backup failed: no notice says the backup failed: {notices:?}"
+                    ));
                 }
                 // 3b. While the file cannot be rewritten, a rewind and a compaction are refused with a clear error
                 //     and change nothing: not the history in memory, not the transcript, not the file.
                 failures.extend(
-                    destructive_rewrites_are_refused(&b, &mock, &no_backup, &cwd, &no_backup_original).await,
+                    destructive_rewrites_are_refused(
+                        &b,
+                        &mock,
+                        &no_backup,
+                        &cwd,
+                        &no_backup_original,
+                    )
+                    .await,
                 );
             }
             Err(e) => failures.push(format!("backup failed: {e}")),
@@ -610,10 +703,16 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
             Ok(()) => {
                 next_turn_messages(&b, &mock, &harmless_tear).await;
                 if session_dir(&harmless_tear, &cwd).join(BACKUP_NAME).exists() {
-                    failures.push("harmless tear: a repair backup was created although nothing needed repair".into());
+                    failures.push(
+                        "harmless tear: a repair backup was created although nothing needed repair"
+                            .into(),
+                    );
                 }
                 if !recorder.repair_notices(&harmless_tear).is_empty() {
-                    failures.push("harmless tear: a repair notice was sent although nothing was repaired".into());
+                    failures.push(
+                        "harmless tear: a repair notice was sent although nothing was repaired"
+                            .into(),
+                    );
                 }
             }
             Err(e) => failures.push(format!("harmless tear: {e}")),
@@ -624,10 +723,18 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
             Ok(()) => {
                 // The mock accepts the malformed request; the turn only lets any notice arrive before the checks.
                 next_turn_messages(&b, &mock, &orphan_no_tear).await;
-                if session_dir(&orphan_no_tear, &cwd).join(CORRUPT_NAME).exists() {
-                    failures.push("orphan without a torn line (fixture): a .corrupt copy exists".into());
+                if session_dir(&orphan_no_tear, &cwd)
+                    .join(CORRUPT_NAME)
+                    .exists()
+                {
+                    failures.push(
+                        "orphan without a torn line (fixture): a .corrupt copy exists".into(),
+                    );
                 }
-                if session_dir(&orphan_no_tear, &cwd).join(BACKUP_NAME).exists() {
+                if session_dir(&orphan_no_tear, &cwd)
+                    .join(BACKUP_NAME)
+                    .exists()
+                {
                     failures.push("orphan without a torn line: load made a repair backup".into());
                 }
                 if !recorder.repair_notices(&orphan_no_tear).is_empty() {
@@ -648,7 +755,8 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                 let torn_under_live = tear_line(&chat_path(&live, &cwd), CALL_ID);
                 match load(&b, &live, &cwd).await {
                     Ok(()) => {
-                        let after = std::fs::read(chat_path(&live, &cwd)).expect("read chat history");
+                        let after =
+                            std::fs::read(chat_path(&live, &cwd)).expect("read chat history");
                         if after != torn_under_live {
                             failures.push("live session: a reconnect rewrote the live session's chat_history.jsonl".into());
                         }
@@ -683,12 +791,20 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                 let backup = session_dir(&broken_earlier, &cwd).join(BACKUP_NAME);
                 match std::fs::read(&backup) {
                     Ok(bytes) if bytes == broken_earlier_original => {}
-                    Ok(_) => failures.push("broken earlier: the backup is not the file as found".into()),
-                    Err(e) => failures.push(format!("broken earlier: no backup at {}: {e}", backup.display())),
+                    Ok(_) => {
+                        failures.push("broken earlier: the backup is not the file as found".into())
+                    }
+                    Err(e) => failures.push(format!(
+                        "broken earlier: no backup at {}: {e}",
+                        backup.display()
+                    )),
                 }
                 let corrupt = session_dir(&broken_earlier, &cwd).join(CORRUPT_NAME);
-                if std::fs::read(&corrupt).ok().as_deref() != Some(broken_earlier_corrupt.as_slice()) {
-                    failures.push("broken earlier: the .corrupt copy was changed or removed".into());
+                if std::fs::read(&corrupt).ok().as_deref()
+                    != Some(broken_earlier_corrupt.as_slice())
+                {
+                    failures
+                        .push("broken earlier: the .corrupt copy was changed or removed".into());
                 }
                 let notices = recorder.repair_notices(&broken_earlier);
                 match notices.as_slice() {
@@ -699,11 +815,15 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                             &backup.display().to_string(),
                         ] {
                             if !notice.contains(want) {
-                                failures.push(format!("broken earlier: the notice lacks {want:?}: {notice}"));
+                                failures.push(format!(
+                                    "broken earlier: the notice lacks {want:?}: {notice}"
+                                ));
                             }
                         }
                     }
-                    other => failures.push(format!("broken earlier: expected one repair notice, got {other:?}")),
+                    other => failures.push(format!(
+                        "broken earlier: expected one repair notice, got {other:?}"
+                    )),
                 }
 
                 // 7b. A second cold load after the repair does nothing more.
@@ -718,9 +838,14 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                         // not replay it (P123): the user saw it when the repair was made, so the client has received
                         // it exactly once across the two loads. A new repair would save a second note, with different
                         // words (the backup is already there).
-                        let saved = std::fs::read_to_string(session_dir(&broken_earlier, &cwd).join("updates.jsonl"))
-                            .unwrap_or_default();
-                        let saved_notes = saved.lines().filter(|l| l.contains("\"history_repaired\"")).count();
+                        let saved = std::fs::read_to_string(
+                            session_dir(&broken_earlier, &cwd).join("updates.jsonl"),
+                        )
+                        .unwrap_or_default();
+                        let saved_notes = saved
+                            .lines()
+                            .filter(|l| l.contains("\"history_repaired\""))
+                            .count();
                         if saved_notes != 1 {
                             failures.push(format!(
                                 "broken earlier, second load: the transcript holds {saved_notes} repair notes, expected 1"
@@ -733,15 +858,25 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                                 notices.len()
                             ));
                         }
-                        let on_disk = std::fs::read(chat_path(&broken_earlier, &cwd)).expect("read chat history");
+                        let on_disk = std::fs::read(chat_path(&broken_earlier, &cwd))
+                            .expect("read chat history");
                         if String::from_utf8_lossy(&on_disk).matches(CALL_ID).count() != 0 {
-                            failures.push("broken earlier, second load: the orphaned result is back on disk".into());
+                            failures.push(
+                                "broken earlier, second load: the orphaned result is back on disk"
+                                    .into(),
+                            );
                         }
-                        if std::fs::read(&backup).ok().as_deref() != Some(broken_earlier_original.as_slice()) {
+                        if std::fs::read(&backup).ok().as_deref()
+                            != Some(broken_earlier_original.as_slice())
+                        {
                             failures.push("broken earlier, second load: the backup changed".into());
                         }
-                        if std::fs::read(&corrupt).ok().as_deref() != Some(broken_earlier_corrupt.as_slice()) {
-                            failures.push("broken earlier, second load: the .corrupt copy changed".into());
+                        if std::fs::read(&corrupt).ok().as_deref()
+                            != Some(broken_earlier_corrupt.as_slice())
+                        {
+                            failures.push(
+                                "broken earlier, second load: the .corrupt copy changed".into(),
+                            );
                         }
                     }
                     Err(e) => failures.push(format!("broken earlier, second load: {e}")),
@@ -753,7 +888,8 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
         // 8. A `.corrupt` copy next to a history that needs no repair: file byte-identical, no backup, no notice.
         match load(&b, &corrupt_copy_only, &cwd).await {
             Ok(()) => {
-                let after = std::fs::read(chat_path(&corrupt_copy_only, &cwd)).expect("read chat history");
+                let after =
+                    std::fs::read(chat_path(&corrupt_copy_only, &cwd)).expect("read chat history");
                 if after != corrupt_copy_only_original {
                     failures.push(format!(
                         ".corrupt copy only: load rewrote chat_history.jsonl ({} bytes before, {} after)",
@@ -762,15 +898,21 @@ fn a_torn_chat_history_line_is_repaired_at_load() {
                     ));
                 }
                 next_turn_messages(&b, &mock, &corrupt_copy_only).await;
-                if session_dir(&corrupt_copy_only, &cwd).join(BACKUP_NAME).exists() {
+                if session_dir(&corrupt_copy_only, &cwd)
+                    .join(BACKUP_NAME)
+                    .exists()
+                {
                     failures.push(".corrupt copy only: a repair backup was created".into());
                 }
                 if !recorder.repair_notices(&corrupt_copy_only).is_empty() {
                     failures.push(".corrupt copy only: a repair notice was sent".into());
                 }
-                let corrupt = std::fs::read(session_dir(&corrupt_copy_only, &cwd).join(CORRUPT_NAME)).ok();
+                let corrupt =
+                    std::fs::read(session_dir(&corrupt_copy_only, &cwd).join(CORRUPT_NAME)).ok();
                 if corrupt.as_deref() != Some(b"{\"torn\n".as_slice()) {
-                    failures.push(".corrupt copy only: the .corrupt copy was changed or removed".into());
+                    failures.push(
+                        ".corrupt copy only: the .corrupt copy was changed or removed".into(),
+                    );
                 }
             }
             Err(e) => failures.push(format!(".corrupt copy only: {e}")),

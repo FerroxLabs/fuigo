@@ -455,7 +455,9 @@ async fn concurrent_phase(backend: &ChannelBackend, gate: &tokio::sync::Semaphor
         .map(|k| {
             let backend = backend.clone();
             tokio::task::spawn_local(async move {
-                backend.spawn(soak_request(format!("conc-{k}"), true), None).await
+                backend
+                    .spawn(soak_request(format!("conc-{k}"), true), None)
+                    .await
             })
         })
         .collect();

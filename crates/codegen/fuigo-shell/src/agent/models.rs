@@ -137,7 +137,9 @@ struct AuthRejectGate {
 fn credential_fingerprint(auth: Option<&FuigoAuth>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    crate::agent::auth_method::read_fuigo_api_key_env().ok().hash(&mut h);
+    crate::agent::auth_method::read_fuigo_api_key_env()
+        .ok()
+        .hash(&mut h);
     auth.map(|a| a.key.as_str()).hash(&mut h);
     h.finish()
 }
@@ -301,7 +303,8 @@ impl ModelsManagerBuilder {
         let has_session = self.auth_manager.current_or_expired().is_some();
         let fetch_auth = ModelFetchAuth::resolve(&self.cfg.endpoints, has_session);
         let current_reasoning_effort = self.cfg.models.default_reasoning_effort;
-        let credential_seen = credential_fingerprint(self.auth_manager.current_or_expired().as_ref());
+        let credential_seen =
+            credential_fingerprint(self.auth_manager.current_or_expired().as_ref());
         ModelsManager {
             inner: Arc::new(Inner {
                 catalog: RwLock::new(CatalogState {
@@ -363,7 +366,10 @@ impl ModelsManager {
         crate::agent::helper_epoch::HelperEpoch {
             model_switch: self.model_switch_generation(),
             catalog_reload: self.catalog_reload_generation(),
-            session_switches: self.inner.session_switches.load(std::sync::atomic::Ordering::Relaxed),
+            session_switches: self
+                .inner
+                .session_switches
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -372,11 +378,15 @@ impl ModelsManager {
     /// own counter. It is NOT a catalog reload (P132): the caller rebuilds the switching session's title client
     /// directly, and the all-sessions rebuild stays with real reloads.
     pub(crate) fn note_session_model_switch(&self) {
-        self.inner.session_switches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .session_switches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn note_catalog_reload(&self) {
-        self.inner.catalog_reload_watch.send_modify(|generation| *generation += 1);
+        self.inner
+            .catalog_reload_watch
+            .send_modify(|generation| *generation += 1);
     }
 
     /// Cheap snapshot of the current model-switch generation, for the laziness-check poll loop.
@@ -637,7 +647,9 @@ impl ModelsManager {
 
     /// The wire model of the session's selected catalog key under the allowlist in force (see [`selected_wire_model`]).
     pub(crate) fn selected_wire_model(&self, catalog_key: &str) -> Option<String> {
-        self.with_helper_catalog(|allowlist, models| selected_wire_model(allowlist, models, catalog_key))
+        self.with_helper_catalog(|allowlist, models| {
+            selected_wire_model(allowlist, models, catalog_key)
+        })
     }
 
     #[cfg(test)]
@@ -911,7 +923,8 @@ impl ModelsManager {
     /// catalogue. Anything that brings the key in later asks this.
     pub(crate) fn fetch_credential_changed(&self) -> bool {
         let session = self.inner.auth_manager.current_or_expired().is_some();
-        ModelFetchAuth::resolve(&self.inner.cfg.read().endpoints, session) != *self.inner.fetch_auth.read()
+        ModelFetchAuth::resolve(&self.inner.cfg.read().endpoints, session)
+            != *self.inner.fetch_auth.read()
     }
 
     /// [`Self::on_auth_changed`] when [`Self::fetch_credential_changed`]: a no-op for a start whose credential
@@ -1007,7 +1020,9 @@ impl ModelsManager {
             return false;
         }
         match gate.blocked_until {
-            Some(until) if gate.credential == Some(credential) => tokio::time::Instant::now() < until,
+            Some(until) if gate.credential == Some(credential) => {
+                tokio::time::Instant::now() < until
+            }
             _ => false,
         }
     }
@@ -1017,14 +1032,20 @@ impl ModelsManager {
         let first = {
             let mut gate = self.inner.auth_gate.lock();
             let first = gate.credential != Some(credential) || gate.rejections == 0;
-            gate.rejections = if gate.credential == Some(credential) { gate.rejections + 1 } else { 1 };
+            gate.rejections = if gate.credential == Some(credential) {
+                gate.rejections + 1
+            } else {
+                1
+            };
             gate.credential = Some(credential);
             let idx = (gate.rejections as usize - 1).min(AUTH_REJECT_BACKOFF_MINUTES.len() - 1);
             let wait = std::time::Duration::from_secs(AUTH_REJECT_BACKOFF_MINUTES[idx] * 60);
             gate.blocked_until = Some(tokio::time::Instant::now() + wait);
             first
         };
-        tracing::warn!("model catalog: the API key or sign-in was rejected (401); background refresh backs off");
+        tracing::warn!(
+            "model catalog: the API key or sign-in was rejected (401); background refresh backs off"
+        );
         if first {
             self.inner
                 .auth_notice
@@ -1057,7 +1078,9 @@ impl ModelsManager {
         }
         let outcome = tokio::time::timeout(
             crate::http::STARTUP_FETCH_TIMEOUT,
-            self.inner.endpoint.fetch_models_outcome(endpoints, auth, fetch_auth),
+            self.inner
+                .endpoint
+                .fetch_models_outcome(endpoints, auth, fetch_auth),
         )
         .await;
         Some(match outcome {
@@ -1270,10 +1293,9 @@ impl ModelsManager {
                 .iter()
                 .map(|(id, p)| (id.clone(), p.base_url.clone()))
                 .collect();
-            let changed = crate::auth::key_models::refresh_stale(|id| {
-                base_urls.get(id).cloned().flatten()
-            })
-            .await;
+            let changed =
+                crate::auth::key_models::refresh_stale(|id| base_urls.get(id).cloned().flatten())
+                    .await;
             if changed {
                 let cfg = mgr.inner.cfg.read().clone();
                 mgr.apply_config(cfg);
@@ -1494,7 +1516,8 @@ impl ModelsManager {
             let _attempt = attempt;
             let _refresh_guard = RefreshInFlightGuard(mgr.inner.clone());
             let auth = Self::bounded_startup_auth(&auth_manager).await;
-            let Some(new_prefetched) = mgr.fetch_throttled(endpoints, auth, fetch_auth).await else {
+            let Some(new_prefetched) = mgr.fetch_throttled(endpoints, auth, fetch_auth).await
+            else {
                 return;
             };
             if !mgr.apply_refresh_result_fenced(&cfg, new_prefetched, new_etag, generation) {
@@ -1707,8 +1730,8 @@ impl ModelsManager {
 mod cache;
 mod endpoint;
 mod fetch;
-mod resolution;
 pub(crate) mod ranking;
+mod resolution;
 mod settings_cache;
 pub mod startup_prefetch;
 
@@ -1718,6 +1741,9 @@ pub(crate) use fetch::*;
 pub(crate) use resolution::*;
 pub(crate) use settings_cache::*;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests;

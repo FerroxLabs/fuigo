@@ -546,9 +546,9 @@ fn measure_entries(entries: &[PickerEntry<'_>]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::layout::Rect;
     use fuigo_pager::views::extensions_modal::ExtensionsModalState;
     use fuigo_pager::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo, McpWireSource};
+    use ratatui::layout::Rect;
 
     fn agent() -> AgentView {
         minimal_api::test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp/repo"))
@@ -720,12 +720,18 @@ mod tests {
                 .unwrap_or_else(|| panic!("no row for {name}:\n{text}"))
         };
         let denied_row = row("denied-srv");
-        assert!(denied_row.contains("blocked by policy"), "policy verdict must win:\n{denied_row}");
+        assert!(
+            denied_row.contains("blocked by policy"),
+            "policy verdict must win:\n{denied_row}"
+        );
         assert!(
             !denied_row.contains("disabled"),
             "policy-blocked row must not read as a personal disable:\n{denied_row}"
         );
-        assert!(row("manual-srv").contains("disabled"), "personal disable keeps its badge:\n{text}");
+        assert!(
+            row("manual-srv").contains("disabled"),
+            "personal disable keeps its badge:\n{text}"
+        );
     }
 
     /// P152 (Astra r2 #5): the minimal `/mcps` list shows why a server is unavailable, on its collapsed row.
@@ -740,7 +746,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut a, ListPanel::Mcps, &theme);
         let text = buffer_text(&buf);
-        assert!(text.contains("not connected: spawn failed"), "reason on the row:\n{text}");
+        assert!(
+            text.contains("not connected: spawn failed"),
+            "reason on the row:\n{text}"
+        );
     }
 
     /// K7: a server waiting on sign-in says why its automatic token refresh was refused.
@@ -748,7 +757,9 @@ mod tests {
     fn mcps_panel_shows_why_a_refresh_was_refused() {
         let _theme = fuigo_pager::theme::cache::pin_theme();
         // The reason arrives as the shell sent it and goes through the pager's list conversion, which filters it
-        use fuigo_pager::views::mcps_modal::{McpsListResponse, McpsServerEntry, McpsServerSession, convert_list_response};
+        use fuigo_pager::views::mcps_modal::{
+            McpsListResponse, McpsServerEntry, McpsServerSession, convert_list_response,
+        };
         let wire = McpsListResponse {
             servers: vec![McpsServerEntry {
                 name: "cog".into(),
@@ -774,7 +785,10 @@ mod tests {
         };
         let converted = convert_list_response(wire);
         let reason = converted[0].status_reason.clone().expect("reason kept");
-        assert!(!reason.chars().any(char::is_control), "control char survived: {reason:?}");
+        assert!(
+            !reason.chars().any(char::is_control),
+            "control char survived: {reason:?}"
+        );
         let mut a = with_mcps(converted);
         let theme = Theme::current();
         let area = Rect::new(0, 0, 120, 24);
@@ -785,7 +799,10 @@ mod tests {
             text.contains("sign-in needed, refresh refused:"),
             "reason on the row:\n{text}"
         );
-        assert!(text.contains("refusing to send"), "reason text kept:\n{text}");
+        assert!(
+            text.contains("refusing to send"),
+            "reason text kept:\n{text}"
+        );
     }
 
     #[test]

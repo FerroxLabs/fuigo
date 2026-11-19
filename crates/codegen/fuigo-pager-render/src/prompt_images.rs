@@ -855,7 +855,8 @@ pub(crate) fn is_network_path(path: &std::path::Path) -> bool {
     }
     // WSL distributions are served locally (9P), not by an SMB host: `\\wsl$\` and `\\wsl.localhost\` stay usable.
     let host = s[2..].split(['\\', '/']).next().unwrap_or("");
-    !(sep(b[1]) && (host.eq_ignore_ascii_case("wsl$") || host.eq_ignore_ascii_case("wsl.localhost")))
+    !(sep(b[1])
+        && (host.eq_ignore_ascii_case("wsl$") || host.eq_ignore_ascii_case("wsl.localhost")))
 }
 
 /// Drive-letter (`X:\` / `X:/`) or UNC (`\\…`) Windows path.
@@ -1276,7 +1277,10 @@ pub fn persist_to_session(
 /// Derive the `images/` directory for a session.
 ///
 /// Returns `None` if session identity is not yet known.
-#[allow(clippy::disallowed_methods, reason = "independently named, write-once pasted-image asset: a fresh UUID-v4 name per paste, published by temp file + rename; creates only images/ and its own image-<uuid>.* files; never touches the session journal (chat_history.jsonl, updates.jsonl, events.jsonl, summary.json) or any name another writer uses (design F5 5.4.3, 5.6)")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "independently named, write-once pasted-image asset: a fresh UUID-v4 name per paste, published by temp file + rename; creates only images/ and its own image-<uuid>.* files; never touches the session journal (chat_history.jsonl, updates.jsonl, events.jsonl, summary.json) or any name another writer uses (design F5 5.4.3, 5.6)"
+)]
 pub fn session_images_dir(
     session_id: Option<&agent_client_protocol::SessionId>,
     cwd: &std::path::Path,
@@ -1294,7 +1298,10 @@ pub fn session_images_dir(
 /// Mirrors [`session_images_dir`]: rendered diagram PNGs live alongside the session's other artifacts (`events.jsonl`, `images/`).
 /// They are owned by the session and torn down with it.
 /// Returns `None` until session identity is known (no diagrams are cached on disk before then).
-#[allow(clippy::disallowed_methods, reason = "content-addressed mermaid render cache, write-once per key; creates only mermaid/ and its own files; never the session journal (design F5 5.4.3, 5.6)")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "content-addressed mermaid render cache, write-once per key; creates only mermaid/ and its own files; never the session journal (design F5 5.4.3, 5.6)"
+)]
 pub fn session_mermaid_dir(
     session_id: Option<&agent_client_protocol::SessionId>,
     cwd: &std::path::Path,
@@ -1498,9 +1505,9 @@ fn build_content_blocks_with_prefixes_and_caps_ref(
             ImageContent::new(data, mime_type)
                 .uri(uri)
                 // Record the `[Image #N]` display number so the server resolves the token by number, not list position. See `AttachedImages`.
-                .meta(Some(
-                    fuigo_shared::placeholder_images::display_number_meta(img.display_number),
-                )),
+                .meta(Some(fuigo_shared::placeholder_images::display_number_meta(
+                    img.display_number,
+                ))),
         ));
     }
 
@@ -1530,7 +1537,12 @@ pub fn sent_image_display_numbers(blocks: &[agent_client_protocol::ContentBlock]
 /// Decoded length of standard base64 `data`, from its unpadded length (exact for valid input), so a payload of exactly
 /// the cap is not refused for its padding.
 fn base64_decoded_len(data: &str) -> usize {
-    let pad = data.bytes().rev().take(2).take_while(|&b| b == b'=').count();
+    let pad = data
+        .bytes()
+        .rev()
+        .take(2)
+        .take_while(|&b| b == b'=')
+        .count();
     let n = data.len() - pad;
     n / 4 * 3 + n % 4 * 3 / 4
 }
@@ -1552,7 +1564,9 @@ fn decode_sent_inline(
 /// Only the block's inline bytes are used, and only when they are a real image within the send limit (the paste checks).
 /// The block's `uri` is never read: a stored session is not trusted to name a file, and a file can change after the send.
 /// `None` when the block names no `[Image #N]` or its inline bytes are missing or not a valid image.
-pub fn pasted_image_from_sent_block(img: &agent_client_protocol::ImageContent) -> Option<PastedImage> {
+pub fn pasted_image_from_sent_block(
+    img: &agent_client_protocol::ImageContent,
+) -> Option<PastedImage> {
     use base64::Engine as _;
     let display_number =
         fuigo_shared::placeholder_images::display_number_from_meta(img.meta.as_ref())?;
@@ -1638,11 +1652,9 @@ fn resolve_orphan_placeholders(
                     ImageContent::new(data, loaded.mime_type)
                         .uri(uri)
                         // Same `[Image #N]` display-number mapping as inline images
-                        .meta(Some(
-                            fuigo_shared::placeholder_images::display_number_meta(
-                                ph.display_number,
-                            ),
-                        )),
+                        .meta(Some(fuigo_shared::placeholder_images::display_number_meta(
+                            ph.display_number,
+                        ))),
                 );
                 tracing::info!(
                     path = ?ph.path,
@@ -2024,7 +2036,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         assert!(img.encoded_bytes.is_none(), "in-memory bytes released");
         // No .tmp left behind after success
@@ -3929,10 +3944,13 @@ mod tests {
         std::fs::write(&external, make_test_png(20, 20)).unwrap();
         let meta = Some(fuigo_shared::placeholder_images::display_number_meta(2));
         let uri = Some(format!("file://{}", external.display()));
-        let block = |data: &str, uri: Option<String>, meta| ImageContent::new(data, "image/png").uri(uri).meta(meta);
+        let block = |data: &str, uri: Option<String>, meta| {
+            ImageContent::new(data, "image/png").uri(uri).meta(meta)
+        };
 
         // Valid inline bytes: restored from them alone, never from the named file
-        let restored = pasted_image_from_sent_block(&block(&b64(&png), uri.clone(), meta.clone())).unwrap();
+        let restored =
+            pasted_image_from_sent_block(&block(&b64(&png), uri.clone(), meta.clone())).unwrap();
         assert_eq!(restored.display_number, 2);
         assert_eq!(restored.encoded_bytes.as_deref(), Some(png.as_slice()));
         assert!(restored.session_image_path.is_none() && restored.source_path.is_none());
@@ -3945,14 +3963,18 @@ mod tests {
         let at = same_len.len() - 20;
         same_len[at] ^= 0xff;
         std::fs::write(&external, &same_len).unwrap();
-        let again = pasted_image_from_sent_block(&block(&b64(&png), uri.clone(), meta.clone())).unwrap();
+        let again =
+            pasted_image_from_sent_block(&block(&b64(&png), uri.clone(), meta.clone())).unwrap();
         assert_eq!(again.encoded_bytes.as_deref(), Some(png.as_slice()));
 
         // Crafted: empty inline data naming an external file -> nothing attached
         assert!(pasted_image_from_sent_block(&block("", uri.clone(), meta.clone())).is_none());
         // Inline bytes that are not an image (or not base64) -> nothing attached
         assert!(pasted_image_from_sent_block(&block("AQID", uri.clone(), meta.clone())).is_none());
-        assert!(pasted_image_from_sent_block(&block("not base64!", uri.clone(), meta.clone())).is_none());
+        assert!(
+            pasted_image_from_sent_block(&block("not base64!", uri.clone(), meta.clone()))
+                .is_none()
+        );
         // No `[Image #N]` number -> nothing to re-attach
         assert!(pasted_image_from_sent_block(&block(&b64(&png), None, None)).is_none());
     }
@@ -3964,10 +3986,16 @@ mod tests {
         use base64::Engine as _;
         let std_decode = |d: &str| base64::engine::general_purpose::STANDARD.decode(d).ok();
         // A real PNG whose base64 is padded, so a padded-length estimate would wrongly refuse the exact-cap case
-        let png = (1..).map(|w| make_test_png(w, 12)).find(|p| p.len() % 3 != 0).unwrap();
+        let png = (1..)
+            .map(|w| make_test_png(w, 12))
+            .find(|p| p.len() % 3 != 0)
+            .unwrap();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         assert_eq!(base64_decoded_len(&b64), png.len());
-        assert_eq!(decode_sent_inline(&b64, png.len(), std_decode).as_deref(), Some(png.as_slice()));
+        assert_eq!(
+            decode_sent_inline(&b64, png.len(), std_decode).as_deref(),
+            Some(png.as_slice())
+        );
         assert!(decode_sent_inline(&b64, png.len() - 1, std_decode).is_none());
 
         // Over the cap from its length alone: refused without calling the decoder
@@ -3977,12 +4005,18 @@ mod tests {
             std_decode(d)
         });
         assert!(over.is_none());
-        assert_eq!(calls, 0, "the decoder must not run for a payload over the cap");
+        assert_eq!(
+            calls, 0,
+            "the decoder must not run for a payload over the cap"
+        );
 
         // Within the cap by its length (one byte) but decoding to more: refused after decoding too
         assert_eq!(base64_decoded_len("AA=="), 1);
         assert!(decode_sent_inline("AA==", 2, |_| Some(vec![1, 2, 3])).is_none());
-        assert_eq!(decode_sent_inline("AA==", 3, |_| Some(vec![1, 2, 3])), Some(vec![1, 2, 3]));
+        assert_eq!(
+            decode_sent_inline("AA==", 3, |_| Some(vec![1, 2, 3])),
+            Some(vec![1, 2, 3])
+        );
     }
 
     #[test]
@@ -4580,9 +4614,15 @@ mod tests {
             r"\??\GLOBALROOT\x.png",
             r"/?/UNC/attacker/share/x.png",
         ] {
-            assert!(is_network_path(&strip_verbatim_prefix(std::path::Path::new(p))), "{p}");
+            assert!(
+                is_network_path(&strip_verbatim_prefix(std::path::Path::new(p))),
+                "{p}"
+            );
             assert!(ScrollbackImageRef::from_path(p).is_none(), "{p}");
-            assert!(ScrollbackVideoRef::from_path(p.replace(".png", ".mp4")).is_none(), "{p}");
+            assert!(
+                ScrollbackVideoRef::from_path(p.replace(".png", ".mp4")).is_none(),
+                "{p}"
+            );
         }
         for p in [
             "/tmp/x.png",

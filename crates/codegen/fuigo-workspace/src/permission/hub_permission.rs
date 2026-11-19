@@ -2,12 +2,12 @@ use crate::permission::peer_denials::DenialCause;
 use crate::permission::prompter::{PromptOutcome, tool_name_for_access};
 use crate::permission::types::{AccessKind, EditTargets, HookAsk};
 use async_trait::async_trait;
-use prometheus::{HistogramVec, IntCounter, register_histogram_vec, register_int_counter};
-use serde_json::Value;
-use std::sync::LazyLock;
 use fuigo_computer_hub_sdk::harness::PERMISSION_REQUEST_KIND;
 use fuigo_computer_hub_sdk::{ToolServer, WeakToolServer};
 use fuigo_tool_protocol::SessionId;
+use prometheus::{HistogramVec, IntCounter, register_histogram_vec, register_int_counter};
+use serde_json::Value;
+use std::sync::LazyLock;
 static PERMISSION_REPLY_DURATION: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!(
         "fuigo_workspace_permission_reply_seconds",
@@ -569,7 +569,11 @@ pub(crate) async fn hub_read_spellings(
             targets.resolution,
         )
         .await;
-        out.push(HubReadSpelling { path: path.clone(), spellings, resolved });
+        out.push(HubReadSpelling {
+            path: path.clone(),
+            spellings,
+            resolved,
+        });
     }
     out
 }
@@ -584,12 +588,14 @@ pub(crate) fn hub_searches_need_walk(
 ) -> bool {
     use crate::permission::types::{RuleAction, ToolFilter};
     config.rules.iter().any(|r| {
-        matches!(r.tool, ToolFilter::Read | ToolFilter::Grep | ToolFilter::Any)
-            && r.pattern.as_deref().is_some_and(|p| {
-                r.action == RuleAction::Ask
-                    || (r.action == RuleAction::Deny
-                        && !(search_excludes_applied && p.starts_with("**/")))
-            })
+        matches!(
+            r.tool,
+            ToolFilter::Read | ToolFilter::Grep | ToolFilter::Any
+        ) && r.pattern.as_deref().is_some_and(|p| {
+            r.action == RuleAction::Ask
+                || (r.action == RuleAction::Deny
+                    && !(search_excludes_applied && p.starts_with("**/")))
+        })
     })
 }
 
@@ -604,10 +610,13 @@ fn hub_search_roots(path: Option<&str>, ctx: &HubPolicyContext<'_>) -> Vec<std::
         Some(p) => ctx.cwd.join(p),
         None => ctx.cwd.to_path_buf(),
     };
-    let resolved: std::path::PathBuf =
-        fuigo_tools::types::resources::resolve_model_path(ctx.cwd, ctx.display_cwd, raw.unwrap_or(""))
-            .components()
-            .collect();
+    let resolved: std::path::PathBuf = fuigo_tools::types::resources::resolve_model_path(
+        ctx.cwd,
+        ctx.display_cwd,
+        raw.unwrap_or(""),
+    )
+    .components()
+    .collect();
     let joined: std::path::PathBuf = joined.components().collect();
     let mut roots = vec![resolved];
     if !roots.contains(&joined) {
@@ -699,7 +708,11 @@ fn hub_access_judged(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> (HubPol
         && let crate::folder_trust::CommandTrust::Untrusted(reason) =
             crate::permission::run_dirs::run_dirs_trust(&[ctx.cwd.to_path_buf()])
     {
-        let base = HubPolicyContext { policy: ctx.base_policy, prompt_policy: ctx.base_prompt_policy, ..*ctx };
+        let base = HubPolicyContext {
+            policy: ctx.base_policy,
+            prompt_policy: ctx.base_prompt_policy,
+            ..*ctx
+        };
         return hub_untrusted_bash_judged(cmd, access, &base, &reason);
     }
     hub_access_judged_in_trusted(access, ctx)
@@ -716,16 +729,22 @@ fn hub_untrusted_bash_judged(
     reason: &crate::folder_trust::UntrustedReason,
 ) -> (HubPolicyVerdict, bool) {
     use crate::permission::types::{Decision, PromptPolicy};
-    let preflight = crate::permission::gate_preflight::GatePreflight::evaluate(ctx.policy, access, ctx.cwd, false);
+    let preflight = crate::permission::gate_preflight::GatePreflight::evaluate(
+        ctx.policy, access, ctx.cwd, false,
+    );
     let decision = preflight.policy_decision();
     if let Some(Decision::Reject(reason) | Decision::PolicyDeny(reason)) = &decision {
         return (HubPolicyVerdict::Deny(reason.clone()), true);
     }
     let protected = crate::permission::manager::hub_protected_target(access, ctx.cwd).is_some();
     let ask = |ctx: &HubPolicyContext<'_>| match ctx.prompt_policy {
-        PromptPolicy::Deny => HubPolicyVerdict::Deny(crate::folder_trust::untrusted_command_refusal(reason)),
+        PromptPolicy::Deny => {
+            HubPolicyVerdict::Deny(crate::folder_trust::untrusted_command_refusal(reason))
+        }
         PromptPolicy::Allow => HubPolicyVerdict::Allow,
-        PromptPolicy::Ask | PromptPolicy::Auto => HubPolicyVerdict::Ask(hub_ask_reason::UNTRUSTED_FOLDER),
+        PromptPolicy::Ask | PromptPolicy::Auto => {
+            HubPolicyVerdict::Ask(hub_ask_reason::UNTRUSTED_FOLDER)
+        }
     };
     if preflight.shell_forced_prompt() || protected {
         return (ask(ctx), false);
@@ -737,14 +756,22 @@ fn hub_untrusted_bash_judged(
         return (ask(ctx), false);
     }
     let policy_allows = matches!(decision, Some(Decision::Allow));
-    if !crate::permission::manager::hub_untrusted_bash_needs_prompt(cmd, ctx.policy, policy_allows, ctx.cwd) {
+    if !crate::permission::manager::hub_untrusted_bash_needs_prompt(
+        cmd,
+        ctx.policy,
+        policy_allows,
+        ctx.cwd,
+    ) {
         return (HubPolicyVerdict::Allow, false);
     }
     (ask(ctx), false)
 }
 
 /// [`hub_access_judged`] for every access but a shell command whose folder is not trusted.
-fn hub_access_judged_in_trusted(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> (HubPolicyVerdict, bool) {
+fn hub_access_judged_in_trusted(
+    access: &AccessKind,
+    ctx: &HubPolicyContext<'_>,
+) -> (HubPolicyVerdict, bool) {
     use crate::permission::types::{Decision, PromptPolicy};
     const DONT_ASK: &str = "denied by prompt policy (tool not pre-approved)";
     use crate::permission::gate_preflight::{EditTargetSpellings, GatePreflight};
@@ -821,7 +848,8 @@ fn hub_access_judged_in_trusted(access: &AccessKind, ctx: &HubPolicyContext<'_>)
         PromptPolicy::Deny => (HubPolicyVerdict::Deny(DONT_ASK.to_owned()), false),
         PromptPolicy::Allow => (HubPolicyVerdict::Allow, false),
         PromptPolicy::Ask | PromptPolicy::Auto if ctx.default_prompts => {
-            if crate::permission::card_replaces(&default_prompt.causes, ctx.sandbox_cover).is_some() {
+            if crate::permission::card_replaces(&default_prompt.causes, ctx.sandbox_cover).is_some()
+            {
                 (HubPolicyVerdict::Allow, false)
             } else {
                 (HubPolicyVerdict::Ask(hub_ask_reason::DEFAULT_PROMPT), false)
@@ -872,7 +900,11 @@ pub(crate) fn hub_policy_verdict_all(
             HubPolicyVerdict::Allow => approved_without_grant |= without_grant,
         }
     }
-    HubCallVerdict { denied: None, asks, approved_without_grant }
+    HubCallVerdict {
+        denied: None,
+        asks,
+        approved_without_grant,
+    }
 }
 
 /// u35 g11 / t4b: one hub-routed call judged in every directory it starts in (the session cwd, and a bash `workdir`,
@@ -884,7 +916,11 @@ pub(crate) fn hub_verdict_over_run_dirs(
     run_dirs: &[std::path::PathBuf],
     mut verdict_in: impl FnMut(&std::path::Path) -> HubCallVerdict,
 ) -> HubCallVerdict {
-    let mut merged = HubCallVerdict { denied: None, asks: Vec::new(), approved_without_grant: false };
+    let mut merged = HubCallVerdict {
+        denied: None,
+        asks: Vec::new(),
+        approved_without_grant: false,
+    };
     for dir in run_dirs {
         let verdict = verdict_in(dir);
         if verdict.denied.is_some() {
@@ -939,7 +975,11 @@ fn hub_search_scope_verdict_capped(
     let added = glob
         .filter(|g| !g.is_empty())
         .map_or(Ok(()), &mut add)
-        .and_then(|()| excludes.iter().try_for_each(|deny| add(&format!("!{deny}"))));
+        .and_then(|()| {
+            excludes
+                .iter()
+                .try_for_each(|deny| add(&format!("!{deny}")))
+        });
     // A walk that cannot finish cannot show the search reads nothing denied: refuse it (Grok r2).
     let Ok(overrides) = added.and_then(|()| overrides.build()) else {
         return HubPolicyVerdict::Deny(
@@ -970,8 +1010,10 @@ fn hub_search_scope_verdict_capped(
             path: Some(file.clone()),
             glob: None,
         };
-        match crate::permission::gate_preflight::GatePreflight::evaluate(ctx.policy, &searched, ctx.cwd, false)
-            .policy_decision()
+        match crate::permission::gate_preflight::GatePreflight::evaluate(
+            ctx.policy, &searched, ctx.cwd, false,
+        )
+        .policy_decision()
         {
             Some(Decision::Reject(_) | Decision::PolicyDeny(_)) => {
                 return HubPolicyVerdict::Deny(format!(
@@ -999,9 +1041,17 @@ pub(crate) async fn settle_hub_asks(
     tool_call_id: &str,
     tool_name: &str,
 ) -> Result<(), fuigo_tool_runtime::ToolError> {
-    settle_hub_asks_caused(transport, asks, accesses, prompt_accesses, tool_call_id, tool_name, None)
-        .await
-        .map_err(|(e, _)| e)
+    settle_hub_asks_caused(
+        transport,
+        asks,
+        accesses,
+        prompt_accesses,
+        tool_call_id,
+        tool_name,
+        None,
+    )
+    .await
+    .map_err(|(e, _)| e)
 }
 
 /// [`settle_hub_asks`] that also says how a refusal ended, so the caller applies the shared recording rule.
@@ -1019,10 +1069,20 @@ pub(crate) async fn settle_hub_asks_caused(
         // u35 g9 (Fable r8 Low): a command asked about because of the environment names the variable, as the local
         // prompt does.
         let note = match (&accesses[index], cwd) {
-            (AccessKind::Bash(cmd), Some(cwd)) => crate::permission::manager::env_steering_of(cmd, cwd),
+            (AccessKind::Bash(cmd), Some(cwd)) => {
+                crate::permission::manager::env_steering_of(cmd, cwd)
+            }
             _ => None,
         };
-        settle_hub_ask_noted(transport, prompt_access, tool_call_id, tool_name, reason, note).await?;
+        settle_hub_ask_noted(
+            transport,
+            prompt_access,
+            tool_call_id,
+            tool_name,
+            reason,
+            note,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1036,7 +1096,9 @@ pub(crate) async fn settle_hub_ask(
     tool_name: &str,
     reason: &str,
 ) -> Result<(), fuigo_tool_runtime::ToolError> {
-    settle_hub_ask_caused(transport, access, tool_call_id, tool_name, reason).await.map_err(|(e, _)| e)
+    settle_hub_ask_caused(transport, access, tool_call_id, tool_name, reason)
+        .await
+        .map_err(|(e, _)| e)
 }
 
 /// How a hub prompt outcome that is not an approval ended, for the shared recording rule. A hub reply (cancel included)
@@ -1086,7 +1148,8 @@ async fn settle_hub_ask_noted(
             DenialCause::NotShown,
         ));
     };
-    let outcome = request_permission_via_hub_noted(transport, access, tool_call_id, None, env_var).await;
+    let outcome =
+        request_permission_via_hub_noted(transport, access, tool_call_id, None, env_var).await;
     if prompt_outcome_allows(&outcome) {
         return Ok(());
     }
@@ -1100,7 +1163,10 @@ async fn settle_hub_ask_noted(
         PromptOutcome::FollowupMessage(msg) => format!("tool permission redirected: {msg}"),
         _ => format!("tool permission denied for {tool_name}"),
     };
-    Err((ToolError::new(ToolErrorKind::PermissionDenied, detail), hub_denial_cause(&outcome)))
+    Err((
+        ToolError::new(ToolErrorKind::PermissionDenied, detail),
+        hub_denial_cause(&outcome),
+    ))
 }
 
 pub fn prompt_outcome_allows(outcome: &PromptOutcome) -> bool {
@@ -1128,9 +1194,12 @@ pub async fn request_permission_via_hub(
 /// u35 g9 (Fable r8 Low): the hub prompt's description names the environment variable the command asks because of
 /// (`GIT_ASKPASS` from an editor terminal), as the local prompt's title does.
 pub(crate) fn with_env_steering_description(mut payload: Value, env_var: Option<&str>) -> Value {
-    if let (Some(var), Some(Value::String(description))) =
-        (env_var, payload.as_object_mut().and_then(|map| map.get_mut("description")))
-    {
+    if let (Some(var), Some(Value::String(description))) = (
+        env_var,
+        payload
+            .as_object_mut()
+            .and_then(|map| map.get_mut("description")),
+    ) {
         description.push_str(&format!(" (asks because of {var} in your environment)"));
     }
     payload
@@ -1143,7 +1212,10 @@ async fn request_permission_via_hub_noted(
     hook_ask: Option<&HookAsk>,
     env_var: Option<&str>,
 ) -> PromptOutcome {
-    let payload = with_env_steering_description(build_permission_payload(access, tool_call_id, hook_ask), env_var);
+    let payload = with_env_steering_description(
+        build_permission_payload(access, tool_call_id, hook_ask),
+        env_var,
+    );
     match transport.request_permission(payload).await {
         Ok(reply) => match reply_to_outcome(&reply) {
             PromptOutcome::AllowAlways if matches!(access, AccessKind::Edit(_)) => {
@@ -1500,9 +1572,9 @@ mod tests {
         let rules = crate::permission::resolution::parse_toml_permission_section_for_test(
             value.get("permission").expect("[permission]"),
         );
-        crate::permission::policy::CompiledPolicy::new(crate::permission::types::PermissionConfig::new(
-            rules,
-        ))
+        crate::permission::policy::CompiledPolicy::new(
+            crate::permission::types::PermissionConfig::new(rules),
+        )
     }
 
     fn ctx<'a>(
@@ -1537,32 +1609,69 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         let send = AccessKind::Tool("send_message".to_owned());
-        let mcp = AccessKind::MCPTool { name: "send_message".into(), input: serde_json::Value::Null };
+        let mcp = AccessKind::MCPTool {
+            name: "send_message".into(),
+            input: serde_json::Value::Null,
+        };
         let none = compiled("[permission]\nallow = []\n");
         let deny = compiled("[permission]\ndeny = [\"send_message\"]\n");
         let ask = compiled("[permission]\nask = [\"send_message\"]\n");
-        for policy_mode in [PromptPolicy::Ask, PromptPolicy::Deny, PromptPolicy::Allow, PromptPolicy::Auto] {
+        for policy_mode in [
+            PromptPolicy::Ask,
+            PromptPolicy::Deny,
+            PromptPolicy::Allow,
+            PromptPolicy::Auto,
+        ] {
             for yolo in [false, true] {
                 for default_prompts in [false, true] {
-                    let label = format!("{policy_mode:?} yolo={yolo} default_prompts={default_prompts}");
+                    let label =
+                        format!("{policy_mode:?} yolo={yolo} default_prompts={default_prompts}");
                     let mk = |p| {
                         let mut c = ctx(p, cwd, yolo, default_prompts);
                         c.prompt_policy = policy_mode;
                         c
                     };
-                    assert_eq!(hub_policy_verdict(&send, &mk(None)), HubPolicyVerdict::Allow, "no policy: {label}");
-                    assert_eq!(hub_policy_verdict(&send, &mk(Some(&none))), HubPolicyVerdict::Allow, "empty policy: {label}");
-                    assert!(matches!(hub_policy_verdict(&send, &mk(Some(&deny))), HubPolicyVerdict::Deny(_)), "deny rule: {label}");
+                    assert_eq!(
+                        hub_policy_verdict(&send, &mk(None)),
+                        HubPolicyVerdict::Allow,
+                        "no policy: {label}"
+                    );
+                    assert_eq!(
+                        hub_policy_verdict(&send, &mk(Some(&none))),
+                        HubPolicyVerdict::Allow,
+                        "empty policy: {label}"
+                    );
+                    assert!(
+                        matches!(
+                            hub_policy_verdict(&send, &mk(Some(&deny))),
+                            HubPolicyVerdict::Deny(_)
+                        ),
+                        "deny rule: {label}"
+                    );
                     let asked = hub_policy_verdict(&send, &mk(Some(&ask)));
                     if yolo {
-                        assert_eq!(asked, HubPolicyVerdict::Allow, "ask rule under always-approve: {label}");
+                        assert_eq!(
+                            asked,
+                            HubPolicyVerdict::Allow,
+                            "ask rule under always-approve: {label}"
+                        );
                     } else if policy_mode == PromptPolicy::Deny {
-                        assert!(matches!(asked, HubPolicyVerdict::Deny(_)), "ask rule under dontAsk: {label}");
+                        assert!(
+                            matches!(asked, HubPolicyVerdict::Deny(_)),
+                            "ask rule under dontAsk: {label}"
+                        );
                     } else if policy_mode != PromptPolicy::Allow {
-                        assert!(matches!(asked, HubPolicyVerdict::Ask(_)), "ask rule asks: {label}");
+                        assert!(
+                            matches!(asked, HubPolicyVerdict::Ask(_)),
+                            "ask rule asks: {label}"
+                        );
                     }
                     if !yolo && policy_mode == PromptPolicy::Ask && default_prompts {
-                        assert_ne!(hub_policy_verdict(&mcp, &mk(None)), HubPolicyVerdict::Allow, "MCP tool named send_message: {label}");
+                        assert_ne!(
+                            hub_policy_verdict(&mcp, &mk(None)),
+                            HubPolicyVerdict::Allow,
+                            "MCP tool named send_message: {label}"
+                        );
                     }
                 }
             }
@@ -1577,7 +1686,11 @@ mod tests {
             "[permission]\ndeny = [\"Bash(rm *)\"]\nask = [\"Bash(git push*)\", \"scheduler_delete\"]\nallow = [\"image_gen\"]\n",
         );
         let bash = |c: &str| AccessKind::Bash(c.to_owned());
-        let hook = AccessKind::Edit(cwd.join(".git/hooks/pre-commit").to_string_lossy().into_owned());
+        let hook = AccessKind::Edit(
+            cwd.join(".git/hooks/pre-commit")
+                .to_string_lossy()
+                .into_owned(),
+        );
         let plain_edit = AccessKind::Edit(cwd.join("notes.txt").to_string_lossy().into_owned());
         let tool = |n: &str| AccessKind::Tool(n.to_owned());
         for yolo in [false, true] {
@@ -1585,7 +1698,10 @@ mod tests {
                 let c = ctx(Some(&policy), cwd, yolo, default_prompts);
                 let label = format!("yolo={yolo} default_prompts={default_prompts}");
                 assert!(
-                    matches!(hub_policy_verdict(&bash("rm -rf x"), &c), HubPolicyVerdict::Deny(_)),
+                    matches!(
+                        hub_policy_verdict(&bash("rm -rf x"), &c),
+                        HubPolicyVerdict::Deny(_)
+                    ),
                     "deny rule refuses: {label}"
                 );
                 assert_eq!(
@@ -1636,7 +1752,13 @@ mod tests {
                 expect(hub_ask_reason::DEFAULT_PROMPT)
             );
             assert_eq!(
-                hub_policy_verdict(&AccessKind::Grep { path: None, glob: None }, &flagged),
+                hub_policy_verdict(
+                    &AccessKind::Grep {
+                        path: None,
+                        glob: None
+                    },
+                    &flagged
+                ),
                 HubPolicyVerdict::Allow
             );
         }
@@ -1650,7 +1772,10 @@ mod tests {
             hub_policy_verdict(&tool("image_edit"), &none),
             HubPolicyVerdict::Ask(hub_ask_reason::SIDE_EFFECTING_TOOL)
         );
-        assert_eq!(hub_policy_verdict(&bash("rm -rf x"), &none), HubPolicyVerdict::Allow);
+        assert_eq!(
+            hub_policy_verdict(&bash("rm -rf x"), &none),
+            HubPolicyVerdict::Allow
+        );
     }
 
     /// P166 on the hub path: the shell write classifier's protected targets (Grok r4/r5 writers, redirects, wrapped
@@ -1685,7 +1810,13 @@ mod tests {
             "git -ccore.hooksPath=/tmp/evil commit",
             "git --config-e=core.hooksPath=/tmp/evil commit",
         ];
-        let ordinary = ["ls", "git status", "cp src/a.rs out/b.rs", "sed -n 's/a/b/p' in", "echo ok > out/log.txt"];
+        let ordinary = [
+            "ls",
+            "git status",
+            "cp src/a.rs out/b.rs",
+            "sed -n 's/a/b/p' in",
+            "echo ok > out/log.txt",
+        ];
         for yolo in [false, true] {
             let c = ctx(None, cwd, yolo, false);
             for cmd in protected {
@@ -1696,7 +1827,11 @@ mod tests {
                 );
             }
             for cmd in ordinary {
-                assert_eq!(hub_policy_verdict(&bash(cmd), &c), HubPolicyVerdict::Allow, "yolo={yolo}: {cmd}");
+                assert_eq!(
+                    hub_policy_verdict(&bash(cmd), &c),
+                    HubPolicyVerdict::Allow,
+                    "yolo={yolo}: {cmd}"
+                );
             }
         }
     }
@@ -1710,7 +1845,10 @@ mod tests {
         let tool = AccessKind::Tool("image_gen".to_owned());
         let mut c = ctx(Some(&policy), cwd, false, false);
         c.prompt_policy = PromptPolicy::Deny;
-        assert!(matches!(hub_policy_verdict(&tool, &c), HubPolicyVerdict::Deny(_)));
+        assert!(matches!(
+            hub_policy_verdict(&tool, &c),
+            HubPolicyVerdict::Deny(_)
+        ));
         c.prompt_policy = PromptPolicy::Allow;
         assert_eq!(hub_policy_verdict(&tool, &c), HubPolicyVerdict::Allow);
         assert!(
@@ -1747,7 +1885,10 @@ mod tests {
                 matches!(hub_policy_verdict(&edit, &c), HubPolicyVerdict::Deny(_)),
                 "dontAsk refuses an unapproved edit (flag={default_prompts})"
             );
-            assert_eq!(hub_policy_verdict(&AccessKind::Bash("ls".into()), &c), HubPolicyVerdict::Allow);
+            assert_eq!(
+                hub_policy_verdict(&AccessKind::Bash("ls".into()), &c),
+                HubPolicyVerdict::Allow
+            );
             assert_eq!(hub_policy_verdict(&read, &c), HubPolicyVerdict::Allow);
         }
         let broad = compiled("[permission]\nallow = [\"Bash(*)\"]\n");
@@ -1762,7 +1903,10 @@ mod tests {
             HubPolicyVerdict::Allow
         );
         assert_eq!(
-            hub_policy_verdict(&AccessKind::Bash("ls".into()), &ctx(Some(&broad), cwd, false, true)),
+            hub_policy_verdict(
+                &AccessKind::Bash("ls".into()),
+                &ctx(Some(&broad), cwd, false, true)
+            ),
             HubPolicyVerdict::Allow
         );
     }
@@ -1770,7 +1914,10 @@ mod tests {
     /// Bookkeeping tools under an any-tool ask rule must not be described as file reads on the hub card.
     #[test]
     fn describe_access_labels_session_bookkeeping_not_as_a_file_read() {
-        assert_eq!(describe_access(&AccessKind::Session), "Update session state");
+        assert_eq!(
+            describe_access(&AccessKind::Session),
+            "Update session state"
+        );
         assert_eq!(describe_access(&AccessKind::Read(None)), "Read a file");
     }
 
@@ -1781,8 +1928,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ask_read = compiled("[permission]\nask = [\"Read\"]\n");
         let c = ctx(Some(&ask_read), dir.path(), false, false);
-        assert_eq!(hub_policy_verdict(&AccessKind::Session, &c), HubPolicyVerdict::Allow);
-        assert!(matches!(hub_policy_verdict(&AccessKind::Read(None), &c), HubPolicyVerdict::Ask(_)));
+        assert_eq!(
+            hub_policy_verdict(&AccessKind::Session, &c),
+            HubPolicyVerdict::Allow
+        );
+        assert!(matches!(
+            hub_policy_verdict(&AccessKind::Read(None), &c),
+            HubPolicyVerdict::Ask(_)
+        ));
     }
 
     /// Astra r2 C: `git status` in a repository whose config runs a program is not a safe command for the hub either.
@@ -1791,7 +1944,10 @@ mod tests {
         use crate::permission::types::PromptPolicy;
         let risky = tempfile::tempdir().unwrap();
         let repo = git2::Repository::init(risky.path()).unwrap();
-        repo.config().unwrap().set_str("core.fsmonitor", "/bin/true").unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("core.fsmonitor", "/bin/true")
+            .unwrap();
         let clean = tempfile::tempdir().unwrap();
         git2::Repository::init(clean.path()).unwrap();
         let status = AccessKind::Bash("git status".into());
@@ -1801,7 +1957,10 @@ mod tests {
         );
         let mut dont_ask = ctx(None, risky.path(), false, false);
         dont_ask.prompt_policy = PromptPolicy::Deny;
-        assert!(matches!(hub_policy_verdict(&status, &dont_ask), HubPolicyVerdict::Deny(_)));
+        assert!(matches!(
+            hub_policy_verdict(&status, &dont_ask),
+            HubPolicyVerdict::Deny(_)
+        ));
         assert_eq!(
             hub_policy_verdict(&status, &ctx(None, clean.path(), false, true)),
             HubPolicyVerdict::Allow,
@@ -1818,7 +1977,11 @@ mod tests {
         let policy = compiled("[permission]\nask = [\"Edit(**/notes.txt)\"]\n");
         let c = ctx(Some(&policy), cwd, false, false);
         let notes = AccessKind::Edit(cwd.join("notes.txt").to_string_lossy().into_owned());
-        let hook = AccessKind::Edit(cwd.join(".git/hooks/pre-commit").to_string_lossy().into_owned());
+        let hook = AccessKind::Edit(
+            cwd.join(".git/hooks/pre-commit")
+                .to_string_lossy()
+                .into_owned(),
+        );
         let verdict = hub_policy_verdict_all(&[notes.clone(), hook, notes], &c);
         assert_eq!(verdict.denied, None);
         assert_eq!(
@@ -1851,7 +2014,10 @@ mod tests {
         // No `Edit("apply_patch")` sentinel: the unparseable patch has no accesses and is refused whole (P184).
         assert!(hub_input_accesses(&broken).is_empty());
         assert!(matches!(hub_patch_targets(&broken), Some(Err(_))));
-        assert_eq!(hub_patch_targets(&input), Some(Ok(vec!["src/a.rs".to_owned()])));
+        assert_eq!(
+            hub_patch_targets(&input),
+            Some(Ok(vec!["src/a.rs".to_owned()]))
+        );
     }
 
     /// Astra r3 G/J: a content search is judged by every file it would read, with the policy's own matcher: an
@@ -1919,7 +2085,9 @@ mod tests {
         // the walk nor refuses the search.
         let any_depth_config = config("[permission]\ndeny = [\"Read(**/secrets/**)\"]\n");
         assert!(!hub_searches_need_walk(&any_depth_config, true));
-        let any_depth = compiled("[permission]\ndeny = [\"Read(**/secrets/**)\"]\nask = [\"Read(**/nothing/**)\"]\n");
+        let any_depth = compiled(
+            "[permission]\ndeny = [\"Read(**/secrets/**)\"]\nask = [\"Read(**/nothing/**)\"]\n",
+        );
         let excludes = vec!["**/secrets/**".to_owned()];
         let mut c = ctx(Some(&any_depth), cwd, false, false);
         c.walk_searches = true;
@@ -1977,7 +2145,10 @@ mod tests {
             path: Some("~/p173-root/sub".to_owned()),
             glob: None,
         };
-        assert!(matches!(hub_policy_verdict(&rooted, &c), HubPolicyVerdict::Deny(_)));
+        assert!(matches!(
+            hub_policy_verdict(&rooted, &c),
+            HubPolicyVerdict::Deny(_)
+        ));
     }
 
     /// Grok r2 HIGH: a root that only needs approval (a broad ask rule) does not skip the walk: a denied descendant
@@ -2007,14 +2178,20 @@ mod tests {
             );
         }
         // The root's own ask survives a walk that finds nothing ruled.
-        let root_only = compiled(&format!("[permission]\nask = [\"Grep({})\"]\n", cwd.display()));
+        let root_only = compiled(&format!(
+            "[permission]\nask = [\"Grep({})\"]\n",
+            cwd.display()
+        ));
         let mut c = ctx(Some(&root_only), cwd, false, false);
         c.walk_searches = true;
         let search = AccessKind::Grep {
             path: None,
             glob: None,
         };
-        assert_eq!(hub_policy_verdict(&search, &c), HubPolicyVerdict::Ask(hub_ask_reason::ASK_RULE));
+        assert_eq!(
+            hub_policy_verdict(&search, &c),
+            HubPolicyVerdict::Ask(hub_ask_reason::ASK_RULE)
+        );
     }
 
     /// Grok r2 MEDIUM: a walk that cannot finish (past the cap, or a glob it cannot parse) refuses the search; only a
@@ -2073,13 +2250,20 @@ mod tests {
         ));
         let mut c = ctx(Some(&deny), cwd, false, false);
         c.walk_searches = true;
-        assert!(matches!(hub_policy_verdict(&search, &c), HubPolicyVerdict::Deny(_)));
+        assert!(matches!(
+            hub_policy_verdict(&search, &c),
+            HubPolicyVerdict::Deny(_)
+        ));
     }
 
     #[test]
     fn hub_policy_accesses_include_every_apply_patch_target() {
         let patch = "*** Begin Patch\n*** Add File: .git/hooks/pre-commit\n+#!/bin/sh\n*** Update File: src/a.rs\n*** Move to: src/b.rs\n@@\n-x\n+y\n*** End Patch\n";
-        for args in [serde_json::json!({"patch": patch}), serde_json::json!({"input": patch}), serde_json::json!(patch)] {
+        for args in [
+            serde_json::json!({"patch": patch}),
+            serde_json::json!({"input": patch}),
+            serde_json::json!(patch),
+        ] {
             let accesses = hub_policy_accesses(None, "apply_patch", &args);
             let edits: Vec<&str> = accesses
                 .iter()
@@ -2089,7 +2273,10 @@ mod tests {
                 })
                 .collect();
             for target in [".git/hooks/pre-commit", "src/a.rs", "src/b.rs"] {
-                assert!(edits.contains(&target), "{target} missing from {edits:?} for {args}");
+                assert!(
+                    edits.contains(&target),
+                    "{target} missing from {edits:?} for {args}"
+                );
             }
         }
     }
@@ -2129,7 +2316,9 @@ mod tests {
         let policy = compiled("[permission]\ndeny = [\"Read(**/secret.txt)\"]\n");
         let c = ctx(Some(&policy), dir.path(), false, false);
         let ok = AccessKind::Read(Some(dir.path().join("a.rs").to_string_lossy().into_owned()));
-        let bad = AccessKind::Read(Some(dir.path().join("secret.txt").to_string_lossy().into_owned()));
+        let bad = AccessKind::Read(Some(
+            dir.path().join("secret.txt").to_string_lossy().into_owned(),
+        ));
         assert!(matches!(
             hub_policy_verdict_all(&[ok.clone(), bad], &c),
             HubCallVerdict {
@@ -2157,20 +2346,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ls = [AccessKind::Bash("ls -la".to_owned())];
         let lists = hub_policy_verdict_all(&ls, &ctx(None, dir.path(), false, false));
-        assert!(lists.denied.is_none() && lists.asks.is_empty() && lists.approved_without_grant, "{lists:?}");
+        assert!(
+            lists.denied.is_none() && lists.asks.is_empty() && lists.approved_without_grant,
+            "{lists:?}"
+        );
         let yolo = hub_policy_verdict_all(&ls, &ctx(None, dir.path(), true, false));
-        assert!(yolo.asks.is_empty() && !yolo.approved_without_grant, "always-approve: {yolo:?}");
+        assert!(
+            yolo.asks.is_empty() && !yolo.approved_without_grant,
+            "always-approve: {yolo:?}"
+        );
         let catch_all = compiled("[permission]\nallow = [\"Bash\"]\n");
         let rule = hub_policy_verdict_all(&ls, &ctx(Some(&catch_all), dir.path(), false, true));
-        assert!(rule.asks.is_empty() && !rule.approved_without_grant, "allow rule: {rule:?}");
+        assert!(
+            rule.asks.is_empty() && !rule.approved_without_grant,
+            "allow rule: {rule:?}"
+        );
         let mut bypass = ctx(None, dir.path(), false, true);
         bypass.prompt_policy = PromptPolicy::Allow;
         let rm = [AccessKind::Bash("rm -rf build".to_owned())];
         let bypassed = hub_policy_verdict_all(&rm, &bypass);
-        assert!(bypassed.asks.is_empty() && !bypassed.approved_without_grant, "bypassPermissions: {bypassed:?}");
+        assert!(
+            bypassed.asks.is_empty() && !bypassed.approved_without_grant,
+            "bypassPermissions: {bypassed:?}"
+        );
         // An access the hub prompt settles is the user's answer: it does not make the call carry `true`.
         let asked = hub_policy_verdict_all(&rm, &ctx(None, dir.path(), false, true));
-        assert!(!asked.asks.is_empty() && !asked.approved_without_grant, "asked: {asked:?}");
+        assert!(
+            !asked.asks.is_empty() && !asked.approved_without_grant,
+            "asked: {asked:?}"
+        );
     }
 
     /// u35 t4b (Grok r3 Medium): a hub call whose session cwd R is trusted and whose `workdir` U is not. `ls` asks
@@ -2186,17 +2390,28 @@ mod tests {
         let _trust = crate::folder_trust::TestFolderTrust::only(&[r.as_path()]);
         let ls = [AccessKind::Bash("ls".to_owned())];
         let judged = |dirs: &[std::path::PathBuf]| {
-            hub_verdict_over_run_dirs(dirs, |dir| hub_policy_verdict_all(&ls, &ctx(None, dir, false, true)))
+            hub_verdict_over_run_dirs(dirs, |dir| {
+                hub_policy_verdict_all(&ls, &ctx(None, dir, false, true))
+            })
         };
         let split = judged(&[r.clone(), u.clone()]);
-        assert!(split.denied.is_none() && !split.asks.is_empty(), "workdir U asks: {split:?}");
-        assert!(!split.approved_without_grant, "the answer approves it, not R's read-only allow: {split:?}");
+        assert!(
+            split.denied.is_none() && !split.asks.is_empty(),
+            "workdir U asks: {split:?}"
+        );
+        assert!(
+            !split.approved_without_grant,
+            "the answer approves it, not R's read-only allow: {split:?}"
+        );
         assert!(
             !crate::permission::manager::runner_trust_judge("ls", &[u.as_path(), r.as_path()]),
             "premise: the runner refuses an ungranted command in U"
         );
         let trusted = judged(&[r.clone(), r.join("sub")]);
-        assert!(trusted.denied.is_none() && trusted.asks.is_empty() && trusted.approved_without_grant, "{trusted:?}");
+        assert!(
+            trusted.denied.is_none() && trusted.asks.is_empty() && trusted.approved_without_grant,
+            "{trusted:?}"
+        );
     }
 
     /// u35 g9 (Fable r8 Low): a hub prompt for a command asked about because of the environment names the variable,
@@ -2209,7 +2424,10 @@ mod tests {
                 ("PATH".to_owned(), "/usr/local/bin:/usr/bin".to_owned()),
                 (extra.0.to_owned(), extra.1.to_owned()),
             ];
-            let transport = StubTransport { reply: Ok(serde_json::json!({"outcome": "approve"})), seen: Mutex::new(None) };
+            let transport = StubTransport {
+                reply: Ok(serde_json::json!({"outcome": "approve"})),
+                seen: Mutex::new(None),
+            };
             let accesses = [AccessKind::Bash(cmd.to_owned())];
             crate::permission::exec_risk::with_env_view(&env, || {
                 futures::executor::block_on(settle_hub_asks_caused(
@@ -2237,9 +2455,15 @@ mod tests {
     async fn hub_ask_goes_through_the_transport_or_is_refused() {
         use fuigo_tool_runtime::ToolErrorKind;
         let access = AccessKind::Tool("image_gen".into());
-        let err = settle_hub_ask(None, &access, "tc-1", "image_gen", hub_ask_reason::SIDE_EFFECTING_TOOL)
-            .await
-            .expect_err("no transport refuses");
+        let err = settle_hub_ask(
+            None,
+            &access,
+            "tc-1",
+            "image_gen",
+            hub_ask_reason::SIDE_EFFECTING_TOOL,
+        )
+        .await
+        .expect_err("no transport refuses");
         assert_eq!(err.kind, ToolErrorKind::PermissionDenied);
         for (reply, allowed) in [
             (Ok(serde_json::json!({"outcome": "approve"})), true),
@@ -2276,31 +2500,96 @@ mod tests {
     #[tokio::test]
     async fn p7r3_hub_denial_recording_table_over_every_outcome() {
         use crate::permission::peer_denials::records_denial;
-        let access = AccessKind::MCPTool { name: "srv__deploy".into(), input: serde_json::json!({}) };
+        let access = AccessKind::MCPTool {
+            name: "srv__deploy".into(),
+            input: serde_json::json!({}),
+        };
         // (hub reply, recorded?)
         let table: Vec<(Result<Value, String>, bool, &str)> = vec![
-            (Ok(serde_json::json!({"outcome": "reject"})), true, "human reject"),
-            (Ok(serde_json::json!({"outcome": "always_reject", "scope": {"kind": "bash_command", "value": "x"}})), true, "human always-reject"),
-            (Ok(serde_json::json!({"outcome": "reject", "followup_message": "do it differently"})), true, "human follow-up"),
-            (Ok(serde_json::json!({"outcome": "cancelled"})), true, "shown, then cancelled by the human"),
-            (Ok(serde_json::json!({"outcome": "nonsense"})), true, "unknown reply word is a reject"),
-            (Err("request timed out after 600s".to_owned()), false, "timeout"),
+            (
+                Ok(serde_json::json!({"outcome": "reject"})),
+                true,
+                "human reject",
+            ),
+            (
+                Ok(
+                    serde_json::json!({"outcome": "always_reject", "scope": {"kind": "bash_command", "value": "x"}}),
+                ),
+                true,
+                "human always-reject",
+            ),
+            (
+                Ok(
+                    serde_json::json!({"outcome": "reject", "followup_message": "do it differently"}),
+                ),
+                true,
+                "human follow-up",
+            ),
+            (
+                Ok(serde_json::json!({"outcome": "cancelled"})),
+                true,
+                "shown, then cancelled by the human",
+            ),
+            (
+                Ok(serde_json::json!({"outcome": "nonsense"})),
+                true,
+                "unknown reply word is a reject",
+            ),
+            (
+                Err("request timed out after 600s".to_owned()),
+                false,
+                "timeout",
+            ),
             (Err("connection lost".to_owned()), false, "prompt error"),
-            (Err("tool server gone (weak upgrade failed)".to_owned()), false, "requester/server gone"),
+            (
+                Err("tool server gone (weak upgrade failed)".to_owned()),
+                false,
+                "requester/server gone",
+            ),
         ];
         for (reply, want, name) in table {
-            let transport = StubTransport { reply, seen: Mutex::new(None) };
-            let (_, cause) = settle_hub_ask_caused(Some(&transport), &access, "tc", "srv__deploy", hub_ask_reason::SIDE_EFFECTING_TOOL)
-                .await
-                .expect_err(name);
+            let transport = StubTransport {
+                reply,
+                seen: Mutex::new(None),
+            };
+            let (_, cause) = settle_hub_ask_caused(
+                Some(&transport),
+                &access,
+                "tc",
+                "srv__deploy",
+                hub_ask_reason::SIDE_EFFECTING_TOOL,
+            )
+            .await
+            .expect_err(name);
             assert_eq!(records_denial(cause), want, "{name}: {cause:?}");
         }
         // No hub prompt at all: never shown, not recorded.
-        let (_, cause) = settle_hub_ask_caused(None, &access, "tc", "srv__deploy", hub_ask_reason::SIDE_EFFECTING_TOOL).await.expect_err("no prompt");
+        let (_, cause) = settle_hub_ask_caused(
+            None,
+            &access,
+            "tc",
+            "srv__deploy",
+            hub_ask_reason::SIDE_EFFECTING_TOOL,
+        )
+        .await
+        .expect_err("no prompt");
         assert!(!records_denial(cause), "{cause:?}");
         // An approval is not a refusal at all.
-        let ok = StubTransport { reply: Ok(serde_json::json!({"outcome": "approve"})), seen: Mutex::new(None) };
-        assert!(settle_hub_ask_caused(Some(&ok), &access, "tc", "srv__deploy", hub_ask_reason::SIDE_EFFECTING_TOOL).await.is_ok());
+        let ok = StubTransport {
+            reply: Ok(serde_json::json!({"outcome": "approve"})),
+            seen: Mutex::new(None),
+        };
+        assert!(
+            settle_hub_ask_caused(
+                Some(&ok),
+                &access,
+                "tc",
+                "srv__deploy",
+                hub_ask_reason::SIDE_EFFECTING_TOOL
+            )
+            .await
+            .is_ok()
+        );
     }
 
     /// Answers each prompt from a script, in order, and records the prompts.
@@ -2310,7 +2599,10 @@ mod tests {
     }
     #[async_trait]
     impl PermissionHookTransport for ScriptedTransport {
-        async fn request_permission(&self, payload: serde_json::Value) -> Result<serde_json::Value, String> {
+        async fn request_permission(
+            &self,
+            payload: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
             self.seen.lock().unwrap().push(payload);
             self.replies
                 .lock()
@@ -2341,25 +2633,50 @@ mod tests {
             seen: Mutex::new(Vec::new()),
         };
         let approve_then_deny = script(&["approve", "reject"]);
-        let err = settle_hub_asks(Some(&approve_then_deny), &asks, &accesses, &accesses, "tc", "apply_patch")
-            .await
-            .expect_err("the second ask is refused, so the call is");
+        let err = settle_hub_asks(
+            Some(&approve_then_deny),
+            &asks,
+            &accesses,
+            &accesses,
+            "tc",
+            "apply_patch",
+        )
+        .await
+        .expect_err("the second ask is refused, so the call is");
         assert_eq!(err.kind, ToolErrorKind::PermissionDenied);
         let seen = approve_then_deny.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 2, "both asks were sent: {seen:?}");
         assert_eq!(seen[1]["edit_file_paths"][0], "/p/.git/hooks/pre-commit");
 
         let both = script(&["approve", "approve"]);
-        settle_hub_asks(Some(&both), &asks, &accesses, &accesses, "tc", "apply_patch")
-            .await
-            .expect("both approved");
+        settle_hub_asks(
+            Some(&both),
+            &asks,
+            &accesses,
+            &accesses,
+            "tc",
+            "apply_patch",
+        )
+        .await
+        .expect("both approved");
         assert_eq!(both.seen.lock().unwrap().len(), 2);
 
         let deny_first = script(&["reject", "approve"]);
-        settle_hub_asks(Some(&deny_first), &asks, &accesses, &accesses, "tc", "apply_patch")
-            .await
-            .expect_err("the first refusal refuses the call");
-        assert_eq!(deny_first.seen.lock().unwrap().len(), 1, "nothing is asked after a refusal");
+        settle_hub_asks(
+            Some(&deny_first),
+            &asks,
+            &accesses,
+            &accesses,
+            "tc",
+            "apply_patch",
+        )
+        .await
+        .expect_err("the first refusal refuses the call");
+        assert_eq!(
+            deny_first.seen.lock().unwrap().len(),
+            1,
+            "nothing is asked after a refusal"
+        );
     }
 
     #[test]
@@ -2379,8 +2696,18 @@ mod tests {
         let none = table_repo(false);
         let tracked = table_repo(true);
         let c = ctx(Some(&policy), none.path(), false, true);
-        for cmd in ["git checkout main", "git pull", "git stash pop", "git status", "git switch -c x"] {
-            assert_eq!(hub_policy_verdict(&bash(cmd), &c), HubPolicyVerdict::Allow, "no protected name: {cmd}");
+        for cmd in [
+            "git checkout main",
+            "git pull",
+            "git stash pop",
+            "git status",
+            "git switch -c x",
+        ] {
+            assert_eq!(
+                hub_policy_verdict(&bash(cmd), &c),
+                HubPolicyVerdict::Allow,
+                "no protected name: {cmd}"
+            );
         }
         let c = ctx(Some(&policy), tracked.path(), false, true);
         for cmd in ["git checkout main", "git pull", "git stash pop"] {
@@ -2390,8 +2717,21 @@ mod tests {
                 "tracked .mcp.json: {cmd}"
             );
         }
-        for cmd in ["git status", "git log", "git diff", "git add -A", "git commit -m x", "git fetch", "git push", "git switch -c x"] {
-            assert_eq!(hub_policy_verdict(&bash(cmd), &c), HubPolicyVerdict::Allow, "unchanged: {cmd}");
+        for cmd in [
+            "git status",
+            "git log",
+            "git diff",
+            "git add -A",
+            "git commit -m x",
+            "git fetch",
+            "git push",
+            "git switch -c x",
+        ] {
+            assert_eq!(
+                hub_policy_verdict(&bash(cmd), &c),
+                HubPolicyVerdict::Allow,
+                "unchanged: {cmd}"
+            );
         }
         // `merge` and `rebase` already carry the unpinned protected floor (r8B): they ask in every repository.
         for dir in [none.path(), tracked.path()] {
@@ -2418,21 +2758,36 @@ mod tests {
         std::fs::write(cwd.join("secrets/key"), "k").unwrap();
         std::os::unix::fs::symlink(cwd.join("secrets"), cwd.join("alias")).unwrap();
         std::os::unix::fs::symlink(cwd.join("secrets/key"), cwd.join("public/k\u{a0}ey")).unwrap();
-        let policy = compiled("[permission]\ndeny = [\"Read(secrets/**)\"]\nask = [\"Read(asked/**)\"]\n");
-        for path in ["alias/key", "public/k ey", "secrets/key", "public/../secrets/key"] {
-            let targets = ReadTargets { paths: vec![path.to_owned()], resolution: ReadResolution::ModelPath };
+        let policy =
+            compiled("[permission]\ndeny = [\"Read(secrets/**)\"]\nask = [\"Read(asked/**)\"]\n");
+        for path in [
+            "alias/key",
+            "public/k ey",
+            "secrets/key",
+            "public/../secrets/key",
+        ] {
+            let targets = ReadTargets {
+                paths: vec![path.to_owned()],
+                resolution: ReadResolution::ModelPath,
+            };
             let spellings = hub_read_spellings(true, cwd, None, Some(&targets)).await;
             let mut c = ctx(Some(&policy), cwd, false, false);
             c.read_spellings = &spellings;
             assert!(
-                matches!(hub_policy_verdict(&AccessKind::Read(Some(path.to_owned())), &c), HubPolicyVerdict::Deny(_)),
+                matches!(
+                    hub_policy_verdict(&AccessKind::Read(Some(path.to_owned())), &c),
+                    HubPolicyVerdict::Deny(_)
+                ),
                 "{path}: a hub read of a denied file in another spelling must be refused, got {:?}",
                 hub_policy_verdict(&AccessKind::Read(Some(path.to_owned())), &c)
             );
         }
         // An ordinary file is still read, and with no policy nothing is resolved at all.
         std::fs::write(cwd.join("public/ok.txt"), "o").unwrap();
-        let targets = ReadTargets { paths: vec!["public/ok.txt".to_owned()], resolution: ReadResolution::ModelPath };
+        let targets = ReadTargets {
+            paths: vec!["public/ok.txt".to_owned()],
+            resolution: ReadResolution::ModelPath,
+        };
         let spellings = hub_read_spellings(true, cwd, None, Some(&targets)).await;
         let mut c = ctx(Some(&policy), cwd, false, false);
         c.read_spellings = &spellings;
@@ -2440,7 +2795,11 @@ mod tests {
             hub_policy_verdict(&AccessKind::Read(Some("public/ok.txt".to_owned())), &c),
             HubPolicyVerdict::Allow
         );
-        assert!(hub_read_spellings(false, cwd, None, Some(&targets)).await.is_empty());
+        assert!(
+            hub_read_spellings(false, cwd, None, Some(&targets))
+                .await
+                .is_empty()
+        );
     }
 
     /// P198 r2: a tool that reads a file but is an `AccessKind::Tool` (an image edit) is judged in the file's spellings.
@@ -2452,10 +2811,14 @@ mod tests {
         std::fs::create_dir_all(cwd.join("secrets")).unwrap();
         std::fs::write(cwd.join("secrets/key.png"), "k").unwrap();
         std::fs::write(cwd.join("ok.png"), "o").unwrap();
-        let policy = compiled("[permission]\ndeny = [\"Read(secrets/**)\"]\nallow = [\"image_edit\"]\n");
+        let policy =
+            compiled("[permission]\ndeny = [\"Read(secrets/**)\"]\nallow = [\"image_edit\"]\n");
         let policy_ref = &policy;
         let verdict = |path: &str| {
-            let targets = ReadTargets { paths: vec![path.to_owned()], resolution: ReadResolution::ModelPath };
+            let targets = ReadTargets {
+                paths: vec![path.to_owned()],
+                resolution: ReadResolution::ModelPath,
+            };
             async move {
                 let spellings = hub_read_spellings(true, cwd, None, Some(&targets)).await;
                 let mut c = ctx(Some(policy_ref), cwd, false, false);
@@ -2467,7 +2830,10 @@ mod tests {
         assert!(matches!(denied, HubPolicyVerdict::Deny(_)), "{denied:?}");
         assert_eq!(verdict("ok.png").await, HubPolicyVerdict::Allow);
         // A `Read` whose path is not among the resolved targets fails closed.
-        let targets = ReadTargets { paths: vec!["ok.png".to_owned()], resolution: ReadResolution::ModelPath };
+        let targets = ReadTargets {
+            paths: vec!["ok.png".to_owned()],
+            resolution: ReadResolution::ModelPath,
+        };
         let spellings = hub_read_spellings(true, cwd, None, Some(&targets)).await;
         let mut c = ctx(Some(&policy), cwd, false, false);
         c.read_spellings = &spellings;
@@ -2481,15 +2847,37 @@ mod tests {
     #[test]
     fn read_deny_filter_agrees_with_the_policy() {
         let cwd = std::path::Path::new("/abs/proj");
-        for (rule, globs) in [("/abs/proj/secrets/**", "/abs/proj/secrets/**"), ("secret", "secret"), ("secrets/**", "secrets/**")] {
-            let policy = compiled(&format!("[permission]\ndeny = [\"Read({rule})\"]\nallow = [\"Read(**)\"]\n"));
-            let filter = fuigo_tools::util::read_deny::ReadDenyFilter::new(cwd, &[globs.to_owned()]).unwrap();
-            for path in ["secrets/key", "secret", "secret/notes.txt", "secrets-public/x", "src/a.rs", "/abs/proj/secrets/key"] {
+        for (rule, globs) in [
+            ("/abs/proj/secrets/**", "/abs/proj/secrets/**"),
+            ("secret", "secret"),
+            ("secrets/**", "secrets/**"),
+        ] {
+            let policy = compiled(&format!(
+                "[permission]\ndeny = [\"Read({rule})\"]\nallow = [\"Read(**)\"]\n"
+            ));
+            let filter =
+                fuigo_tools::util::read_deny::ReadDenyFilter::new(cwd, &[globs.to_owned()])
+                    .unwrap();
+            for path in [
+                "secrets/key",
+                "secret",
+                "secret/notes.txt",
+                "secrets-public/x",
+                "src/a.rs",
+                "/abs/proj/secrets/key",
+            ] {
                 let denied = matches!(
                     policy.evaluate_with_cwd(&AccessKind::Read(Some(path.to_owned())), Some(cwd)),
-                    Some(crate::permission::types::Decision::Reject(_) | crate::permission::types::Decision::PolicyDeny(_))
+                    Some(
+                        crate::permission::types::Decision::Reject(_)
+                            | crate::permission::types::Decision::PolicyDeny(_)
+                    )
                 );
-                assert_eq!(filter.denies(std::path::Path::new(path), false), denied, "rule {rule}, path {path}");
+                assert_eq!(
+                    filter.denies(std::path::Path::new(path), false),
+                    denied,
+                    "rule {rule}, path {path}"
+                );
             }
         }
     }
@@ -2500,10 +2888,15 @@ mod tests {
     fn bare_name_and_sibling_verdicts() {
         let cwd = std::path::Path::new("/abs/proj");
         let denied = |rule: &str, path: &str| {
-            let policy = compiled(&format!("[permission]\ndeny = [\"Read({rule})\"]\nallow = [\"Read(**)\"]\n"));
+            let policy = compiled(&format!(
+                "[permission]\ndeny = [\"Read({rule})\"]\nallow = [\"Read(**)\"]\n"
+            ));
             matches!(
                 policy.evaluate_with_cwd(&AccessKind::Read(Some(path.to_owned())), Some(cwd)),
-                Some(crate::permission::types::Decision::Reject(_) | crate::permission::types::Decision::PolicyDeny(_))
+                Some(
+                    crate::permission::types::Decision::Reject(_)
+                        | crate::permission::types::Decision::PolicyDeny(_)
+                )
             )
         };
         // bare name: only that exact path
@@ -2518,7 +2911,10 @@ mod tests {
         assert!(denied("secret/**", "secret/notes.txt"));
         // an absolute rule, read through the cwd-relative and the absolute spelling
         assert!(denied("/abs/proj/secrets/**", "secrets/key_material.txt"));
-        assert!(denied("/abs/proj/secrets/**", "/abs/proj/secrets/key_material.txt"));
+        assert!(denied(
+            "/abs/proj/secrets/**",
+            "/abs/proj/secrets/key_material.txt"
+        ));
         assert!(!denied("/abs/other/**", "secrets/key_material.txt"));
     }
 
@@ -2549,20 +2945,38 @@ mod tests {
         assert_eq!(hub_policy_verdict(&ls, &there), untrusted_ask);
         // u35 t3: a folder the command names does not change the answer: judged by the folder it starts in.
         let cd_there = AccessKind::Bash(format!("cd {} && ls", untrusted.path().display()));
-        assert_ne!(hub_policy_verdict(&cd_there, &here), untrusted_ask, "judged by the trusted start folder (R2)");
+        assert_ne!(
+            hub_policy_verdict(&cd_there, &here),
+            untrusted_ask,
+            "judged by the trusted start folder (R2)"
+        );
         let cd_here = AccessKind::Bash(format!("cd {} && ls", trusted.path().display()));
-        assert_eq!(hub_policy_verdict(&cd_here, &there), untrusted_ask, "an untrusted start folder still asks");
+        assert_eq!(
+            hub_policy_verdict(&cd_here, &there),
+            untrusted_ask,
+            "an untrusted start folder still asks"
+        );
         // Left to the hub side's agent (no live prompts): asks instead.
-        let (verdict, without_grant) = hub_policy_judged(&ls, &ctx(None, untrusted.path(), false, false));
+        let (verdict, without_grant) =
+            hub_policy_judged(&ls, &ctx(None, untrusted.path(), false, false));
         assert_eq!((verdict, without_grant), (untrusted_ask, false));
         // dontAsk refuses with the folder-trust text.
         let mut dont_ask = ctx(None, untrusted.path(), false, true);
         dont_ask.base_prompt_policy = PromptPolicy::Deny;
-        let HubPolicyVerdict::Deny(text) = hub_policy_verdict(&ls, &dont_ask) else { panic!("dontAsk refuses") };
+        let HubPolicyVerdict::Deny(text) = hub_policy_verdict(&ls, &dont_ask) else {
+            panic!("dontAsk refuses")
+        };
         assert!(text.contains("trusted_folders"), "{text}");
         // Always-approve and the user's own rule (in the base policy) run it.
-        assert_eq!(hub_policy_verdict(&ls, &ctx(None, untrusted.path(), true, true)), HubPolicyVerdict::Allow);
+        assert_eq!(
+            hub_policy_verdict(&ls, &ctx(None, untrusted.path(), true, true)),
+            HubPolicyVerdict::Allow
+        );
         let user = ctx(Some(&project), untrusted.path(), false, true);
-        assert_eq!(hub_policy_verdict(&make, &user), HubPolicyVerdict::Allow, "the user's own rule");
+        assert_eq!(
+            hub_policy_verdict(&make, &user),
+            HubPolicyVerdict::Allow,
+            "the user's own rule"
+        );
     }
 }

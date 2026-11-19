@@ -79,7 +79,9 @@ pub(crate) fn fork_filter_chat(items: &mut Vec<ConversationItem>) {
     items.truncate(last_complete_end);
 
     if project_files_withheld
-        && let Some(first_user) = items.iter_mut().find(|item| matches!(item, ConversationItem::User(_)))
+        && let Some(first_user) = items
+            .iter_mut()
+            .find(|item| matches!(item, ConversationItem::User(_)))
     {
         first_user.mark_project_files_withheld();
     }

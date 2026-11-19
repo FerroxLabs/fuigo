@@ -425,7 +425,11 @@ mod admin_source_tests_p183r10 {
     /// A broken admin file or MDM payload with no validated copy turns the remote fetches off (they were left on).
     #[test]
     fn broken_admin_source_turns_remote_fetch_off_p183r10() {
-        for make in [seam::broken_file, seam::undecodable_mdm, seam::mdm_with_bad_overrides] {
+        for make in [
+            seam::broken_file,
+            seam::undecodable_mdm,
+            seam::mdm_with_bad_overrides,
+        ] {
             let _seam = make();
             assert!(!resolve_remote_fetch_enabled());
         }

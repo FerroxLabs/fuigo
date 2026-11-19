@@ -9,7 +9,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 
-use serde::{Deserialize, Serialize};
 use fuigo_computer_hub_core::{
     ConnectionCleanupReport, ErasedTool, ResolvedTool, SessionCleanupReport, ToolHandle,
     ToolRegistry, ToolSessionBindOutcome, ToolSessionUnbindOutcome, resolver::CompoundResolver,
@@ -20,6 +19,7 @@ use fuigo_tool_protocol::{
 };
 use fuigo_tool_runtime::{SearchSnapshot, ServerSummary, Tool, ToolCallContext, ToolError};
 use fuigo_tool_types::ToolDescription;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 struct EmptyArgs {}

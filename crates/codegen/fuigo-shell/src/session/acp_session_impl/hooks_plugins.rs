@@ -37,13 +37,14 @@ impl SessionActor {
                 continue;
             }
             if let Some(ref hooks_path) = plugin.hooks_path {
-                let (specs, warnings) = fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks_contained(
-                    hooks_path,
-                    &plugin.pinned_root(),
-                    &plugin.name,
-                    &plugin.root_str(),
-                    &plugin.data_dir_str(),
-                );
+                let (specs, warnings) =
+                    fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks_contained(
+                        hooks_path,
+                        &plugin.pinned_root(),
+                        &plugin.name,
+                        &plugin.root_str(),
+                        &plugin.data_dir_str(),
+                    );
                 for w in &warnings {
                     tracing::warn!("{w}");
                 }
@@ -250,7 +251,10 @@ impl SessionActor {
     #[allow(clippy::type_complexity)]
     pub(super) fn do_hooks_trust_project(
         cwd: &str,
-    ) -> (Result<(std::path::PathBuf, Option<String>), String>, fuigo_workspace::folder_trust::GrantOutcome) {
+    ) -> (
+        Result<(std::path::PathBuf, Option<String>), String>,
+        fuigo_workspace::folder_trust::GrantOutcome,
+    ) {
         let cwd = std::path::Path::new(cwd);
         let key = fuigo_workspace::trust::workspace_key(cwd);
         use fuigo_workspace::folder_trust::GrantResolution;
@@ -265,7 +269,10 @@ impl SessionActor {
     /// Hand a grant this session made (`/trust`, the `/hooks` Trust action) to the agent, which settles it exactly as it
     /// settles the modal's grant: after a durable save, the reload to a `reload` client and the reopen notice to a
     /// `reopenNotice` client; nothing for any other outcome or client (design F5 §2 goal 1, §9.4 B2).
-    pub(super) fn report_folder_trust_grant(&self, outcome: fuigo_workspace::folder_trust::GrantOutcome) {
+    pub(super) fn report_folder_trust_grant(
+        &self,
+        outcome: fuigo_workspace::folder_trust::GrantOutcome,
+    ) {
         if let Some(grants) = &self.notifications.client_caps.folder_trust_grants {
             let _ = grants.send(crate::session::notifications::SessionGrant {
                 session_id: self.session_info.id.clone(),
@@ -432,7 +439,11 @@ impl SessionActor {
                     let _ = self.reload_hooks_impl().await;
                     ActionOutcome {
                         status: OutcomeStatus::NotFound,
-                        message: format!("Not currently trusted: {}{}", root.display(), note.map(|n| format!("\n{n}")).unwrap_or_default()),
+                        message: format!(
+                            "Not currently trusted: {}{}",
+                            root.display(),
+                            note.map(|n| format!("\n{n}")).unwrap_or_default()
+                        ),
                         requires_reload: false,
                         requires_restart: false,
                     }
@@ -561,9 +572,12 @@ impl SessionActor {
                 if let Some(refused) = self.refuse_under_managed_hooks_only([hook_name.as_str()]) {
                     return refused;
                 }
-                let enabled = self.hook_disable_keys(&hook_name).iter().try_fold(false, |any, key| {
-                    fuigo_hooks::trust::enable_hook(key).map(|removed| any || removed)
-                });
+                let enabled = self
+                    .hook_disable_keys(&hook_name)
+                    .iter()
+                    .try_fold(false, |any, key| {
+                        fuigo_hooks::trust::enable_hook(key).map(|removed| any || removed)
+                    });
                 match enabled {
                     Ok(true) => ActionOutcome {
                         status: OutcomeStatus::Success,
@@ -1288,18 +1302,21 @@ impl SessionActor {
         // The order-sensitive `update_configs` would tear everything down instead, because merge order is non-deterministic
         // This mirrors the `UpdateMcpServers` command handler
         let t_mcp = std::time::Instant::now();
-        let (new_mcp_servers, overlay_notices) = crate::session::agent_mcp::rematerialize_with_agent_overlay(
-            crate::session::agent_mcp::RematerializeParams {
-                initial_client_mcp_servers: self.initial_client_mcp_servers.borrow().clone(),
-                cwd: session_cwd,
-                parent_cwd: self.startup_hints.parent_cwd.as_deref(),
-                plugin_registry: new_registry_snapshot.as_deref(),
-                compat: &self.rebuild_spec.compat,
-                definition: self.agent.borrow().definition(),
-            },
-        );
+        let (new_mcp_servers, overlay_notices) =
+            crate::session::agent_mcp::rematerialize_with_agent_overlay(
+                crate::session::agent_mcp::RematerializeParams {
+                    initial_client_mcp_servers: self.initial_client_mcp_servers.borrow().clone(),
+                    cwd: session_cwd,
+                    parent_cwd: self.startup_hints.parent_cwd.as_deref(),
+                    plugin_registry: new_registry_snapshot.as_deref(),
+                    compat: &self.rebuild_spec.compat,
+                    definition: self.agent.borrow().definition(),
+                },
+            );
         for notice in overlay_notices {
-            self.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice { message: notice });
+            self.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice {
+                message: notice,
+            });
         }
         let (mcp_diff, dispatch_event_tx) = {
             let mut mcp_state = self.mcp_state.lock().await;
@@ -1439,7 +1456,10 @@ fn managed_hooks_only_refusal<'a>(
         })
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod p07_plugin_hook_tests {
     use super::SessionActor;
@@ -1821,11 +1841,16 @@ mod p07_plugin_hook_tests {
         write_hook(repo.path(), "root.json", "echo root-hook");
         write_hook(&sub, "sub.json", "echo sub-hook");
         // A sibling folder's hooks are not this session's.
-        write_hook(&repo.path().join("services").join("web"), "sibling.json", "echo sibling-hook");
+        write_hook(
+            &repo.path().join("services").join("web"),
+            "sibling.json",
+            "echo sibling-hook",
+        );
 
         let compat = fuigo_tools::types::compat::CompatConfig::default();
         let commands = |cwd: &std::path::Path| -> Vec<String> {
-            let (registry, errors) = SessionActor::build_session_hook_registry(cwd, &compat, None, true);
+            let (registry, errors) =
+                SessionActor::build_session_hook_registry(cwd, &compat, None, true);
             assert!(errors.is_empty(), "{errors:?}");
             registry
                 .all_hooks()
@@ -1834,11 +1859,24 @@ mod p07_plugin_hook_tests {
                 .filter(|c| c.ends_with("-hook"))
                 .collect()
         };
-        assert_eq!(commands(&sub), vec!["echo root-hook".to_string(), "echo sub-hook".to_string()]);
-        assert_eq!(commands(repo.path()), vec!["echo root-hook".to_string()], "the root session does not see subfolder hooks");
+        assert_eq!(
+            commands(&sub),
+            vec!["echo root-hook".to_string(), "echo sub-hook".to_string()]
+        );
+        assert_eq!(
+            commands(repo.path()),
+            vec!["echo root-hook".to_string()],
+            "the root session does not see subfolder hooks"
+        );
         // Untrusted: no repo-local hooks at all, subfolder or not.
         let (untrusted, _) = SessionActor::build_session_hook_registry(&sub, &compat, None, false);
-        assert!(untrusted.all_hooks().iter().all(|h| !h.command_raw.as_deref().unwrap_or("").ends_with("-hook")));
+        assert!(
+            untrusted.all_hooks().iter().all(|h| !h
+                .command_raw
+                .as_deref()
+                .unwrap_or("")
+                .ends_with("-hook"))
+        );
     }
 
     /// The session builder is the initial load: plugin hooks sit beside the disk hooks from the start.
@@ -1856,11 +1894,19 @@ mod p07_plugin_hook_tests {
         let handle = SharedPluginRegistryHandle::new(None, vec![]);
         let plugins = handle.build_for_cwd(repo.path(), &cfg, &[cli_plugin], true);
         let compat = fuigo_tools::types::compat::CompatConfig::default();
-        let (registry, _errors) =
-            SessionActor::build_session_hook_registry(repo.path(), &compat, plugins.as_deref(), true);
+        let (registry, _errors) = SessionActor::build_session_hook_registry(
+            repo.path(),
+            &compat,
+            plugins.as_deref(),
+            true,
+        );
         assert_eq!(plugin_names(registry.all_hooks()), vec!["cligate"]);
-        let (untrusted, _errors) =
-            SessionActor::build_session_hook_registry(repo.path(), &compat, plugins.as_deref(), false);
+        let (untrusted, _errors) = SessionActor::build_session_hook_registry(
+            repo.path(),
+            &compat,
+            plugins.as_deref(),
+            false,
+        );
         assert!(
             plugin_names(untrusted.all_hooks()).is_empty(),
             "an untrusted folder loads no plugin hooks"
@@ -1868,14 +1914,20 @@ mod p07_plugin_hook_tests {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-#[cfg(test)]
-#[path = "hooks_plugins_p141_tests.rs"]
-mod p141_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "hooks_plugins_agent_mcp_tests.rs"]
 mod agent_mcp_tests;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+#[cfg(test)]
+#[path = "hooks_plugins_p141_tests.rs"]
+mod p141_tests;
 
 #[cfg(test)]
 mod p169_managed_hooks_only_tests {
@@ -1899,12 +1951,23 @@ mod p169_managed_hooks_only_tests {
             refused.status,
             fuigo_hooks_plugins_types::OutcomeStatus::ValidationError
         ));
-        assert!(managed_hooks_only_refusal(&on, ["requirements/system:a[0].hooks[0]"], managed).is_none());
         assert!(
-            managed_hooks_only_refusal(&on, ["requirements/system:a[0].hooks[0]", "plugin/p:h"], managed).is_some(),
+            managed_hooks_only_refusal(&on, ["requirements/system:a[0].hooks[0]"], managed)
+                .is_none()
+        );
+        assert!(
+            managed_hooks_only_refusal(
+                &on,
+                ["requirements/system:a[0].hooks[0]", "plugin/p:h"],
+                managed
+            )
+            .is_some(),
             "one non-managed name in a bulk enable refuses the whole action"
         );
-        assert!(managed_hooks_only_refusal(&on, [""], managed).is_some(), "adding a hook path is refused");
+        assert!(
+            managed_hooks_only_refusal(&on, [""], managed).is_some(),
+            "adding a hook path is refused"
+        );
     }
 
     /// `FUIGO_MANAGED_HOOKS_ONLY`: the same refusal, with a note that names the environment variable.
@@ -1913,9 +1976,15 @@ mod p169_managed_hooks_only_tests {
         let managed = |name: &str| name.starts_with("requirements/system:");
         let env_pin = with_env_managed_hooks_only(PolicyPin::Unpinned, true);
         let refused = managed_hooks_only_refusal(&env_pin, ["global/x"], managed).unwrap();
-        assert_eq!(refused.message, fuigo_hooks::trust::MANAGED_HOOKS_ONLY_ENV_NOTE);
+        assert_eq!(
+            refused.message,
+            fuigo_hooks::trust::MANAGED_HOOKS_ONLY_ENV_NOTE
+        );
         assert!(refused.message.contains("FUIGO_MANAGED_HOOKS_ONLY"));
-        assert!(managed_hooks_only_refusal(&env_pin, ["requirements/system:a[0].hooks[0]"], managed).is_none());
+        assert!(
+            managed_hooks_only_refusal(&env_pin, ["requirements/system:a[0].hooks[0]"], managed)
+                .is_none()
+        );
     }
 }
 

@@ -3266,8 +3266,9 @@ impl AgentView {
                 match prompt_post_flush.as_mut() {
                     Some(post) => post.append_plain(shape),
                     None => {
-                        prompt_post_flush =
-                            Some(crate::terminal::overlay::PostFlush::plain(shape.to_string()));
+                        prompt_post_flush = Some(crate::terminal::overlay::PostFlush::plain(
+                            shape.to_string(),
+                        ));
                     }
                 }
             }
@@ -4807,11 +4808,23 @@ mod mode_tint_tests {
     fn auto_review_tints_the_bar_blue_and_plan_keeps_precedence() {
         let _theme = crate::theme::cache::pin_theme();
         let theme = crate::theme::Theme::current();
-        assert_eq!(mode_tint(&theme, false, PermissionLabel::Auto), Some(theme.accent_system));
-        assert_eq!(mode_tint(&theme, true, PermissionLabel::Auto), Some(theme.accent_plan));
-        assert_eq!(mode_tint(&theme, true, PermissionLabel::Ask), Some(theme.accent_plan));
+        assert_eq!(
+            mode_tint(&theme, false, PermissionLabel::Auto),
+            Some(theme.accent_system)
+        );
+        assert_eq!(
+            mode_tint(&theme, true, PermissionLabel::Auto),
+            Some(theme.accent_plan)
+        );
+        assert_eq!(
+            mode_tint(&theme, true, PermissionLabel::Ask),
+            Some(theme.accent_plan)
+        );
         assert_eq!(mode_tint(&theme, false, PermissionLabel::Ask), None);
-        assert_eq!(mode_tint(&theme, false, PermissionLabel::AlwaysApprove), None);
+        assert_eq!(
+            mode_tint(&theme, false, PermissionLabel::AlwaysApprove),
+            None
+        );
     }
 }
 

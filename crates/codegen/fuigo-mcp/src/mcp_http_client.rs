@@ -148,7 +148,10 @@ impl<C> McpHttpClient<C> {
     }
 
     #[must_use]
-    pub fn with_bearer_token_file(mut self, file: Option<crate::bearer_token_file::BearerTokenFile>) -> Self {
+    pub fn with_bearer_token_file(
+        mut self,
+        file: Option<crate::bearer_token_file::BearerTokenFile>,
+    ) -> Self {
         self.bearer_token_file = file;
         self
     }
@@ -515,8 +518,12 @@ mod tests {
     async fn get_stream_maps_warn_debug_and_suppressed_severities() {
         use std::sync::atomic::Ordering;
 
+        // A second live dispatcher keeps tracing-core in multi-dispatcher mode, so a parallel sibling test that first hits a callsite
+        // with no subscriber cannot cache "never" for this thread-local capture (see servers_bearer_file_tests.rs).
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let capture = LogCapture::default();
         let _guard = tracing::subscriber::set_default(capture.clone());
+        tracing::callsite::rebuild_interest_cache();
 
         let client = McpHttpClient::new(MockInner, "mock-server", WarnBudget::default());
         // Attempts 0 and 1 are unthrottled; attempt 2 warns; attempt 3 is debug.

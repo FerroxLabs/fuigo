@@ -56,10 +56,12 @@ fn eligibility(
     match disabled.skip_reason(spec) {
         Some(reason) => {
             match reason {
-                crate::trust::HookSkipReason::ManagedOnly if disabled.managed_only_by_env() => tracing::info!(
-                    hook_name = %spec.name,
-                    "hook skipped (only managed hooks run: FUIGO_MANAGED_HOOKS_ONLY)"
-                ),
+                crate::trust::HookSkipReason::ManagedOnly if disabled.managed_only_by_env() => {
+                    tracing::info!(
+                        hook_name = %spec.name,
+                        "hook skipped (only managed hooks run: FUIGO_MANAGED_HOOKS_ONLY)"
+                    )
+                }
                 crate::trust::HookSkipReason::ManagedOnly => tracing::info!(
                     hook_name = %spec.name,
                     "hook skipped (allow_managed_hooks_only: only managed hooks run)"
@@ -89,7 +91,8 @@ fn eligibility(
     // from then on the session skips it silently instead of failing again on every prompt and tool call.
     // A fail-closed gate is the exception: that the hook cannot start is exactly the failure it asked to block on.
     if let Some(detail) = crate::health::config_failure_for(session_id, &spec.name) {
-        if spec.fail_closed && matches!(spec.event.traits().gate, GateKind::Tool | GateKind::Prompt) {
+        if spec.fail_closed && matches!(spec.event.traits().gate, GateKind::Tool | GateKind::Prompt)
+        {
             return Eligibility::Block(format!(
                 "hook '{}' cannot start and failClosed is set: {detail}",
                 spec.name
@@ -476,7 +479,9 @@ pub async fn dispatch_pre_tool_use(
             reason,
             ends_turn: true,
         }) => HookDecision::Stop { reason, hook_name },
-        Some(GateBlock { hook_name, reason, .. }) => HookDecision::Deny { reason, hook_name },
+        Some(GateBlock {
+            hook_name, reason, ..
+        }) => HookDecision::Deny { reason, hook_name },
         None => match (outcome.pending_ask, outcome.deferring_hook) {
             (Some(ask), _) => HookDecision::Ask {
                 hook_name: ask.hook_name,
@@ -515,7 +520,9 @@ pub async fn dispatch_prompt_gate(
     .await;
     PromptGateResult {
         decision: match outcome.block {
-            Some(GateBlock { hook_name, reason, .. }) => PromptDecision::Block { reason, hook_name },
+            Some(GateBlock {
+                hook_name, reason, ..
+            }) => PromptDecision::Block { reason, hook_name },
             None => PromptDecision::Allow,
         },
         results: outcome.results,
@@ -618,7 +625,13 @@ pub async fn dispatch_stop(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled, ctx.session_id) {
+            if !eligible_or_record_skip(
+                spec,
+                match_value.as_deref(),
+                &mut out.results,
+                &disabled,
+                ctx.session_id,
+            ) {
                 continue;
             }
 
@@ -896,7 +909,13 @@ pub async fn dispatch_post_tool_use(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled, ctx.session_id) {
+            if !eligible_or_record_skip(
+                spec,
+                match_value.as_deref(),
+                &mut out.results,
+                &disabled,
+                ctx.session_id,
+            ) {
                 continue;
             }
 
@@ -1009,7 +1028,13 @@ pub async fn dispatch_post_tool_use_failure(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled, ctx.session_id) {
+            if !eligible_or_record_skip(
+                spec,
+                match_value.as_deref(),
+                &mut out.results,
+                &disabled,
+                ctx.session_id,
+            ) {
                 continue;
             }
 
@@ -1112,7 +1137,13 @@ pub async fn dispatch_non_blocking(
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
-            if !eligible_or_record_skip(spec, match_value.as_deref(), &mut results, &disabled, ctx.session_id) {
+            if !eligible_or_record_skip(
+                spec,
+                match_value.as_deref(),
+                &mut results,
+                &disabled,
+                ctx.session_id,
+            ) {
                 continue;
             }
 
@@ -1251,12 +1282,18 @@ mod tests {
             (
                 ReplacementKind::Mcp,
                 0,
-                ReplacementChoice { chosen: Some(replacement(ReplacementKind::Mcp, 1)), rejected: None },
+                ReplacementChoice {
+                    chosen: Some(replacement(ReplacementKind::Mcp, 1)),
+                    rejected: None,
+                },
             ),
             (
                 ReplacementKind::Mcp,
                 2,
-                ReplacementChoice { chosen: Some(replacement(ReplacementKind::Builtin, 2)), rejected: None },
+                ReplacementChoice {
+                    chosen: Some(replacement(ReplacementKind::Builtin, 2)),
+                    rejected: None,
+                },
             ),
             (
                 ReplacementKind::Builtin,
@@ -1988,7 +2025,11 @@ mod tests {
     const GATE_FAILURES: &[(&str, &str, u64)] = &[
         ("timeout", "sleep 5", 300),
         ("crash by signal", "kill -9 $$", 5000),
-        ("non-zero exit without a decision", "echo 'oops' >&2; exit 1", 5000),
+        (
+            "non-zero exit without a decision",
+            "echo 'oops' >&2; exit 1",
+            5000,
+        ),
         ("invalid output", "echo '{\"decision\":\"maybe\"}'", 5000),
     ];
 
@@ -2013,7 +2054,10 @@ mod tests {
             let result =
                 dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
             match result.decision {
-                HookDecision::Deny { ref hook_name, ref reason } => {
+                HookDecision::Deny {
+                    ref hook_name,
+                    ref reason,
+                } => {
                     assert_eq!(hook_name, "flaky", "{label}");
                     assert!(reason.contains("failed"), "{label}: {reason}");
                     assert!(reason.contains("failClosed is set"), "{label}: {reason}");
@@ -2050,7 +2094,10 @@ mod tests {
             let result =
                 dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
             match result.decision {
-                PromptDecision::Block { ref hook_name, ref reason } => {
+                PromptDecision::Block {
+                    ref hook_name,
+                    ref reason,
+                } => {
                     assert_eq!(hook_name, "flaky", "{label}");
                     assert!(reason.contains("failed"), "{label}: {reason}");
                     assert!(reason.contains("failClosed is set"), "{label}: {reason}");
@@ -2067,8 +2114,13 @@ mod tests {
 
     #[tokio::test]
     async fn fail_closed_hook_that_runs_cleanly_is_unaffected() {
-        let registry = registry_from_specs(vec![failing_pre(r#"echo '{"decision":"allow"}'"#, 5000, true)]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        let registry = registry_from_specs(vec![failing_pre(
+            r#"echo '{"decision":"allow"}'"#,
+            5000,
+            true,
+        )]);
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
         assert_eq!(result.decision, HookDecision::Allow);
 
         let registry = registry_from_specs(vec![failing_pre(
@@ -2076,10 +2128,14 @@ mod tests {
             5000,
             true,
         )]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
         assert_eq!(
             result.decision,
-            HookDecision::Deny { hook_name: "flaky".into(), reason: "nope".into() },
+            HookDecision::Deny {
+                hook_name: "flaky".into(),
+                reason: "nope".into()
+            },
             "an explicit deny keeps the hook's own reason"
         );
 
@@ -2094,7 +2150,8 @@ mod tests {
             failing_pre("exit 1", 5000, false),
             failing_pre(r#"echo '{"decision":"allow"}'"#, 5000, true),
         ]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
         assert_eq!(result.decision, HookDecision::Allow);
     }
 
@@ -2102,16 +2159,26 @@ mod tests {
     /// these may pass as an allow, and without it each stays an allow, as it always was.
     const GATE_LAUNDERED: &[(&str, &str)] = &[
         ("malformed JSON then exit 0", "echo '{\"decision\":'"),
-        ("allow then killed by a signal", "echo '{\"decision\":\"allow\"}'; kill -9 $$"),
-        ("allow then exit 3", "echo '{\"decision\":\"allow\"}'; exit 3"),
-        ("continue true then exit 1", "echo '{\"continue\":true}'; exit 1"),
+        (
+            "allow then killed by a signal",
+            "echo '{\"decision\":\"allow\"}'; kill -9 $$",
+        ),
+        (
+            "allow then exit 3",
+            "echo '{\"decision\":\"allow\"}'; exit 3",
+        ),
+        (
+            "continue true then exit 1",
+            "echo '{\"continue\":true}'; exit 1",
+        ),
     ];
 
     #[tokio::test]
     async fn fail_closed_pre_tool_use_denies_an_allow_that_is_followed_by_a_failure() {
         for &(label, script) in GATE_LAUNDERED {
             let registry = registry_from_specs(vec![failing_pre(script, 5000, true)]);
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
             match result.decision {
                 HookDecision::Deny { ref reason, .. } => {
                     assert!(reason.contains("failClosed is set"), "{label}: {reason}")
@@ -2120,8 +2187,13 @@ mod tests {
             }
 
             let registry = registry_from_specs(vec![failing_pre(script, 5000, false)]);
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
-            assert_eq!(result.decision, HookDecision::Allow, "{label} (default stays fail-open)");
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            assert_eq!(
+                result.decision,
+                HookDecision::Allow,
+                "{label} (default stays fail-open)"
+            );
         }
     }
 
@@ -2129,7 +2201,8 @@ mod tests {
     async fn fail_closed_prompt_gate_blocks_an_allow_that_is_followed_by_a_failure() {
         for &(label, script) in GATE_LAUNDERED {
             let registry = registry_from_specs(vec![failing_prompt(script, 5000, true)]);
-            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            let result =
+                dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
             match result.decision {
                 PromptDecision::Block { ref reason, .. } => {
                     assert!(reason.contains("failClosed is set"), "{label}: {reason}")
@@ -2138,8 +2211,13 @@ mod tests {
             }
 
             let registry = registry_from_specs(vec![failing_prompt(script, 5000, false)]);
-            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
-            assert_eq!(result.decision, PromptDecision::Allow, "{label} (default stays fail-open)");
+            let result =
+                dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            assert_eq!(
+                result.decision,
+                PromptDecision::Allow,
+                "{label} (default stays fail-open)"
+            );
         }
     }
 
@@ -2148,17 +2226,35 @@ mod tests {
     #[tokio::test]
     async fn fail_closed_denies_a_decision_with_trailing_garbage() {
         for flag in [true, false] {
-            let registry = registry_from_specs(vec![failing_pre(r#"printf '{"decision":"deny"}oops'"#, 5000, flag)]);
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            let registry = registry_from_specs(vec![failing_pre(
+                r#"printf '{"decision":"deny"}oops'"#,
+                5000,
+                flag,
+            )]);
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
             if flag {
-                assert!(matches!(result.decision, HookDecision::Deny { .. }), "{:?}", result.decision);
+                assert!(
+                    matches!(result.decision, HookDecision::Deny { .. }),
+                    "{:?}",
+                    result.decision
+                );
             } else {
                 assert_eq!(result.decision, HookDecision::Allow);
             }
-            let registry = registry_from_specs(vec![failing_prompt(r#"printf '{"decision":"block"}oops'"#, 5000, flag)]);
-            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            let registry = registry_from_specs(vec![failing_prompt(
+                r#"printf '{"decision":"block"}oops'"#,
+                5000,
+                flag,
+            )]);
+            let result =
+                dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
             if flag {
-                assert!(matches!(result.decision, PromptDecision::Block { .. }), "{:?}", result.decision);
+                assert!(
+                    matches!(result.decision, PromptDecision::Block { .. }),
+                    "{:?}",
+                    result.decision
+                );
             } else {
                 assert_eq!(result.decision, PromptDecision::Allow);
             }
@@ -2172,16 +2268,22 @@ mod tests {
         let tail = r#"head -c 1048577 /dev/zero | tr '\0' ' '; printf '{"decision":'"#;
         for flag in [true, false] {
             let registry = registry_from_specs(vec![failing_pre(tail, 20000, flag)]);
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
             match (flag, &result.decision) {
-                (true, HookDecision::Deny { reason, .. }) => assert!(reason.contains("size cap"), "{reason}"),
+                (true, HookDecision::Deny { reason, .. }) => {
+                    assert!(reason.contains("size cap"), "{reason}")
+                }
                 (false, HookDecision::Allow) => {}
                 (_, other) => panic!("flag {flag}: unexpected {other:?}"),
             }
             let registry = registry_from_specs(vec![failing_prompt(tail, 20000, flag)]);
-            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            let result =
+                dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
             match (flag, &result.decision) {
-                (true, PromptDecision::Block { reason, .. }) => assert!(reason.contains("size cap"), "{reason}"),
+                (true, PromptDecision::Block { reason, .. }) => {
+                    assert!(reason.contains("size cap"), "{reason}")
+                }
                 (false, PromptDecision::Allow) => {}
                 (_, other) => panic!("flag {flag}: unexpected {other:?}"),
             }
@@ -2193,25 +2295,48 @@ mod tests {
     #[tokio::test]
     async fn fail_closed_denies_a_json_object_that_is_not_a_decision_document() {
         for flag in [true, false] {
-            let registry = registry_from_specs(vec![failing_pre(r#"printf '{"decison":"deny"}'"#, 5000, flag)]);
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            let registry = registry_from_specs(vec![failing_pre(
+                r#"printf '{"decison":"deny"}'"#,
+                5000,
+                flag,
+            )]);
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
             match (flag, &result.decision) {
-                (true, HookDecision::Deny { reason, .. }) => assert!(reason.contains("does not recognise"), "{reason}"),
+                (true, HookDecision::Deny { reason, .. }) => {
+                    assert!(reason.contains("does not recognise"), "{reason}")
+                }
                 (false, HookDecision::Allow) => {}
                 (_, other) => panic!("flag {flag}: unexpected {other:?}"),
             }
-            let registry = registry_from_specs(vec![failing_prompt(r#"printf '{"decison":"block"}'"#, 5000, flag)]);
-            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            let registry = registry_from_specs(vec![failing_prompt(
+                r#"printf '{"decison":"block"}'"#,
+                5000,
+                flag,
+            )]);
+            let result =
+                dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
             match (flag, &result.decision) {
-                (true, PromptDecision::Block { reason, .. }) => assert!(reason.contains("does not recognise"), "{reason}"),
+                (true, PromptDecision::Block { reason, .. }) => {
+                    assert!(reason.contains("does not recognise"), "{reason}")
+                }
                 (false, PromptDecision::Allow) => {}
                 (_, other) => panic!("flag {flag}: unexpected {other:?}"),
             }
         }
-        let registry = registry_from_specs(vec![failing_pre(r#"printf '{"systemMessage":"hi"}'"#, 5000, true)]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        let registry = registry_from_specs(vec![failing_pre(
+            r#"printf '{"systemMessage":"hi"}'"#,
+            5000,
+            true,
+        )]);
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
         assert_eq!(result.decision, HookDecision::Allow);
-        let registry = registry_from_specs(vec![failing_prompt(r#"printf '{"systemMessage":"hi"}'"#, 5000, true)]);
+        let registry = registry_from_specs(vec![failing_prompt(
+            r#"printf '{"systemMessage":"hi"}'"#,
+            5000,
+            true,
+        )]);
         let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
         assert_eq!(result.decision, PromptDecision::Allow);
     }
@@ -2235,18 +2360,36 @@ mod tests {
         ];
         for flag in [true, false] {
             for doc in denied {
-                let registry = registry_from_specs(vec![failing_pre(&format!("printf '%s' '{doc}'"), 5000, flag)]);
-                let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+                let registry = registry_from_specs(vec![failing_pre(
+                    &format!("printf '%s' '{doc}'"),
+                    5000,
+                    flag,
+                )]);
+                let result =
+                    dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx())
+                        .await;
                 match (flag, &result.decision) {
-                    (true, HookDecision::Deny { reason, .. }) => assert!(reason.contains("does not recognise"), "{doc}: {reason}"),
+                    (true, HookDecision::Deny { reason, .. }) => {
+                        assert!(reason.contains("does not recognise"), "{doc}: {reason}")
+                    }
                     (false, HookDecision::Allow) => {}
                     (_, other) => panic!("tool, flag {flag}, {doc}: unexpected {other:?}"),
                 }
             }
             for doc in allowed {
-                let registry = registry_from_specs(vec![failing_pre(&format!("printf '%s' '{doc}'"), 5000, flag)]);
-                let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
-                assert_eq!(result.decision, HookDecision::Allow, "tool, flag {flag}, {doc}");
+                let registry = registry_from_specs(vec![failing_pre(
+                    &format!("printf '%s' '{doc}'"),
+                    5000,
+                    flag,
+                )]);
+                let result =
+                    dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx())
+                        .await;
+                assert_eq!(
+                    result.decision,
+                    HookDecision::Allow,
+                    "tool, flag {flag}, {doc}"
+                );
             }
         }
         let prompt_denied = [
@@ -2262,18 +2405,34 @@ mod tests {
         ];
         for flag in [true, false] {
             for doc in prompt_denied {
-                let registry = registry_from_specs(vec![failing_prompt(&format!("printf '%s' '{doc}'"), 5000, flag)]);
-                let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+                let registry = registry_from_specs(vec![failing_prompt(
+                    &format!("printf '%s' '{doc}'"),
+                    5000,
+                    flag,
+                )]);
+                let result =
+                    dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
                 match (flag, &result.decision) {
-                    (true, PromptDecision::Block { reason, .. }) => assert!(reason.contains("does not recognise"), "{doc}: {reason}"),
+                    (true, PromptDecision::Block { reason, .. }) => {
+                        assert!(reason.contains("does not recognise"), "{doc}: {reason}")
+                    }
                     (false, PromptDecision::Allow) => {}
                     (_, other) => panic!("prompt, flag {flag}, {doc}: unexpected {other:?}"),
                 }
             }
             for doc in prompt_allowed {
-                let registry = registry_from_specs(vec![failing_prompt(&format!("printf '%s' '{doc}'"), 5000, flag)]);
-                let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
-                assert_eq!(result.decision, PromptDecision::Allow, "prompt, flag {flag}, {doc}");
+                let registry = registry_from_specs(vec![failing_prompt(
+                    &format!("printf '%s' '{doc}'"),
+                    5000,
+                    flag,
+                )]);
+                let result =
+                    dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+                assert_eq!(
+                    result.decision,
+                    PromptDecision::Allow,
+                    "prompt, flag {flag}, {doc}"
+                );
             }
         }
     }
@@ -2289,39 +2448,58 @@ mod tests {
             r#"{"systemMessage":"a","systemMessage":"b"}"#,
             r#"{"hookSpecificOutput":{"additionalContext":"a","additionalContext":"b"}}"#,
         ];
-        let tool_cases: Vec<String> = std::iter::once(r#"printf '{"decision":"allow","reason":"\377"}'"#.to_string())
-            .chain(duplicates.iter().map(|doc| format!("printf '%s' '{doc}'")))
-            .collect();
-        let prompt_cases: Vec<String> = std::iter::once(r#"printf '{"decision":"approve","reason":"\377"}'"#.to_string())
-            .chain(duplicates.iter().map(|doc| format!("printf '%s' '{doc}'")))
-            .collect();
+        let tool_cases: Vec<String> =
+            std::iter::once(r#"printf '{"decision":"allow","reason":"\377"}'"#.to_string())
+                .chain(duplicates.iter().map(|doc| format!("printf '%s' '{doc}'")))
+                .collect();
+        let prompt_cases: Vec<String> =
+            std::iter::once(r#"printf '{"decision":"approve","reason":"\377"}'"#.to_string())
+                .chain(duplicates.iter().map(|doc| format!("printf '%s' '{doc}'")))
+                .collect();
         let refused = |reason: &str| reason.contains("UTF-8") || reason.contains("duplicate key");
         for flag in [true, false] {
             for script in &tool_cases {
                 let registry = registry_from_specs(vec![failing_pre(script, 5000, flag)]);
-                let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+                let result =
+                    dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx())
+                        .await;
                 match (flag, &result.decision) {
-                    (true, HookDecision::Deny { reason, .. }) => assert!(refused(reason), "{script}: {reason}"),
+                    (true, HookDecision::Deny { reason, .. }) => {
+                        assert!(refused(reason), "{script}: {reason}")
+                    }
                     (false, HookDecision::Allow) => {}
                     (_, other) => panic!("tool, flag {flag}, {script}: unexpected {other:?}"),
                 }
             }
             for script in &prompt_cases {
                 let registry = registry_from_specs(vec![failing_prompt(script, 5000, flag)]);
-                let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+                let result =
+                    dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
                 match (flag, &result.decision) {
-                    (true, PromptDecision::Block { reason, .. }) => assert!(refused(reason), "{script}: {reason}"),
+                    (true, PromptDecision::Block { reason, .. }) => {
+                        assert!(refused(reason), "{script}: {reason}")
+                    }
                     (false, PromptDecision::Allow) => {}
                     (_, other) => panic!("prompt, flag {flag}, {script}: unexpected {other:?}"),
                 }
             }
             let ok = r#"printf '%s' '{"systemMessage":"café ✓ 日本語"}'"#;
             let registry = registry_from_specs(vec![failing_pre(ok, 5000, flag)]);
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
-            assert_eq!(result.decision, HookDecision::Allow, "tool, flag {flag}, valid UTF-8");
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            assert_eq!(
+                result.decision,
+                HookDecision::Allow,
+                "tool, flag {flag}, valid UTF-8"
+            );
             let registry = registry_from_specs(vec![failing_prompt(ok, 5000, flag)]);
-            let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
-            assert_eq!(result.decision, PromptDecision::Allow, "prompt, flag {flag}, valid UTF-8");
+            let result =
+                dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+            assert_eq!(
+                result.decision,
+                PromptDecision::Allow,
+                "prompt, flag {flag}, valid UTF-8"
+            );
         }
     }
 
@@ -2334,25 +2512,43 @@ mod tests {
             r#"echo '{"continue":false,"stopReason":"halt"}'; exit 1"#,
         ] {
             let registry = registry_from_specs(vec![failing_pre(script, 5000, true)]);
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
             match &result.decision {
-                HookDecision::Deny { reason, .. } => assert!(!reason.contains("halt"), "{script}: {reason}"),
+                HookDecision::Deny { reason, .. } => {
+                    assert!(!reason.contains("halt"), "{script}: {reason}")
+                }
                 other => panic!("flag on, {script}: expected Deny, got {other:?}"),
             }
             let registry = registry_from_specs(vec![failing_pre(script, 5000, false)]);
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
-            assert!(matches!(result.decision, HookDecision::Stop { .. }), "flag off keeps the stop: {:?}", result.decision);
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            assert!(
+                matches!(result.decision, HookDecision::Stop { .. }),
+                "flag off keeps the stop: {:?}",
+                result.decision
+            );
         }
-        let registry = registry_from_specs(vec![failing_pre(r#"echo '{"continue":false,"stopReason":"halt"}'"#, 5000, true)]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
-        assert!(matches!(result.decision, HookDecision::Stop { .. }), "a clean stop stays a stop: {:?}", result.decision);
+        let registry = registry_from_specs(vec![failing_pre(
+            r#"echo '{"continue":false,"stopReason":"halt"}'"#,
+            5000,
+            true,
+        )]);
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert!(
+            matches!(result.decision, HookDecision::Stop { .. }),
+            "a clean stop stays a stop: {:?}",
+            result.decision
+        );
     }
 
     /// Exit 0 with an empty body is a clean "no objection", not a failure, even when fail-closed.
     #[tokio::test]
     async fn fail_closed_empty_output_on_exit_zero_is_an_allow() {
         let registry = registry_from_specs(vec![failing_pre("true", 5000, true)]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
         assert_eq!(result.decision, HookDecision::Allow);
         let registry = registry_from_specs(vec![failing_prompt("true", 5000, true)]);
         let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
@@ -2362,8 +2558,10 @@ mod tests {
     /// A hook that exits 0 with plain text (not JSON) was never a decision; it stays an allow even when fail-closed.
     #[tokio::test]
     async fn fail_closed_plain_text_output_on_exit_zero_is_still_an_allow() {
-        let registry = registry_from_specs(vec![failing_pre("echo 'all checks passed'", 5000, true)]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        let registry =
+            registry_from_specs(vec![failing_pre("echo 'all checks passed'", 5000, true)]);
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
         assert_eq!(result.decision, HookDecision::Allow);
     }
 
@@ -2386,11 +2584,18 @@ mod tests {
         // Found at run time (note_result records it), then cached: calls 1 and 2 and 3 all block.
         let registry = registry_from_specs(vec![ghost("u42-ghost-pre", true, false)]);
         for call in 1..=3 {
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
             match result.decision {
                 HookDecision::Deny { ref reason, .. } => {
-                    assert!(reason.contains("failClosed is set"), "call {call}: {reason}");
-                    assert!(reason.contains("command not found"), "call {call}: {reason}");
+                    assert!(
+                        reason.contains("failClosed is set"),
+                        "call {call}: {reason}"
+                    );
+                    assert!(
+                        reason.contains("command not found"),
+                        "call {call}: {reason}"
+                    );
                 }
                 ref other => panic!("call {call}: expected Deny, got {other:?}"),
             }
@@ -2399,10 +2604,16 @@ mod tests {
         // Found by the startup check before the first call.
         let registry = registry_from_specs(vec![ghost("u42-ghost-startup", true, false)]);
         let problems = crate::health::validate_registry(&registry, "/tmp", "test-session");
-        assert!(problems.iter().any(|p| p.hook_name == "u42-ghost-startup"), "{problems:?}");
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert!(
+            problems.iter().any(|p| p.hook_name == "u42-ghost-startup"),
+            "{problems:?}"
+        );
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
         match result.decision {
-            HookDecision::Deny { ref reason, .. } => assert!(reason.contains("cannot start"), "{reason}"),
+            HookDecision::Deny { ref reason, .. } => {
+                assert!(reason.contains("cannot start"), "{reason}")
+            }
             ref other => panic!("expected Deny after the startup check, got {other:?}"),
         }
 
@@ -2410,13 +2621,18 @@ mod tests {
         let registry = registry_from_specs(vec![ghost("u42-ghost-prompt", true, true)]);
         crate::health::validate_registry(&registry, "/tmp", "test-session");
         let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
-        assert!(matches!(result.decision, PromptDecision::Block { .. }), "{:?}", result.decision);
+        assert!(
+            matches!(result.decision, PromptDecision::Block { .. }),
+            "{:?}",
+            result.decision
+        );
 
         // No flag: skipped, the call goes ahead.
         let registry = registry_from_specs(vec![ghost("u42-ghost-open", false, false)]);
         crate::health::validate_registry(&registry, "/tmp", "test-session");
         for _ in 0..2 {
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
             assert_eq!(result.decision, HookDecision::Allow);
         }
     }
@@ -2432,7 +2648,8 @@ mod tests {
             let mut first = pre_tool_use_spec("earlier", earlier);
             first.fail_closed = false;
             let registry = registry_from_specs(vec![first, failing_pre("exit 1", 5000, true)]);
-            let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+            let result =
+                dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
             assert!(
                 matches!(&result.decision, HookDecision::Deny { hook_name, .. } if hook_name == "flaky"),
                 "{earlier}: {:?}",
@@ -2849,10 +3066,17 @@ mod tests {
     async fn post_tool_use_continue_false_is_captured_first_hook_wins() {
         let registry = registry_from_specs(vec![
             post_tool_use_spec("quiet", "echo ok"),
-            post_tool_use_spec("stopper", "echo '{\"continue\":false,\"stopReason\":\"enough\"}'"),
-            post_tool_use_spec("later", "echo '{\"continue\":false,\"stopReason\":\"too late\"}'"),
+            post_tool_use_spec(
+                "stopper",
+                "echo '{\"continue\":false,\"stopReason\":\"enough\"}'",
+            ),
+            post_tool_use_spec(
+                "later",
+                "echo '{\"continue\":false,\"stopReason\":\"too late\"}'",
+            ),
         ]);
-        let result = dispatch_post_tool_use(&registry, &post_tool_use_envelope("Bash"), &run_ctx()).await;
+        let result =
+            dispatch_post_tool_use(&registry, &post_tool_use_envelope("Bash"), &run_ctx()).await;
         assert_eq!(
             result.force_stop,
             Some(PostToolUseStop {
@@ -2862,8 +3086,12 @@ mod tests {
         );
         assert_eq!(result.results.len(), 3, "every hook still ran");
 
-        let registry = registry_from_specs(vec![post_tool_use_spec("go-on", "echo '{\"continue\":true}'")]);
-        let result = dispatch_post_tool_use(&registry, &post_tool_use_envelope("Bash"), &run_ctx()).await;
+        let registry = registry_from_specs(vec![post_tool_use_spec(
+            "go-on",
+            "echo '{\"continue\":true}'",
+        )]);
+        let result =
+            dispatch_post_tool_use(&registry, &post_tool_use_envelope("Bash"), &run_ctx()).await;
         assert!(result.force_stop.is_none());
     }
 
@@ -2878,10 +3106,14 @@ mod tests {
     #[tokio::test]
     async fn pre_tool_use_continue_false_decides_stop_not_deny() {
         let registry = registry_from_specs(vec![
-            pre_tool_use_spec("stopper", r#"echo '{"continue":false,"stopReason":"enough"}'"#),
+            pre_tool_use_spec(
+                "stopper",
+                r#"echo '{"continue":false,"stopReason":"enough"}'"#,
+            ),
             pre_tool_use_spec("later", r#"echo '{"decision":"allow"}'"#),
         ]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
         assert_eq!(
             result.decision,
             HookDecision::Stop {
@@ -2889,17 +3121,29 @@ mod tests {
                 reason: "enough".to_string()
             }
         );
-        assert_eq!(result.results.len(), 1, "a stop ends the gate chain like a deny");
+        assert_eq!(
+            result.results.len(),
+            1,
+            "a stop ends the gate chain like a deny"
+        );
 
         let registry = registry_from_specs(vec![pre_tool_use_spec(
             "denier",
             r#"echo '{"decision":"deny","reason":"no"}'"#,
         )]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
-        assert!(matches!(result.decision, HookDecision::Deny { .. }), "a plain deny does not end the turn");
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        assert!(
+            matches!(result.decision, HookDecision::Deny { .. }),
+            "a plain deny does not end the turn"
+        );
 
-        let registry = registry_from_specs(vec![pre_tool_use_spec("go-on", r#"echo '{"continue":true}'"#)]);
-        let result = dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
+        let registry = registry_from_specs(vec![pre_tool_use_spec(
+            "go-on",
+            r#"echo '{"continue":true}'"#,
+        )]);
+        let result =
+            dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("Bash"), &run_ctx()).await;
         assert_eq!(result.decision, HookDecision::Allow);
     }
 
@@ -3031,29 +3275,55 @@ mod tests {
             ("project/repo-hook", HookProvenance::File),
             ("plugin/p:hook", HookProvenance::Plugin),
             ("managed:pre_tool_use[0].hooks[0]", HookProvenance::Managed),
-            ("requirements/user:pre_tool_use[0].hooks[0]", HookProvenance::UserRequirements),
+            (
+                "requirements/user:pre_tool_use[0].hooks[0]",
+                HookProvenance::UserRequirements,
+            ),
         ] {
             let mut spec = make_command_spec(name, None, true, "echo ok");
             spec.layer = layer;
-            assert_eq!(pinned.skip_reason(&spec), Some(HookSkipReason::ManagedOnly), "{name}");
-            assert!(!eligible_or_record_skip(&spec, None, &mut results, &pinned, ""), "{name}");
-            assert!(crate::trust::hook_disabled_for_display_with(&spec, &pinned), "{name}");
+            assert_eq!(
+                pinned.skip_reason(&spec),
+                Some(HookSkipReason::ManagedOnly),
+                "{name}"
+            );
+            assert!(
+                !eligible_or_record_skip(&spec, None, &mut results, &pinned, ""),
+                "{name}"
+            );
+            assert!(
+                crate::trust::hook_disabled_for_display_with(&spec, &pinned),
+                "{name}"
+            );
         }
         assert_eq!(results.len(), 5);
-        assert!(results.iter().all(|r| matches!(r, HookRunResult::Skipped { .. })));
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r, HookRunResult::Skipped { .. }))
+        );
         for layer in [HookProvenance::Requirements, HookProvenance::SystemManaged] {
-            let mut managed = make_command_spec("requirements/system:x[0].hooks[0]", None, false, "echo ok");
+            let mut managed =
+                make_command_spec("requirements/system:x[0].hooks[0]", None, false, "echo ok");
             managed.layer = layer;
             assert_eq!(pinned.skip_reason(&managed), None, "{layer:?}");
-            assert!(eligible_or_record_skip(&managed, None, &mut results, &pinned, ""), "{layer:?}");
-            assert!(!crate::trust::hook_disabled_for_display_with(&managed, &pinned));
+            assert!(
+                eligible_or_record_skip(&managed, None, &mut results, &pinned, ""),
+                "{layer:?}"
+            );
+            assert!(!crate::trust::hook_disabled_for_display_with(
+                &managed, &pinned
+            ));
         }
         // Without the pin the user's own disable state decides, as before.
         let unpinned = DisabledHooks::new(["global/off".to_string()], false);
         let on = make_command_spec("global/on", None, true, "echo ok");
         let off = make_command_spec("global/off", None, true, "echo ok");
         assert_eq!(unpinned.skip_reason(&on), None);
-        assert_eq!(unpinned.skip_reason(&off), Some(HookSkipReason::UserDisabled));
+        assert_eq!(
+            unpinned.skip_reason(&off),
+            Some(HookSkipReason::UserDisabled)
+        );
         assert!(!unpinned.managed_only() && pinned.managed_only());
     }
 
@@ -3062,7 +3332,9 @@ mod tests {
     #[test]
     fn env_managed_only_pin_skips_non_managed_hooks_and_names_the_env_var() {
         use crate::config::HookProvenance;
-        use crate::trust::{DisabledHooks, HookSkipReason, MANAGED_HOOKS_ONLY_ENV_NOTE, MANAGED_HOOKS_ONLY_NOTE};
+        use crate::trust::{
+            DisabledHooks, HookSkipReason, MANAGED_HOOKS_ONLY_ENV_NOTE, MANAGED_HOOKS_ONLY_NOTE,
+        };
         let by_env = DisabledHooks::new(Vec::<String>::new(), false).with_managed_only_by_env();
         let mut results = Vec::new();
         for (name, layer) in [
@@ -3072,19 +3344,39 @@ mod tests {
         ] {
             let mut spec = make_command_spec(name, None, true, "echo ok");
             spec.layer = layer;
-            assert_eq!(by_env.skip_reason(&spec), Some(HookSkipReason::ManagedOnly), "{name}");
-            assert!(!eligible_or_record_skip(&spec, None, &mut results, &by_env, ""), "{name}");
+            assert_eq!(
+                by_env.skip_reason(&spec),
+                Some(HookSkipReason::ManagedOnly),
+                "{name}"
+            );
+            assert!(
+                !eligible_or_record_skip(&spec, None, &mut results, &by_env, ""),
+                "{name}"
+            );
             let diag = crate::health::diagnose(&spec, "s", "/tmp", &by_env);
-            assert!(diag.reason.unwrap().contains("FUIGO_MANAGED_HOOKS_ONLY"), "{name}");
+            assert!(
+                diag.reason.unwrap().contains("FUIGO_MANAGED_HOOKS_ONLY"),
+                "{name}"
+            );
         }
-        let mut managed = make_command_spec("requirements/system:x[0].hooks[0]", None, true, "echo ok");
+        let mut managed =
+            make_command_spec("requirements/system:x[0].hooks[0]", None, true, "echo ok");
         managed.layer = HookProvenance::Requirements;
         assert_eq!(by_env.skip_reason(&managed), None);
-        assert!(eligible_or_record_skip(&managed, None, &mut results, &by_env, ""));
+        assert!(eligible_or_record_skip(
+            &managed,
+            None,
+            &mut results,
+            &by_env,
+            ""
+        ));
         assert_eq!(by_env.managed_only_note(), MANAGED_HOOKS_ONLY_ENV_NOTE);
         assert!(MANAGED_HOOKS_ONLY_ENV_NOTE.contains("FUIGO_MANAGED_HOOKS_ONLY"));
         // A policy-file pin keeps the old wording.
-        assert_eq!(DisabledHooks::new(Vec::<String>::new(), true).managed_only_note(), MANAGED_HOOKS_ONLY_NOTE);
+        assert_eq!(
+            DisabledHooks::new(Vec::<String>::new(), true).managed_only_note(),
+            MANAGED_HOOKS_ONLY_NOTE
+        );
     }
 
     #[tokio::test]

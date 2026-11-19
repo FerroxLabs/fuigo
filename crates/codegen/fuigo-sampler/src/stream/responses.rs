@@ -203,7 +203,10 @@ pub struct ClientTools {
 
 impl From<HashSet<String>> for ClientTools {
     fn from(all: HashSet<String>) -> Self {
-        Self { all, custom: HashSet::new() }
+        Self {
+            all,
+            custom: HashSet::new(),
+        }
     }
 }
 
@@ -212,7 +215,11 @@ impl ClientTools {
     pub fn of_request(tools: &[fuigo_sampling_types::ToolSpec]) -> Self {
         Self {
             all: tools.iter().map(|t| t.name.clone()).collect(),
-            custom: tools.iter().filter(|t| t.is_freeform()).map(|t| t.name.clone()).collect(),
+            custom: tools
+                .iter()
+                .filter(|t| t.is_freeform())
+                .map(|t| t.name.clone())
+                .collect(),
         }
     }
 }
@@ -257,7 +264,10 @@ pub(crate) fn stream_responses_tracked<'a>(
     // call (streamed like a function call); any other `custom_tool_call` is backend-executed x_search
     client_tools: ClientTools,
 ) -> impl Stream<Item = SamplingEvent> + Send + 'a {
-    let ClientTools { all: client_tools, custom: custom_tools } = client_tools;
+    let ClientTools {
+        all: client_tools,
+        custom: custom_tools,
+    } = client_tools;
     async_stream::stream! {
         use rs::{ResponseStreamEvent, Status};
 
@@ -1244,10 +1254,12 @@ mod tests {
         terminal.output = vec![message("msg_t", "terminal")];
         let raw = stream::iter(vec![
             Ok(done(0, message("msg_1", "streamed"))),
-            Ok(rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
-                response: terminal,
-                sequence_number: 0,
-            })),
+            Ok(rs::ResponseStreamEvent::ResponseCompleted(
+                rs_types::ResponseCompletedEvent {
+                    response: terminal,
+                    sequence_number: 0,
+                },
+            )),
         ])
         .boxed();
         let events = collect(stream_responses(
@@ -1858,11 +1870,13 @@ mod tests {
         let mut response = build_response(rs_types::Status::Completed);
         response.output = vec![rs_types::OutputItem::CustomToolCall(done.clone())];
         vec![
-            rs::ResponseStreamEvent::ResponseOutputItemAdded(rs_types::ResponseOutputItemAddedEvent {
-                sequence_number: 0,
-                output_index: 0,
-                item: rs_types::OutputItem::CustomToolCall(started),
-            }),
+            rs::ResponseStreamEvent::ResponseOutputItemAdded(
+                rs_types::ResponseOutputItemAddedEvent {
+                    sequence_number: 0,
+                    output_index: 0,
+                    item: rs_types::OutputItem::CustomToolCall(started),
+                },
+            ),
             rs::ResponseStreamEvent::ResponseCustomToolCallInputDelta(
                 rs_types::ResponseCustomToolCallInputDeltaEvent {
                     sequence_number: 1,
@@ -1879,11 +1893,13 @@ mod tests {
                     input: input.to_string(),
                 },
             ),
-            rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
-                sequence_number: 3,
-                output_index: 0,
-                item: rs_types::OutputItem::CustomToolCall(done),
-            }),
+            rs::ResponseStreamEvent::ResponseOutputItemDone(
+                rs_types::ResponseOutputItemDoneEvent {
+                    sequence_number: 3,
+                    output_index: 0,
+                    item: rs_types::OutputItem::CustomToolCall(done),
+                },
+            ),
             rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
                 response,
                 sequence_number: 4,
@@ -1897,7 +1913,8 @@ mod tests {
     #[tokio::test]
     async fn custom_tool_call_for_client_tool_streams_as_tool_call() {
         let patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n";
-        let raw = stream::iter(custom_call_events("apply_patch", patch).into_iter().map(Ok)).boxed();
+        let raw =
+            stream::iter(custom_call_events("apply_patch", patch).into_iter().map(Ok)).boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1911,17 +1928,27 @@ mod tests {
         let deltas: Vec<(Option<&str>, Option<&str>, Option<&str>)> = events
             .iter()
             .filter_map(|e| match e {
-                SamplingEvent::ToolCallDelta { id, name, arguments_delta, .. } => {
-                    Some((id.as_deref(), name.as_deref(), arguments_delta.as_deref()))
-                }
+                SamplingEvent::ToolCallDelta {
+                    id,
+                    name,
+                    arguments_delta,
+                    ..
+                } => Some((id.as_deref(), name.as_deref(), arguments_delta.as_deref())),
                 _ => None,
             })
             .collect();
-        assert_eq!(deltas, vec![(Some("call_1"), Some("apply_patch"), None), (None, None, Some(patch))]);
+        assert_eq!(
+            deltas,
+            vec![
+                (Some("call_1"), Some("apply_patch"), None),
+                (None, None, Some(patch))
+            ]
+        );
         assert!(
             !events.iter().any(|e| matches!(
                 e,
-                SamplingEvent::BackendToolCallStarted { .. } | SamplingEvent::BackendToolCallCompleted { .. }
+                SamplingEvent::BackendToolCallStarted { .. }
+                    | SamplingEvent::BackendToolCallCompleted { .. }
             )),
             "a client custom tool is not a backend tool: {events:?}"
         );
@@ -1933,7 +1960,12 @@ mod tests {
                 assert_eq!(assistant.tool_calls[0].name, "apply_patch");
                 assert_eq!(assistant.tool_calls[0].id.as_ref(), "call_1");
                 assert_eq!(assistant.tool_calls[0].arguments.as_ref(), patch);
-                assert!(!response.items.iter().any(|i| matches!(i, ConversationItem::BackendToolCall(_))));
+                assert!(
+                    !response
+                        .items
+                        .iter()
+                        .any(|i| matches!(i, ConversationItem::BackendToolCall(_)))
+                );
             }
             other => panic!("expected Completed, got {other:?}"),
         }
@@ -1942,7 +1974,12 @@ mod tests {
     /// The same frames for a name the request did not advertise stay the hosted x_search path.
     #[tokio::test]
     async fn custom_tool_call_for_unknown_name_stays_backend_x_search() {
-        let raw = stream::iter(custom_call_events("x_keyword_search", "{\"q\":\"rust\"}").into_iter().map(Ok)).boxed();
+        let raw = stream::iter(
+            custom_call_events("x_keyword_search", "{\"q\":\"rust\"}")
+                .into_iter()
+                .map(Ok),
+        )
+        .boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -1952,14 +1989,21 @@ mod tests {
             HashSet::from(["apply_patch".to_string()]).into(),
         ))
         .await;
-        assert!(!events.iter().any(|e| matches!(e, SamplingEvent::ToolCallDelta { .. })), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SamplingEvent::ToolCallDelta { .. })),
+            "{events:?}"
+        );
         assert!(events.iter().any(|e| matches!(e, SamplingEvent::BackendToolCallStarted { name, .. } if name == "x_search")));
         assert!(events.iter().any(|e| matches!(e, SamplingEvent::BackendToolCallCompleted { name, call_id, .. } if name == "x_search" && call_id == "ctc_1")));
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
                 assert!(response.assistant().unwrap().tool_calls.is_empty());
-                assert!(matches!(&response.items[0], ConversationItem::BackendToolCall(b) if b.id() == "ctc_1"));
+                assert!(
+                    matches!(&response.items[0], ConversationItem::BackendToolCall(b) if b.id() == "ctc_1")
+                );
             }
             other => panic!("expected Completed, got {other:?}"),
         }
@@ -1983,16 +2027,20 @@ mod tests {
         let mut response = build_response(rs_types::Status::Completed);
         response.output = vec![rs_types::OutputItem::FunctionCall(fc.clone())];
         let frames = vec![
-            rs::ResponseStreamEvent::ResponseOutputItemAdded(rs_types::ResponseOutputItemAddedEvent {
-                sequence_number: 0,
-                output_index: 0,
-                item: rs_types::OutputItem::FunctionCall(started),
-            }),
-            rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
-                sequence_number: 1,
-                output_index: 0,
-                item: rs_types::OutputItem::FunctionCall(fc),
-            }),
+            rs::ResponseStreamEvent::ResponseOutputItemAdded(
+                rs_types::ResponseOutputItemAddedEvent {
+                    sequence_number: 0,
+                    output_index: 0,
+                    item: rs_types::OutputItem::FunctionCall(started),
+                },
+            ),
+            rs::ResponseStreamEvent::ResponseOutputItemDone(
+                rs_types::ResponseOutputItemDoneEvent {
+                    sequence_number: 1,
+                    output_index: 0,
+                    item: rs_types::OutputItem::FunctionCall(fc),
+                },
+            ),
             rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
                 response,
                 sequence_number: 2,
@@ -2003,7 +2051,15 @@ mod tests {
             all: HashSet::from(["apply_patch".to_string()]),
             custom: HashSet::from(["apply_patch".to_string()]),
         };
-        let events = collect(stream_responses(raw, None, rid(), Duration::from_secs(60), None, tools)).await;
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            tools,
+        ))
+        .await;
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
                 assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
@@ -2029,7 +2085,10 @@ mod tests {
         let mut response = build_response(rs_types::Status::Completed);
         response.output = vec![rs_types::OutputItem::FunctionCall(fc)];
         let raw = stream::iter(vec![Ok(rs::ResponseStreamEvent::ResponseCompleted(
-            rs_types::ResponseCompletedEvent { response, sequence_number: 0 },
+            rs_types::ResponseCompletedEvent {
+                response,
+                sequence_number: 0,
+            },
         ))])
         .boxed();
         let events = collect(stream_responses(

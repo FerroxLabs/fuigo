@@ -66,7 +66,10 @@ async fn selection_applies_to_the_sampling_config_and_is_persisted() {
                     false,
                     true,
                     85,
-                    switch(SwitchContextWindow::Set(Some(w(400_000))), &[100_000, 400_000]),
+                    switch(
+                        SwitchContextWindow::Set(Some(w(400_000))),
+                        &[100_000, 400_000],
+                    ),
                 )
                 .await
                 .expect("switch");
@@ -106,7 +109,10 @@ async fn a_window_the_model_does_not_list_is_refused_and_forgotten() {
                     false,
                     true,
                     85,
-                    switch(SwitchContextWindow::Set(Some(w(400_000))), &[100_000, 400_000]),
+                    switch(
+                        SwitchContextWindow::Set(Some(w(400_000))),
+                        &[100_000, 400_000],
+                    ),
                 )
                 .await
                 .expect("switch");
@@ -121,7 +127,10 @@ async fn a_window_the_model_does_not_list_is_refused_and_forgotten() {
                     false,
                     true,
                     85,
-                    switch(SwitchContextWindow::Set(Some(w(900_000))), &[100_000, 400_000]),
+                    switch(
+                        SwitchContextWindow::Set(Some(w(900_000))),
+                        &[100_000, 400_000],
+                    ),
                 )
                 .await
                 .expect("switch");
@@ -153,7 +162,10 @@ async fn a_plain_switch_carries_the_selection_only_while_the_new_model_lists_it(
                     false,
                     true,
                     85,
-                    switch(SwitchContextWindow::Set(Some(w(400_000))), &[100_000, 400_000]),
+                    switch(
+                        SwitchContextWindow::Set(Some(w(400_000))),
+                        &[100_000, 400_000],
+                    ),
                 )
                 .await
                 .expect("switch");
@@ -213,23 +225,40 @@ async fn selected_window_is_the_compaction_basis_and_survives_server_overflow_ru
                     false,
                     true,
                     80,
-                    switch(SwitchContextWindow::Set(Some(w(400_000))), &[100_000, 400_000]),
+                    switch(
+                        SwitchContextWindow::Set(Some(w(400_000))),
+                        &[100_000, 400_000],
+                    ),
                 )
                 .await
                 .expect("switch");
             let cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
-            assert_eq!(cfg.context_window.get() * u64::from(actor.compaction.threshold_percent.get()) / 100, 320_000);
+            assert_eq!(
+                cfg.context_window.get() * u64::from(actor.compaction.threshold_percent.get())
+                    / 100,
+                320_000
+            );
 
             // The window the server reports is ignored while the selection is in use
             assert!(actor.is_context_window_fixed(cfg.context_window));
             // A server window at or above the selection keeps it
-            assert_eq!(actor.context_window_after_overflow(&cfg, w(500_000)), w(400_000));
+            assert_eq!(
+                actor.context_window_after_overflow(&cfg, w(500_000)),
+                w(400_000)
+            );
             // A server window below the selection wins and the selection is cleared and persisted as cleared
-            assert_eq!(actor.context_window_after_overflow(&cfg, w(200_000)), w(200_000));
+            assert_eq!(
+                actor.context_window_after_overflow(&cfg, w(200_000)),
+                w(200_000)
+            );
             assert_eq!(selection_of(&actor), None);
             let mut cleared = false;
             while let Ok(msg) = persistence_rx.try_recv() {
-                if let PersistenceMsg::CurrentModel { context_window: Some(None), .. } = msg {
+                if let PersistenceMsg::CurrentModel {
+                    context_window: Some(None),
+                    ..
+                } = msg
+                {
                     cleared = true;
                 }
             }

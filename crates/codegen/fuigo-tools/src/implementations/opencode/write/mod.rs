@@ -95,7 +95,10 @@ impl fuigo_tool_runtime::Tool for WriteTool {
     }
 
     #[tracing::instrument(name = "tool.write", skip_all)]
-    #[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "file tool write of a model/user-chosen path (user content); not inside a session folder"
+    )]
     async fn run(
         &self,
         ctx: fuigo_tool_runtime::ToolCallContext,
@@ -136,11 +139,16 @@ impl fuigo_tool_runtime::Tool for WriteTool {
         // Only NotFound means "did not exist"; non-UTF-8 or unreadable content is reported without a snapshot so a
         // rewind never deletes the file or writes lossy text back (audit S4-F3).
         let read =
-            crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), &path).await;
+            crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), &path)
+                .await;
         // A file over the source cap is overwritten all the same, but its old content cannot be held for a rewind: warn
         // instead of refusing (review L16; the read was the only reason for the refusal).
         let over_cap = read.as_ref().err().and_then(|e| {
-            crate::implementations::fuigo_build::read_file::source_too_large_message(e, &input.file_path, "write")
+            crate::implementations::fuigo_build::read_file::source_too_large_message(
+                e,
+                &input.file_path,
+                "write",
+            )
         });
         if over_cap.is_some() {
             tracing::warn!(path = %path.display(), "write: overwriting a file larger than 256 MB; no rewind snapshot is kept");
@@ -233,7 +241,10 @@ impl fuigo_tool_runtime::Tool for WriteTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use crate::types::tool_metadata::test_ctx;
@@ -263,20 +274,30 @@ mod tests {
     async fn write_overwrites_a_file_over_the_source_cap_with_a_warning() {
         let tmp = TempDir::new().unwrap();
         let big = tmp.path().join("big.log");
-        let len = (crate::implementations::fuigo_build::read_file::MAX_READ_SOURCE_BYTES + 1) as u64;
+        let len =
+            (crate::implementations::fuigo_build::read_file::MAX_READ_SOURCE_BYTES + 1) as u64;
         std::fs::File::create(&big).unwrap().set_len(len).unwrap();
         let resources = test_resources(tmp.path());
         let input = WriteInput {
             file_path: big.to_string_lossy().into_owned(),
             content: "x".to_string(),
         };
-        let result = fuigo_tool_runtime::Tool::run(&WriteTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let result =
+            fuigo_tool_runtime::Tool::run(&WriteTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
         match result {
             SearchReplaceOutput::EditsApplied(applied) => {
-                assert!(applied.tool_output_for_prompt.contains("256 MB"), "{}", applied.tool_output_for_prompt);
-                assert!(applied.tool_output_for_prompt.contains("rewind"), "{}", applied.tool_output_for_prompt);
+                assert!(
+                    applied.tool_output_for_prompt.contains("256 MB"),
+                    "{}",
+                    applied.tool_output_for_prompt
+                );
+                assert!(
+                    applied.tool_output_for_prompt.contains("rewind"),
+                    "{}",
+                    applied.tool_output_for_prompt
+                );
             }
             other => panic!("expected the write to go ahead, got {other:?}"),
         }
@@ -294,9 +315,10 @@ mod tests {
             file_path: tmp.path().join("new.txt").to_string_lossy().into_owned(),
             content: "hello\nworld\n".to_string(),
         };
-        let result = fuigo_tool_runtime::Tool::run(&tool, test_ctx(shared_resources.clone()), input)
-            .await
-            .unwrap();
+        let result =
+            fuigo_tool_runtime::Tool::run(&tool, test_ctx(shared_resources.clone()), input)
+                .await
+                .unwrap();
 
         match &result {
             SearchReplaceOutput::EditsApplied(applied) => {
@@ -542,7 +564,10 @@ mod tests {
         let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
         builder.add_line(None, "secret/").unwrap();
         let mut resources = test_resources(repo.path());
-        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        resources.insert(crate::types::resources::GitignoreFilter::new(
+            builder.build().unwrap(),
+            canonical,
+        ));
         let result = fuigo_tool_runtime::Tool::run(
             &WriteTool,
             test_ctx(resources.into_shared()),
@@ -554,10 +579,15 @@ mod tests {
         .await
         .unwrap();
         match result {
-            SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("ignored by .gitignore"), "{msg}")
+            }
             other => panic!("expected the gitignore refusal, got {other:?}"),
         }
-        assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOP SECRET\n");
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("key.txt")).unwrap(),
+            "TOP SECRET\n"
+        );
     }
 
     #[tokio::test]

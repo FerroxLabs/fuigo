@@ -70,16 +70,25 @@ pub async fn run(target: Option<LoginTarget>, status: bool) -> anyhow::Result<Ne
                 Ok(Next::Done)
             }
             None => {
-                fuigo_tty_utils::cli_println!("{}", ProviderStatus::current(sso_configured()).status_text());
+                fuigo_tty_utils::cli_println!(
+                    "{}",
+                    ProviderStatus::current(sso_configured()).status_text()
+                );
                 Ok(Next::Done)
             }
         },
         Plan::Status(None) => {
-            fuigo_tty_utils::cli_println!("{}", ProviderStatus::current(sso_configured()).status_text());
+            fuigo_tty_utils::cli_println!(
+                "{}",
+                ProviderStatus::current(sso_configured()).status_text()
+            );
             Ok(Next::Done)
         }
         Plan::PrintOptionsAndExit2 => {
-            fuigo_tty_utils::cli_println!("{}", ProviderStatus::current(sso_configured()).picker_text());
+            fuigo_tty_utils::cli_println!(
+                "{}",
+                ProviderStatus::current(sso_configured()).picker_text()
+            );
             Ok(Next::Exit(2))
         }
         Plan::Provider(t) => sign_in(t).await,
@@ -107,7 +116,9 @@ async fn sign_in(target: LoginTarget) -> anyhow::Result<Next> {
             Ok(Next::Done)
         }
         key => {
-            let id = key.key_provider_id().expect("remaining targets are key providers");
+            let id = key
+                .key_provider_id()
+                .expect("remaining targets are key providers");
             Ok(Next::Exit(provider_key(id).await))
         }
     }
@@ -165,9 +176,9 @@ fn read_key_line(reader: &mut impl BufRead) -> Option<String> {
 /// A provider API key stays in the environment. Report whether it can be used now, and what to do if not.
 async fn provider_key(id: &str) -> i32 {
     let status = ProviderStatus::current(false);
-    let Some(c) = status.connections().into_iter().find(|c| {
-        matches!(c.id, fuigo_shell::auth::provider_status::ConnectionId::Key(k) if k == id)
-    }) else {
+    let Some(c) = status.connections().into_iter().find(
+        |c| matches!(c.id, fuigo_shell::auth::provider_status::ConnectionId::Key(k) if k == id),
+    ) else {
         fuigo_tty_utils::cli_eprintln!("unknown provider {id}");
         return 2;
     };
@@ -299,7 +310,10 @@ mod tests {
     #[test]
     fn a_piped_key_is_read_as_one_line() {
         let mut input = std::io::Cursor::new(b"flx-fake-key-123\r\nsecond line\n".to_vec());
-        assert_eq!(read_key_line(&mut input).as_deref().map(str::trim), Some("flx-fake-key-123"));
+        assert_eq!(
+            read_key_line(&mut input).as_deref().map(str::trim),
+            Some("flx-fake-key-123")
+        );
         assert_eq!(read_key_line(&mut std::io::Cursor::new(Vec::new())), None);
     }
 
@@ -311,9 +325,18 @@ mod tests {
 
     #[test]
     fn provider_flags_skip_straight_to_that_sign_in() {
-        assert_eq!(plan(Some(LoginTarget::Flux), false, false), Plan::Provider(LoginTarget::Flux));
-        assert_eq!(plan(Some(LoginTarget::Xai), false, true), Plan::Provider(LoginTarget::Xai));
-        assert_eq!(plan(Some(LoginTarget::Openai), false, false), Plan::Provider(LoginTarget::Openai));
+        assert_eq!(
+            plan(Some(LoginTarget::Flux), false, false),
+            Plan::Provider(LoginTarget::Flux)
+        );
+        assert_eq!(
+            plan(Some(LoginTarget::Xai), false, true),
+            Plan::Provider(LoginTarget::Xai)
+        );
+        assert_eq!(
+            plan(Some(LoginTarget::Openai), false, false),
+            Plan::Provider(LoginTarget::Openai)
+        );
     }
 
     #[test]
@@ -328,7 +351,10 @@ mod tests {
     #[test]
     fn status_flag_lists_without_signing_in() {
         assert_eq!(plan(None, true, false), Plan::Status(None));
-        assert_eq!(plan(Some(LoginTarget::Chatgpt), true, true), Plan::Status(Some(LoginTarget::Chatgpt)));
+        assert_eq!(
+            plan(Some(LoginTarget::Chatgpt), true, true),
+            Plan::Status(Some(LoginTarget::Chatgpt))
+        );
     }
 
     #[test]
@@ -347,7 +373,10 @@ mod tests {
         assert_eq!(choice_from_input(&rows, ""), Some(PickerChoice::Flux));
         assert_eq!(choice_from_input(&rows, "2"), Some(PickerChoice::Chatgpt));
         assert_eq!(choice_from_input(&rows, "3"), Some(PickerChoice::Xai));
-        assert_eq!(choice_from_input(&rows, "4"), Some(PickerChoice::ProviderKey));
+        assert_eq!(
+            choice_from_input(&rows, "4"),
+            Some(PickerChoice::ProviderKey)
+        );
         assert_eq!(choice_from_input(&rows, "5"), Some(PickerChoice::Exit));
         assert_eq!(choice_from_input(&rows, "q"), Some(PickerChoice::Exit));
         assert_eq!(choice_from_input(&rows, "6"), None);

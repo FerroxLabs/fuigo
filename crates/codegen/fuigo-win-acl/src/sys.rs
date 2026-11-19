@@ -7,20 +7,25 @@ use std::os::windows::io::AsRawHandle;
 use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
-use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_KERNEL_OBJECT};
+use windows::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
+};
 use windows::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, GetAce,
-    GetAclInformation, GetSecurityDescriptorControl, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+    GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_ELEVATION,
+    TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
 };
 use windows::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_TYPE_DISK, GetFileInformationByHandle,
-    GetDriveTypeW, GetFileType,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_TYPE_DISK, GetDriveTypeW, GetFileInformationByHandle, GetFileType,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{PCWSTR, PWSTR};
 
-use crate::policy::{DaclSummary, RawAce, dacl_summary_from_binary, locator_dacl_ok, locator_owner_ok};
+use crate::policy::{
+    DaclSummary, RawAce, dacl_summary_from_binary, locator_dacl_ok, locator_owner_ok,
+};
 
 pub fn code(e: &windows::core::Error) -> u32 {
     (e.code().0 as u32) & 0xFFFF
@@ -60,8 +65,16 @@ pub fn token_info_buf(
     // u64 elements: the buffer is at least 8-byte aligned for TOKEN_USER and the other token structs.
     let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
     // SAFETY: `buf` holds at least `needed` bytes.
-    unsafe { GetTokenInformation(token, class, Some(buf.as_mut_ptr().cast()), needed, &mut needed) }
-        .map_err(|e| code(&e))?;
+    unsafe {
+        GetTokenInformation(
+            token,
+            class,
+            Some(buf.as_mut_ptr().cast()),
+            needed,
+            &mut needed,
+        )
+    }
+    .map_err(|e| code(&e))?;
     Ok(buf)
 }
 
@@ -98,8 +111,18 @@ pub fn owner_and_dacl(handle: HANDLE) -> Result<(String, DaclSummary), u32> {
     let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
     // SAFETY: `handle` is a live pipe handle; `owner` and `dacl` point into `sd`, a LocalAlloc'd descriptor that is
     // freed only after the last use below.
-    let status =
-        unsafe { GetSecurityInfo(handle, SE_KERNEL_OBJECT, info, Some(&mut owner), None, Some(&mut dacl), None, Some(&mut sd)) };
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            info,
+            Some(&mut owner),
+            None,
+            Some(&mut dacl),
+            None,
+            Some(&mut sd),
+        )
+    };
     if status.0 != 0 {
         return Err(status.0);
     }
@@ -110,7 +133,11 @@ pub fn owner_and_dacl(handle: HANDLE) -> Result<(String, DaclSummary), u32> {
 }
 
 /// The part of [`owner_and_dacl`] that borrows from the descriptor. `dacl` NULL (no DACL = everyone) is an error.
-pub fn read_owner_dacl(sd: PSECURITY_DESCRIPTOR, owner: PSID, dacl: *mut ACL) -> Result<(String, DaclSummary), u32> {
+pub fn read_owner_dacl(
+    sd: PSECURITY_DESCRIPTOR,
+    owner: PSID,
+    dacl: *mut ACL,
+) -> Result<(String, DaclSummary), u32> {
     if owner.0.is_null() || dacl.is_null() {
         return Err(0);
     }
@@ -118,7 +145,8 @@ pub fn read_owner_dacl(sd: PSECURITY_DESCRIPTOR, owner: PSID, dacl: *mut ACL) ->
     let mut control = 0u16;
     let mut revision = 0u32;
     // SAFETY: `sd` is the live descriptor from GetSecurityInfo; both out pointers are writable locals.
-    unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) }.map_err(|e| code(&e))?;
+    unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) }
+        .map_err(|e| code(&e))?;
     let mut size = ACL_SIZE_INFORMATION::default();
     // SAFETY: `dacl` is a valid ACL inside `sd`; `size` is a writable ACL_SIZE_INFORMATION of the stated length.
     unsafe {
@@ -151,7 +179,12 @@ pub fn read_owner_dacl(sd: PSECURITY_DESCRIPTOR, owner: PSID, dacl: *mut ACL) ->
         // { Header, Mask, Sid }. Object ACEs and anything unknown are reported by type alone: no Mask and no SID is
         // read from them, and the policy refuses every type that is not a plain allow.
         if header.AceType > 1 {
-            aces.push(RawAce { ace_type: header.AceType, flags: header.AceFlags, mask: 0, trustee_sid: String::new() });
+            aces.push(RawAce {
+                ace_type: header.AceType,
+                flags: header.AceFlags,
+                mask: 0,
+                trustee_sid: String::new(),
+            });
             continue;
         }
         let ace = p.cast::<ACCESS_ALLOWED_ACE>();
@@ -171,9 +204,17 @@ pub fn read_owner_dacl(sd: PSECURITY_DESCRIPTOR, owner: PSID, dacl: *mut ACL) ->
         let sid = PSID(sid_ptr.cast::<c_void>());
         // A SID that does not convert makes the trustee empty, which matches nothing (fails closed).
         let trustee_sid = sid_to_string(sid).unwrap_or_default();
-        aces.push(RawAce { ace_type: header.AceType, flags: header.AceFlags, mask, trustee_sid });
+        aces.push(RawAce {
+            ace_type: header.AceType,
+            flags: header.AceFlags,
+            mask,
+            trustee_sid,
+        });
     }
-    Ok((owner_text, dacl_summary_from_binary(control & 0x1000 != 0, &aces)))
+    Ok((
+        owner_text,
+        dacl_summary_from_binary(control & 0x1000 != 0, &aces),
+    ))
 }
 
 /// The user SID text of this process (cached).
@@ -226,11 +267,15 @@ pub enum FileAclRefusal {
 /// Judge an open file ON ITS HANDLE: regular disk file (no reparse point, no directory), one link, within `cap` when
 /// given, owned by us, DACL for nobody else. Returns the size. Never reads the content. The handle must be opened
 /// with `FILE_FLAG_OPEN_REPARSE_POINT` so a link is judged as the link itself.
-pub fn check_owner_only_file_capped(h: &impl AsRawHandle, cap: Option<u64>) -> Result<u64, FileAclRefusal> {
+pub fn check_owner_only_file_capped(
+    h: &impl AsRawHandle,
+    cap: Option<u64>,
+) -> Result<u64, FileAclRefusal> {
     let raw = HANDLE(h.as_raw_handle());
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: `raw` is a live file handle; `info` is a writable out structure.
-    unsafe { GetFileInformationByHandle(raw, &mut info) }.map_err(|e| FileAclRefusal::Io(code(&e) as i32))?;
+    unsafe { GetFileInformationByHandle(raw, &mut info) }
+        .map_err(|e| FileAclRefusal::Io(code(&e) as i32))?;
     let attrs = info.dwFileAttributes;
     if attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
         return Err(FileAclRefusal::ReparsePoint);
@@ -248,7 +293,13 @@ pub fn check_owner_only_file_capped(h: &impl AsRawHandle, cap: Option<u64>) -> R
     }
     let ours = our_sid().map_err(|c| FileAclRefusal::Io(c as i32))?;
     // A NULL DACL (everyone) comes back as code 0: that is a wrong mode, not an I/O error.
-    let (owner, dacl) = owner_and_dacl(raw).map_err(|c| if c == 0 { FileAclRefusal::OtherPrincipals } else { FileAclRefusal::Io(c as i32) })?;
+    let (owner, dacl) = owner_and_dacl(raw).map_err(|c| {
+        if c == 0 {
+            FileAclRefusal::OtherPrincipals
+        } else {
+            FileAclRefusal::Io(c as i32)
+        }
+    })?;
     if !locator_owner_ok(&owner, ours, token_elevated()) {
         return Err(FileAclRefusal::WrongOwner);
     }

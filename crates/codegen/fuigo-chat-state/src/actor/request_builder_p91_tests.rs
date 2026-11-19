@@ -14,8 +14,12 @@ fn system_text(items: &[ConversationItem]) -> String {
 /// tag must survive, with everything after it, when a reminder is injected.
 #[test]
 fn stray_tag_in_system_prompt_keeps_the_text_after_it() {
-    let prompt = "Role: our plugin emits <memory-context> tags.\nKEEP_CANARY: follow the user's rules.";
-    let mut items = vec![ConversationItem::system(prompt), ConversationItem::user("hi")];
+    let prompt =
+        "Role: our plugin emits <memory-context> tags.\nKEEP_CANARY: follow the user's rules.";
+    let mut items = vec![
+        ConversationItem::system(prompt),
+        ConversationItem::user("hi"),
+    ];
     assert!(inject_memory_reminder(
         &mut items,
         "<memory-context>\nRemember: user likes rust\n</memory-context>"
@@ -42,13 +46,19 @@ fn nonced_reminder_replaces_only_its_own_block() {
     let other = block("ffffffffffffffffffffffffffffffff", "not ours");
     let prompt = format!("Sys.\n\n{}\nTAIL_CANARY\n{other}", block(NONCE, "old fact"));
     let mut items = vec![ConversationItem::system(prompt)];
-    assert!(inject_memory_reminder(&mut items, &block(NONCE, "new fact")));
+    assert!(inject_memory_reminder(
+        &mut items,
+        &block(NONCE, "new fact")
+    ));
     assert_eq!(
         system_text(&items),
         format!("Sys.\n\n{}\nTAIL_CANARY\n{other}", block(NONCE, "new fact"))
     );
     // Same block again: no change.
-    assert!(!inject_memory_reminder(&mut items, &block(NONCE, "new fact")));
+    assert!(!inject_memory_reminder(
+        &mut items,
+        &block(NONCE, "new fact")
+    ));
 }
 
 /// An opening tag with no close is never treated as a block to replace.
@@ -77,7 +87,10 @@ fn unclosed_own_tag_does_not_pair_with_a_later_block() {
     assert!(inject_memory_reminder(&mut items, &block(NONCE, "second")));
     let text = system_text(&items);
     assert!(text.starts_with(&prompt), "{text:?}");
-    assert!(text.ends_with(&block(NONCE, "second")) && !text.contains("first"), "{text:?}");
+    assert!(
+        text.ends_with(&block(NONCE, "second")) && !text.contains("first"),
+        "{text:?}"
+    );
     assert_eq!(
         crate::types::find_memory_context_block(&text, NONCE, 0).map(|r| &text[r]),
         Some(block(NONCE, "second").as_str())

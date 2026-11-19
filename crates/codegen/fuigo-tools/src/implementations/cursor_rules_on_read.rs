@@ -452,7 +452,10 @@ fn render_cursor_rule_reminder(rules: &[ParsedCursorRule]) -> Option<String> {
     Some(lines.join("\n\n"))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -789,7 +792,8 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join(".cursor")).unwrap();
         std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
         let out =
-            cursor_rule_reminder_for_read_inner(resources(&root), &root, &root.join("main.rs")).await;
+            cursor_rule_reminder_for_read_inner(resources(&root), &root, &root.join("main.rs"))
+                .await;
         assert!(
             !out.as_deref().is_some_and(|t| t.contains("OUTSIDE RULE")),
             "an outside rules folder must not be read: {out:?}"
@@ -798,11 +802,15 @@ mod tests {
         // A nested scope dir whose `.cursor/rules` links outside is skipped as well.
         let sub = root.join("sub");
         std::fs::create_dir_all(sub.join(".cursor")).unwrap();
-        std::os::unix::fs::symlink(outside.join("rules"), sub.join(".cursor").join("rules")).unwrap();
+        std::os::unix::fs::symlink(outside.join("rules"), sub.join(".cursor").join("rules"))
+            .unwrap();
         std::fs::write(sub.join("lib.rs"), "\n").unwrap();
         let out =
             cursor_rule_reminder_for_read_inner(resources(&root), &root, &sub.join("lib.rs")).await;
-        assert!(!out.as_deref().is_some_and(|t| t.contains("OUTSIDE RULE")), "{out:?}");
+        assert!(
+            !out.as_deref().is_some_and(|t| t.contains("OUTSIDE RULE")),
+            "{out:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -817,10 +825,18 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(root.join(".cursor")).unwrap();
-        std::os::unix::fs::symlink(root.join("shared-rules"), root.join(".cursor").join("rules")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("shared-rules"),
+            root.join(".cursor").join("rules"),
+        )
+        .unwrap();
         std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
-        let out = cursor_rule_reminder_for_read_inner(resources(root), root, &root.join("main.rs")).await;
-        assert!(out.as_deref().is_some_and(|t| t.contains("INSIDE RULE")), "{out:?}");
+        let out =
+            cursor_rule_reminder_for_read_inner(resources(root), root, &root.join("main.rs")).await;
+        assert!(
+            out.as_deref().is_some_and(|t| t.contains("INSIDE RULE")),
+            "{out:?}"
+        );
     }
 
     #[test]

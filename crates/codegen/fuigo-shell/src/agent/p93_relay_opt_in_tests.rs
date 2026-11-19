@@ -90,7 +90,9 @@ pub(super) async fn spawn_counting_relay() -> (std::net::SocketAddr, RelaySeen) 
 }
 
 /// [`spawn_counting_relay`]; when `first_frame` is set, each accepted WebSocket is sent that one text frame at once.
-pub(super) async fn spawn_counting_relay_sending(first_frame: Option<&'static str>) -> (std::net::SocketAddr, RelaySeen) {
+pub(super) async fn spawn_counting_relay_sending(
+    first_frame: Option<&'static str>,
+) -> (std::net::SocketAddr, RelaySeen) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let seen = RelaySeen::default();
@@ -110,7 +112,9 @@ pub(super) async fn spawn_counting_relay_sending(first_frame: Option<&'static st
                 counters.websockets.fetch_add(1, Ordering::SeqCst);
                 if let Some(frame) = first_frame {
                     use futures_util::SinkExt as _;
-                    let _ = ws.send(tokio_tungstenite::tungstenite::Message::text(frame)).await;
+                    let _ = ws
+                        .send(tokio_tungstenite::tungstenite::Message::text(frame))
+                        .await;
                 }
                 // Read (and count) whatever the agent sends until the test ends.
                 use futures_util::StreamExt as _;
@@ -125,7 +129,9 @@ pub(super) async fn spawn_counting_relay_sending(first_frame: Option<&'static st
 
 /// The child-process guard plus a started front, with the opt-in environment variable cleared.
 fn child(test: &str) -> Option<(SessionFront, EnvGuard)> {
-    fuigo_test_support::env::fresh_process_home(&format!("agent::app::p93_relay_opt_in_tests::{test}"))?;
+    fuigo_test_support::env::fresh_process_home(&format!(
+        "agent::app::p93_relay_opt_in_tests::{test}"
+    ))?;
     let front = SessionFront::start();
     crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
     crate::agent::config::Config::install_test_trusted_origins();
@@ -135,11 +141,17 @@ fn child(test: &str) -> Option<(SessionFront, EnvGuard)> {
 /// `(ws_url, ws_origin)` of the mock at `addr` as a relay FluxRouter does NOT operate (`wss://service.example.test`).
 pub(super) fn service_relay(front: &SessionFront, addr: std::net::SocketAddr) -> (String, String) {
     let https = front.front_service(&format!("http://{addr}/ws"));
-    (https.replacen("https://", "wss://", 1), SERVICE_ORIGIN.to_owned())
+    (
+        https.replacen("https://", "wss://", 1),
+        SERVICE_ORIGIN.to_owned(),
+    )
 }
 
 /// The same mock as the FluxRouter-operated relay (`wss://api.fluxrouter.ai`).
-pub(super) fn fluxrouter_relay(front: &SessionFront, addr: std::net::SocketAddr) -> (String, String) {
+pub(super) fn fluxrouter_relay(
+    front: &SessionFront,
+    addr: std::net::SocketAddr,
+) -> (String, String) {
     let https = front.front(&format!("http://{addr}/ws"));
     (
         https.replacen("https://", "wss://", 1),
@@ -206,7 +218,11 @@ impl LeaderStart {
 
 /// Start the leader's relay for `relay` exactly as `run_leader` does (`spawn_leader_relay`), eagerly or on demand,
 /// without yielding and with no headless client registered yet.
-pub(super) fn spawn_leader(relay: (String, String), on_demand: bool, cancel: &CancellationToken) -> LeaderStart {
+pub(super) fn spawn_leader(
+    relay: (String, String),
+    on_demand: bool,
+    cancel: &CancellationToken,
+) -> LeaderStart {
     let (ws_to_agent_tx, ws_to_agent_rx) = mpsc::unbounded_channel();
     let sender: Rc<Mutex<Option<mpsc::UnboundedSender<String>>>> = Rc::new(Mutex::new(None));
     let (demand_tx, demand_rx) = watch::channel(false);
@@ -263,7 +279,10 @@ fn spawn_deferred(relay: (String, String), cancel: &CancellationToken) -> Leader
         fuigo_com_config,
         alpha_test_key: None,
     };
-    assert!(arm.arm_if_eligible(&relay_session(), &auth_manager).is_none());
+    assert!(
+        arm.arm_if_eligible(&relay_session(), &auth_manager)
+            .is_none()
+    );
     std::mem::forget(tmp);
     LeaderStart {
         slot,
@@ -296,12 +315,19 @@ pub(super) async fn assert_connects(seen: &RelaySeen, context: &str) {
 /// Give a wrongly started relay task time to connect, then require that nothing reached the relay.
 pub(super) async fn assert_nothing_reached(seen: &RelaySeen, context: &str) {
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(seen.tcp(), 0, "a refused relay got a TCP connection: {context}");
+    assert_eq!(
+        seen.tcp(),
+        0,
+        "a refused relay got a TCP connection: {context}"
+    );
     assert_eq!(seen.bytes(), 0, "a refused relay got bytes: {context}");
 }
 
 fn assert_refused(start: &LeaderStart, context: &str) {
-    assert!(!start.started(), "a relay task was started for a refused relay: {context}");
+    assert!(
+        !start.started(),
+        "a relay task was started for a refused relay: {context}"
+    );
     assert!(
         !start.sender_installed(),
         "the bridge to a refused relay was installed: {context}"
@@ -312,7 +338,9 @@ fn assert_refused(start: &LeaderStart, context: &str) {
 /// arm), and nothing reaches it. Control: the same relay, opted in through the user config, connects.
 #[test]
 fn leader_refuses_a_relay_fluxrouter_does_not_operate_without_an_opt_in() {
-    let Some((front, _env)) = child("leader_refuses_a_relay_fluxrouter_does_not_operate_without_an_opt_in") else {
+    let Some((front, _env)) =
+        child("leader_refuses_a_relay_fluxrouter_does_not_operate_without_an_opt_in")
+    else {
         return;
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -324,8 +352,14 @@ fn leader_refuses_a_relay_fluxrouter_does_not_operate_without_an_opt_in() {
         local
             .run_until(async {
                 assert_refused(&leader_start(relay.clone(), false, &cancel).await, "eager");
-                assert_refused(&leader_start(relay.clone(), true, &cancel).await, "on demand");
-                assert!(!deferred_arm(relay.clone(), &cancel), "deferred arm started a relay");
+                assert_refused(
+                    &leader_start(relay.clone(), true, &cancel).await,
+                    "on demand",
+                );
+                assert!(
+                    !deferred_arm(relay.clone(), &cancel),
+                    "deferred arm started a relay"
+                );
                 assert_nothing_reached(&seen, "no opt-in").await;
                 // Control: the same relay through the same front, opted in.
                 write_user_config(&user_opt_in(&[SERVICE_ORIGIN]));
@@ -373,14 +407,20 @@ fn a_refusing_leader_bridges_once_opted_in_and_a_headless_client_registers() {
                 // ... and the next headless registration bridges.
                 eager.headless_client_registers().await;
                 on_demand.headless_client_registers().await;
-                assert!(eager.started() && eager.sender_installed(), "eager, after the registration");
+                assert!(
+                    eager.started() && eager.sender_installed(),
+                    "eager, after the registration"
+                );
                 assert!(
                     on_demand.started() && on_demand.sender_installed(),
                     "on demand, after the registration"
                 );
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 while seen.websockets() < 2 {
-                    assert!(tokio::time::Instant::now() < deadline, "both relays connect");
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "both relays connect"
+                    );
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
@@ -426,7 +466,10 @@ fn a_registration_right_after_the_refusal_is_not_lost() {
                 }
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 while seen.websockets() < 3 {
-                    assert!(tokio::time::Instant::now() < deadline, "all three relays connect");
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "all three relays connect"
+                    );
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
@@ -438,10 +481,14 @@ fn a_registration_right_after_the_refusal_is_not_lost() {
 /// `[relay] trusted_origins` in the user config file opts the leader in for that origin (eager, on demand, deferred).
 #[test]
 fn leader_bridges_a_relay_opted_in_through_the_user_config() {
-    let Some((front, _env)) = child("leader_bridges_a_relay_opted_in_through_the_user_config") else {
+    let Some((front, _env)) = child("leader_bridges_a_relay_opted_in_through_the_user_config")
+    else {
         return;
     };
-    write_user_config(&user_opt_in(&["https://unrelated.example", "wss://service.example.test:443/"]));
+    write_user_config(&user_opt_in(&[
+        "https://unrelated.example",
+        "wss://service.example.test:443/",
+    ]));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let (addr, seen) = spawn_counting_relay().await;
@@ -454,11 +501,17 @@ fn leader_bridges_a_relay_opted_in_through_the_user_config() {
                 assert!(eager.started() && eager.sender_installed(), "eager");
                 assert_connects(&seen, "eager, user config opt-in").await;
                 let on_demand = leader_start(relay.clone(), true, &cancel).await;
-                assert!(on_demand.started() && on_demand.sender_installed(), "on demand");
+                assert!(
+                    on_demand.started() && on_demand.sender_installed(),
+                    "on demand"
+                );
                 assert!(deferred_arm(relay, &cancel), "deferred arm");
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 while seen.websockets() < 3 {
-                    assert!(tokio::time::Instant::now() < deadline, "all three relays connect");
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "all three relays connect"
+                    );
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
@@ -470,7 +523,8 @@ fn leader_bridges_a_relay_opted_in_through_the_user_config() {
 /// `FUIGO_TRUSTED_RELAY_ORIGINS` opts the leader in for that origin (no user config file).
 #[test]
 fn leader_bridges_a_relay_opted_in_through_the_environment() {
-    let Some((front, _env)) = child("leader_bridges_a_relay_opted_in_through_the_environment") else {
+    let Some((front, _env)) = child("leader_bridges_a_relay_opted_in_through_the_environment")
+    else {
         return;
     };
     let _opt_in = EnvGuard::set(
@@ -500,7 +554,10 @@ fn an_opt_in_for_a_different_origin_is_refused() {
     let Some((front, _env)) = child("an_opt_in_for_a_different_origin_is_refused") else {
         return;
     };
-    write_user_config(&user_opt_in(&["https://relay.example", "https://service.example.test:8443"]));
+    write_user_config(&user_opt_in(&[
+        "https://relay.example",
+        "https://service.example.test:8443",
+    ]));
     let _opt_in = EnvGuard::set(
         TRUSTED_RELAY_ORIGINS_ENV,
         "http://service.example.test ws://service.example.test http://service.example.test:443 https://sub.service.example.test",
@@ -513,7 +570,10 @@ fn an_opt_in_for_a_different_origin_is_refused() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                assert_refused(&leader_start(relay.clone(), false, &cancel).await, "other origins");
+                assert_refused(
+                    &leader_start(relay.clone(), false, &cancel).await,
+                    "other origins",
+                );
                 assert_nothing_reached(&seen, "opt-ins for other origins").await;
                 // Control: naming this origin connects.
                 write_user_config(&user_opt_in(&[SERVICE_ORIGIN]));
@@ -531,7 +591,8 @@ fn an_opt_in_for_a_different_origin_is_refused() {
 /// console-synced `managed_config.toml`.
 #[test]
 fn an_opt_in_in_a_project_overlay_or_managed_config_is_ignored() {
-    let Some((front, _env)) = child("an_opt_in_in_a_project_overlay_or_managed_config_is_ignored") else {
+    let Some((front, _env)) = child("an_opt_in_in_a_project_overlay_or_managed_config_is_ignored")
+    else {
         return;
     };
     let opt_in = user_opt_in(&[SERVICE_ORIGIN]);
@@ -565,7 +626,10 @@ fn an_opt_in_in_a_project_overlay_or_managed_config_is_ignored() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                assert_refused(&leader_start(relay.clone(), false, &cancel).await, "project/overlay/managed");
+                assert_refused(
+                    &leader_start(relay.clone(), false, &cancel).await,
+                    "project/overlay/managed",
+                );
                 assert_nothing_reached(&seen, "project, overlay and managed opt-ins").await;
                 // Control: the same opt-in in the user config file connects.
                 write_user_config(&opt_in);
@@ -599,7 +663,10 @@ fn a_fluxrouter_relay_is_bridged_without_an_opt_in() {
                 assert!(deferred_arm(relay, &cancel), "deferred");
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 while seen.websockets() < 3 {
-                    assert!(tokio::time::Instant::now() < deadline, "all three relays connect");
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "all three relays connect"
+                    );
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             })
@@ -625,11 +692,15 @@ fn headless_startup_refuses_a_relay_fluxrouter_does_not_operate_without_an_opt_i
             fuigo_com_config: com_config(service_relay(&front, addr)),
             ..AgentConfig::default()
         };
-        let outcome =
-            tokio::time::timeout(Duration::from_secs(30), run_headless(&agent_config, false, None))
-                .await
-                .expect("a refused headless start returns at once");
-        let error = outcome.expect_err("headless startup must refuse the relay").to_string();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_headless(&agent_config, false, None),
+        )
+        .await
+        .expect("a refused headless start returns at once");
+        let error = outcome
+            .expect_err("headless startup must refuse the relay")
+            .to_string();
         for needle in [
             SERVICE_ORIGIN,
             "trusted_origins = [\"https://service.example.test\"]",
@@ -655,10 +726,15 @@ fn headless_relay_connection_requires_the_opt_in() {
         let relay = service_relay(&front, addr);
         let cancel = CancellationToken::new();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let refused = spawn_headless_relay(relay_config(relay.clone()), tx.clone(), cancel.clone(), None)
-            .err()
-            .expect("no opt-in: refused")
-            .to_string();
+        let refused = spawn_headless_relay(
+            relay_config(relay.clone()),
+            tx.clone(),
+            cancel.clone(),
+            None,
+        )
+        .err()
+        .expect("no opt-in: refused")
+        .to_string();
         assert!(refused.contains("trusted_origins"), "{refused}");
         assert_nothing_reached(&seen, "headless relay without opt-in").await;
         write_user_config(&user_opt_in(&[SERVICE_ORIGIN]));
@@ -674,7 +750,10 @@ fn headless_relay_connection_requires_the_opt_in() {
 async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while !done() {
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for: {what}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -686,14 +765,20 @@ async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
 #[test]
 fn the_production_relay_start_sets_remote_attached_before_any_relay_frame_can_reach_the_agent() {
     use crate::peer_inbox::driver::remote_attached;
-    let Some((front, _env)) = child("the_production_relay_start_sets_remote_attached_before_any_relay_frame_can_reach_the_agent")
-    else {
+    let Some((front, _env)) = child(
+        "the_production_relay_start_sets_remote_attached_before_any_relay_frame_can_reach_the_agent",
+    ) else {
         return;
     };
     let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     rt.block_on(async {
-        let (addr, seen) = spawn_counting_relay_sending(Some(r#"{"jsonrpc":"2.0","method":"relay/test-frame"}"#)).await;
+        let (addr, seen) =
+            spawn_counting_relay_sending(Some(r#"{"jsonrpc":"2.0","method":"relay/test-frame"}"#))
+                .await;
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -702,21 +787,33 @@ fn the_production_relay_start_sets_remote_attached_before_any_relay_frame_can_re
                 let cancel = CancellationToken::new();
                 let refused = spawn_leader(service_relay(&front, addr), false, &cancel);
                 assert!(!refused.started() && !refused.sender_installed());
-                assert!(!remote_attached(), "a refused relay must not set the attached fact");
+                assert!(
+                    !remote_attached(),
+                    "a refused relay must not set the attached fact"
+                );
                 // (a)+(c) on demand: nothing until the demand fires, then the fact no later than the sender.
                 let cancel = CancellationToken::new();
                 let relay = fluxrouter_relay(&front, addr);
                 let demand = spawn_leader(relay.clone(), true, &cancel);
                 assert!(!remote_attached() && !demand.started() && !demand.sender_installed());
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                assert!(!remote_attached(), "on demand and not demanded yet: not attached");
+                assert!(
+                    !remote_attached(),
+                    "on demand and not demanded yet: not attached"
+                );
                 demand.demand_tx.send_replace(true);
                 wait_until("on-demand sender installed", || {
                     if demand.sender_installed() {
-                        assert!(remote_attached(), "sender installed but the attached fact is not set yet");
+                        assert!(
+                            remote_attached(),
+                            "sender installed but the attached fact is not set yet"
+                        );
                         true
                     } else {
-                        assert!(!remote_attached(), "attached before the demand's relay start installed its sender");
+                        assert!(
+                            !remote_attached(),
+                            "attached before the demand's relay start installed its sender"
+                        );
                         false
                     }
                 })
@@ -731,14 +828,24 @@ fn the_production_relay_start_sets_remote_attached_before_any_relay_frame_can_re
                 let cancel = CancellationToken::new();
                 let mut eager = spawn_leader(relay, false, &cancel);
                 assert!(eager.started() && eager.sender_installed());
-                assert!(remote_attached(), "eager start: the attached fact must hold on return, before any yield");
+                assert!(
+                    remote_attached(),
+                    "eager start: the attached fact must hold on return, before any yield"
+                );
                 // (d) the first frame the relay hands the agent finds the fact already set.
-                let frame = tokio::time::timeout(Duration::from_secs(10), eager.ws_to_agent_rx.recv())
-                    .await
-                    .expect("the mock relay's frame reached the agent channel")
-                    .expect("channel open");
-                assert!(frame.contains("relay/test-frame"), "unexpected frame: {frame}");
-                assert!(remote_attached(), "a relay frame reached the agent before the attached fact held");
+                let frame =
+                    tokio::time::timeout(Duration::from_secs(10), eager.ws_to_agent_rx.recv())
+                        .await
+                        .expect("the mock relay's frame reached the agent channel")
+                        .expect("channel open");
+                assert!(
+                    frame.contains("relay/test-frame"),
+                    "unexpected frame: {frame}"
+                );
+                assert!(
+                    remote_attached(),
+                    "a relay frame reached the agent before the attached fact held"
+                );
                 // (e) cancel: the relay task ends and the fact is released.
                 cancel.cancel();
                 wait_until("eager attach released", || !remote_attached()).await;
@@ -753,22 +860,40 @@ fn the_production_relay_start_sets_remote_attached_before_any_relay_frame_can_re
 #[test]
 fn spawn_leader_relay_takes_the_attach_guard_before_every_relay_spawn() {
     let src = include_str!("app.rs");
-    let body = src.split("\nfn spawn_leader_relay(").nth(1).expect("spawn_leader_relay");
+    let body = src
+        .split("\nfn spawn_leader_relay(")
+        .nth(1)
+        .expect("spawn_leader_relay");
     let body = body.split("\n}\n").next().unwrap();
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert_eq!(flat.matches("spawn_relay_connection(").count(), 2, "two relay start sites");
+    assert_eq!(
+        flat.matches("spawn_relay_connection(").count(),
+        2,
+        "two relay start sites"
+    );
     let mut rest = flat.as_str();
     for site in 0..2 {
         let spawn = rest.find("= spawn_relay_connection(").expect("spawn site");
         let before = &rest[..spawn];
         let after = &rest[spawn..];
         assert!(
-            before.rsplit("spawn_relay_connection(").next().unwrap().contains("let attach = crate::peer_inbox::driver::attach_remote();"),
+            before
+                .rsplit("spawn_relay_connection(")
+                .next()
+                .unwrap()
+                .contains("let attach = crate::peer_inbox::driver::attach_remote();"),
             "site {site}: attach_remote() must be taken before spawn_relay_connection("
         );
-        let hold = after.find("handle.hold_peer_attach(attach);").expect("hold after spawn");
-        let next_spawn = after[1..].find("= spawn_relay_connection(").map_or(usize::MAX, |i| i + 1);
-        assert!(hold < next_spawn, "site {site}: the guard is handed to the handle right after the spawn");
+        let hold = after
+            .find("handle.hold_peer_attach(attach);")
+            .expect("hold after spawn");
+        let next_spawn = after[1..]
+            .find("= spawn_relay_connection(")
+            .map_or(usize::MAX, |i| i + 1);
+        assert!(
+            hold < next_spawn,
+            "site {site}: the guard is handed to the handle right after the spawn"
+        );
         rest = &after[hold..];
     }
 }

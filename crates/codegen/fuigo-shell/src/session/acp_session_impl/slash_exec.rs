@@ -75,7 +75,8 @@ impl SessionActor {
                         session_id = %self.session_info.id.0,
                         "dream skipped via /dream: memory not enabled for this session",
                     );
-                    "skipped: memory is not enabled for this session (turn it on with /memory on)".to_owned()
+                    "skipped: memory is not enabled for this session (turn it on with /memory on)"
+                        .to_owned()
                 };
                 self.send_host_turn_slash_command_output(&format!("Dream: {result}"))
                     .await;
@@ -231,7 +232,11 @@ impl SessionActor {
                     Ok((root, was_trusted, note)) => {
                         let reload_msg = self.reload_hooks_impl().await;
                         let note = note.map(|n| format!("{n}\n")).unwrap_or_default();
-                        let head = if was_trusted { "Untrusted" } else { "Not trusted (now declined)" };
+                        let head = if was_trusted {
+                            "Untrusted"
+                        } else {
+                            "Not trusted (now declined)"
+                        };
                         format!(
                             "{head}: {}. Shell commands here ask unless your approval or grant covers them; project \
                              MCP and LSP servers already running stop when the session restarts.\n{note}{reload_msg}",
@@ -251,12 +256,17 @@ impl SessionActor {
                     && crate::session::peer_message::peer_messaging_enabled();
                 let verb = args.split_whitespace().next().unwrap_or("");
                 let admin_cmd = matches!(verb, "held" | "release" | "refuse");
-                let msg = if admin_cmd && !self.startup_hints.is_subagent && crate::session::peer_message::peer_messaging_enabled() {
+                let msg = if admin_cmd
+                    && !self.startup_hints.is_subagent
+                    && crate::session::peer_message::peer_messaging_enabled()
+                {
                     // Human-typed only: model and peer origins never reach this arm, and a subagent is refused below.
                     owned_msg = self.peers_human_admin(&args).await;
                     owned_msg.as_str()
                 } else if new_cmd {
-                    owned_msg = crate::peer_inbox::tool_host::peers_command(&args, &*self.peer_host()).await;
+                    owned_msg =
+                        crate::peer_inbox::tool_host::peers_command(&args, &*self.peer_host())
+                            .await;
                     owned_msg.as_str()
                 } else if self.startup_hints.is_subagent {
                     // A subagent's task prompt is model-authored text: it must never lift the parent's guard, whatever its origin.
@@ -433,7 +443,7 @@ impl SessionActor {
                      **Working directory:** {}\n\n\
                      {}{}\n\n\
                      **Turn:** {}\n\n\
-                     **Context:** {} / {} tokens ({:.0}%){}",
+                     **Context:** {} / {} tokens ({:.0}%){}{}",
                     title_line,
                     self.session_info.id.0,
                     self.session_info.cwd,
@@ -444,6 +454,7 @@ impl SessionActor {
                     ctx.total,
                     context_pct,
                     status_sandbox_warning_block(fuigo_sandbox::unavailable_warning().as_deref()),
+                    status_bwrap_block(fuigo_sandbox::bwrap_status_line().as_deref()),
                 );
                 self.send_host_turn_slash_command_output(&text).await;
                 ok_end_turn(0, None)
@@ -841,12 +852,18 @@ impl SessionActor {
                 );
                 let msg = if enabled && !self.memory.is_enabled() {
                     if let Some(ref params) = self.memory.backend_params {
-                        let storage = self.memory.suspended_storage.borrow().clone().unwrap_or_else(|| {
-                            crate::session::memory::MemoryStorage::new(
-                                std::path::Path::new(&self.session_info.cwd),
-                                None,
-                            ).with_global_enabled(false)
-                        });
+                        let storage = self
+                            .memory
+                            .suspended_storage
+                            .borrow()
+                            .clone()
+                            .unwrap_or_else(|| {
+                                crate::session::memory::MemoryStorage::new(
+                                    std::path::Path::new(&self.session_info.cwd),
+                                    None,
+                                )
+                                .with_global_enabled(false)
+                            });
                         if let Err(e) = storage.ensure_initialized() {
                             tracing::warn!(error = %e, "failed to initialize memory storage on re-enable");
                             format!("Memory could not be enabled: {e}")
@@ -884,7 +901,8 @@ impl SessionActor {
                     ) {
                         tracing::debug!("memory_get tool was not registered during unregister");
                     }
-                    *self.memory.suspended_storage.borrow_mut() = self.memory.storage.borrow_mut().take();
+                    *self.memory.suspended_storage.borrow_mut() =
+                        self.memory.storage.borrow_mut().take();
                     *self.memory.search_counter.borrow_mut() = None;
                     "Memory disabled for this session.".to_owned()
                 } else {
@@ -1128,12 +1146,29 @@ impl SessionActor {
 /// The `/status` (alias of `/session-info`) block for "a sandbox profile is set but this platform cannot enforce it":
 /// a `Sandbox warning` line, or nothing when there is no warning (profile `off`, Linux, macOS).
 fn status_sandbox_warning_block(warning: Option<&str>) -> String {
-    warning.map(|w| format!("\n\n**Sandbox warning:** {w}")).unwrap_or_default()
+    warning
+        .map(|w| format!("\n\n**Sandbox warning:** {w}"))
+        .unwrap_or_default()
+}
+
+/// The `/status` line naming the `bwrap` that launched the sandbox; empty when the process did not start through one.
+fn status_bwrap_block(line: Option<&str>) -> String {
+    line.map(|l| format!("\n\n**Sandbox launcher (bwrap):** {l}"))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod status_sandbox_warning_tests {
-    use super::status_sandbox_warning_block;
+    use super::{status_bwrap_block, status_sandbox_warning_block};
+
+    #[test]
+    fn status_shows_the_bwrap_launcher_line_only_when_there_is_one() {
+        assert_eq!(status_bwrap_block(None), "");
+        assert_eq!(
+            status_bwrap_block(Some("/usr/bin/bwrap")),
+            "\n\n**Sandbox launcher (bwrap):** /usr/bin/bwrap"
+        );
+    }
 
     #[test]
     fn status_shows_the_sandbox_warning_line_only_when_there_is_one() {
@@ -1142,6 +1177,11 @@ mod status_sandbox_warning_tests {
         assert_eq!(block, format!("\n\n**Sandbox warning:** {w}"));
         assert!(block.contains("sandboxing is not available on Windows"));
         assert_eq!(status_sandbox_warning_block(None), "");
-        assert_eq!(status_sandbox_warning_block(fuigo_sandbox::unavailable_warning_for("off", true).as_deref()), "");
+        assert_eq!(
+            status_sandbox_warning_block(
+                fuigo_sandbox::unavailable_warning_for("off", true).as_deref()
+            ),
+            ""
+        );
     }
 }

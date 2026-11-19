@@ -47,9 +47,16 @@ async fn a_dropped_receive_mid_line_does_not_lose_the_start_of_the_line() {
     let (head, tail) = line.split_at(20);
     server_out.write_all(head.as_bytes()).await.unwrap();
     // The caller gives up on this receive while the line is only half there.
-    let first = tokio::time::timeout(std::time::Duration::from_millis(50), transport.receive()).await;
-    assert!(first.is_err(), "no complete line yet, so the receive is still pending");
-    server_out.write_all(format!("{tail}\n").as_bytes()).await.unwrap();
+    let first =
+        tokio::time::timeout(std::time::Duration::from_millis(50), transport.receive()).await;
+    assert!(
+        first.is_err(),
+        "no complete line yet, so the receive is still pending"
+    );
+    server_out
+        .write_all(format!("{tail}\n").as_bytes())
+        .await
+        .unwrap();
     drop(server_out);
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), transport.receive())
         .await
@@ -106,7 +113,10 @@ async fn a_repaired_reply_keeps_its_text_and_garbage_is_still_skipped() {
     let msg = receive_one_line(line).await.expect("decoded");
     let text = serde_json::to_string(&msg).unwrap();
     assert!(text.contains(r#""id":7"#), "{text}");
-    assert!(text.contains(r"a\u0001b"), "the control character is kept escaped: {text}");
+    assert!(
+        text.contains(r"a\u0001b"),
+        "the control character is kept escaped: {text}"
+    );
     assert!(receive_one_line(b"not json at all").await.is_none());
 }
 
@@ -5232,7 +5242,11 @@ fn configured_mcp_header_values_are_recorded_as_sent() {
         assert_ne!(scrub(&echoed).as_ref(), echoed, "{secret} was not recorded");
     }
     let accept = "negotiation failed: application/json, text/event-stream";
-    assert_eq!(scrub(accept).as_ref(), accept, "a protocol header was recorded");
+    assert_eq!(
+        scrub(accept).as_ref(),
+        accept,
+        "a protocol header was recorded"
+    );
 }
 
 /// P70a x P70b (restack s28): when late binding hands an MCP server the saved key, in an HTTP header, a stdio `env`
@@ -6911,7 +6925,10 @@ fn tool_list_walk_is_capped_by_pages_tools_and_repeated_cursors() {
         if tool_list_stop_reason(pages, pages, &next, &mut seen).is_some() {
             break;
         }
-        assert!(pages <= MAX_TOOL_LIST_PAGES, "walk must stop at the page cap");
+        assert!(
+            pages <= MAX_TOOL_LIST_PAGES,
+            "walk must stop at the page cap"
+        );
     }
     assert_eq!(pages, MAX_TOOL_LIST_PAGES);
     let mut seen = std::collections::HashSet::new();
@@ -6921,7 +6938,10 @@ fn tool_list_walk_is_capped_by_pages_tools_and_repeated_cursors() {
     );
     let mut seen = std::collections::HashSet::new();
     assert_eq!(tool_list_stop_reason(1, 1, "a", &mut seen), None);
-    assert_eq!(tool_list_stop_reason(2, 2, "a", &mut seen), Some("cursor repeated"));
+    assert_eq!(
+        tool_list_stop_reason(2, 2, "a", &mut seen),
+        Some("cursor repeated")
+    );
 }
 
 /// Audit S11-F4: a header value set statically in MCP config is recorded as a credential actually sent, so a server
@@ -6933,5 +6953,8 @@ fn s11_f4_configured_mcp_header_values_are_recorded_as_sent() {
     let headers = parse_config_headers("srv", "test", [("X-Api-Key", TOKEN)].into_iter());
     assert_eq!(headers.len(), 1);
     let echoed = format!("upstream rejected {TOKEN}");
-    assert!(!scrub(&echoed).contains(TOKEN), "the configured header value was not recorded");
+    assert!(
+        !scrub(&echoed).contains(TOKEN),
+        "the configured header value was not recorded"
+    );
 }

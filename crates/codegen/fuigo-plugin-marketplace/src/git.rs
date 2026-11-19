@@ -121,7 +121,10 @@ pub fn sync_source_cache_as(
 /// True when `cache_root` is, physically (canonicalized, symlinks resolved), `own_root` or inside it. Fuigo clones that
 /// cache itself from a URL in user or managed config, and a clone carries no repository configuration or hooks.
 fn cache_root_is_fuigos_own(cache_root: &Path, own_root: &Path) -> bool {
-    match (dunce::canonicalize(cache_root), dunce::canonicalize(own_root)) {
+    match (
+        dunce::canonicalize(cache_root),
+        dunce::canonicalize(own_root),
+    ) {
         (Ok(root), Ok(own)) => root.starts_with(own),
         _ => false,
     }
@@ -807,7 +810,10 @@ mod tests {
                 Err(_) => continue,
             };
             let out = cmd.output().unwrap();
-            assert!(!out.status.success(), "{invocation:?} cloned an ext:: source");
+            assert!(
+                !out.status.success(),
+                "{invocation:?} cloned an ext:: source"
+            );
             assert!(!marker.exists(), "{invocation:?} ran the ext helper");
         }
     }

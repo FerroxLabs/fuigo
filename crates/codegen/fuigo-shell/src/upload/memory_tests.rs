@@ -35,8 +35,17 @@ async fn memory_archive_build_archives_seeded_root_off_runtime() {
 /// built from the user's memory root, so only the flag stops it being tarred and sent.
 #[test]
 fn memory_archive_is_skipped_when_the_session_has_memory_off() {
-    assert_eq!(memory_upload_skip_reason(true, false), Some("memory_disabled"));
+    assert_eq!(
+        memory_upload_skip_reason(true, false),
+        Some("memory_disabled")
+    );
     assert_eq!(memory_upload_skip_reason(true, true), None);
-    assert_eq!(memory_upload_skip_reason(false, true), Some("session_registry_disabled"));
-    assert_eq!(memory_upload_skip_reason(false, false), Some("session_registry_disabled"));
+    assert_eq!(
+        memory_upload_skip_reason(false, true),
+        Some("session_registry_disabled")
+    );
+    assert_eq!(
+        memory_upload_skip_reason(false, false),
+        Some("session_registry_disabled")
+    );
 }

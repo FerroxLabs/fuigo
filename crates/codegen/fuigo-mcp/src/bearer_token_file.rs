@@ -62,7 +62,9 @@ pub enum BearerTokenFileError {
     TooPermissive,
     #[error("bearer_token_file has more than one hard link")]
     MultipleLinks,
-    #[error("bearer_token_file must be a plain file path on a local drive (not a device, pipe, network or stream path)")]
+    #[error(
+        "bearer_token_file must be a plain file path on a local drive (not a device, pipe, network or stream path)"
+    )]
     UnsupportedPath,
     #[error("bearer_token_file is larger than 16 KiB")]
     TooLarge,
@@ -100,9 +102,17 @@ pub fn refusal_text(error: &BearerTokenFileError, path: &Path) -> String {
         return error.to_string();
     }
     match error {
-        E::TooPermissive => format!("{error}: remove access for other users from {}", path.display()),
+        E::TooPermissive => format!(
+            "{error}: remove access for other users from {}",
+            path.display()
+        ),
         // Setting-level reasons that are not about the file itself.
-        E::NotAbsolute | E::NoHomeDir | E::NotAString | E::InsecureUrl | E::ConflictsWithAuthorization | E::TimedOut => error.to_string(),
+        E::NotAbsolute
+        | E::NoHomeDir
+        | E::NotAString
+        | E::InsecureUrl
+        | E::ConflictsWithAuthorization
+        | E::TimedOut => error.to_string(),
         _ => format!("{error}: {}", path.display()),
     }
 }
@@ -114,7 +124,9 @@ pub fn refusal_text(error: &BearerTokenFileError, path: &Path) -> String {
 #[cfg(windows)]
 pub fn preflight(path: &BearerTokenPath) -> Result<(), BearerTokenFileError> {
     let path = path.as_ref().to_path_buf();
-    preflight_within(TOKEN_READ_TIMEOUT, move || windows_rules::open_checked(&path).map(drop))
+    preflight_within(TOKEN_READ_TIMEOUT, move || {
+        windows_rules::open_checked(&path).map(drop)
+    })
 }
 
 /// Run `judge` on its own thread and wait at most `bound` for it. Config loading is synchronous and may run on an async
@@ -129,9 +141,11 @@ where
     F: FnOnce() -> Result<(), BearerTokenFileError> + Send + 'static,
 {
     let (tx, rx) = std::sync::mpsc::channel();
-    let spawned = std::thread::Builder::new().name("bearer-file-preflight".into()).spawn(move || {
-        let _ = tx.send(judge());
-    });
+    let spawned = std::thread::Builder::new()
+        .name("bearer-file-preflight".into())
+        .spawn(move || {
+            let _ = tx.send(judge());
+        });
     if spawned.is_err() {
         return Ok(());
     }
@@ -149,15 +163,23 @@ pub fn preflight(_path: &BearerTokenPath) -> Result<(), BearerTokenFileError> {
 
 /// The configured string as `_meta` for the ACP server entry.
 pub fn bearer_token_file_meta(configured: &str) -> acp::Meta {
-    acp::Meta::from_iter([(META_KEY.to_owned(), serde_json::Value::String(configured.to_owned()))])
+    acp::Meta::from_iter([(
+        META_KEY.to_owned(),
+        serde_json::Value::String(configured.to_owned()),
+    )])
 }
 
 /// The configured string from `_meta`: `Ok(None)` when absent.
-pub fn configured_from_meta(meta: Option<&acp::Meta>) -> Result<Option<String>, BearerTokenFileError> {
+pub fn configured_from_meta(
+    meta: Option<&acp::Meta>,
+) -> Result<Option<String>, BearerTokenFileError> {
     let Some(value) = meta.and_then(|meta| meta.get(META_KEY)) else {
         return Ok(None);
     };
-    value.as_str().map(|s| Some(s.to_owned())).ok_or(BearerTokenFileError::NotAString)
+    value
+        .as_str()
+        .map(|s| Some(s.to_owned()))
+        .ok_or(BearerTokenFileError::NotAString)
 }
 
 /// Remove a `bearer_token_file` from a server definition that came from somewhere other than the user's own config
@@ -169,7 +191,9 @@ pub fn strip_from_server(server: &mut acp::McpServer, origin: &str) -> bool {
         acp::McpServer::Sse(s) => (s.name.clone(), &mut s.meta),
         _ => return false,
     };
-    let Some(map) = meta.as_mut() else { return false };
+    let Some(map) = meta.as_mut() else {
+        return false;
+    };
     if map.remove(META_KEY).is_none() {
         return false;
     }
@@ -222,7 +246,8 @@ impl std::fmt::Display for BearerTokenPath {
     }
 }
 
-type StalledRead = Arc<parking_lot::Mutex<Option<JoinHandle<Result<String, BearerTokenFileError>>>>>;
+type StalledRead =
+    Arc<parking_lot::Mutex<Option<JoinHandle<Result<String, BearerTokenFileError>>>>>;
 
 /// Clones share the stalled-read slot, and one value lives for a client's lifetime (reconnects included), so a hung
 /// mount pins at most one blocking-pool thread per server. The token is never stored here: every request reads again.
@@ -237,13 +262,19 @@ pub struct BearerTokenFile {
 
 impl std::fmt::Debug for BearerTokenFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BearerTokenFile").field("path", &self.path.to_string()).finish_non_exhaustive()
+        f.debug_struct("BearerTokenFile")
+            .field("path", &self.path.to_string())
+            .finish_non_exhaustive()
     }
 }
 
 impl BearerTokenFile {
     pub fn new(path: BearerTokenPath) -> Self {
-        Self { path: Arc::new(path), read_timeout: TOKEN_READ_TIMEOUT, stalled_read: Arc::default() }
+        Self {
+            path: Arc::new(path),
+            read_timeout: TOKEN_READ_TIMEOUT,
+            stalled_read: Arc::default(),
+        }
     }
 
     /// [`refusal_text`] for this file's path.
@@ -265,7 +296,12 @@ impl BearerTokenFile {
     /// The generic [`BearerTokenFileError`] for whichever check failed. Nothing is cached: a file that disappears or
     /// fails a check fails this request.
     pub async fn read(&self) -> Result<String, BearerTokenFileError> {
-        if self.stalled_read.lock().as_ref().is_some_and(|read| !read.is_finished()) {
+        if self
+            .stalled_read
+            .lock()
+            .as_ref()
+            .is_some_and(|read| !read.is_finished())
+        {
             return Err(BearerTokenFileError::TimedOut);
         }
         let mut read = tokio::task::spawn_blocking({
@@ -328,7 +364,9 @@ fn read_checked_bytes(path: &Path) -> Result<Vec<u8>, BearerTokenFileError> {
             _ => BearerTokenFileError::Unreadable,
         })?;
     // Every check is on the open descriptor, so the file judged is the file read.
-    let meta = file.metadata().map_err(|_| BearerTokenFileError::Unreadable)?;
+    let meta = file
+        .metadata()
+        .map_err(|_| BearerTokenFileError::Unreadable)?;
     if !meta.file_type().is_file() {
         return Err(BearerTokenFileError::NotRegular);
     }
@@ -410,14 +448,23 @@ mod preflight_bound_tests {
             Err(BearerTokenFileError::TooPermissive)
         });
         assert_eq!(result, Ok(()));
-        assert!(started.elapsed() < Duration::from_secs(2), "the caller was held past the bound");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the caller was held past the bound"
+        );
     }
 
     #[test]
     fn a_refusal_in_time_is_returned_and_unreadable_or_ok_pass() {
         let bound = Duration::from_secs(5);
-        assert_eq!(preflight_within(bound, || Err(BearerTokenFileError::TooPermissive)), Err(BearerTokenFileError::TooPermissive));
-        assert_eq!(preflight_within(bound, || Err(BearerTokenFileError::Unreadable)), Ok(()));
+        assert_eq!(
+            preflight_within(bound, || Err(BearerTokenFileError::TooPermissive)),
+            Err(BearerTokenFileError::TooPermissive)
+        );
+        assert_eq!(
+            preflight_within(bound, || Err(BearerTokenFileError::Unreadable)),
+            Ok(())
+        );
         assert_eq!(preflight_within(bound, || Ok(())), Ok(()));
     }
 }

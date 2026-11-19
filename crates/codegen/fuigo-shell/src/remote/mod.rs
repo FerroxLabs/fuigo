@@ -104,7 +104,10 @@ pub(crate) mod identity_tests {
     /// [`assert_no_identity`] for unauthenticated paths (OAuth device code, token exchange).
     pub(crate) fn assert_no_identity_headers(seen: &Seen, path: &str) {
         let seen = seen.lock().unwrap();
-        assert!(!seen.is_empty(), "{path}: the mock received no request, so this proves nothing");
+        assert!(
+            !seen.is_empty(),
+            "{path}: the mock received no request, so this proves nothing"
+        );
         for headers in seen.iter() {
             for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
                 assert!(

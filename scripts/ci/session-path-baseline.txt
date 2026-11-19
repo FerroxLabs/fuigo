@@ -21,7 +21,7 @@ fuigo-sandbox:src/paths.rs:join("sessions"): the sandbox audit log sessions/sand
 fuigo-sandbox:src/profiles.rs:join("sessions"): the sessions root as a sandbox profile grant/deny path; no write into a session folder
 fuigo-session-search:src/db.rs:join("sessions"): the search index sessions/session_search.sqlite at the sessions root, not a session folder
 fuigo-session-search:src/fts.rs:join("sessions"): the search index path at the sessions root (index tests at the end of the file); not a session folder
-fuigo-workspace:src/permission/shell_access.rs:join("sessions"): compares a path with the sessions root for the shell-access rule; no write
+fuigo-workspace:src/permission/shell_access/protected_paths.rs:join("sessions"): compares a path with the sessions root for the shell-access rule; no write
 fuigo-workspace:src/permission/state.rs:join("sessions"): cleanup_stale_permission_state removes permission*.toml in the cwd buckets (sessions/<cwd>/), one level above any session folder
 fuigo-workspace:src/recovery.rs:join("sessions"): workspace_home/sessions, the workspace tree, a different tree
 fuigo-workspace:src/session/mod.rs:join("sessions"): workspace_home/sessions, the workspace tree, a different tree

@@ -73,7 +73,10 @@ impl std::fmt::Debug for AuthEntry {
         f.debug_struct("AuthEntry")
             .field("key", &"<redacted>")
             .field("user_id", user_id)
-            .field("refresh_token", &refresh_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "refresh_token",
+                &refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("oidc_issuer", oidc_issuer)
             .field("oidc_client_id", oidc_client_id)
             .field("principal_type", principal_type)
@@ -310,7 +313,10 @@ struct AuthFileLockGuard {
     _file: std::fs::File,
 }
 
-fn lock_auth_file(auth_json_path: &Path, timeout: std::time::Duration) -> Option<AuthFileLockGuard> {
+fn lock_auth_file(
+    auth_json_path: &Path,
+    timeout: std::time::Duration,
+) -> Option<AuthFileLockGuard> {
     use fs2::FileExt;
     use std::io::Write;
     let lock_path = auth_json_path.with_file_name("auth.json.lock");
@@ -987,8 +993,15 @@ mod tests {
 
         let err = result.expect_err("a held lock must fail the write");
         assert!(err.to_string().contains("auth.json.lock"), "{err}");
-        assert!(waited >= wait, "returned after {waited:?}, before the {wait:?} bound");
-        assert_eq!(std::fs::read(&path).unwrap(), before, "auth.json must be untouched");
+        assert!(
+            waited >= wait,
+            "returned after {waited:?}, before the {wait:?} bound"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "auth.json must be untouched"
+        );
     }
 
     #[test]
@@ -1043,13 +1056,21 @@ mod tests {
             Some("eyJ.new"),
             "the unsaved event must be kept"
         );
-        let on_disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(on_disk["oidc"]["key"], "eyJ.old", "nothing written while the lock is held");
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["oidc"]["key"], "eyJ.old",
+            "nothing written while the lock is held"
+        );
 
         drop(held);
         retry.join().unwrap();
-        assert!(unsaved.lock().is_none(), "a landed retry clears the unsaved slot");
-        let on_disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            unsaved.lock().is_none(),
+            "a landed retry clears the unsaved slot"
+        );
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(on_disk["oidc"]["key"], "eyJ.new");
         assert_eq!(on_disk["oidc"]["refresh_token"], "rt-new");
     }
@@ -1090,7 +1111,10 @@ mod tests {
     fn hub_session_token_is_recorded_as_sent() {
         const TOKEN: &str = "eyJ.x1f5-hub-token-FAKE-0001";
         let echoed = format!("hub said bad token {TOKEN}");
-        assert_eq!(fuigo_secrets::sent_credentials::scrub(&echoed).as_ref(), echoed);
+        assert_eq!(
+            fuigo_secrets::sent_credentials::scrub(&echoed).as_ref(),
+            echoed
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = write_auth_json(
             dir.path(),
@@ -1150,7 +1174,10 @@ mod tests {
         )
         .err()
         .unwrap();
-        assert!(err.to_string().contains("The request was not made"), "{err}");
+        assert!(
+            err.to_string().contains("The request was not made"),
+            "{err}"
+        );
         let ok = provider(
             &Url::parse("wss://hub.example.test/v1/tools").unwrap(),
             Some(&path),
@@ -1280,7 +1307,6 @@ mod tests {
             _ => panic!("expected Bearer"),
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1290,12 +1316,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }

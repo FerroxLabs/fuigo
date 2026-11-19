@@ -84,7 +84,10 @@ pub async fn project_id() -> String {
 }
 
 pub async fn email(service_account: &str) -> Result<String, Error> {
-    get_etag_with_trim(&format!("instance/service-accounts/{service_account}/email")).await
+    get_etag_with_trim(&format!(
+        "instance/service-accounts/{service_account}/email"
+    ))
+    .await
 }
 
 async fn get_etag_with_trim(suffix: &str) -> Result<String, Error> {
@@ -93,13 +96,20 @@ async fn get_etag_with_trim(suffix: &str) -> Result<String, Error> {
 }
 
 async fn get_etag(suffix: &str) -> Result<String, Error> {
-    let host = std::env::var(METADATA_HOST_ENV).unwrap_or_else(|_| METADATA_GOOGLE_HOST.to_string());
+    let host =
+        std::env::var(METADATA_HOST_ENV).unwrap_or_else(|_| METADATA_GOOGLE_HOST.to_string());
     let url = format!("http://{host}/computeMetadata/v1/{suffix}");
     let client = transport::client(Duration::from_secs(3))?;
     let response = client
         .get(url)
-        .header(METADATA_FLAVOR_KEY, HeaderValue::from_str(METADATA_GOOGLE).unwrap())
-        .header(USER_AGENT, HeaderValue::from_str("gcloud-rust/0.1").unwrap())
+        .header(
+            METADATA_FLAVOR_KEY,
+            HeaderValue::from_str(METADATA_GOOGLE).unwrap(),
+        )
+        .header(
+            USER_AGENT,
+            HeaderValue::from_str("gcloud-rust/0.1").unwrap(),
+        )
         .send_guarded()
         .await?;
 
@@ -119,21 +129,37 @@ mod policy_tests {
             proxy.set_nonblocking(true).unwrap();
             let url = format!("http://{}", proxy.local_addr().unwrap());
             let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "policy_tests::metadata_override_cannot_bypass_policy", "--nocapture"])
-                .env(CASE, "1").env(super::METADATA_HOST_ENV, "blocked.invalid")
-                .env("HTTP_PROXY", &url).env("http_proxy", &url)
-                .env("ALL_PROXY", &url).env("all_proxy", &url)
-                .env_remove("NO_PROXY").env_remove("no_proxy")
-                .status().unwrap();
+                .args([
+                    "--exact",
+                    "policy_tests::metadata_override_cannot_bypass_policy",
+                    "--nocapture",
+                ])
+                .env(CASE, "1")
+                .env(super::METADATA_HOST_ENV, "blocked.invalid")
+                .env("HTTP_PROXY", &url)
+                .env("http_proxy", &url)
+                .env("ALL_PROXY", &url)
+                .env("all_proxy", &url)
+                .env_remove("NO_PROXY")
+                .env_remove("no_proxy")
+                .status()
+                .unwrap();
             assert!(status.success());
-            assert_eq!(proxy.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(
+                proxy.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
             return;
         }
         super::transport::install(super::transport::Policy {
             configure: |b| b,
             check_url: |_| Err("denied".into()),
-        }).unwrap();
+        })
+        .unwrap();
         let error = super::email("default").await.unwrap_err();
-        assert!(matches!(error, super::Error::TransportPolicy(super::transport::Error::Denied)));
+        assert!(matches!(
+            error,
+            super::Error::TransportPolicy(super::transport::Error::Denied)
+        ));
     }
 }

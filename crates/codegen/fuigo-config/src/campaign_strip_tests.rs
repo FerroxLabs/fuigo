@@ -8,7 +8,9 @@ fn set_path(root: &mut toml::Table, path: &[&str], value: toml::Value) {
             root.insert((*leaf).to_owned(), value);
         }
         [head, rest @ ..] => {
-            let entry = root.entry((*head).to_owned()).or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let entry = root
+                .entry((*head).to_owned())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
             set_path(entry.as_table_mut().expect("table"), rest, value);
         }
         [] => {}
@@ -81,9 +83,19 @@ fn campaign_cannot_set_credential_destinations_or_execution_policy() {
         let mut user = toml::Table::new();
         set_path(&mut user, &segs, toml::Value::String("user-value".into()));
         let mut patch = toml::Table::new();
-        set_path(&mut patch, &segs, toml::Value::String("campaign-value".into()));
+        set_path(
+            &mut patch,
+            &segs,
+            toml::Value::String("campaign-value".into()),
+        );
         let mut effective = toml::Value::Table(user);
-        apply_active_campaign_patches(&mut effective, &[CampaignEntry { id: "c".into(), patch }]);
+        apply_active_campaign_patches(
+            &mut effective,
+            &[CampaignEntry {
+                id: "c".into(),
+                patch,
+            }],
+        );
         assert_eq!(
             get_path(&effective, &segs).and_then(toml::Value::as_str),
             Some("user-value"),
@@ -91,21 +103,43 @@ fn campaign_cannot_set_credential_destinations_or_execution_policy() {
         );
         // The user did not set it: the campaign must not introduce it.
         let mut patch = toml::Table::new();
-        set_path(&mut patch, &segs, toml::Value::String("campaign-value".into()));
+        set_path(
+            &mut patch,
+            &segs,
+            toml::Value::String("campaign-value".into()),
+        );
         let mut effective = toml::Value::Table(toml::Table::new());
-        apply_active_campaign_patches(&mut effective, &[CampaignEntry { id: "c".into(), patch }]);
-        assert!(get_path(&effective, &segs).is_none(), "campaign introduced `{path}`: {effective:?}");
+        apply_active_campaign_patches(
+            &mut effective,
+            &[CampaignEntry {
+                id: "c".into(),
+                patch,
+            }],
+        );
+        assert!(
+            get_path(&effective, &segs).is_none(),
+            "campaign introduced `{path}`: {effective:?}"
+        );
     }
 }
 
 /// A whole-table or non-table campaign value for a stripped key cannot clobber the user's table either.
 #[test]
 fn campaign_cannot_replace_a_stripped_table_wholesale() {
-    let mut effective: toml::Value =
-        toml::from_str("[shell_environment_policy]\ninherit = \"core\"\n[hub]\nurl = \"wss://mine.invalid\"\n").unwrap();
+    let mut effective: toml::Value = toml::from_str(
+        "[shell_environment_policy]\ninherit = \"core\"\n[hub]\nurl = \"wss://mine.invalid\"\n",
+    )
+    .unwrap();
     let before = effective.clone();
-    let patch: toml::Table = toml::from_str("shell_environment_policy = \"none\"\nhub = 1\n").unwrap();
-    apply_active_campaign_patches(&mut effective, &[CampaignEntry { id: "c".into(), patch }]);
+    let patch: toml::Table =
+        toml::from_str("shell_environment_policy = \"none\"\nhub = 1\n").unwrap();
+    apply_active_campaign_patches(
+        &mut effective,
+        &[CampaignEntry {
+            id: "c".into(),
+            patch,
+        }],
+    );
     assert_eq!(effective, before);
 }
 
@@ -123,13 +157,22 @@ fn secret_free_campaign_still_applies_beside_stripped_keys() {
          [mcp_servers.docs]\nurl = \"https://docs.invalid/mcp\"\ncommand = \"docs-srv\"\nargs = [\"--plain\", \"--mode=${MODE}\"]\n",
     )
     .unwrap();
-    apply_active_campaign_patches(&mut effective, &[CampaignEntry { id: "c".into(), patch }]);
+    apply_active_campaign_patches(
+        &mut effective,
+        &[CampaignEntry {
+            id: "c".into(),
+            patch,
+        }],
+    );
     assert_eq!(effective["models"]["default"].as_str(), Some("a"));
     assert_eq!(effective["model"]["a"]["name"].as_str(), Some("New name"));
     // `features` is not on the campaign allowlist.
     assert!(effective.get("features").is_none(), "{effective:?}");
     assert_eq!(effective["hub"]["url"].as_str(), Some("wss://mine.invalid"));
-    assert_eq!(effective["telemetry"]["otel_endpoint"].as_str(), Some("https://mine.invalid"));
+    assert_eq!(
+        effective["telemetry"]["otel_endpoint"].as_str(),
+        Some("https://mine.invalid")
+    );
     let docs = &effective["mcp_servers"]["docs"];
     assert_eq!(docs["url"].as_str(), Some("https://docs.invalid/mcp"));
     assert_eq!(docs["args"][1].as_str(), Some("--mode=${MODE}"));
@@ -138,7 +181,13 @@ fn secret_free_campaign_still_applies_beside_stripped_keys() {
 fn apply_one(base: &str, id: &str, patch: &str) -> toml::Value {
     let mut effective: toml::Value = toml::from_str(base).unwrap();
     let patch: toml::Table = toml::from_str(patch).unwrap();
-    apply_active_campaign_patches(&mut effective, &[CampaignEntry { id: id.into(), patch }]);
+    apply_active_campaign_patches(
+        &mut effective,
+        &[CampaignEntry {
+            id: id.into(),
+            patch,
+        }],
+    );
     effective
 }
 
@@ -164,7 +213,11 @@ fn campaign_unlisted_keys_change_nothing() {
         "[version_overrides.x]\n[version_overrides.x.models]\ndefault = \"x\"\n",
         "[[campaigns]]\nid = \"nested\"\n[campaigns.models]\ndefault = \"x\"\n",
     ] {
-        assert_eq!(apply_one(base, "u", patch), toml::from_str::<toml::Value>(base).unwrap(), "{patch}");
+        assert_eq!(
+            apply_one(base, "u", patch),
+            toml::from_str::<toml::Value>(base).unwrap(),
+            "{patch}"
+        );
     }
 }
 
@@ -182,9 +235,15 @@ fn campaign_allowed_paths_still_apply() {
     assert_eq!(effective["models"]["image_description"].as_str(), Some("a"));
     assert_eq!(effective["models"]["session_summary"].as_str(), Some("a"));
     assert_eq!(effective["model"]["a"]["name"].as_str(), Some("New"));
-    assert_eq!(effective["model"]["a"]["context_window"].as_integer(), Some(2000));
+    assert_eq!(
+        effective["model"]["a"]["context_window"].as_integer(),
+        Some(2000)
+    );
     assert_eq!(effective["model"]["added"]["name"].as_str(), Some("Added"));
-    assert_eq!(effective["mcp_servers"]["docs"]["url"].as_str(), Some("https://docs.invalid/mcp"));
+    assert_eq!(
+        effective["mcp_servers"]["docs"]["url"].as_str(),
+        Some("https://docs.invalid/mcp")
+    );
     assert_eq!(effective["managed_mcps"]["enabled"].as_bool(), Some(false));
 }
 
@@ -213,7 +272,11 @@ fn campaign_allowed_paths_keep_only_their_constrained_values() {
         "[model.a]\ncontext_window = 10000001\n",
         "[model.a]\ncontext_window = 9223372036854775807\n",
     ] {
-        assert_eq!(apply_one(base, "v", patch), toml::from_str::<toml::Value>(base).unwrap(), "{patch}");
+        assert_eq!(
+            apply_one(base, "v", patch),
+            toml::from_str::<toml::Value>(base).unwrap(),
+            "{patch}"
+        );
     }
 }
 
@@ -226,27 +289,43 @@ fn campaign_dropped_keys_are_noted_once_without_values() {
         "[models]\ndefault = \"a\"\n[features]\ntelemetry = \"secret-value-1\"\n[ui]\nyolo = true\n\
          [agent]\nname = \"secret-value-2\"\n",
     );
-    let notes: Vec<String> =
-        crate::key_naming::refusal_notes().into_iter().filter(|n| n.contains("campaign `drop-note`")).collect();
+    let notes: Vec<String> = crate::key_naming::refusal_notes()
+        .into_iter()
+        .filter(|n| n.contains("campaign `drop-note`"))
+        .collect();
     assert_eq!(notes.len(), 1, "{notes:?}");
     let note = &notes[0];
     for key in ["`agent`", "`features`", "`ui`"] {
         assert!(note.contains(key), "{note}");
     }
-    assert!(!note.contains("secret-value") && !note.contains("`models`"), "{note}");
+    assert!(
+        !note.contains("secret-value") && !note.contains("`models`"),
+        "{note}"
+    );
 }
 
 /// The context window is bounded: the ends of the range apply, a value outside it is dropped.
 #[test]
 fn campaign_context_window_range_edges_apply() {
     for n in [1024, 10_000_000] {
-        let effective = apply_one("[model.a]\nname = \"Old\"\n", "w", &format!("[model.a]\ncontext_window = {n}\n"));
-        assert_eq!(effective["model"]["a"]["context_window"].as_integer(), Some(n), "{n}");
+        let effective = apply_one(
+            "[model.a]\nname = \"Old\"\n",
+            "w",
+            &format!("[model.a]\ncontext_window = {n}\n"),
+        );
+        assert_eq!(
+            effective["model"]["a"]["context_window"].as_integer(),
+            Some(n),
+            "{n}"
+        );
     }
 }
 
 fn notes_for(prefix: &str) -> Vec<String> {
-    crate::key_naming::refusal_notes().into_iter().filter(|n| n.contains(prefix)).collect()
+    crate::key_naming::refusal_notes()
+        .into_iter()
+        .filter(|n| n.contains(prefix))
+        .collect()
 }
 
 /// The campaign id, a server name and the dropped-key list are cleaned and capped in notes.
@@ -254,7 +333,11 @@ fn notes_for(prefix: &str) -> Vec<String> {
 fn campaign_note_text_is_tidied_and_capped() {
     let id = format!("tidy-\u{1b}[2J{}", "a".repeat(200));
     let many: String = (0..20).map(|i| format!("k{i:02} = 1\n")).collect();
-    apply_one("[mcp_servers.\"ev\\u0007il\"]\ncommand = \"x\"\n", &id, &format!("{many}[mcp_servers.\"ev\\u0007il\"]\ncommand = \"y\"\n"));
+    apply_one(
+        "[mcp_servers.\"ev\\u0007il\"]\ncommand = \"x\"\n",
+        &id,
+        &format!("{many}[mcp_servers.\"ev\\u0007il\"]\ncommand = \"y\"\n"),
+    );
     let notes = notes_for("campaign `tidy-");
     assert!(notes.len() >= 2, "{notes:?}");
     for note in &notes {
@@ -268,10 +351,24 @@ fn campaign_note_text_is_tidied_and_capped() {
 /// A helper model changed by a campaign is announced once.
 #[test]
 fn campaign_helper_model_change_is_noted() {
-    apply_one("[models]\ndefault = \"mine\"\n", "helper-note", "[models]\nimage_description = \"vision-x\"\nsession_summary = \"sum-y\"\n");
+    apply_one(
+        "[models]\ndefault = \"mine\"\n",
+        "helper-note",
+        "[models]\nimage_description = \"vision-x\"\nsession_summary = \"sum-y\"\n",
+    );
     let notes = notes_for("campaign `helper-note`");
-    assert!(notes.iter().any(|n| n.contains("image") && n.contains("`vision-x`")), "{notes:?}");
-    assert!(notes.iter().any(|n| n.contains("summar") && n.contains("`sum-y`")), "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("image") && n.contains("`vision-x`")),
+        "{notes:?}"
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("summar") && n.contains("`sum-y`")),
+        "{notes:?}"
+    );
 }
 
 /// The overflow line of a scope does not claim every overflowed note was about the saved key.
@@ -296,15 +393,22 @@ fn campaign_layer_and_remote_sources_go_through_the_allowlist() {
     let mut layers = crate::config_layers::ConfigLayers::default();
     layers.campaigns.user = vec![CampaignEntry {
         id: "layer-src".into(),
-        patch: patch("[models]\ndefault = \"layer-model\"\n[features]\nweb_fetch = true\n[ui]\nyolo = true\n"),
+        patch: patch(
+            "[models]\ndefault = \"layer-model\"\n[features]\nweb_fetch = true\n[ui]\nyolo = true\n",
+        ),
     }];
     let remote = vec![CampaignEntry {
         id: "remote-src".into(),
-        patch: patch("[models]\nsession_summary = \"remote-sum\"\n[agent]\nname = \"x\"\n[model.r]\ncontext_window = 5\nname = \"R\"\n"),
+        patch: patch(
+            "[models]\nsession_summary = \"remote-sum\"\n[agent]\nname = \"x\"\n[model.r]\ncontext_window = 5\nname = \"R\"\n",
+        ),
     }];
     let effective = layers.effective_config_with_campaigns(&remote, &Default::default());
     assert_eq!(effective["models"]["default"].as_str(), Some("layer-model"));
-    assert_eq!(effective["models"]["session_summary"].as_str(), Some("remote-sum"));
+    assert_eq!(
+        effective["models"]["session_summary"].as_str(),
+        Some("remote-sum")
+    );
     assert_eq!(effective["model"]["r"]["name"].as_str(), Some("R"));
     for dropped in [["features", "web_fetch"], ["ui", "yolo"], ["agent", "name"]] {
         assert!(get_path(&effective, &dropped).is_none(), "{dropped:?}");
@@ -323,7 +427,20 @@ fn campaign_note_names_only_what_was_removed() {
     let notes = notes_for("campaign `sub-note`");
     // The dropped keys, plus the one-time notice that the campaign renamed model `a` (outc7 F6)
     assert_eq!(notes.len(), 2, "{notes:?}");
-    assert!(notes[0].contains("`models.allowed_models`") && notes[0].contains("`model.a.context_window`"), "{}", notes[0]);
-    assert!(!notes[0].contains("`models`") && !notes[0].contains("`model`"), "{}", notes[0]);
-    assert!(notes[1].contains("display name of model `a` to `N`"), "{}", notes[1]);
+    assert!(
+        notes[0].contains("`models.allowed_models`")
+            && notes[0].contains("`model.a.context_window`"),
+        "{}",
+        notes[0]
+    );
+    assert!(
+        !notes[0].contains("`models`") && !notes[0].contains("`model`"),
+        "{}",
+        notes[0]
+    );
+    assert!(
+        notes[1].contains("display name of model `a` to `N`"),
+        "{}",
+        notes[1]
+    );
 }

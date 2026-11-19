@@ -202,7 +202,13 @@ fn padded_str(d: &[u8]) -> String {
     let end = d.iter().position(|&b| b == 0).unwrap_or(d.len());
     d[..end]
         .iter()
-        .map(|&b| if (0x20..=0x7e).contains(&b) { b as char } else { '?' })
+        .map(|&b| {
+            if (0x20..=0x7e).contains(&b) {
+                b as char
+            } else {
+                '?'
+            }
+        })
         .collect()
 }
 

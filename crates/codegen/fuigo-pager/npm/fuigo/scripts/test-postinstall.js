@@ -1166,14 +1166,97 @@ if (process.platform !== 'win32') {
         }
     });
 
-    test('installer: no args array with a shell (DEP0190), one lsof call for all old binaries (audit L2/L7)', () => {
-    const installer = fs.readFileSync(path.join(__dirname, '..', 'bin', 'fuigo-install.js'), 'utf8');
-    assert.ok(!/shell:\s*IS_WINDOWS/.test(installer), 'a shell must come with a command string, not an args array');
-    assert.ok(installer.includes("spawnSync('npm config get registry'"), 'Windows path uses one command string');
-    assert.strictEqual((installer.match(/spawnSync\('lsof'/g) || []).length, 1, 'exactly one lsof call site');
-    assert.ok(installer.includes("['-Fn', '--', ...files]"), 'lsof is given all files at once');
-    assert.ok(/timeout: 2000/.test(installer), 'lsof timeout shortened');
-});
+    // Audit L2/L7, behaviour not source text (Fable delta-3): the old binaries are asked about in ONE lsof call, a
+    // missing lsof counts every file as in use, and on Windows the registry is looked up with one command string
+    // under a shell, never an args array (DEP0190).
+    test('installer: one lsof call covers every old binary and its answer decides which are kept (audit L2/L7)', () => {
+        const dir = makeTmpDir();
+        const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+        const realPath = process.env.PATH;
+        try {
+            const bin = path.join(dir, 'bin');
+            fs.mkdirSync(bin);
+            const log = path.join(dir, 'lsof.log');
+            const fakeDir = path.join(dir, 'fake');
+            fs.mkdirSync(fakeDir);
+            // Prints the name line of the one file the "process" holds open (1.0.1) and logs every call.
+            fs.writeFileSync(path.join(fakeDir, 'lsof'),
+                `#!/bin/sh\necho "$@" >> '${log}'\nfor f in "$@"; do case "$f" in *fuigo-1.0.1) echo "n$f";; esac; done\n`,
+                { mode: 0o755 });
+            const old = Date.now() - 3 * 60 * 60 * 1000;
+            for (const v of ['1.0.0', '1.0.1', '1.0.2', '1.0.3', '1.0.4']) {
+                const f = path.join(bin, `fuigo-${v}`);
+                fs.writeFileSync(f, 'x');
+                fs.utimesSync(f, old / 1000, old / 1000);
+            }
+            Object.defineProperty(process, 'platform', { value: 'darwin' });
+            process.env.PATH = `${fakeDir}${path.delimiter}${realPath}`;
+            shippedInstall.cleanupOldVersions(bin, 'fuigo', '1.0.4', { now: Date.now() });
+            const calls = fs.readFileSync(log, 'utf8').trim().split('\n');
+            assert.strictEqual(calls.length, 1, `exactly one lsof call: ${calls}`);
+            for (const v of ['1.0.0', '1.0.1', '1.0.2']) {
+                assert.ok(calls[0].includes(`fuigo-${v}`), `the call names fuigo-${v}: ${calls[0]}`);
+            }
+            const left = fs.readdirSync(bin).sort();
+            assert.deepStrictEqual(left, ['fuigo-1.0.1', 'fuigo-1.0.3', 'fuigo-1.0.4'],
+                'the file lsof named, the previous version and the current one stay; the rest go');
+
+            // No lsof at all: every candidate counts as in use and nothing is deleted.
+            fs.rmSync(path.join(fakeDir, 'lsof'));
+            process.env.PATH = fakeDir;
+            for (const v of ['1.0.0', '1.0.2']) {
+                const f = path.join(bin, `fuigo-${v}`);
+                fs.writeFileSync(f, 'x');
+                fs.utimesSync(f, old / 1000, old / 1000);
+            }
+            shippedInstall.cleanupOldVersions(bin, 'fuigo', '1.0.4', { now: Date.now() });
+            assert.ok(fs.existsSync(path.join(bin, 'fuigo-1.0.0')) && fs.existsSync(path.join(bin, 'fuigo-1.0.2')),
+                'an lsof that cannot run deletes nothing');
+        } finally {
+            Object.defineProperty(process, 'platform', realPlatform);
+            process.env.PATH = realPath;
+            cleanup(dir);
+        }
+    });
+
+    test('installer: on Windows the registry lookup is one command string under a shell, never an args array (DEP0190)', () => {
+        const dir = makeTmpDir();
+        const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+        const childProcess = require('child_process');
+        const realSpawnSync = childProcess.spawnSync;
+        const realRegistry = process.env.FUIGO_NPM_REGISTRY;
+        try {
+            // A copy of the installer with a stub @iarna/toml beside it, loaded as if on Windows with spawnSync recorded.
+            const lib = path.join(dir, 'lib');
+            fs.mkdirSync(path.join(lib, 'bin'), { recursive: true });
+            for (const f of ['fuigo-install.js', 'fuigo-replace.js']) {
+                fs.copyFileSync(path.join(__dirname, '..', 'bin', f), path.join(lib, 'bin', f));
+            }
+            const toml = path.join(lib, 'node_modules', '@iarna', 'toml');
+            fs.mkdirSync(toml, { recursive: true });
+            fs.writeFileSync(path.join(toml, 'package.json'), '{"name":"@iarna/toml","main":"index.js"}');
+            fs.writeFileSync(path.join(toml, 'index.js'),
+                'module.exports = { parse: (t) => JSON.parse(t.replace(/^#.*$/m, "") || "{}"), stringify: (o) => "# stub\\n" + JSON.stringify(o) };');
+            const calls = [];
+            childProcess.spawnSync = (...args) => { calls.push(args); return { status: 0, stdout: 'https://registry.example/\n' }; };
+            Object.defineProperty(process, 'platform', { value: 'win32' });
+            delete process.env.FUIGO_NPM_REGISTRY;
+            const copy = require(path.join(lib, 'bin', 'fuigo-install.js'));
+            fs.mkdirSync(path.join(dir, 'home'));
+            copy.writeInstallerConfig(path.join(dir, 'home'));
+            assert.strictEqual(calls.length, 1, 'one lookup');
+            const [command, options] = calls[0];
+            assert.strictEqual(typeof command, 'string', 'the command is one string');
+            assert.ok(command.includes('npm config get registry'), command);
+            assert.ok(options && options.shell === true, 'run under a shell');
+            assert.strictEqual(calls[0].length, 2, 'no args array beside the shell');
+        } finally {
+            childProcess.spawnSync = realSpawnSync;
+            Object.defineProperty(process, 'platform', realPlatform);
+            if (realRegistry === undefined) delete process.env.FUIGO_NPM_REGISTRY; else process.env.FUIGO_NPM_REGISTRY = realRegistry;
+            cleanup(dir);
+        }
+    });
 
 test('mirrored link matches fuigo-install.js and the shipped entry wires the bootstrap', () => {
         const pkgRoot = path.join(__dirname, '..');

@@ -1,0 +1,69 @@
+# Preflight: the cheap checks the release workflow runs before and after its long builds, in about 20 minutes,
+# so a broken release script or layout fails here and not 5 hours into a dry run (1.0.45: one shellcheck SC2016
+# info failed "assemble and publish" -> "Check versions" after the whole build matrix).
+#
+# Run it before ANY release dry run:  Actions -> preflight -> Run workflow   (or push to a release/* branch).
+# The checks live in scripts/release/preflight-local.sh, so the same run is available locally and from the
+# pre-squash replay. It builds no release artifacts, signs nothing and publishes nothing.
+name: preflight
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["release/*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  scripts:
+    name: release scripts, layout, notices, shellcheck, leak guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - name: Tool versions
+        run: |
+          node --version
+          python3 --version
+          shellcheck --version | sed -n 2p
+      - name: Preflight checks (same script as local and the pre-squash replay)
+        run: scripts/release/preflight-local.sh --require-shellcheck
+
+  compile-check:
+    name: linux-x64 release-dist type-check (fuigo-pager-bin)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "4"
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (action default toolchain: stable; rust-toolchain.toml pins 1.94.0)
+      - name: Install protoc 29.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 30 --max-time 300 https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip -o "$RUNNER_TEMP/protoc.zip"
+          echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  $RUNNER_TEMP/protoc.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: preflight-release-dist
+          cache-on-failure: true
+      - name: cargo check, release-dist profile, fuigo-pager-bin
+        run: |
+          rustup show active-toolchain
+          cargo check --locked --profile release-dist -p fuigo-pager-bin

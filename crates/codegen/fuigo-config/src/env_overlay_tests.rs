@@ -198,12 +198,16 @@ fn overlay_still_sets_soft_settings() {
 /// discovery-adding `paths` / `enabled`, never get through.
 #[test]
 fn overlay_can_turn_plugin_discovery_off_only() {
-    let off = r#"{"plugins": {"auto_discover": false, "paths": ["/tmp/evil"], "enabled": ["evil"]}}"#;
+    let off =
+        r#"{"plugins": {"auto_discover": false, "paths": ["/tmp/evil"], "enabled": ["evil"]}}"#;
     let overlay = resolve_overlay(Some(off), None).unwrap();
     let expected: toml::Value = toml::from_str("[plugins]\nauto_discover = false\n").unwrap();
     assert_eq!(overlay, expected);
     let on = r#"{"plugins": {"auto_discover": true}}"#;
-    assert!(resolve_overlay(Some(on), None).is_none(), "an overlay must not turn discovery back on");
+    assert!(
+        resolve_overlay(Some(on), None).is_none(),
+        "an overlay must not turn discovery back on"
+    );
 }
 
 #[test]
@@ -231,7 +235,11 @@ fn malformed_overlay_parse_errors_do_not_carry_the_value() {
 fn an_untrusted_overlay_file_cannot_name_the_saved_key() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("overlay.toml");
-    std::fs::write(&path, "[models.extra_headers]\nX-Key = \"Bearer ${FUIGO_API_KEY}\"\nX-Other = \"plain\"\n").unwrap();
+    std::fs::write(
+        &path,
+        "[models.extra_headers]\nX-Key = \"Bearer ${FUIGO_API_KEY}\"\nX-Other = \"plain\"\n",
+    )
+    .unwrap();
     let overlay = resolve_overlay(None, Some(&path)).expect("overlay resolves");
     let headers = &overlay["models"]["extra_headers"];
     assert_eq!(headers["X-Key"].as_str(), Some("Bearer "), "{overlay:?}");
@@ -246,15 +254,32 @@ fn a_shared_overlay_file_refusal_reaches_every_session_that_loads_it() {
     let shared = dir.path().join("opt").join("shared").join(".fuigo");
     std::fs::create_dir_all(&shared).unwrap();
     let path = shared.join("config.toml");
-    std::fs::write(&path, "[models.extra_headers]\nX-Key = \"Bearer ${FUIGO_API_KEY}\"\n").unwrap();
+    std::fs::write(
+        &path,
+        "[models.extra_headers]\nX-Key = \"Bearer ${FUIGO_API_KEY}\"\n",
+    )
+    .unwrap();
     let label = path.display().to_string();
-    let sessions = [crate::key_naming::NoticeScope::new(), crate::key_naming::NoticeScope::new()];
+    let sessions = [
+        crate::key_naming::NoticeScope::new(),
+        crate::key_naming::NoticeScope::new(),
+    ];
     for session in sessions {
-        let overlay = session.run(|| resolve_overlay(None, Some(&path))).expect("overlay resolves");
-        assert_eq!(overlay["models"]["extra_headers"]["X-Key"].as_str(), Some("Bearer "));
+        let overlay = session
+            .run(|| resolve_overlay(None, Some(&path)))
+            .expect("overlay resolves");
+        assert_eq!(
+            overlay["models"]["extra_headers"]["X-Key"].as_str(),
+            Some("Bearer ")
+        );
     }
     for session in sessions {
         let notes = session.notes();
-        assert!(notes.iter().any(|n| n.starts_with(&label) && n.contains("FUIGO_API_KEY")), "{notes:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with(&label) && n.contains("FUIGO_API_KEY")),
+            "{notes:?}"
+        );
     }
 }

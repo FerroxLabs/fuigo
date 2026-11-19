@@ -100,6 +100,7 @@ fuigo-file-utils = { path = "../fuigo-file-utils" }
 fuigo-active-sessions = { workspace = true }
 fuigo-config = { workspace = true }
 fuigo-dirs = { workspace = true }
+fuigo-secrets = { workspace = true }
 fuigo-dashboard-store = { workspace = true }
 # Voice dictation. `audio` (mic capture) is enabled on every target. On
 # macOS/Windows it links cpal; on Linux it compiles a subprocess-recorder
@@ -149,7 +150,7 @@ shellexpand = "3.1"
 
 # libgit2 for the startup git-info populator (no fork/exec, runs once on launch
 # in spawn_blocking; the render path never touches git directly).
-git2 = { version = "0.20", default-features = false, features = [
+git2 = { version = "0.21", default-features = false, features = [
     "vendored-libgit2",
 ] }
 urlencoding = { workspace = true }

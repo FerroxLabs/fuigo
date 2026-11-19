@@ -50,6 +50,7 @@ impl SandboxLaunch for WrappingHook {
         Ok(Some(LaunchReceipt {
             sandboxed: true,
             backend: Some(super::BackendName::Seatbelt),
+            grants: Vec::new(),
         }))
     }
 }
@@ -404,33 +405,49 @@ fn child_env_for_windows_has_one_entry_per_variable() {
         (os("PYTHONUSERBASE"), os("C:\\old-base")),
         (os("Drop_Me"), os("x")),
     ];
-    let edits = vec![
-        (os("Path"), Some(os("C:\\edited"))),
-        (os("DROP_ME"), None),
-    ];
+    let edits = vec![(os("Path"), Some(os("C:\\edited"))), (os("DROP_ME"), None)];
     let restored = vec![(os("PythonUserBase"), os("C:\\restored-base"))];
-    let env = super::child_env_for(inherited.clone(), edits.clone(), restored.clone(), EnvPlatform::Windows);
+    let env = super::child_env_for(
+        inherited.clone(),
+        edits.clone(),
+        restored.clone(),
+        EnvPlatform::Windows,
+    );
     assert_eq!(
         env,
-        vec![(os("PATH"), os("C:\\edited")), (os("PYTHONUSERBASE"), os("C:\\restored-base"))]
+        vec![
+            (os("PATH"), os("C:\\edited")),
+            (os("PYTHONUSERBASE"), os("C:\\restored-base"))
+        ]
     );
     let env = super::child_env_for(inherited, edits, restored, EnvPlatform::Unix);
     let names: Vec<&OsString> = env.iter().map(|(k, _)| k).collect();
     assert_eq!(
         names,
-        vec![&os("Drop_Me"), &os("PATH"), &os("PYTHONUSERBASE"), &os("Path"), &os("PythonUserBase")]
+        vec![
+            &os("Drop_Me"),
+            &os("PATH"),
+            &os("PYTHONUSERBASE"),
+            &os("Path"),
+            &os("PythonUserBase")
+        ]
     );
 }
 
 /// u35 g9: a judge for the runner tests: `U35_STEER_A` / `U35_STEER_B` steer, nothing else does.
 fn u35_test_judge(_command: &str, env: &[(String, String)], _dir: &Path) -> Option<String> {
     env.iter()
-        .find(|(name, value)| matches!(name.as_str(), "U35_STEER_A" | "U35_STEER_B") && !value.is_empty())
+        .find(|(name, value)| {
+            matches!(name.as_str(), "U35_STEER_A" | "U35_STEER_B") && !value.is_empty()
+        })
         .map(|(name, _)| name.clone())
 }
 
 fn u35_env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
-    pairs.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect()
+    pairs
+        .iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+        .collect()
 }
 
 /// u35 g9 (Astra r8 High 2): a child `PATH` that is empty or missing makes the shell search its
@@ -439,11 +456,20 @@ fn u35_env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
 fn u35_g9_empty_or_missing_child_path_is_judged() {
     let dir = Path::new("/");
     let empty = u35_env(&[("PATH", ""), ("HOME", "/home/u")]);
-    assert_eq!(super::judge_child_env(&empty, "ls", dir, u35_test_judge).as_deref(), Some("PATH"));
+    assert_eq!(
+        super::judge_child_env(&empty, "ls", dir, u35_test_judge).as_deref(),
+        Some("PATH")
+    );
     let missing = u35_env(&[("HOME", "/home/u")]);
-    assert_eq!(super::judge_child_env(&missing, "ls", dir, u35_test_judge).as_deref(), Some("PATH"));
+    assert_eq!(
+        super::judge_child_env(&missing, "ls", dir, u35_test_judge).as_deref(),
+        Some("PATH")
+    );
     let clean = u35_env(&[("PATH", "/usr/bin:/bin"), ("HOME", "/home/u")]);
-    assert_eq!(super::judge_child_env(&clean, "ls", dir, u35_test_judge), None);
+    assert_eq!(
+        super::judge_child_env(&clean, "ls", dir, u35_test_judge),
+        None
+    );
 }
 
 /// u35 g9 (Astra/Grok r8 High 1): nothing is remembered between calls. Every call approved without
@@ -461,13 +487,18 @@ fn u35_g9_every_no_grant_call_is_judged_on_its_own_environment() {
         );
     }
     let other = u35_env(&[("PATH", "/usr/bin"), ("U35_STEER_B", "2")]);
-    assert_eq!(super::judge_child_env(&other, "ls", dir, u35_test_judge).as_deref(), Some("U35_STEER_B"));
+    assert_eq!(
+        super::judge_child_env(&other, "ls", dir, u35_test_judge).as_deref(),
+        Some("U35_STEER_B")
+    );
     // A call approved by a grant, an answer or an override is never refused by the check.
     let cmd = tokio::process::Command::new("true");
     assert!(super::check_child_env(&cmd, &steering, "ls", false, None).is_ok());
     // A call that carries no flag is judged.
     assert!(super::ApprovedWithoutGrant::of(None));
-    assert!(!super::ApprovedWithoutGrant::of(Some(&super::ApprovedWithoutGrant(false))));
+    assert!(!super::ApprovedWithoutGrant::of(Some(
+        &super::ApprovedWithoutGrant(false)
+    )));
 }
 
 /// u35 g8 (release gate, `an_acp_error_in_the_body_still_answers_the_exit_plan_tail`): the
@@ -481,23 +512,38 @@ fn u35_fuigo_own_pager_env_is_not_the_users() {
     assert!(!super::is_fuigo_own_env("GH_PAGER", "sh ./pager"));
     assert!(!super::is_fuigo_own_env("GIT_ASKPASS", ""));
     let steer_any = |_: &str, env: &[(String, String)], _: &Path| {
-        env.iter().find(|(name, _)| name != "PATH").map(|(name, _)| name.clone())
+        env.iter()
+            .find(|(name, _)| name != "PATH")
+            .map(|(name, _)| name.clone())
     };
-    let mut env: Vec<(OsString, OsString)> =
-        crate::util::pager_env().into_iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect();
+    let mut env: Vec<(OsString, OsString)> = crate::util::pager_env()
+        .into_iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+        .collect();
     env.push((OsString::from("PATH"), OsString::from("/usr/bin")));
-    assert_eq!(super::judge_child_env(&env, "git log -1", Path::new("/"), steer_any), None);
+    assert_eq!(
+        super::judge_child_env(&env, "git log -1", Path::new("/"), steer_any),
+        None
+    );
     env.push((OsString::from("GH_PAGER"), OsString::from("sh ./pager")));
-    assert_eq!(super::judge_child_env(&env, "gh pr list", Path::new("/"), steer_any).as_deref(), Some("GH_PAGER"));
+    assert_eq!(
+        super::judge_child_env(&env, "gh pr list", Path::new("/"), steer_any).as_deref(),
+        Some("GH_PAGER")
+    );
 }
 
 /// u35 g10 (Fable r9 Low): the refusal names only remedies that exist when it happens. Nothing
 /// prompts here, and a remembered "always allow" is written only by a prompt answer.
 #[test]
 fn u35_g10_refusal_names_only_reachable_remedies() {
-    let text = super::ChildEnvSteers { name: "GIT_ASKPASS".to_owned() }.to_string();
+    let text = super::ChildEnvSteers {
+        name: "GIT_ASKPASS".to_owned(),
+    }
+    .to_string();
     assert!(
-        text.contains("--allow 'Bash(") && text.contains("allow all commands") && text.contains("always-approve"),
+        text.contains("--allow 'Bash(")
+            && text.contains("allow all commands")
+            && text.contains("always-approve"),
         "{text}"
     );
     assert!(!text.contains("\"always allow\" for the command"), "{text}");
@@ -510,9 +556,17 @@ fn u35_g10_refusal_names_only_reachable_remedies() {
 fn u35_g11_runner_refuses_no_grant_calls_under_powershell_and_cmd() {
     use fuigo_config::shell::WindowsShellFamily as F;
     for shell in [F::Pwsh, F::PowerShell, F::Cmd] {
-        let text = super::check_runner_shell(Some(shell)).expect_err("refused").to_string();
-        assert!(text.contains(shell.name()) && text.contains("FUIGO_SHELL=bash"), "{text}");
-        assert!(text.contains("--allow 'Bash(") && text.contains("allow all commands"), "{text}");
+        let text = super::check_runner_shell(Some(shell))
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            text.contains(shell.name()) && text.contains("FUIGO_SHELL=bash"),
+            "{text}"
+        );
+        assert!(
+            text.contains("--allow 'Bash(") && text.contains("allow all commands"),
+            "{text}"
+        );
     }
     assert!(super::check_runner_shell(Some(F::GitBash)).is_ok());
     assert!(super::check_runner_shell(None).is_ok());
@@ -522,7 +576,9 @@ fn u35_g11_runner_refuses_no_grant_calls_under_powershell_and_cmd() {
 /// grant is refused outside this crate's tests.
 #[test]
 fn u35_g11_no_installed_judge_refuses_a_no_grant_call() {
-    let text = super::missing_env_judge(true).expect_err("refused").to_string();
+    let text = super::missing_env_judge(true)
+        .expect_err("refused")
+        .to_string();
     assert!(text.contains("approval"), "{text}");
     assert!(super::missing_env_judge(false).is_ok());
 }
@@ -537,9 +593,17 @@ fn u35_g12_check_child_env_refuses_no_grant_calls_under_powershell_and_cmd() {
     let cmd = tokio::process::Command::new("/bin/echo");
     for shell in [F::Pwsh, F::PowerShell, F::Cmd] {
         let _shell = super::TestRunnerShell::set(Some(shell));
-        let text = super::check_child_env(&cmd, &[], "ls -la", true, None).expect_err("refused").to_string();
-        assert!(text.contains(shell.name()) && text.contains("FUIGO_SHELL=bash"), "{text}");
-        assert!(super::check_child_env(&cmd, &[], "ls -la", false, None).is_ok(), "{shell:?}: a grant runs");
+        let text = super::check_child_env(&cmd, &[], "ls -la", true, None)
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            text.contains(shell.name()) && text.contains("FUIGO_SHELL=bash"),
+            "{text}"
+        );
+        assert!(
+            super::check_child_env(&cmd, &[], "ls -la", false, None).is_ok(),
+            "{shell:?}: a grant runs"
+        );
     }
     // u35 g13 (Fable r12 Low): with this crate's judge installed, Git Bash and Unix shells reach the
     // environment check and the call runs.
@@ -559,10 +623,18 @@ fn u35_t1_runner_refuses_an_ungranted_command_outside_a_trusted_folder() {
     let trusted = tempfile::tempdir().unwrap();
     let mut cmd = tokio::process::Command::new("/bin/sh");
     cmd.current_dir(trusted.path());
-    let text = super::check_child_env(&cmd, &[], "ls u35-t1-untrusted", true, None).expect_err("refused").to_string();
+    let text = super::check_child_env(&cmd, &[], "ls u35-t1-untrusted", true, None)
+        .expect_err("refused")
+        .to_string();
     assert!(text.contains("not trusted"), "{text}");
-    assert!(super::check_child_env(&cmd, &[], "ls u35-t1-untrusted", false, None).is_ok(), "a grant runs");
-    assert!(super::check_child_env(&cmd, &[], "ls", true, None).is_ok(), "a trusted folder runs");
+    assert!(
+        super::check_child_env(&cmd, &[], "ls u35-t1-untrusted", false, None).is_ok(),
+        "a grant runs"
+    );
+    assert!(
+        super::check_child_env(&cmd, &[], "ls", true, None).is_ok(),
+        "a trusted folder runs"
+    );
     let judged = std::path::Path::new("/w/u35-t1-untrusted");
     assert!(
         super::check_child_env(&cmd, &[], "ls", true, Some(judged)).is_err(),
@@ -572,9 +644,16 @@ fn u35_t1_runner_refuses_an_ungranted_command_outside_a_trusted_folder() {
     std::fs::create_dir_all(&untrusted_dir).unwrap();
     let mut there = tokio::process::Command::new("/bin/sh");
     there.current_dir(&untrusted_dir);
-    assert!(super::check_child_env(&there, &[], "ls", true, None).is_err(), "where it runs counts");
-    let no_rule = super::check_runner_trust_with(None, "ls", trusted.path(), None, true).expect_err("strict");
-    assert!(no_rule.to_string().contains("no rule to check the folder"), "{no_rule}");
+    assert!(
+        super::check_child_env(&there, &[], "ls", true, None).is_err(),
+        "where it runs counts"
+    );
+    let no_rule =
+        super::check_runner_trust_with(None, "ls", trusted.path(), None, true).expect_err("strict");
+    assert!(
+        no_rule.to_string().contains("no rule to check the folder"),
+        "{no_rule}"
+    );
     assert!(super::check_runner_trust_with(None, "ls", trusted.path(), None, false).is_ok());
 }
 
@@ -606,7 +685,9 @@ fn u37_entries(value: &str) -> Vec<String> {
     #[cfg(windows)]
     assert_eq!(
         entries,
-        std::env::split_paths(value).map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        std::env::split_paths(value)
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
         "{value:?}"
     );
     entries
@@ -620,9 +701,24 @@ fn u37_windows_path_drops_only_empty_segments() {
     for &(value, want) in U37_PATH_VECTORS {
         let got = clean(value);
         assert_eq!(got, want, "{value:?}");
-        let kept: Vec<String> = u37_entries(value).into_iter().filter(|e| !e.is_empty()).collect();
-        assert_eq!(u37_entries(&got), if got.is_empty() { vec![String::new()] } else { kept }, "{value:?}");
-        assert_eq!(matches!(got, std::borrow::Cow::Borrowed(_)), value == want, "{value:?}");
+        let kept: Vec<String> = u37_entries(value)
+            .into_iter()
+            .filter(|e| !e.is_empty())
+            .collect();
+        assert_eq!(
+            u37_entries(&got),
+            if got.is_empty() {
+                vec![String::new()]
+            } else {
+                kept
+            },
+            "{value:?}"
+        );
+        assert_eq!(
+            matches!(got, std::borrow::Cow::Borrowed(_)),
+            value == want,
+            "{value:?}"
+        );
     }
 }
 
@@ -630,10 +726,17 @@ fn u37_windows_path_drops_only_empty_segments() {
 /// reads the same entries as `split_paths` unless a quoted run holds a `;`.
 #[test]
 fn u37_git_bash_reads_every_semicolon() {
-    let read = |value: &str| super::windows_path_entries_as_git_bash_reads(value).collect::<Vec<_>>();
+    let read =
+        |value: &str| super::windows_path_entries_as_git_bash_reads(value).collect::<Vec<_>>();
     let hidden = r#"C:\Windows\System32;"C:\safe;.;"C:\safe"#;
-    assert_eq!(read(hidden), [r"C:\Windows\System32", r"C:\safe", ".", r"C:\safe"]);
-    assert_eq!(u37_entries(hidden), [r"C:\Windows\System32", r"C:\safe;.;C:\safe"]);
+    assert_eq!(
+        read(hidden),
+        [r"C:\Windows\System32", r"C:\safe", ".", r"C:\safe"]
+    );
+    assert_eq!(
+        u37_entries(hidden),
+        [r"C:\Windows\System32", r"C:\safe;.;C:\safe"]
+    );
     assert_eq!(read(r#""C:\a;;b""#), [r"C:\a", "", "b"]);
     for plain in [r#"C:\a;"C:\Program Files\x""#, r"C:\a;C:\b", r"C:\a;"] {
         assert_eq!(read(plain), u37_entries(plain), "{plain:?}");
@@ -646,14 +749,20 @@ fn u37_os(s: &str) -> OsString {
 
 /// The `PATH` (any spelling) of a whole environment, one entry expected.
 fn u37_path_of(env: &[(OsString, OsString)]) -> OsString {
-    let paths: Vec<&OsString> =
-        env.iter().filter(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case("PATH")).map(|(_, v)| v).collect();
+    let paths: Vec<&OsString> = env
+        .iter()
+        .filter(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case("PATH"))
+        .map(|(_, v)| v)
+        .collect();
     assert_eq!(paths.len(), 1, "one PATH in {env:?}");
     paths[0].clone()
 }
 
 fn u37_edits_of(cmd: &tokio::process::Command) -> Vec<(OsString, Option<OsString>)> {
-    cmd.as_std().get_envs().map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string()))).collect()
+    cmd.as_std()
+        .get_envs()
+        .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+        .collect()
 }
 
 /// u37: on Windows the child's `PATH`, in whichever spelling it is inherited or set, has no empty segment once the
@@ -667,7 +776,10 @@ fn u37_child_path_has_no_empty_segment_on_windows() {
         for (inherited, edit) in [
             (vec![(u37_os("Path"), u37_os(value))], None),
             (vec![(u37_os("PATH"), u37_os(value))], None),
-            (vec![(u37_os("Path"), u37_os(r"C:\old"))], Some((u37_os("PATH"), u37_os(value)))),
+            (
+                vec![(u37_os("Path"), u37_os(r"C:\old"))],
+                Some((u37_os("PATH"), u37_os(value))),
+            ),
         ] {
             let mut cmd = tokio::process::Command::new("cmd");
             if let Some((name, value)) = &edit {
@@ -676,15 +788,32 @@ fn u37_child_path_has_no_empty_segment_on_windows() {
             let before = u37_edits_of(&cmd);
             super::normalize_child_path_for(&mut cmd, inherited.clone(), EnvPlatform::Windows);
             if value == want {
-                assert_eq!(u37_edits_of(&cmd), before, "{value:?}: a clean PATH adds no edit");
+                assert_eq!(
+                    u37_edits_of(&cmd),
+                    before,
+                    "{value:?}: a clean PATH adds no edit"
+                );
             }
-            let env = super::child_env_for(inherited, u37_edits_of(&cmd), std::iter::empty(), EnvPlatform::Windows);
+            let env = super::child_env_for(
+                inherited,
+                u37_edits_of(&cmd),
+                std::iter::empty(),
+                EnvPlatform::Windows,
+            );
             assert_eq!(u37_path_of(&env), u37_os(want), "{value:?}");
         }
     }
     let mut cmd = tokio::process::Command::new("sh");
-    super::normalize_child_path_for(&mut cmd, vec![(u37_os("PATH"), u37_os("/usr/bin:"))], EnvPlatform::Unix);
-    super::normalize_child_path_for(&mut cmd, vec![(u37_os("PATH"), u37_os(r"C:\a;"))], EnvPlatform::Unix);
+    super::normalize_child_path_for(
+        &mut cmd,
+        vec![(u37_os("PATH"), u37_os("/usr/bin:"))],
+        EnvPlatform::Unix,
+    );
+    super::normalize_child_path_for(
+        &mut cmd,
+        vec![(u37_os("PATH"), u37_os(r"C:\a;"))],
+        EnvPlatform::Unix,
+    );
     assert!(u37_edits_of(&cmd).is_empty(), "Unix PATH is left as it is");
     #[cfg(unix)]
     assert_eq!(super::child_path_value("/usr/bin:"), "/usr/bin:");
@@ -699,12 +828,31 @@ fn u37_non_unicode_path_is_left_as_it_is() {
     use std::os::unix::ffi::OsStringExt;
     let raw = OsString::from_vec(b"C:\\a;\xff;".to_vec());
     let mut cmd = tokio::process::Command::new("cmd");
-    super::normalize_child_path_for(&mut cmd, vec![(u37_os("Path"), raw.clone())], EnvPlatform::Windows);
+    super::normalize_child_path_for(
+        &mut cmd,
+        vec![(u37_os("Path"), raw.clone())],
+        EnvPlatform::Windows,
+    );
     assert!(u37_edits_of(&cmd).is_empty());
-    let env = super::client_terminal_env_for(Vec::new(), vec![(u37_os("Path"), raw.clone())], EnvPlatform::Windows);
+    let env = super::client_terminal_env_for(
+        Vec::new(),
+        vec![(u37_os("Path"), raw.clone())],
+        EnvPlatform::Windows,
+    );
     assert!(env.is_empty(), "{env:?}");
-    let env = super::child_env_for(vec![(u37_os("Path"), raw)], Vec::new(), std::iter::empty(), EnvPlatform::Windows);
-    let judged = super::judge_child_env_for(&env, "ls", Path::new("C:\\w"), u37_judge, EnvPlatform::Windows);
+    let env = super::child_env_for(
+        vec![(u37_os("Path"), raw)],
+        Vec::new(),
+        std::iter::empty(),
+        EnvPlatform::Windows,
+    );
+    let judged = super::judge_child_env_for(
+        &env,
+        "ls",
+        Path::new("C:\\w"),
+        u37_judge,
+        EnvPlatform::Windows,
+    );
     assert_eq!(judged.as_deref(), Some("PATH"));
 }
 
@@ -717,33 +865,57 @@ fn u37_client_terminal_env_carries_the_judged_path() {
     use crate::util::shell_env_policy::EnvPlatform;
     let own = || vec![("FOO".to_owned(), "1".to_owned())];
     for &(value, want) in U37_PATH_VECTORS {
-        let inherited = vec![(u37_os("Path"), u37_os(value)), (u37_os("HOME"), u37_os(r"C:\u"))];
+        let inherited = vec![
+            (u37_os("Path"), u37_os(value)),
+            (u37_os("HOME"), u37_os(r"C:\u")),
+        ];
         let env = client_env(own(), inherited.clone(), EnvPlatform::Windows);
         if value == want {
             assert_eq!(env, own(), "{value:?}: a clean PATH adds nothing");
         } else {
-            assert_eq!(env, vec![("FOO".to_owned(), "1".to_owned()), ("Path".to_owned(), want.to_owned())], "{value:?}");
+            assert_eq!(
+                env,
+                vec![
+                    ("FOO".to_owned(), "1".to_owned()),
+                    ("Path".to_owned(), want.to_owned())
+                ],
+                "{value:?}"
+            );
         }
         for name in ["PATH", "path"] {
             let request = vec![(name.to_owned(), value.to_owned())];
             let env = client_env(request.clone(), inherited.clone(), EnvPlatform::Windows);
-            let paths: Vec<&(String, String)> = env.iter().filter(|(k, _)| k.eq_ignore_ascii_case("PATH")).collect();
+            let paths: Vec<&(String, String)> = env
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+                .collect();
             assert_eq!(paths.len(), 1, "{value:?}: {env:?}");
             assert_eq!(paths[0].1, want, "{value:?}");
             if value == want {
                 assert_eq!(env, request, "{value:?}: unchanged");
             }
         }
-        assert_eq!(client_env(own(), inherited, EnvPlatform::Unix), own(), "{value:?}: Unix adds nothing");
+        assert_eq!(
+            client_env(own(), inherited, EnvPlatform::Unix),
+            own(),
+            "{value:?}: Unix adds nothing"
+        );
     }
-    assert_eq!(client_env(own(), Vec::new(), EnvPlatform::Windows), own(), "no PATH: nothing added");
+    assert_eq!(
+        client_env(own(), Vec::new(), EnvPlatform::Windows),
+        own(),
+        "no PATH: nothing added"
+    );
 }
 
 /// A stand-in for the classifier's `PATH` rule (`fuigo_workspace::permission::exec_risk::path_list_is_clean`, which
 /// on Windows runs the same normalizer first): any empty entry, or a lossy `U+FFFD`, steers.
 fn u37_judge(_command: &str, env: &[(String, String)], _dir: &Path) -> Option<String> {
     let path = &env.iter().find(|(name, _)| name == "PATH")?.1;
-    u37_entries(path).iter().any(|e| e.is_empty() || e.contains('\u{FFFD}')).then(|| "PATH".to_owned())
+    u37_entries(path)
+        .iter()
+        .any(|e| e.is_empty() || e.contains('\u{FFFD}'))
+        .then(|| "PATH".to_owned())
 }
 
 /// u37: the local runner normalizes and then judges ([`super::normalize_child_path`] before `judge_spawn_env`), so
@@ -761,10 +933,23 @@ fn u37_runner_normalizes_then_judges() {
         let expected = if want.is_empty() { Some("PATH") } else { None };
         let inherited = vec![(u37_os("Path"), u37_os(value))];
         let mut cmd = tokio::process::Command::new("cmd");
-        let raw = super::child_env_for(inherited.clone(), u37_edits_of(&cmd), std::iter::empty(), EnvPlatform::Windows);
-        assert_eq!(super::judge_child_env_for(&raw, "ls", dir, u37_judge, EnvPlatform::Windows).as_deref(), Some("PATH"));
+        let raw = super::child_env_for(
+            inherited.clone(),
+            u37_edits_of(&cmd),
+            std::iter::empty(),
+            EnvPlatform::Windows,
+        );
+        assert_eq!(
+            super::judge_child_env_for(&raw, "ls", dir, u37_judge, EnvPlatform::Windows).as_deref(),
+            Some("PATH")
+        );
         super::normalize_child_path_for(&mut cmd, inherited.clone(), EnvPlatform::Windows);
-        let env = super::child_env_for(inherited, u37_edits_of(&cmd), std::iter::empty(), EnvPlatform::Windows);
+        let env = super::child_env_for(
+            inherited,
+            u37_edits_of(&cmd),
+            std::iter::empty(),
+            EnvPlatform::Windows,
+        );
         assert_eq!(
             super::judge_child_env_for(&env, "ls", dir, u37_judge, EnvPlatform::Windows).as_deref(),
             expected,
@@ -778,13 +963,23 @@ fn u37_runner_normalizes_then_judges() {
 fn u37_steer_judge(_command: &str, env: &[(String, String)], dir: &Path) -> Option<String> {
     let path = &env.iter().find(|(name, _)| name == "PATH")?.1;
     let windows = path.contains('\\');
-    let entries: Vec<String> =
-        if windows { u37_entries(path) } else { path.split(':').map(str::to_owned).collect() };
+    let entries: Vec<String> = if windows {
+        u37_entries(path)
+    } else {
+        path.split(':').map(str::to_owned).collect()
+    };
     let dir = dir.to_string_lossy();
     let absolute = |e: &str| {
-        if windows { e.get(1..3) == Some(":\\") } else { e.starts_with('/') }
+        if windows {
+            e.get(1..3) == Some(":\\")
+        } else {
+            e.starts_with('/')
+        }
     };
-    entries.iter().any(|e| !absolute(e) || e.starts_with(dir.as_ref())).then(|| "PATH".to_owned())
+    entries
+        .iter()
+        .any(|e| !absolute(e) || e.starts_with(dir.as_ref()))
+        .then(|| "PATH".to_owned())
 }
 
 /// u37 (round 2): a client terminal (ACP `terminal/create`) gets the local runner's check, on the environment it is
@@ -795,34 +990,97 @@ fn u37_steer_judge(_command: &str, env: &[(String, String)], dir: &Path) -> Opti
 fn u37_client_terminal_env_is_judged_as_sent() {
     use super::{ClientTerminalCheck, checked_client_terminal_env_with as checked};
     // The runner shell is pinned: on a Windows host it would otherwise be detected (pwsh first) and refuse first.
-    let _shell = super::TestRunnerShell::set(Some(fuigo_config::shell::WindowsShellFamily::GitBash));
+    let _shell =
+        super::TestRunnerShell::set(Some(fuigo_config::shell::WindowsShellFamily::GitBash));
     use crate::util::shell_env_policy::EnvPlatform;
     let steers = |result: Result<Vec<(String, String)>, super::SandboxLaunchError>| {
         let err = result.expect_err("a steering PATH must be refused");
-        assert_eq!(err.downcast_ref::<super::ChildEnvSteers>().map(|e| e.name.as_str()), Some("PATH"), "{err}");
+        assert_eq!(
+            err.downcast_ref::<super::ChildEnvSteers>()
+                .map(|e| e.name.as_str()),
+            Some("PATH"),
+            "{err}"
+        );
     };
     let own = || vec![("FOO".to_owned(), "1".to_owned())];
-    let with_path = |path: &str| vec![("FOO".to_owned(), "1".to_owned()), ("PATH".to_owned(), path.to_owned())];
+    let with_path = |path: &str| {
+        vec![
+            ("FOO".to_owned(), "1".to_owned()),
+            ("PATH".to_owned(), path.to_owned()),
+        ]
+    };
     let cases = [
-        (EnvPlatform::Windows, r"C:\repo", r"C:\Windows\System32;", r"C:\Windows\System32", [r".;C:\Windows\System32;", r"C:\repo\bin;C:\Windows\System32"]),
-        (EnvPlatform::Unix, "/repo", "/usr/bin:/bin", "/usr/bin:/bin", [".:/usr/bin", "/repo/bin:/usr/bin"]),
+        (
+            EnvPlatform::Windows,
+            r"C:\repo",
+            r"C:\Windows\System32;",
+            r"C:\Windows\System32",
+            [
+                r".;C:\Windows\System32;",
+                r"C:\repo\bin;C:\Windows\System32",
+            ],
+        ),
+        (
+            EnvPlatform::Unix,
+            "/repo",
+            "/usr/bin:/bin",
+            "/usr/bin:/bin",
+            [".:/usr/bin", "/repo/bin:/usr/bin"],
+        ),
     ];
     for (platform, dir, inherited_path, sent_path, overrides) in cases {
         let dir = Path::new(dir);
-        let check = Some(ClientTerminalCheck { command: "ls", dir, request_cwd: None });
-        let inherited = || vec![(u37_os("PATH"), u37_os(inherited_path)), (u37_os("HOME"), u37_os("h"))];
+        let check = Some(ClientTerminalCheck {
+            command: "ls",
+            dir,
+            request_cwd: None,
+        });
+        let inherited = || {
+            vec![
+                (u37_os("PATH"), u37_os(inherited_path)),
+                (u37_os("HOME"), u37_os("h")),
+            ]
+        };
         // No override: allowed; Unix sends the request's variables byte for byte, Windows adds only the normalized PATH.
-        let sent = checked(own(), inherited(), platform, check, Some(u37_steer_judge)).expect("a clean PATH is allowed");
-        let want = if inherited_path == sent_path { own() } else { with_path(sent_path) };
+        let sent = checked(own(), inherited(), platform, check, Some(u37_steer_judge))
+            .expect("a clean PATH is allowed");
+        let want = if inherited_path == sent_path {
+            own()
+        } else {
+            with_path(sent_path)
+        };
         assert_eq!(sent, want, "{platform:?}");
         // A clean session PATH: allowed, sent unchanged.
-        let sent = checked(with_path(sent_path), inherited(), platform, check, Some(u37_steer_judge));
-        assert_eq!(sent.expect("a clean session PATH is allowed"), with_path(sent_path), "{platform:?}");
+        let sent = checked(
+            with_path(sent_path),
+            inherited(),
+            platform,
+            check,
+            Some(u37_steer_judge),
+        );
+        assert_eq!(
+            sent.expect("a clean session PATH is allowed"),
+            with_path(sent_path),
+            "{platform:?}"
+        );
         for path in overrides {
             // The judge passes Fuigo's own environment: only the override steers.
-            steers(checked(with_path(path), inherited(), platform, check, Some(u37_steer_judge)));
+            steers(checked(
+                with_path(path),
+                inherited(),
+                platform,
+                check,
+                Some(u37_steer_judge),
+            ));
             // A grant approved the call: nothing is judged, the request is sent (normalized on Windows).
-            let sent = checked(with_path(path), inherited(), platform, None, Some(u37_steer_judge)).expect("granted");
+            let sent = checked(
+                with_path(path),
+                inherited(),
+                platform,
+                None,
+                Some(u37_steer_judge),
+            )
+            .expect("granted");
             let path = if platform == EnvPlatform::Windows {
                 super::windows_path_without_empty_segments(path).into_owned()
             } else {

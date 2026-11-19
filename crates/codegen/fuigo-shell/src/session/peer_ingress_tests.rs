@@ -13,7 +13,10 @@ fn ae() -> PeerMode {
 }
 
 fn live() -> Live {
-    Live { feature_on: true, receiver_mode: ae() }
+    Live {
+        feature_on: true,
+        receiver_mode: ae(),
+    }
 }
 
 fn cfg() -> PeerAdmissionConfig {
@@ -27,8 +30,15 @@ fn cfg() -> PeerAdmissionConfig {
 
 /// A host ingress with the rate limits lifted, so the store and loop rules can be exercised alone.
 fn open_host() -> Arc<Mutex<PeerIngress>> {
-    let c = IngressConfig { pair_per_minute: usize::MAX, host_per_minute: usize::MAX, ..IngressConfig::default() };
-    Arc::new(Mutex::new(PeerIngress::new(c, Arc::new(HostLedger::default()))))
+    let c = IngressConfig {
+        pair_per_minute: usize::MAX,
+        host_per_minute: usize::MAX,
+        ..IngressConfig::default()
+    };
+    Arc::new(Mutex::new(PeerIngress::new(
+        c,
+        Arc::new(HostLedger::default()),
+    )))
 }
 
 fn session(host: &Arc<Mutex<PeerIngress>>) -> PeerAdmissionState {
@@ -39,7 +49,12 @@ fn session(host: &Arc<Mutex<PeerIngress>>) -> PeerAdmissionState {
 
 fn env(sender: usize, id: &str, body: &str, hop: u32) -> Envelope {
     let mut e = test_envelope(id, "lane a", body);
-    e.from = Address::new("0123456789abcdef0123456789abcdef", &format!("sender-{sender}"), 1).unwrap();
+    e.from = Address::new(
+        "0123456789abcdef0123456789abcdef",
+        &format!("sender-{sender}"),
+        1,
+    )
+    .unwrap();
     e.hop = hop;
     e
 }
@@ -68,7 +83,10 @@ fn s5_1_receiver_rechecks_body_size() {
     let ok = env(1, "a", &"x".repeat(MAX_BODY_BYTES), 0);
     assert!(matches!(s.submit(ok, T0, &live()), Submitted::Enqueue));
     let big = env(1, "b", &"x".repeat(MAX_BODY_BYTES + 1), 0);
-    assert_eq!(outcome(s.submit(big, T0, &live())), rejected(RejectReason::TooLarge));
+    assert_eq!(
+        outcome(s.submit(big, T0, &live())),
+        rejected(RejectReason::TooLarge)
+    );
     assert_eq!(s.host_usage(), (1, MAX_BODY_BYTES));
 }
 
@@ -80,20 +98,33 @@ fn s5_2_host_total_256_messages_across_sessions() {
     for (si, s) in sessions.iter().take(4).enumerate() {
         for n in 0..MAX_MESSAGES_PER_SESSION {
             let e = mismatch(env(si, &format!("m{n}"), "b", 0));
-            assert!(matches!(s.submit(e, T0, &live()), Submitted::Done(DeliveryOutcome::Held { .. })));
+            assert!(matches!(
+                s.submit(e, T0, &live()),
+                Submitted::Done(DeliveryOutcome::Held { .. })
+            ));
         }
     }
     assert_eq!(sessions[0].host_usage().0, MAX_MESSAGES_PER_HOST);
     let e = mismatch(env(9, "over", "b", 0));
-    assert_eq!(outcome(sessions[4].submit(e, T0, &live())), rejected(RejectReason::Saturated));
-    assert_eq!(sessions[4].held_count(), 0, "a refused message costs nothing in the store");
+    assert_eq!(
+        outcome(sessions[4].submit(e, T0, &live())),
+        rejected(RejectReason::Saturated)
+    );
+    assert_eq!(
+        sessions[4].held_count(),
+        0,
+        "a refused message costs nothing in the store"
+    );
     // Session 0 ends: its 64 are returned, the fifth session can hold again.
     let mut sessions = sessions;
     let first = sessions.remove(0);
     drop(first);
     assert_eq!(sessions[0].host_usage().0, 3 * MAX_MESSAGES_PER_SESSION);
     let e = mismatch(env(9, "again", "b", 0));
-    assert!(matches!(sessions[3].submit(e, T0, &live()), Submitted::Done(DeliveryOutcome::Held { .. })));
+    assert!(matches!(
+        sessions[3].submit(e, T0, &live()),
+        Submitted::Done(DeliveryOutcome::Held { .. })
+    ));
 }
 
 /// S5.2: 4 MiB across sessions; one byte more is refused.
@@ -105,26 +136,44 @@ fn s5_2_host_total_4_mib_across_sessions() {
     for (si, s) in sessions.iter().take(4).enumerate() {
         for n in 0..MAX_BODY_BYTES_PER_SESSION / per {
             let e = mismatch(env(si, &format!("m{n}"), &"x".repeat(per), 0));
-            assert!(matches!(s.submit(e, T0, &live()), Submitted::Done(DeliveryOutcome::Held { .. })));
+            assert!(matches!(
+                s.submit(e, T0, &live()),
+                Submitted::Done(DeliveryOutcome::Held { .. })
+            ));
         }
     }
     assert_eq!(sessions[0].host_usage().1, MAX_BODY_BYTES_PER_HOST);
     let e = mismatch(env(9, "one", "x", 0));
-    assert_eq!(outcome(sessions[4].submit(e, T0, &live())), rejected(RejectReason::Saturated));
+    assert_eq!(
+        outcome(sessions[4].submit(e, T0, &live())),
+        rejected(RejectReason::Saturated)
+    );
 }
 
 /// S5.2: the host count returns to zero after every exit path, with no leak and no double free.
 #[test]
 fn s5_2_accounting_returns_to_zero_on_every_exit_path() {
     let l = live();
-    for path in ["promote", "release_then_start", "reject", "expire", "session_end", "untrack", "prune", "rehold_then_expire"] {
+    for path in [
+        "promote",
+        "release_then_start",
+        "reject",
+        "expire",
+        "session_end",
+        "untrack",
+        "prune",
+        "rehold_then_expire",
+    ] {
         let h = open_host();
         let s = session(&h);
         let probe = session(&h); // a second session reads the shared total
         let held = |id: &str| mismatch(env(1, id, "body", 0));
         match path {
             "promote" => {
-                assert!(matches!(s.submit(env(1, "a", "body", 0), T0, &l), Submitted::Enqueue));
+                assert!(matches!(
+                    s.submit(env(1, "a", "body", 0), T0, &l),
+                    Submitted::Enqueue
+                ));
                 assert_eq!(probe.host_usage(), (1, 4));
                 assert!(s.recheck_queued(&msg_key(&env(1, "a", "body", 0)), T0, &l));
             }
@@ -167,7 +216,10 @@ fn s5_2_accounting_returns_to_zero_on_every_exit_path() {
                 let tok = s.list_held(T0)[0].token.clone();
                 s.release("a", &tok, T0, &l).unwrap();
                 // The receiver's mode changed before the drain: the message goes back on hold (the same reservation).
-                let changed = Live { feature_on: true, receiver_mode: PeerMode::new(false, PeerBase::Yolo, false) };
+                let changed = Live {
+                    feature_on: true,
+                    receiver_mode: PeerMode::new(false, PeerBase::Yolo, false),
+                };
                 let (enter, outs) = s.drain(T0, &changed);
                 assert!(enter.is_empty());
                 assert!(matches!(outs[0].1, ReleaseOutcome::Reheld { .. }));
@@ -189,11 +241,20 @@ fn s5_3_pair_rate_through_state() {
     let h = Arc::new(Mutex::new(PeerIngress::default()));
     let s = session(&h);
     for n in 0..10 {
-        assert!(matches!(s.submit(mismatch(env(1, &format!("m{n}"), "b", 0)), T0, &live()), Submitted::Done(DeliveryOutcome::Held { .. })));
+        assert!(matches!(
+            s.submit(mismatch(env(1, &format!("m{n}"), "b", 0)), T0, &live()),
+            Submitted::Done(DeliveryOutcome::Held { .. })
+        ));
     }
-    assert_eq!(outcome(s.submit(mismatch(env(1, "m10", "b", 0)), T0, &live())), rejected(RejectReason::RateLimited));
+    assert_eq!(
+        outcome(s.submit(mismatch(env(1, "m10", "b", 0)), T0, &live())),
+        rejected(RejectReason::RateLimited)
+    );
     assert_eq!(s.held_count(), 10);
-    assert!(matches!(s.submit(mismatch(env(1, "m11", "b", 0)), T0 + 60, &live()), Submitted::Done(DeliveryOutcome::Held { .. })));
+    assert!(matches!(
+        s.submit(mismatch(env(1, "m11", "b", 0)), T0 + 60, &live()),
+        Submitted::Done(DeliveryOutcome::Held { .. })
+    ));
 }
 
 /// S5.4 through the state: a rejected (operator-refused) id resent 1,000 times is never held again and memory stays flat.
@@ -217,7 +278,10 @@ fn s5_4_rejected_id_resent_1000_times_creates_no_hold() {
     assert_eq!(s.ingress_sizes(), sizes, "memory flat");
     // The same id with a different body is refused (one rule).
     let other = mismatch(env(1, "r", "other", 0));
-    assert_eq!(outcome(s.submit(other, T0 + 2, &live())), rejected(RejectReason::Ambiguous));
+    assert_eq!(
+        outcome(s.submit(other, T0 + 2, &live())),
+        rejected(RejectReason::Ambiguous)
+    );
     // After 10 minutes the id is forgotten and judged afresh.
     let again = outcome(s.submit(e, T0 + MESSAGE_ID_MEMORY_SECS, &live()));
     assert!(matches!(again, DeliveryOutcome::Held { .. }));
@@ -233,7 +297,10 @@ fn s5_4_expired_id_resent_is_answered_from_memory() {
     let first = outcome(s.submit(e.clone(), T0, &live()));
     s.take_notices(T0 + HOLD_EXPIRY_SECS);
     assert_eq!(s.held_count(), 0);
-    assert_eq!(outcome(s.submit(e, T0 + HOLD_EXPIRY_SECS + 1, &live())), first);
+    assert_eq!(
+        outcome(s.submit(e, T0 + HOLD_EXPIRY_SECS + 1, &live())),
+        first
+    );
     assert_eq!(s.held_count(), 0);
 }
 
@@ -243,8 +310,14 @@ fn s5_4_memory_is_per_receiving_session() {
     let h = open_host();
     let (a, b) = (session(&h), session(&h));
     let e = mismatch(env(1, "same", "body", 0));
-    assert!(matches!(a.submit(e.clone(), T0, &live()), Submitted::Done(DeliveryOutcome::Held { .. })));
-    assert!(matches!(b.submit(e, T0, &live()), Submitted::Done(DeliveryOutcome::Held { .. })));
+    assert!(matches!(
+        a.submit(e.clone(), T0, &live()),
+        Submitted::Done(DeliveryOutcome::Held { .. })
+    ));
+    assert!(matches!(
+        b.submit(e, T0, &live()),
+        Submitted::Done(DeliveryOutcome::Held { .. })
+    ));
     assert_eq!((a.held_count(), b.held_count()), (1, 1));
 }
 
@@ -253,18 +326,42 @@ fn s5_4_memory_is_per_receiving_session() {
 fn s5_6_hop_7_admits_hop_8_holds_loop_guard() {
     let h = open_host();
     let s = session(&h);
-    assert!(matches!(s.submit(env(1, "h7", "b", HOP_BUDGET - 1), T0, &live()), Submitted::Enqueue));
+    assert!(matches!(
+        s.submit(env(1, "h7", "b", HOP_BUDGET - 1), T0, &live()),
+        Submitted::Enqueue
+    ));
     let o = outcome(s.submit(env(1, "h8", "b", HOP_BUDGET), T0, &live()));
-    assert!(matches!(o, DeliveryOutcome::Held { reason: HoldReason::LoopGuard, .. }), "{o:?}");
+    assert!(
+        matches!(
+            o,
+            DeliveryOutcome::Held {
+                reason: HoldReason::LoopGuard,
+                ..
+            }
+        ),
+        "{o:?}"
+    );
     let o = outcome(s.submit(env(1, "h99", "b", 99), T0, &live()));
-    assert!(matches!(o, DeliveryOutcome::Held { reason: HoldReason::LoopGuard, .. }));
+    assert!(matches!(
+        o,
+        DeliveryOutcome::Held {
+            reason: HoldReason::LoopGuard,
+            ..
+        }
+    ));
     assert_eq!(s.held_count(), 2);
     // With nobody who can answer a hold, it is refused rather than admitted.
     let none = PeerAdmissionState::with_host(h.clone());
-    none.configure(PeerAdmissionConfig { operator: OperatorPresence::None, ..cfg() });
+    none.configure(PeerAdmissionConfig {
+        operator: OperatorPresence::None,
+        ..cfg()
+    });
     let mut e = env(1, "h8n", "b", HOP_BUDGET);
     e.from_operator = OperatorKind::None;
-    assert_eq!(outcome(none.submit(e, T0, &live())), rejected(RejectReason::NoOperator));
+    assert_eq!(
+        outcome(none.submit(e, T0, &live())),
+        rejected(RejectReason::NoOperator)
+    );
 }
 
 /// S5.6: 20 peer messages admitted, the 21st held `loop_guard`, a human prompt resets, a released hold still counts.
@@ -273,14 +370,32 @@ fn s5_6_turn_budget_20_admitted_21st_held_human_resets() {
     let h = open_host();
     let s = session(&h);
     for n in 0..PEER_TURN_BUDGET {
-        assert!(matches!(s.submit(env(1, &format!("m{n}"), "b", 0), T0, &live()), Submitted::Enqueue), "message {n}");
+        assert!(
+            matches!(
+                s.submit(env(1, &format!("m{n}"), "b", 0), T0, &live()),
+                Submitted::Enqueue
+            ),
+            "message {n}"
+        );
     }
     assert_eq!(s.peer_turns_used(), 20);
     let o = outcome(s.submit(env(1, "m20", "b", 0), T0, &live()));
-    assert!(matches!(o, DeliveryOutcome::Held { reason: HoldReason::LoopGuard, .. }), "{o:?}");
+    assert!(
+        matches!(
+            o,
+            DeliveryOutcome::Held {
+                reason: HoldReason::LoopGuard,
+                ..
+            }
+        ),
+        "{o:?}"
+    );
     s.human_prompt();
     assert_eq!(s.peer_turns_used(), 0);
-    assert!(matches!(s.submit(env(1, "m21", "b", 0), T0, &live()), Submitted::Enqueue));
+    assert!(matches!(
+        s.submit(env(1, "m21", "b", 0), T0, &live()),
+        Submitted::Enqueue
+    ));
 }
 
 /// S5.6: two sessions answering each other with unique bodies and honest hops stop at hop 8.
@@ -292,7 +407,16 @@ fn s5_6_alternating_reply_loop_stops_at_hop_budget() {
     let mut last = None;
     for n in 0..100 {
         let (to, from_idx) = if n % 2 == 0 { (&b, 1) } else { (&a, 2) };
-        let o = outcome(to.submit(env(from_idx, &format!("m{n}"), &format!("reply number {n}"), hop), T0, &live()));
+        let o = outcome(to.submit(
+            env(
+                from_idx,
+                &format!("m{n}"),
+                &format!("reply number {n}"),
+                hop,
+            ),
+            T0,
+            &live(),
+        ));
         if o != (DeliveryOutcome::Delivered {}) {
             last = Some((n, o));
             break;
@@ -303,7 +427,13 @@ fn s5_6_alternating_reply_loop_stops_at_hop_budget() {
     assert_eq!(delivered, HOP_BUDGET as usize, "hops 0..=7 are admitted");
     let (n, o) = last.expect("the loop must stop");
     assert_eq!(n, 8);
-    assert!(matches!(o, DeliveryOutcome::Held { reason: HoldReason::LoopGuard, .. }));
+    assert!(matches!(
+        o,
+        DeliveryOutcome::Held {
+            reason: HoldReason::LoopGuard,
+            ..
+        }
+    ));
 }
 
 /// S5.6, forged hop: a sender that stamps hop 0 on every reply (claiming a human turn each time) defeats the hop check, because the
@@ -314,9 +444,19 @@ fn s5_6_forged_low_hop_is_bounded_by_the_turn_budget() {
     let mut stopped_at = None;
     for n in 0..200 {
         let to = if n % 2 == 0 { &b } else { &a };
-        let o = outcome(to.submit(env(1 + n % 2, &format!("m{n}"), &format!("unique {n}"), 0), T0, &live()));
+        let o = outcome(to.submit(
+            env(1 + n % 2, &format!("m{n}"), &format!("unique {n}"), 0),
+            T0,
+            &live(),
+        ));
         if o != (DeliveryOutcome::Delivered {}) {
-            assert!(matches!(o, DeliveryOutcome::Held { reason: HoldReason::LoopGuard, .. }));
+            assert!(matches!(
+                o,
+                DeliveryOutcome::Held {
+                    reason: HoldReason::LoopGuard,
+                    ..
+                }
+            ));
             stopped_at = Some(n);
             break;
         }
@@ -331,9 +471,15 @@ fn s5_6_forged_low_hop_is_bounded_by_the_turn_budget() {
 fn flag_off_tracks_nothing() {
     let h = open_host();
     let s = session(&h);
-    let off = Live { feature_on: false, receiver_mode: ae() };
+    let off = Live {
+        feature_on: false,
+        receiver_mode: ae(),
+    };
     for n in 0..300 {
-        assert_eq!(outcome(s.submit(env(n, &format!("m{n}"), "b", 0), T0, &off)), rejected(RejectReason::Unavailable));
+        assert_eq!(
+            outcome(s.submit(env(n, &format!("m{n}"), "b", 0), T0, &off)),
+            rejected(RejectReason::Unavailable)
+        );
     }
     let z = s.ingress_sizes();
     assert_eq!((z.pairs, z.host_log, z.replay), (0, 0, 0));
@@ -348,7 +494,11 @@ fn flood_100k_refused_envelopes_bounded_tables() {
     let s = PeerAdmissionState::with_host(h); // not opted in: every message is refused `unavailable`
     let mut max = s.ingress_sizes();
     for n in 0..100_000usize {
-        let _ = s.submit(env(n, &format!("m{n}"), "b", 0), T0 + (n / 50) as u64, &live());
+        let _ = s.submit(
+            env(n, &format!("m{n}"), "b", 0),
+            T0 + (n / 50) as u64,
+            &live(),
+        );
         let z = s.ingress_sizes();
         max.pairs = max.pairs.max(z.pairs);
         max.host_log = max.host_log.max(z.host_log);
@@ -382,4 +532,43 @@ fn s5_5_expiry_constants() {
     assert_eq!(HOLD_EXPIRY_SECS, 300);
     assert_eq!(WATCH_EXPIRY_SECS, 12 * 3600);
     assert_eq!(MESSAGE_ID_MEMORY_SECS, 600);
+}
+
+// ---- mutation-pass tests (u46-mut2) ----
+
+#[test]
+fn the_host_ingress_is_one_shared_process_wide_table() {
+    assert!(Arc::ptr_eq(&host_ingress(), &host_ingress()));
+}
+
+#[test]
+fn dropping_a_session_forgets_its_rate_pairs_and_remembered_ids() {
+    let h = Arc::new(Mutex::new(PeerIngress::default()));
+    let keep = session(&h);
+    let gone = session(&h);
+    for s in [&keep, &gone] {
+        let o = outcome(s.submit(mismatch(env(1, "m1", "body", 0)), T0, &live()));
+        assert!(matches!(o, DeliveryOutcome::Held { .. }), "{o:?}");
+    }
+    let both = keep.ingress_sizes();
+    assert_eq!((both.pairs, both.replay), (2, 2));
+    drop(gone);
+    let after = keep.ingress_sizes();
+    assert_eq!(
+        (after.pairs, after.replay),
+        (1, 1),
+        "only the ended session is forgotten"
+    );
+    drop(keep);
+    let z = ingress(&h).sizes();
+    assert_eq!((z.pairs, z.replay, z.replay_order), (0, 0, 0));
+}
+
+#[test]
+fn token_comparison_is_not_fooled_by_cancelling_differences() {
+    assert!(tokens_equal("abc", "abc"));
+    assert!(!tokens_equal("abc", "abd"));
+    assert!(!tokens_equal("abc", "ab"));
+    // Two bytes that differ by the same bit pattern would cancel under XOR accumulation.
+    assert!(!tokens_equal("ab", "ba"));
 }

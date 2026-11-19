@@ -133,6 +133,10 @@ pub(crate) fn hold_awake(_reason: &str) -> Option<Assertion> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test fixture child process; the test waits on it and kills it"
+)]
 mod startup_tests {
     use std::time::{Duration, Instant};
 

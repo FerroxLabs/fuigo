@@ -131,7 +131,14 @@ impl LeaderClient {
         mode: ClientMode,
         capabilities: ClientCapabilities,
     ) -> Result<Self, ClientError> {
-        Self::connect_checked(socket_path, client_type, mode, capabilities, super::peer_auth::verify_connected).await
+        Self::connect_checked(
+            socket_path,
+            client_type,
+            mode,
+            capabilities,
+            super::peer_auth::verify_connected,
+        )
+        .await
     }
 
     /// `connect` with the pre-registration peer check as a parameter (tests inject facts here). The check runs on the
@@ -148,7 +155,9 @@ impl LeaderClient {
         #[cfg(windows)]
         let os_server_pid = stream.os_server_pid();
         #[cfg(windows)]
-        let pipe_probe = stream.client_raw_handle().and_then(super::peer_auth::win::DupHandle::of);
+        let pipe_probe = stream
+            .client_raw_handle()
+            .and_then(super::peer_auth::win::DupHandle::of);
         let (reader, writer) = tokio::io::split(stream);
 
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
@@ -402,18 +411,14 @@ async fn register(
     .await?;
 
     // Wait for confirmation with timeout to prevent indefinite hangs
-    let response: ServerMessage = match tokio::time::timeout(
-        REGISTRATION_RESPONSE_TIMEOUT,
-        reader.read_message(),
-    )
-    .await
-    {
-        Ok(Ok(msg)) => msg,
-        Ok(Err(e)) => return Err(e.into()),
-        Err(_) => {
-            return Err(ClientError::Timeout(REGISTRATION_RESPONSE_TIMEOUT));
-        }
-    };
+    let response: ServerMessage =
+        match tokio::time::timeout(REGISTRATION_RESPONSE_TIMEOUT, reader.read_message()).await {
+            Ok(Ok(msg)) => msg,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                return Err(ClientError::Timeout(REGISTRATION_RESPONSE_TIMEOUT));
+            }
+        };
     let (registration, leader_ready_at_registration) = match response {
         ServerMessage::Registered {
             client_id,
@@ -575,7 +580,10 @@ async fn register(
     Ok((registration, leader_ready_at_registration))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};

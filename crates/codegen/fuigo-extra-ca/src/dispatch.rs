@@ -80,8 +80,7 @@ impl From<reqwest::Error> for DispatchError {
 /// about whether a credential on this request belongs at this destination.
 /// Does not log the URL, whose path/query may contain credentials.
 pub fn check_url(url: &reqwest::Url) -> Result<(), DispatchError> {
-    if url.host_str().is_some_and(crate::egress::is_refused_host)
-    {
+    if url.host_str().is_some_and(crate::egress::is_refused_host) {
         return Err(DispatchError::Denied(
             "fuigo refuses to contact upstream vendor host",
         ));

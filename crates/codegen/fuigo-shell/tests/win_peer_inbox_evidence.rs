@@ -38,12 +38,22 @@ use fuigo_peer::HostId;
 use fuigo_shell::win_peer_evidence as ev;
 
 fn host_id(salt: u128) -> HostId {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(1);
-    HostId::new(&format!("{:032x}", nanos ^ (salt << 64) ^ u128::from(std::process::id()))).expect("32 hex")
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(1);
+    HostId::new(&format!(
+        "{:032x}",
+        nanos ^ (salt << 64) ^ u128::from(std::process::id())
+    ))
+    .expect("32 hex")
 }
 
 fn report(case: &str, ok: bool, detail: &str) {
-    println!("P10-EVIDENCE {case} {} {detail}", if ok { "PASS" } else { "FAIL" });
+    println!(
+        "P10-EVIDENCE {case} {} {detail}",
+        if ok { "PASS" } else { "FAIL" }
+    );
     assert!(ok, "P10-EVIDENCE {case} FAIL {detail}");
 }
 
@@ -51,7 +61,13 @@ fn need_env(case: &str, name: &str) -> String {
     match std::env::var(name) {
         Ok(v) if !v.is_empty() => v,
         _ => {
-            report(case, false, &format!("prerequisite missing: set the environment variable {name} (see the file header)"));
+            report(
+                case,
+                false,
+                &format!(
+                    "prerequisite missing: set the environment variable {name} (see the file header)"
+                ),
+            );
             unreachable!()
         }
     }
@@ -63,7 +79,10 @@ fn need_env(case: &str, name: &str) -> String {
 fn child_script(full_pipe_name: &str, result: Option<&std::path::Path>) -> String {
     let short = full_pipe_name.trim_start_matches(r"\\.\pipe\");
     let tail = match result {
-        Some(p) => format!("Set-Content -Path '{}' -Value $code -Encoding ascii; ", p.display()),
+        Some(p) => format!(
+            "Set-Content -Path '{}' -Value $code -Encoding ascii; ",
+            p.display()
+        ),
         None => String::new(),
     };
     format!(
@@ -76,21 +95,37 @@ fn child_script(full_pipe_name: &str, result: Option<&std::path::Path>) -> Strin
 }
 
 async fn run_blocking(mut cmd: Command) -> Result<i32, String> {
-    tokio::task::spawn_blocking(move || cmd.status().map_err(|e| format!("could not start the helper: {e}")))
-        .await
-        .map_err(|_| "helper task failed".to_owned())?
-        .map(|s| s.code().unwrap_or(-1))
+    tokio::task::spawn_blocking(move || {
+        cmd.status()
+            .map_err(|e| format!("could not start the helper: {e}"))
+    })
+    .await
+    .map_err(|_| "helper task failed".to_owned())?
+    .map(|s| s.code().unwrap_or(-1))
 }
 
 /// Judge a foreign client's exit code and the server's counters after it ran.
 async fn judge_foreign(case: &str, who: &str, exit: i32, inbox: &ev::EvidenceInbox) {
     tokio::time::sleep(Duration::from_millis(700)).await;
     let (acc, refd, last) = (inbox.accepted(), inbox.refused(), inbox.last_refusal());
-    let detail = format!("{who} child exit={exit} accepted={acc} refused={refd} last_refusal={last:?}");
+    let detail =
+        format!("{who} child exit={exit} accepted={acc} refused={refd} last_refusal={last:?}");
     match exit {
-        5 => report(case, acc == 0, &format!("{detail} (the pipe's own access list denied the open)")),
-        0 => report(case, acc == 0 && refd >= 1, &format!("{detail} (connected; the server must have refused it unread)")),
-        _ => report(case, false, &format!("{detail} (inconclusive: the helper did not reach the pipe)")),
+        5 => report(
+            case,
+            acc == 0,
+            &format!("{detail} (the pipe's own access list denied the open)"),
+        ),
+        0 => report(
+            case,
+            acc == 0 && refd >= 1,
+            &format!("{detail} (connected; the server must have refused it unread)"),
+        ),
+        _ => report(
+            case,
+            false,
+            &format!("{detail} (inconclusive: the helper did not reach the pipe)"),
+        ),
     }
 }
 
@@ -119,25 +154,44 @@ struct TaskGuard {
 impl Drop for TaskGuard {
     fn drop(&mut self) {
         if self.created {
-            let _ = Command::new("schtasks").args(["/Delete", "/TN", &self.name, "/F"]).output();
+            let _ = Command::new("schtasks")
+                .args(["/Delete", "/TN", &self.name, "/F"])
+                .output();
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
 fn schtasks(args: &[&str]) -> Result<String, String> {
-    let o = Command::new("schtasks").args(args).output().map_err(|e| format!("schtasks did not start: {e}"))?;
+    let o = Command::new("schtasks")
+        .args(args)
+        .output()
+        .map_err(|e| format!("schtasks did not start: {e}"))?;
     let text = String::from_utf8_lossy(&o.stdout).into_owned();
-    if o.status.success() { Ok(text) } else { Err(format!("schtasks {} failed: {}", args[0], String::from_utf8_lossy(&o.stderr).trim())) }
+    if o.status.success() {
+        Ok(text)
+    } else {
+        Err(format!(
+            "schtasks {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&o.stderr).trim()
+        ))
+    }
 }
 
 /// "Last Result" of the task: `None` while it has not run yet or is still running.
 fn task_last_result(name: &str) -> Option<i32> {
     let text = schtasks(&["/Query", "/TN", name, "/FO", "LIST", "/V"]).ok()?;
-    let line = text.lines().find(|l| l.trim_start().starts_with("Last Result:"))?;
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("Last Result:"))?;
     let v: i64 = line.split(':').nth(1)?.trim().parse().ok()?;
     // 267009 = running, 267011 = has not run yet.
-    if v == 267_009 || v == 267_011 { None } else { Some(v as i32) }
+    if v == 267_009 || v == 267_011 {
+        None
+    } else {
+        Some(v as i32)
+    }
 }
 
 /// Run the foreign client as `FUIGO_P10_USER2` through a one-shot scheduled task (a batch logon, which works from a
@@ -146,22 +200,44 @@ fn run_as_user2(pipe: &str) -> Result<i32, String> {
     let user = std::env::var("FUIGO_P10_USER2").map_err(|_| "FUIGO_P10_USER2 unset".to_owned())?;
     let pass = std::env::var("FUIGO_P10_PASS2").map_err(|_| "FUIGO_P10_PASS2 unset".to_owned())?;
     let public = std::env::var("PUBLIC").unwrap_or_else(|_| r"C:\Users\Public".to_owned());
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(1);
     let tag = format!("p10-ev-{}-{nanos}", std::process::id());
     let dir = PathBuf::from(public).join(&tag);
-    let mut guard = TaskGuard { name: tag.clone(), dir: dir.clone(), created: false };
+    let mut guard = TaskGuard {
+        name: tag.clone(),
+        dir: dir.clone(),
+        created: false,
+    };
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
     // Both accounts must be able to write here: Everyone, modify, inherited.
-    let _ = Command::new("icacls").arg(&dir).args(["/grant", "*S-1-1-0:(OI)(CI)M"]).output();
+    let _ = Command::new("icacls")
+        .arg(&dir)
+        .args(["/grant", "*S-1-1-0:(OI)(CI)M"])
+        .output();
     let result = dir.join("result.txt");
     let script = dir.join("child.ps1");
-    std::fs::write(&script, child_script(pipe, Some(&result))).map_err(|e| format!("cannot write the helper: {e}"))?;
-    let run = format!("powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"", script.display());
-    let created = schtasks(&["/Create", "/RU", &user, "/RP", &pass, "/SC", "ONCE", "/ST", "00:00", "/TN", &tag, "/TR", &run, "/F"]);
+    std::fs::write(&script, child_script(pipe, Some(&result)))
+        .map_err(|e| format!("cannot write the helper: {e}"))?;
+    let run = format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+        script.display()
+    );
+    let created = schtasks(&[
+        "/Create", "/RU", &user, "/RP", &pass, "/SC", "ONCE", "/ST", "00:00", "/TN", &tag, "/TR",
+        &run, "/F",
+    ]);
     if let Err(e) = created {
         // The password never appears in this text (schtasks does not echo it).
-        println!("P10-EVIDENCE note scheduled task not created ({e}); falling back to Start-Process -Credential");
-        return user2_fallback_cmd(pipe).status().map(|s| s.code().unwrap_or(-1)).map_err(|e| format!("fallback launch failed: {e}"));
+        println!(
+            "P10-EVIDENCE note scheduled task not created ({e}); falling back to Start-Process -Credential"
+        );
+        return user2_fallback_cmd(pipe)
+            .status()
+            .map(|s| s.code().unwrap_or(-1))
+            .map_err(|e| format!("fallback launch failed: {e}"));
     }
     guard.created = true;
     schtasks(&["/Run", "/TN", &tag])?;
@@ -175,7 +251,11 @@ fn run_as_user2(pipe: &str) -> Result<i32, String> {
         if let Some(last) = task_last_result(&tag) {
             // The task ended. Give the result file a moment, then report the task's own code (e.g. 0xC0000142).
             std::thread::sleep(Duration::from_millis(500));
-            if let Ok(code) = std::fs::read_to_string(&result).unwrap_or_default().trim().parse::<i32>() {
+            if let Ok(code) = std::fs::read_to_string(&result)
+                .unwrap_or_default()
+                .trim()
+                .parse::<i32>()
+            {
                 return Ok(code);
             }
             return Ok(last);
@@ -186,7 +266,11 @@ fn run_as_user2(pipe: &str) -> Result<i32, String> {
 }
 
 async fn run_user2(pipe: String) -> i32 {
-    tokio::task::spawn_blocking(move || run_as_user2(&pipe)).await.ok().and_then(Result::ok).unwrap_or(-1)
+    tokio::task::spawn_blocking(move || run_as_user2(&pipe))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(-1)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -201,7 +285,11 @@ async fn same_user_accepts_and_round_trips() {
     let r = ev::dial_list(&me, &h).await;
     let (acc, refd) = (inbox.accepted(), inbox.refused());
     inbox.shutdown().await;
-    report(case, r == Ok(0) && acc == 1 && refd == 0, &format!("dial={r:?} accepted={acc} refused={refd}"));
+    report(
+        case,
+        r == Ok(0) && acc == 1 && refd == 0,
+        &format!("dial={r:?} accepted={acc} refused={refd}"),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -225,7 +313,14 @@ async fn system_client_refused() {
     let h = host_id(4);
     let inbox = ev::start(&h).await.expect("start");
     let mut cmd = Command::new(launcher);
-    cmd.args(["-accepteula", "-s", "powershell.exe", "-NoProfile", "-Command", &child_script(&inbox.pipe_name(), None)]);
+    cmd.args([
+        "-accepteula",
+        "-s",
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        &child_script(&inbox.pipe_name(), None),
+    ]);
     let exit = run_blocking(cmd).await.unwrap_or(-1);
     judge_foreign(case, "system", exit, &inbox).await;
     inbox.shutdown().await;
@@ -239,7 +334,10 @@ async fn remote_client_refused() {
     let (h, me) = (host_id(5), host_id(6));
     let inbox = ev::start(&h).await.expect("start");
     let local = inbox.pipe_name();
-    let remote = format!(r"\\{computer}\pipe\{}", local.trim_start_matches(r"\\.\pipe\"));
+    let remote = format!(
+        r"\\{computer}\pipe\{}",
+        local.trim_start_matches(r"\\.\pipe\")
+    );
     let r = ev::dial_list_at(&remote, &me, &h).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (acc, refd) = (inbox.accepted(), inbox.refused());
@@ -248,7 +346,11 @@ async fn remote_client_refused() {
     // `NoServer` could mean "SMB is off", which proves nothing: that is inconclusive, so it fails.
     let reached_and_refused = matches!(&r, Err(e) if e != "NoServer" && e != "Timeout") && acc == 0;
     let unreadable_after_connect = r.is_err() && acc == 0 && refd >= 1;
-    report(case, reached_and_refused || unreadable_after_connect, &detail);
+    report(
+        case,
+        reached_and_refused || unreadable_after_connect,
+        &detail,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -258,14 +360,24 @@ async fn pre_created_pipe_makes_start_fail_closed() {
     let h = host_id(7);
     let name = ev::pipe_name_for(&h).expect("name");
     // An attacker-style squatter: it claims the name first, with the default access list.
-    let squatter = tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(&name);
+    let squatter = tokio::net::windows::named_pipe::ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&name);
     let Ok(_squatter) = squatter else {
-        report(case, false, "could not create the squatter pipe for the test");
+        report(
+            case,
+            false,
+            "could not create the squatter pipe for the test",
+        );
         return;
     };
     let r = ev::start(&h).await;
     let detail = format!("start = {:?}", r.as_ref().err());
-    report(case, matches!(&r, Err(e) if e.contains("already in use")), &detail);
+    report(
+        case,
+        matches!(&r, Err(e) if e.contains("already in use")),
+        &detail,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -276,7 +388,11 @@ async fn feature_off_does_not_create_the_pipe() {
     let r = ev::start_disabled(&h).await;
     let name = ev::pipe_name_for(&h).expect("name");
     let exists = std::fs::metadata(&name).is_ok();
-    report(case, matches!(&r, Err(e) if e.contains("feature is off")) && !exists, &format!("start={:?} pipe_exists={exists}", r.as_ref().err()));
+    report(
+        case,
+        matches!(&r, Err(e) if e.contains("feature is off")) && !exists,
+        &format!("start={:?} pipe_exists={exists}", r.as_ref().err()),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -298,7 +414,11 @@ async fn file_and_junction_at_the_name_are_refused() {
         .map(|o| o.status.success())
         .unwrap_or(false);
     let on_file = ev::dial_list_at(&file.to_string_lossy(), &me, &h).await;
-    let on_junction = if made { Some(ev::dial_list_at(&junction.to_string_lossy(), &me, &h).await) } else { None };
+    let on_junction = if made {
+        Some(ev::dial_list_at(&junction.to_string_lossy(), &me, &h).await)
+    } else {
+        None
+    };
     let _ = std::fs::remove_dir_all(&dir);
     let detail = format!("file={on_file:?} junction_created={made} junction={on_junction:?}");
     let file_ok = matches!(&on_file, Err(e) if e == "NotAPipe");
@@ -307,7 +427,14 @@ async fn file_and_junction_at_the_name_are_refused() {
 }
 
 /// One foreign client against the widened pipe: the OS must let it connect and the SERVER's verdict must refuse it.
-async fn verdict_layer_case(case: &str, who: &str, exit: i32, inbox: &ev::EvidenceInbox, before: u64, expect: &[&str]) -> bool {
+async fn verdict_layer_case(
+    case: &str,
+    who: &str,
+    exit: i32,
+    inbox: &ev::EvidenceInbox,
+    before: u64,
+    expect: &[&str],
+) -> bool {
     tokio::time::sleep(Duration::from_millis(900)).await;
     let (acc, refd, last) = (inbox.accepted(), inbox.refused(), inbox.last_refusal());
     let matches_expected = last.as_deref().is_some_and(|l| expect.contains(&l));
@@ -326,7 +453,9 @@ async fn verdict_layer_case(case: &str, who: &str, exit: i32, inbox: &ev::Eviden
         "connected, but the verdict refusal was not the expected one"
     };
     let ok = refused_by_verdict;
-    println!("P10-EVIDENCE {case} {who} refused_by_layer={layer} expected={expect:?} last_refusal={last:?} exit={exit} accepted={acc}");
+    println!(
+        "P10-EVIDENCE {case} {who} refused_by_layer={layer} expected={expect:?} last_refusal={last:?} exit={exit} accepted={acc}"
+    );
     ok
 }
 
@@ -348,13 +477,33 @@ async fn foreign_token_reaches_the_verdict() {
     };
     let before = inbox.refused();
     let exit = run_user2(inbox.pipe_name()).await;
-    let user2_ok = verdict_layer_case(case, "user2", exit, &inbox, before, &["DifferentAccount"]).await;
+    let user2_ok =
+        verdict_layer_case(case, "user2", exit, &inbox, before, &["DifferentAccount"]).await;
     let mut sys = Command::new(launcher);
-    sys.args(["-accepteula", "-s", "powershell.exe", "-NoProfile", "-Command", &child_script(&inbox.pipe_name(), None)]);
+    sys.args([
+        "-accepteula",
+        "-s",
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        &child_script(&inbox.pipe_name(), None),
+    ]);
     let before = inbox.refused();
     let exit = run_blocking(sys).await.unwrap_or(-1);
     // Either refusal is a refusal by the server's verdict function: SYSTEM recognised, or its token unreadable (fail closed).
-    let system_ok = verdict_layer_case(case, "system", exit, &inbox, before, &["ClientSystemOrService", "ClientUnreadable"]).await;
+    let system_ok = verdict_layer_case(
+        case,
+        "system",
+        exit,
+        &inbox,
+        before,
+        &["ClientSystemOrService", "ClientUnreadable"],
+    )
+    .await;
     inbox.shutdown().await;
-    report(case, user2_ok && system_ok, &format!("user2_refused_by_verdict={user2_ok} system_refused_by_verdict={system_ok}"));
+    report(
+        case,
+        user2_ok && system_ok,
+        &format!("user2_refused_by_verdict={user2_ok} system_refused_by_verdict={system_ok}"),
+    );
 }

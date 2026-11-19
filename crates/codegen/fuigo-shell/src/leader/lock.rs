@@ -160,7 +160,10 @@ impl LeaderLock {
     }
 
     /// Open (or create) the lock file for subsequent locking operations.
-    #[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder"
+    )]
     pub(super) fn open_lock_file(&self) -> Result<File, LockError> {
         Ok(OpenOptions::new()
             .read(true)
@@ -235,7 +238,8 @@ impl LeaderLock {
         &mut self,
         timeout: Duration,
     ) -> Result<(), LockError> {
-        self.acquire_reopen_timeout_with(timeout, &identity_of_path).await
+        self.acquire_reopen_timeout_with(timeout, &identity_of_path)
+            .await
     }
 
     /// `acquire_reopen_timeout` with the identity check injected (tests).
@@ -265,7 +269,10 @@ impl LeaderLock {
     }
 
     /// Write our PID to the lock file. Call after acquiring lock.
-    #[allow(clippy::disallowed_methods, reason = "leader lock file under FUIGO_HOME (PID stamp); not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "leader lock file under FUIGO_HOME (PID stamp); not inside a session folder"
+    )]
     pub fn write_pid(&mut self) -> Result<(), LockError> {
         if let Some(ref mut file) = self.lock_file {
             file.set_len(0)?;
@@ -312,7 +319,10 @@ impl LeaderLock {
     }
 
     /// Delete the socket file. Call while holding the lock.
-    #[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder"
+    )]
     pub(crate) fn cleanup_socket(&self) -> io::Result<()> {
         match fs::remove_file(&self.sock_path) {
             Ok(()) => Ok(()),
@@ -376,7 +386,9 @@ pub(in crate::leader) mod win {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx};
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+    };
 
     const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
     const SHARE_ALL: u32 = 0x7;
@@ -387,7 +399,10 @@ pub(in crate::leader) mod win {
     /// The 128-bit file id of an open handle (`FILE_ID_INFO`: 8-byte volume serial + 16-byte id, 24 bytes).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(in crate::leader) enum IdQuery {
-        Id { volume: u64, file: [u8; 16] },
+        Id {
+            volume: u64,
+            file: [u8; 16],
+        },
         /// The call failed (a filesystem without 128-bit ids, or any other error).
         Unavailable,
     }
@@ -416,7 +431,10 @@ pub(in crate::leader) mod win {
         }
         .is_ok();
         if ok {
-            IdQuery::Id { volume: info.VolumeSerialNumber, file: info.FileId.Identifier }
+            IdQuery::Id {
+                volume: info.VolumeSerialNumber,
+                file: info.FileId.Identifier,
+            }
         } else {
             IdQuery::Unavailable
         }
@@ -432,10 +450,21 @@ pub(in crate::leader) mod win {
     pub(in crate::leader) fn decide(held: IdQuery, by_path: PathOpen) -> Identity {
         match (held, by_path) {
             (_, PathOpen::Missing) => Identity::Replaced,
-            (IdQuery::Id { volume: v1, file: a }, PathOpen::Opened(IdQuery::Id { volume: v2, file: b }))
-                if a != [0u8; 16] && b != [0u8; 16] =>
-            {
-                if v1 == v2 && a == b { Identity::Same } else { Identity::Replaced }
+            (
+                IdQuery::Id {
+                    volume: v1,
+                    file: a,
+                },
+                PathOpen::Opened(IdQuery::Id {
+                    volume: v2,
+                    file: b,
+                }),
+            ) if a != [0u8; 16] && b != [0u8; 16] => {
+                if v1 == v2 && a == b {
+                    Identity::Same
+                } else {
+                    Identity::Replaced
+                }
             }
             _ => Identity::NoCheck,
         }
@@ -451,7 +480,14 @@ pub(in crate::leader) mod win {
             .open(path)
         {
             Ok(f) => PathOpen::Opened(id_of(&f)),
-            Err(e) if matches!(e.raw_os_error(), Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)) => PathOpen::Missing,
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+                ) =>
+            {
+                PathOpen::Missing
+            }
             Err(_) => PathOpen::OtherError,
         };
         decide(held, by_path)
@@ -471,7 +507,10 @@ impl LeaderLock {
 }
 
 impl Drop for LeaderLock {
-    #[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder"
+    )]
     fn drop(&mut self) {
         // The flock itself releases when the file closes
         // `was_leader` is set on acquisition and cleared by `release()`, so a spawner that handed off does not delete the leader's files here
@@ -482,7 +521,10 @@ impl Drop for LeaderLock {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

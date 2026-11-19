@@ -138,9 +138,12 @@ impl SessionActor {
         let parent_session_id = self.session_info.id.to_string();
         let asked_at = chrono::Utc::now();
 
-        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await.map_err(|e| {
-            SideQuestionError::PrepareClient(crate::sampling::error::acp_error_text(&e))
-        })?;
+        let sampling_client = self
+            .prepare_chat_completion(false, crate::session::acp_session::CallRole::Side)
+            .await
+            .map_err(|e| {
+                SideQuestionError::PrepareClient(crate::sampling::error::acp_error_text(&e))
+            })?;
 
         // Full conversation snapshot including system prompt, reasoning, tool calls, and results.
         let mut items = self.chat_state_handle.get_conversation_for_model().await;
@@ -181,16 +184,18 @@ impl SessionActor {
 
         // Built once without the browsing overlay; each attempt clones it, stamps a fresh req_id and applies the head the
         // mode has at that attempt. Retries are rare, so the success path pays one clone.
-        let mut base_request = self.parent_cached_request_unoverlaid(AuxCall {
-            items,
-            tools: tool_specs,
-            hosted_tools,
-            model: model.clone(),
-            reasoning_effort,
-            backend: sampling_client.api_backend(),
-            conv_id: btw_session_id.clone(),
-            req_id: format!("fuigo-btw-{}", uuid::Uuid::new_v4()),
-        }).with_purpose(fuigo_sampling_types::RequestPurpose::Work);
+        let mut base_request = self
+            .parent_cached_request_unoverlaid(AuxCall {
+                items,
+                tools: tool_specs,
+                hosted_tools,
+                model: model.clone(),
+                reasoning_effort,
+                backend: sampling_client.api_backend(),
+                conv_id: btw_session_id.clone(),
+                req_id: format!("fuigo-btw-{}", uuid::Uuid::new_v4()),
+            })
+            .with_purpose(fuigo_sampling_types::RequestPurpose::Work);
         // Its own per-request admission, so a token-budget refusal comes back as the typed denial
         // (Contract D.4) and never lands on the turn's request.
         let admission = crate::session::execution_state::Execution::current(&parent_session_id)
@@ -203,23 +208,22 @@ impl SessionActor {
         // /btw adds its own bounded transient-failure retry (the policy and predicate above)
         use backon::Retryable as _;
         let attempts = std::cell::Cell::new(1u32);
-        let result =
-            (|| {
-                let mut attempt = build_side_question_attempt(&base_request);
-                self.apply_effective_head(&mut attempt.items);
-                sampling_client.conversation_collect(attempt)
-            })
-                .retry(side_question_retry_policy())
-                .when(should_retry_side_question)
-                .notify(|e: &SamplingError, backoff: std::time::Duration| {
-                    attempts.set(attempts.get() + 1);
-                    tracing::warn!(
-                        backoff_ms = backoff.as_millis() as u64,
-                        error = %e,
-                        "side question transient failure; retrying"
-                    );
-                })
-                .await;
+        let result = (|| {
+            let mut attempt = build_side_question_attempt(&base_request);
+            self.apply_effective_head(&mut attempt.items);
+            sampling_client.conversation_collect(attempt)
+        })
+        .retry(side_question_retry_policy())
+        .when(should_retry_side_question)
+        .notify(|e: &SamplingError, backoff: std::time::Duration| {
+            attempts.set(attempts.get() + 1);
+            tracing::warn!(
+                backoff_ms = backoff.as_millis() as u64,
+                error = %e,
+                "side question transient failure; retrying"
+            );
+        })
+        .await;
 
         match result {
             Ok(response) => {
@@ -650,7 +654,10 @@ impl SessionActor {
         cwd: &str,
         model_override: Option<&str>,
     ) -> Option<String> {
-        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await.ok()?;
+        let sampling_client = self
+            .prepare_chat_completion(false, crate::session::acp_session::CallRole::Side)
+            .await
+            .ok()?;
 
         let system = "You are a shell command autocomplete engine. \
             Given a partial command, output ONLY the completed command. \
@@ -668,14 +675,17 @@ impl SessionActor {
             .get_sampling_config()
             .await
             .map(|c| c.model);
-        let Some(model) = self.models_manager.with_helper_catalog(|allowlist, models| {
-            crate::agent::models::ai_suggest_wire_model(
-                allowlist,
-                models,
-                model_override,
-                session_model.as_deref(),
-            )
-        }) else {
+        let Some(model) = self
+            .models_manager
+            .with_helper_catalog(|allowlist, models| {
+                crate::agent::models::ai_suggest_wire_model(
+                    allowlist,
+                    models,
+                    model_override,
+                    session_model.as_deref(),
+                )
+            })
+        else {
             tracing::debug!("AI suggest: no model the organization's policy admits; skipping");
             return None;
         };
@@ -770,7 +780,9 @@ impl SessionActor {
         };
 
         self.refresh_token_if_expired().await;
-        let mut sampling_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Side).await;
+        let mut sampling_config = self
+            .reconstruct_full_config(crate::session::acp_session::CallRole::Side)
+            .await;
         let suggest_entry = self.models_manager.catalog_entry(&model);
         if !suggest_route_allowed(&sampling_config, suggest_entry.as_ref()) {
             // P192: the override below swaps only the wire model and keeps the session's
@@ -784,15 +796,20 @@ impl SessionActor {
             return None;
         }
         if sampling_config.subscription.is_none() {
-            let Some(wire_model) = self.models_manager.with_helper_catalog(|allowlist, models| {
-                crate::agent::models::suggest_prompt_wire_model(
-                    allowlist,
-                    models,
-                    &model,
-                    session_model,
-                )
-            }) else {
-                tracing::debug!("prompt suggest: no model the organization's policy admits; skipping request");
+            let Some(wire_model) = self
+                .models_manager
+                .with_helper_catalog(|allowlist, models| {
+                    crate::agent::models::suggest_prompt_wire_model(
+                        allowlist,
+                        models,
+                        &model,
+                        session_model,
+                    )
+                })
+            else {
+                tracing::debug!(
+                    "prompt suggest: no model the organization's policy admits; skipping request"
+                );
                 return None;
             };
             sampling_config.model = wire_model;
@@ -960,7 +977,11 @@ mod tests {
         ] {
             match side_question_failure(SamplingError::InvalidConfiguration(limit), None, None) {
                 SideQuestionError::BudgetDenied(denial) => {
-                    assert_eq!(denial, ExecutionBudgetDenial::without_token_figures(rule), "{limit}");
+                    assert_eq!(
+                        denial,
+                        ExecutionBudgetDenial::without_token_figures(rule),
+                        "{limit}"
+                    );
                 }
                 other => panic!("`{limit}` must be the typed denial, got {other:?}"),
             }
@@ -971,7 +992,8 @@ mod tests {
     #[test]
     fn a_recorded_admission_denial_is_kept() {
         use crate::acp_error::{ExecutionBudgetDenial, ExecutionBudgetRule};
-        let recorded = ExecutionBudgetDenial::without_token_figures(ExecutionBudgetRule::TotalTokensExhausted);
+        let recorded =
+            ExecutionBudgetDenial::without_token_figures(ExecutionBudgetRule::TotalTokensExhausted);
         match side_question_failure(
             SamplingError::InvalidConfiguration(fuigo_sampler::execution_budget::CALL_LIMIT),
             Some(recorded.clone()),
@@ -988,8 +1010,12 @@ mod tests {
     fn other_side_question_failures_are_not_relabelled_as_a_denial() {
         use fuigo_sampler::execution_budget::{CALL_LIMIT, WALL_LIMIT};
         for error in [
-            SamplingError::InvalidConfiguration("execution admission denied or could not be persisted"),
-            SamplingError::InvalidConfiguration("execution budget limits must be positive integers"),
+            SamplingError::InvalidConfiguration(
+                "execution admission denied or could not be persisted",
+            ),
+            SamplingError::InvalidConfiguration(
+                "execution budget limits must be positive integers",
+            ),
             api(500, CALL_LIMIT, Some(false)),
             api(429, WALL_LIMIT, Some(false)),
             SamplingError::StreamError {
@@ -1114,10 +1140,16 @@ mod tests {
             base_url: "https://api.x.ai/v1".into(),
             ..Default::default()
         };
-        assert!(super::suggest_route_allowed(&session, models.get("grok-4.7")), "no subscription: unchanged");
+        assert!(
+            super::suggest_route_allowed(&session, models.get("grok-4.7")),
+            "no subscription: unchanged"
+        );
         session.subscription = Some(fuigo_sampler::subscription::SubscriptionKind::Xai);
         assert!(super::suggest_route_allowed(&session, models.get("sub")));
-        assert!(!super::suggest_route_allowed(&session, models.get("grok-4.7")), "a key spelling the wire id is another model");
+        assert!(
+            !super::suggest_route_allowed(&session, models.get("grok-4.7")),
+            "a key spelling the wire id is another model"
+        );
         assert!(!super::suggest_route_allowed(&session, None));
     }
 
@@ -1133,7 +1165,10 @@ mod tests {
         let cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
         let models = crate::agent::config::resolve_model_list(&cfg, None);
         let mirror = models.get("mirror").expect("mirror entry resolved");
-        assert_eq!(mirror.info.model, "grok-4.7", "fixture: same wire id as the session");
+        assert_eq!(
+            mirror.info.model, "grok-4.7",
+            "fixture: same wire id as the session"
+        );
         let session = fuigo_sampler::SamplerConfig {
             model: "grok-4.7".into(),
             base_url: "https://api.x.ai/v1".into(),

@@ -214,7 +214,12 @@ fn answer_queued_after_the_deadline_is_not_accepted() {
     sent.send((Safety::Delete, deadline + Duration::from_secs(1)))
         .unwrap();
     assert_eq!(
-        await_answer(Path::new("/nonexistent"), Duration::ZERO, Some(deadline), &answered),
+        await_answer(
+            Path::new("/nonexistent"),
+            Duration::ZERO,
+            Some(deadline),
+            &answered
+        ),
         Safety::Keep(KeepReason::GateTimedOut),
         "a verdict that arrived after the deadline must fail closed"
     );
@@ -225,7 +230,12 @@ fn answer_queued_after_the_deadline_is_not_accepted() {
     sent.send((Safety::Delete, deadline - Duration::from_secs(1)))
         .unwrap();
     assert_eq!(
-        await_answer(Path::new("/nonexistent"), Duration::from_secs(60), Some(deadline), &answered),
+        await_answer(
+            Path::new("/nonexistent"),
+            Duration::from_secs(60),
+            Some(deadline),
+            &answered
+        ),
         Safety::Delete
     );
 }

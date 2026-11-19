@@ -59,7 +59,14 @@ const DIR_LISTS: &[&str] = &[
 /// Skill directories: each subdirectory's `SKILL.md` is watched (the name set of the directory itself is recorded too).
 const SKILL_LISTS: &[&str] = &[".claude/skills", ".fuigo/skills"];
 /// Well-known names directly in the Fuigo home.
-const FUIGO_HOME_FILES: &[&str] = &["config.toml", "sandbox.toml", "managed_config.toml", "requirements.toml", "AGENTS.md", "CLAUDE.md"];
+const FUIGO_HOME_FILES: &[&str] = &[
+    "config.toml",
+    "sandbox.toml",
+    "managed_config.toml",
+    "requirements.toml",
+    "AGENTS.md",
+    "CLAUDE.md",
+];
 const FUIGO_HOME_LISTS: &[&str] = &["rules", "hooks", "commands", "agents"];
 const FUIGO_HOME_SKILLS: &[&str] = &["skills"];
 /// Lists under the user's home (`~/.claude/...`); late in the order, so among the first dropped over the file cap.
@@ -103,7 +110,11 @@ struct Stat {
 #[derive(Debug, Clone)]
 enum State {
     Absent,
-    Present { stat: Stat, hash: String, copy: Vec<u8> },
+    Present {
+        stat: Stat,
+        hash: String,
+        copy: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -127,10 +138,16 @@ pub(crate) const UNREADABLE_PATH: &str = "(protected files could not be read)";
 impl Change {
     /// The finding for a baseline or recheck that did not finish (timeout, panic, died task).
     pub(crate) fn unreadable() -> Self {
-        Self { path: PathBuf::from(UNREADABLE_PATH), old_hash: None, new_hash: None }
+        Self {
+            path: PathBuf::from(UNREADABLE_PATH),
+            old_hash: None,
+            new_hash: None,
+        }
     }
     pub(crate) fn is_unreadable(&self) -> bool {
-        self.old_hash.is_none() && self.new_hash.is_none() && self.path.as_os_str() == UNREADABLE_PATH
+        self.old_hash.is_none()
+            && self.new_hash.is_none()
+            && self.path.as_os_str() == UNREADABLE_PATH
     }
 }
 
@@ -169,7 +186,11 @@ pub(crate) fn display_path(path: &Path) -> String {
     for c in path.to_string_lossy().chars() {
         let bad = c.is_control()
             || matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}' | '\u{061c}');
-        let piece = if bad { format!("\\u{{{:x}}}", c as u32) } else { c.to_string() };
+        let piece = if bad {
+            format!("\\u{{{:x}}}", c as u32)
+        } else {
+            c.to_string()
+        };
         total += piece.chars().count();
         pieces.push(piece);
         if total > MAX + 16 {
@@ -298,7 +319,11 @@ impl IntegrityState {
     }
     /// The watch for a recheck, or `None` when not armed or already tripped.
     pub(crate) fn take_for_check(&self) -> Option<(SharedWatch, u64)> {
-        if self.tripped { None } else { self.watch.clone().map(|w| (w, self.generation)) }
+        if self.tripped {
+            None
+        } else {
+            self.watch.clone().map(|w| (w, self.generation))
+        }
     }
     /// Apply a recheck result. `false` (and nothing changes) when a reset happened in between.
     pub(crate) fn put_back(&mut self, tripped: bool, generation: u64) -> bool {
@@ -311,7 +336,10 @@ impl IntegrityState {
     /// The human's clear: drop the watch and the hold; any recheck in flight is void.
     pub(crate) fn reset(&mut self) {
         let generation = self.generation.wrapping_add(1);
-        *self = Self { generation, ..Self::default() };
+        *self = Self {
+            generation,
+            ..Self::default()
+        };
     }
 }
 
@@ -348,11 +376,22 @@ fn stat_of(path: &Path) -> Option<Stat> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        Some(Stat { kind, len: md.len(), mtime: md.modified().ok(), ctime: (md.ctime(), md.ctime_nsec()), ino: md.ino(), dev: md.dev() })
+        Some(Stat {
+            kind,
+            len: md.len(),
+            mtime: md.modified().ok(),
+            ctime: (md.ctime(), md.ctime_nsec()),
+            ino: md.ino(),
+            dev: md.dev(),
+        })
     }
     #[cfg(not(unix))]
     {
-        Some(Stat { kind, len: md.len(), mtime: md.modified().ok() })
+        Some(Stat {
+            kind,
+            len: md.len(),
+            mtime: md.modified().ok(),
+        })
     }
 }
 
@@ -401,7 +440,11 @@ fn capped_names(dir: &Path) -> Option<Vec<PathBuf>> {
         return None; // a symlinked directory is never listed through
     }
     let rd = std::fs::read_dir(dir).ok()?;
-    let mut names: Vec<PathBuf> = rd.filter_map(Result::ok).take(MAX_PRESENT).map(|e| e.path()).collect();
+    let mut names: Vec<PathBuf> = rd
+        .filter_map(Result::ok)
+        .take(MAX_PRESENT)
+        .map(|e| e.path())
+        .collect();
     names.sort();
     Some(names)
 }
@@ -414,10 +457,16 @@ fn list_files(dir: &Path, skills: bool, out: &mut Vec<PathBuf>, dirs: &mut Vec<P
         out.push(dir.to_path_buf());
         return;
     }
-    let Some(names) = capped_names(dir) else { return };
+    let Some(names) = capped_names(dir) else {
+        return;
+    };
     dirs.push(dir.to_path_buf());
     out.extend(names.into_iter().map(|n| {
-        if skills && std::fs::symlink_metadata(&n).is_ok_and(|m| m.file_type().is_dir()) { n.join("SKILL.md") } else { n }
+        if skills && std::fs::symlink_metadata(&n).is_ok_and(|m| m.file_type().is_dir()) {
+            n.join("SKILL.md")
+        } else {
+            n
+        }
     }));
 }
 
@@ -491,7 +540,12 @@ impl Watch {
             if let Some(names) = capped_names(&d) {
                 let hash = names_hash(&names);
                 let stat = dir_stat(&d);
-                w.dirs.push(DirEntry { path: d, names, hash, stat });
+                w.dirs.push(DirEntry {
+                    path: d,
+                    names,
+                    hash,
+                    stat,
+                });
             }
         }
         let mut seen = HashSet::new();
@@ -504,9 +558,15 @@ impl Watch {
             }
             match stat_of(&path) {
                 // Only the fixed names are recorded as absent; a listed file is present by construction.
-                None if i < n_fixed && absent < MAX_ABSENT && std::fs::symlink_metadata(&path).is_err() => {
+                None if i < n_fixed
+                    && absent < MAX_ABSENT
+                    && std::fs::symlink_metadata(&path).is_err() =>
+                {
                     absent += 1;
-                    w.entries.push(Entry { path, state: State::Absent });
+                    w.entries.push(Entry {
+                        path,
+                        state: State::Absent,
+                    });
                 }
                 None => {}
                 // Too big to hash: only its stat fields are kept (no content, no hash), so a change still trips the hold.
@@ -514,14 +574,26 @@ impl Watch {
                     w.skipped.push(path.clone());
                     if present < MAX_PRESENT {
                         present += 1;
-                        w.entries.push(Entry { path, state: State::Present { stat, hash: OVERSIZE.to_owned(), copy: Vec::new() } });
+                        w.entries.push(Entry {
+                            path,
+                            state: State::Present {
+                                stat,
+                                hash: OVERSIZE.to_owned(),
+                                copy: Vec::new(),
+                            },
+                        });
                     }
                 }
                 Some(_) if present >= MAX_PRESENT => w.skipped.push(path),
                 Some(stat) => {
-                    let Some((hash, copy)) = read_state(&path, stat.kind) else { continue };
+                    let Some((hash, copy)) = read_state(&path, stat.kind) else {
+                        continue;
+                    };
                     present += 1;
-                    w.entries.push(Entry { path, state: State::Present { stat, hash, copy } });
+                    w.entries.push(Entry {
+                        path,
+                        state: State::Present { stat, hash, copy },
+                    });
                 }
             }
         }
@@ -540,16 +612,22 @@ impl Watch {
 
     #[cfg(test)]
     pub(crate) fn watched_len_absent(&self) -> usize {
-        self.entries.iter().filter(|e| matches!(e.state, State::Absent)).count()
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.state, State::Absent))
+            .count()
     }
 
     /// The in-memory copy taken at snapshot (kept for a future restore command; none is offered yet).
     #[allow(dead_code)]
     pub(crate) fn copy_of(&self, path: &Path) -> Option<&[u8]> {
-        self.entries.iter().find(|e| e.path == path).and_then(|e| match &e.state {
-            State::Present { copy, .. } => Some(copy.as_slice()),
-            State::Absent => None,
-        })
+        self.entries
+            .iter()
+            .find(|e| e.path == path)
+            .and_then(|e| match &e.state {
+                State::Present { copy, .. } => Some(copy.as_slice()),
+                State::Absent => None,
+            })
     }
 
     /// Stat every recorded file and the name set of every watched directory; hash only a file whose size or mtime moved. Each change is reported once (the recorded state
@@ -566,23 +644,40 @@ impl Watch {
             let stat_only = hash == d.hash && cut && stat != d.stat;
             if hash != d.hash || stat_only {
                 added.extend(names.iter().filter(|n| !d.names.contains(n)).cloned());
-                let new_hash = if stat_only { hash_hex(format!("{hash}|{stat:?}").as_bytes()) } else { hash.clone() };
-                out.push(Change { path: d.path.clone(), old_hash: Some(std::mem::replace(&mut d.hash, hash)), new_hash: Some(new_hash) });
+                let new_hash = if stat_only {
+                    hash_hex(format!("{hash}|{stat:?}").as_bytes())
+                } else {
+                    hash.clone()
+                };
+                out.push(Change {
+                    path: d.path.clone(),
+                    old_hash: Some(std::mem::replace(&mut d.hash, hash)),
+                    new_hash: Some(new_hash),
+                });
                 d.names = names;
             }
             d.stat = stat;
         }
         // A name that appeared is watched from now on (within the file cap).
         for path in added {
-            let path = if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir()) { path.join("SKILL.md") } else { path };
-            if self.entries.iter().any(|e| e.path == path) || self.entries.len() >= MAX_PRESENT + MAX_ABSENT {
+            let path = if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir()) {
+                path.join("SKILL.md")
+            } else {
+                path
+            };
+            if self.entries.iter().any(|e| e.path == path)
+                || self.entries.len() >= MAX_PRESENT + MAX_ABSENT
+            {
                 continue;
             }
             if let Some(stat) = stat_of(&path)
                 && (stat.kind != Kind::File || stat.len <= MAX_FILE_BYTES)
                 && let Some((hash, copy)) = read_state(&path, stat.kind)
             {
-                self.entries.push(Entry { path, state: State::Present { stat, hash, copy } });
+                self.entries.push(Entry {
+                    path,
+                    state: State::Present { stat, hash, copy },
+                });
             }
         }
         for e in &mut self.entries {
@@ -590,12 +685,26 @@ impl Watch {
             match (&mut e.state, now) {
                 (State::Absent, None) => {}
                 (State::Absent, Some(stat)) => {
-                    let h = read_state(&e.path, stat.kind).map(|(h, _)| h).unwrap_or_default();
-                    out.push(Change { path: e.path.clone(), old_hash: None, new_hash: Some(h.clone()) });
-                    e.state = State::Present { stat, hash: h, copy: Vec::new() };
+                    let h = read_state(&e.path, stat.kind)
+                        .map(|(h, _)| h)
+                        .unwrap_or_default();
+                    out.push(Change {
+                        path: e.path.clone(),
+                        old_hash: None,
+                        new_hash: Some(h.clone()),
+                    });
+                    e.state = State::Present {
+                        stat,
+                        hash: h,
+                        copy: Vec::new(),
+                    };
                 }
                 (State::Present { hash, .. }, None) => {
-                    out.push(Change { path: e.path.clone(), old_hash: Some(hash.clone()), new_hash: None });
+                    out.push(Change {
+                        path: e.path.clone(),
+                        old_hash: Some(hash.clone()),
+                        new_hash: None,
+                    });
                     e.state = State::Absent;
                 }
                 (State::Present { stat, hash, copy }, Some(new)) => {
@@ -606,7 +715,11 @@ impl Watch {
                     }
                     if hash == OVERSIZE {
                         *stat = new;
-                        out.push(Change { path: e.path.clone(), old_hash: Some(OVERSIZE.to_owned()), new_hash: Some("oversize-changed".to_owned()) });
+                        out.push(Change {
+                            path: e.path.clone(),
+                            old_hash: Some(OVERSIZE.to_owned()),
+                            new_hash: Some("oversize-changed".to_owned()),
+                        });
                         continue;
                     }
                     // An unreadable path (a swap to a FIFO or a link since the stat) is a change, never skipped.
@@ -627,10 +740,16 @@ impl Watch {
                         *copy = bytes.clone();
                         continue;
                     }
-                    let nh = read.map(|(h, _)| h).unwrap_or_else(|| "unreadable".to_owned());
+                    let nh = read
+                        .map(|(h, _)| h)
+                        .unwrap_or_else(|| "unreadable".to_owned());
                     *stat = new;
                     if nh != *hash {
-                        out.push(Change { path: e.path.clone(), old_hash: Some(hash.clone()), new_hash: Some(nh.clone()) });
+                        out.push(Change {
+                            path: e.path.clone(),
+                            old_hash: Some(hash.clone()),
+                            new_hash: Some(nh.clone()),
+                        });
                         *hash = nh;
                     }
                 }
@@ -640,7 +759,10 @@ impl Watch {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "peer_integrity_tests.rs"]
 mod tests;

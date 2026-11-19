@@ -36,18 +36,30 @@ impl Debug for ExternalAccountTokenSource {
 }
 
 impl ExternalAccountTokenSource {
-    pub(crate) async fn new(scopes: String, credentials: CredentialsFile) -> Result<ExternalAccountTokenSource, Error> {
-        let auth_header = if let (Some(client_id), Some(client_secret)) = (credentials.client_id.as_ref(), credentials.client_secret.as_ref()) {
+    pub(crate) async fn new(
+        scopes: String,
+        credentials: CredentialsFile,
+    ) -> Result<ExternalAccountTokenSource, Error> {
+        let auth_header = if let (Some(client_id), Some(client_secret)) = (
+            credentials.client_id.as_ref(),
+            credentials.client_secret.as_ref(),
+        ) {
             let plain_text = format!("{}:{}", client_id, client_secret);
             Some(format!("Basic: {}", BASE64_STANDARD.encode(plain_text)))
         } else {
             None
         };
-        let subject_token_type = credentials.subject_token_type.ok_or(Error::MissingSubjectTokenType)?;
+        let subject_token_type = credentials
+            .subject_token_type
+            .ok_or(Error::MissingSubjectTokenType)?;
         Ok(ExternalAccountTokenSource {
-            source: credentials.credential_source.ok_or(Error::NoCredentialsSource)?,
+            source: credentials
+                .credential_source
+                .ok_or(Error::NoCredentialsSource)?,
             subject_token_type,
-            url: credentials.token_url_external.ok_or(Error::MissingTokenURL)?,
+            url: credentials
+                .token_url_external
+                .ok_or(Error::MissingTokenURL)?,
             audience: credentials.audience,
             auth_header,
             scopes,
@@ -59,7 +71,8 @@ impl ExternalAccountTokenSource {
 #[async_trait]
 impl TokenSource for ExternalAccountTokenSource {
     async fn token(&self) -> Result<Token, crate::error::Error> {
-        let subject_token_source = subject_token_source(self.audience.clone(), self.source.clone()).await?;
+        let subject_token_source =
+            subject_token_source(self.audience.clone(), self.source.clone()).await?;
 
         let mut builder = self.client.post(&self.url);
         if let Some(auth_header) = &self.auth_header {
@@ -73,12 +86,18 @@ impl TokenSource for ExternalAccountTokenSource {
 
         let subject_token = subject_token_source.subject_token().await?;
         let sts_request = vec![
-            ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
             ("audience", audience),
             ("scope", &self.scopes),
             ("subject_token_type", &self.subject_token_type),
             ("subject_token", &subject_token),
-            ("requested_token_type", "urn:ietf:params:oauth:token-type:access_token"),
+            (
+                "requested_token_type",
+                "urn:ietf:params:oauth:token-type:access_token",
+            ),
         ];
         let response = builder.form(&sts_request).send_guarded().await?;
         if !response.status().is_success() {

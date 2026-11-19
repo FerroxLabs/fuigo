@@ -1773,7 +1773,10 @@ impl DashboardState {
                 self.peek_tail_selection = None;
                 if inside {
                     let at = (mouse.column, mouse.row);
-                    self.peek_tail_selection = Some(PeekTailSelection { anchor: at, head: at });
+                    self.peek_tail_selection = Some(PeekTailSelection {
+                        anchor: at,
+                        head: at,
+                    });
                     self.peek_tail_dragging = true;
                     return Some(InputOutcome::Changed);
                 }

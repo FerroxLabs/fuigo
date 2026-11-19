@@ -3,10 +3,10 @@
 use std::fmt;
 use std::sync::LazyLock;
 
+use fuigo_circuit_breaker::RetryPolicy;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use fuigo_circuit_breaker::RetryPolicy;
 
 use crate::provider_error::{parse_provider_error, parse_provider_error_str};
 
@@ -342,19 +342,36 @@ impl SamplingError {
 
     pub fn upstream(&self) -> UpstreamError {
         match self {
-            Self::Api {status, upstream_state, upstream_type, upstream_details, ..} => {
-                let mut u=upstream_details.clone(); u.http_status=Some(status.as_u16());
-                u.state=u.state.or_else(||upstream_state.clone());u.error_type=u.error_type.or_else(||upstream_type.clone());u
-            },
-            Self::Auth {status,upstream,..}=>{let mut u=upstream.clone();u.http_status=(*status!=0).then_some(*status).or(u.http_status);u},
-            Self::StreamError {upstream,..} => upstream.clone(),
-            _=>UpstreamError::default(),
+            Self::Api {
+                status,
+                upstream_state,
+                upstream_type,
+                upstream_details,
+                ..
+            } => {
+                let mut u = upstream_details.clone();
+                u.http_status = Some(status.as_u16());
+                u.state = u.state.or_else(|| upstream_state.clone());
+                u.error_type = u.error_type.or_else(|| upstream_type.clone());
+                u
+            }
+            Self::Auth {
+                status, upstream, ..
+            } => {
+                let mut u = upstream.clone();
+                u.http_status = (*status != 0).then_some(*status).or(u.http_status);
+                u
+            }
+            Self::StreamError { upstream, .. } => upstream.clone(),
+            _ => UpstreamError::default(),
         }
     }
     /// Network boundaries must attach a decision before an error leaves the sampler.
     pub fn assert_boundary_classified(&self) {
-        debug_assert!(self.upstream().classification.is_some(),
-            "sampling error reached a consumer without boundary classification");
+        debug_assert!(
+            self.upstream().classification.is_some(),
+            "sampling error reached a consumer without boundary classification"
+        );
     }
 
     pub fn is_terminal_refusal(&self) -> bool {
@@ -496,7 +513,9 @@ impl SamplingError {
     }
 
     pub fn is_retryable(&self) -> bool {
-        if self.is_terminal_refusal() { return false; }
+        if self.is_terminal_refusal() {
+            return false;
+        }
         match self {
             SamplingError::Auth { .. } => false,
             SamplingError::InvalidConfiguration(_) => false,
@@ -655,7 +674,9 @@ impl SamplingError {
     /// - `x-should-retry: false`: the server says the request content caused the failure, not something transient.
     /// - Context-length overflow: deterministic; re-sending the same payload always fails.
     pub fn is_retry_vetoed(&self) -> bool {
-        self.is_terminal_refusal() || self.should_retry_header() == Some(false) || self.is_context_length_error()
+        self.is_terminal_refusal()
+            || self.should_retry_header() == Some(false)
+            || self.is_context_length_error()
     }
 }
 
@@ -709,17 +730,51 @@ pub(crate) fn lenient_code<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<Option<String>, D::Error> {
     struct StringOnly;
     impl<'de> serde::de::Visitor<'de> for StringOnly {
-        type Value=Option<String>;
-        fn expecting(&self,f:&mut fmt::Formatter)->fmt::Result {f.write_str("an optional string")}
-        fn visit_str<E:serde::de::Error>(self,s:&str)->std::result::Result<Self::Value,E>{Ok(Some(s.to_owned()))}
-        fn visit_string<E:serde::de::Error>(self,s:String)->std::result::Result<Self::Value,E>{Ok(Some(s))}
-        fn visit_unit<E:serde::de::Error>(self)->std::result::Result<Self::Value,E>{Ok(None)}
-        fn visit_bool<E:serde::de::Error>(self,_:bool)->std::result::Result<Self::Value,E>{Ok(None)}
-        fn visit_u64<E:serde::de::Error>(self,_:u64)->std::result::Result<Self::Value,E>{Ok(None)}
-        fn visit_i64<E:serde::de::Error>(self,_:i64)->std::result::Result<Self::Value,E>{Ok(None)}
-        fn visit_f64<E:serde::de::Error>(self,_:f64)->std::result::Result<Self::Value,E>{Ok(None)}
-        fn visit_seq<A:serde::de::SeqAccess<'de>>(self,mut a:A)->std::result::Result<Self::Value,A::Error>{while a.next_element::<serde::de::IgnoredAny>()?.is_some() {} Ok(None)}
-        fn visit_map<A:serde::de::MapAccess<'de>>(self,mut a:A)->std::result::Result<Self::Value,A::Error>{while a.next_entry::<serde::de::IgnoredAny,serde::de::IgnoredAny>()?.is_some() {} Ok(None)}
+        type Value = Option<String>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("an optional string")
+        }
+        fn visit_str<E: serde::de::Error>(self, s: &str) -> std::result::Result<Self::Value, E> {
+            Ok(Some(s.to_owned()))
+        }
+        fn visit_string<E: serde::de::Error>(
+            self,
+            s: String,
+        ) -> std::result::Result<Self::Value, E> {
+            Ok(Some(s))
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut a: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            while a.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut a: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            while a
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {}
+            Ok(None)
+        }
     }
     d.deserialize_any(StringOnly)
 }
@@ -814,39 +869,96 @@ pub struct UpstreamError {
         skip_serializing_if = "Option::is_none"
     )]
     pub state: Option<String>,
-    #[serde(default,deserialize_with="crate::upstream_vocab::deserialize_optional",serialize_with="crate::upstream_vocab::serialize_optional",skip_serializing_if="Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::upstream_vocab::deserialize_optional",
+        serialize_with = "crate::upstream_vocab::serialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub code: Option<String>,
-    #[serde(default,deserialize_with="deserialize_upstream_codes",serialize_with="crate::upstream_vocab::serialize_codes",skip_serializing_if="Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_upstream_codes",
+        serialize_with = "crate::upstream_vocab::serialize_codes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub codes: Vec<String>,
-    #[serde(default,deserialize_with="crate::upstream_vocab::deserialize_optional",serialize_with="crate::upstream_vocab::serialize_optional",skip_serializing_if="Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::upstream_vocab::deserialize_optional",
+        serialize_with = "crate::upstream_vocab::serialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub hold_reason: Option<String>,
-    #[serde(default,deserialize_with="crate::upstream_vocab::deserialize_optional",serialize_with="crate::upstream_vocab::serialize_optional",skip_serializing_if="Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::upstream_vocab::deserialize_optional",
+        serialize_with = "crate::upstream_vocab::serialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub limit: Option<String>,
-    #[serde(default,deserialize_with="deserialize_upstream_wait",skip_serializing_if="Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_upstream_wait",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub retry_after_s: Option<u64>,
-    #[serde(default,deserialize_with="deserialize_reset",skip_serializing_if="Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_reset",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub resets_at: Option<String>,
 }
 
-fn deserialize_upstream_codes<'de,D:serde::Deserializer<'de>>(d:D)->std::result::Result<Vec<String>,D::Error>{
-    let value=serde_json::Value::deserialize(d)?;let mut codes=Vec::new();
-    if let Some(values)=value.as_array() {for v in values {if let Some(c)=v.as_str().map(|s|crate::upstream_vocab::vocab(s).to_owned()) && !codes.contains(&c) {codes.push(c);}}}
+fn deserialize_upstream_codes<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    let mut codes = Vec::new();
+    if let Some(values) = value.as_array() {
+        for v in values {
+            if let Some(c) = v
+                .as_str()
+                .map(|s| crate::upstream_vocab::vocab(s).to_owned())
+                && !codes.contains(&c)
+            {
+                codes.push(c);
+            }
+        }
+    }
     Ok(codes)
 }
 impl UpstreamError {
     pub fn project(&mut self) {
-        for value in [&mut self.state,&mut self.error_type,&mut self.code,&mut self.hold_reason,&mut self.limit] {
-            if let Some(s)=value { *s=crate::upstream_vocab::vocab(s).to_owned(); }
+        for value in [
+            &mut self.state,
+            &mut self.error_type,
+            &mut self.code,
+            &mut self.hold_reason,
+            &mut self.limit,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *value = crate::upstream_vocab::vocab(value).to_owned();
         }
-        for s in &mut self.codes {*s=crate::upstream_vocab::vocab(s).to_owned();}
+        for s in &mut self.codes {
+            *s = crate::upstream_vocab::vocab(s).to_owned();
+        }
     }
 
-    pub fn is_empty(&self)->bool { self==&Self::default() }
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
     pub fn classification(&self) -> crate::refusal::Classification {
         // Legacy records have no boundary decision. Do not guess from their display text.
         self.classification.clone().unwrap_or_else(|| {
             if self.flux_routed {
-                crate::refusal::decide_for_request(&crate::refusal::from_upstream(self, "", chrono::Utc::now()), true)
+                crate::refusal::decide_for_request(
+                    &crate::refusal::from_upstream(self, "", chrono::Utc::now()),
+                    true,
+                )
             } else {
                 crate::refusal::Classification::pass()
             }
@@ -856,28 +968,36 @@ impl UpstreamError {
         self.classification()
     }
     /// Preserve the A1 bounded envelope walker for encoded/wrapped provider bodies.
-    pub fn with_body(mut self,status:u16,bytes:&[u8])->Self {
-        let mut headers=serde_json::Map::new();
-        if let Some(h)=&self.hold_reason {headers.insert("x-flux-hold-reason".into(),h.clone().into());}
-        if let Some(w)=self.retry_after_s {headers.insert("retry-after".into(),w.to_string().into());}
-        let body=crate::selective_error::from_slice(bytes).unwrap_or(serde_json::Value::Null);
+    pub fn with_body(mut self, status: u16, bytes: &[u8]) -> Self {
+        let mut headers = serde_json::Map::new();
+        if let Some(h) = &self.hold_reason {
+            headers.insert("x-flux-hold-reason".into(), h.clone().into());
+        }
+        if let Some(w) = self.retry_after_s {
+            headers.insert("retry-after".into(), w.to_string().into());
+        }
+        let body = crate::selective_error::from_slice(bytes).unwrap_or(serde_json::Value::Null);
         let headers = serde_json::Value::Object(headers);
-        let u=crate::refusal::fuigo_upstream(status,&headers,&body);
-        let flux_routed=self.flux_routed;
-        self=u;
-        self.flux_routed=flux_routed;
-        self.state=self.state.or_else(||parse_error_state(bytes));
-        self.error_type=self.error_type.or_else(||parse_error_type(bytes));
+        let u = crate::refusal::fuigo_upstream(status, &headers, &body);
+        let flux_routed = self.flux_routed;
+        self = u;
+        self.flux_routed = flux_routed;
+        self.state = self.state.or_else(|| parse_error_state(bytes));
+        self.error_type = self.error_type.or_else(|| parse_error_type(bytes));
         // Present strings outside the slug grammar are still projected, never
         // silently changed into absence. Keep the public slug readers strict.
         if let Ok(text) = std::str::from_utf8(bytes) {
-            let projected = |field: &str| upstream_value(text, 0, &|e| {
-                let value = e.get(field)?.as_str()?;
-                // The binding Flux chat capture uses the Python sentinel "None"
-                // for an absent type (FA1); it is not an upstream fact.
-                if value == "None" { return None; }
-                Some(crate::upstream_vocab::vocab(value).to_owned())
-            });
+            let projected = |field: &str| {
+                upstream_value(text, 0, &|e| {
+                    let value = e.get(field)?.as_str()?;
+                    // The binding Flux chat capture uses the Python sentinel "None"
+                    // for an absent type (FA1); it is not an upstream fact.
+                    if value == "None" {
+                        return None;
+                    }
+                    Some(crate::upstream_vocab::vocab(value).to_owned())
+                })
+            };
             self.state = self.state.or_else(|| projected("state"));
             self.error_type = self.error_type.or_else(|| projected("type"));
         }
@@ -885,31 +1005,55 @@ impl UpstreamError {
         if self.flux_routed && status == 401 && self.error_type.is_none() {
             self.error_type = Some("authentication_error".into());
         }
-        self.code=self.code.or_else(||parse_upstream_code(bytes));
-        self.retry_after_s=self.retry_after_s.or_else(||parse_upstream_retry_after(bytes));
+        self.code = self.code.or_else(|| parse_upstream_code(bytes));
+        self.retry_after_s = self
+            .retry_after_s
+            .or_else(|| parse_upstream_retry_after(bytes));
         self.classification = Some(if self.flux_routed {
-            let mut signals = crate::refusal::extract("resp", status, &headers, &body, chrono::Utc::now());
+            let mut signals =
+                crate::refusal::extract("resp", status, &headers, &body, chrono::Utc::now());
             // The bounded envelope walker also recognizes encoded provider envelopes.
             // Keep those code slots while using the raw combined message, never Display.
-            for code in [&self.state, &self.code, &self.error_type].into_iter().flatten() {
-                if !signals.codes.contains(code) { signals.codes.push(code.clone()); }
+            for code in [&self.state, &self.code, &self.error_type]
+                .into_iter()
+                .flatten()
+            {
+                if !signals.codes.contains(code) {
+                    signals.codes.push(code.clone());
+                }
             }
             crate::refusal::decide_for_request(&signals, true)
-        } else { crate::refusal::Classification::pass() });
+        } else {
+            crate::refusal::Classification::pass()
+        });
         self
     }
 }
-fn deserialize_upstream_wait<'de,D:serde::Deserializer<'de>>(d:D)->std::result::Result<Option<u64>,D::Error>{
-    Ok(serde_json::Value::deserialize(d)?.as_u64().filter(|n|*n<=7200))
+fn deserialize_upstream_wait<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?
+        .as_u64()
+        .filter(|n| *n <= 7200))
 }
-static RESET_DATE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$").unwrap());
-fn deserialize_reset<'de,D:serde::Deserializer<'de>>(d:D)->std::result::Result<Option<String>,D::Error>{
-    Ok(serde_json::Value::deserialize(d)?.as_str().filter(|s|RESET_DATE.is_match(s)).map(str::to_owned))
+static RESET_DATE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$").unwrap());
+fn deserialize_reset<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?
+        .as_str()
+        .filter(|s| RESET_DATE.is_match(s))
+        .map(str::to_owned))
 }
 
 // Only inspect error envelopes / their message wrappers, with a bounded unwrap depth.
 // Streaming deserialization permits LiteLLM's non-JSON suffix after the embedded envelope.
-fn upstream_value<T>(text: &str, depth: usize, pick: &impl Fn(&serde_json::Map<String,serde_json::Value>)->Option<T>) -> Option<T> {
+fn upstream_value<T>(
+    text: &str,
+    depth: usize,
+    pick: &impl Fn(&serde_json::Map<String, serde_json::Value>) -> Option<T>,
+) -> Option<T> {
     if depth == 8 {
         return None;
     }
@@ -930,25 +1074,28 @@ fn upstream_value<T>(text: &str, depth: usize, pick: &impl Fn(&serde_json::Map<S
                 .into_iter::<crate::selective_error::Envelope>()
                 .next()?
                 .ok()
-        })?.0;
+        })?
+        .0;
     if let Some(inner) = value.as_str() {
-        return upstream_value(inner, depth + 1,pick);
+        return upstream_value(inner, depth + 1, pick);
     }
     let error = value.get("error")?.as_object()?;
-    pick(error).or_else(|| upstream_value(error.get("message")?.as_str()?,depth+1,pick))
+    pick(error).or_else(|| upstream_value(error.get("message")?.as_str()?, depth + 1, pick))
 }
 
-fn upstream_field(text:&str,field:&str,depth:usize)->Option<String>{
-    upstream_value(text,depth,&|e|crate::refusal::slug(e.get(field)?))
+fn upstream_field(text: &str, field: &str, depth: usize) -> Option<String> {
+    upstream_value(text, depth, &|e| crate::refusal::slug(e.get(field)?))
 }
-pub fn parse_upstream_code(bytes:&[u8])->Option<String>{
-    upstream_value(std::str::from_utf8(bytes).ok()?,0,&|e|{
-        crate::refusal::fuigo_upstream(0,&serde_json::Value::Null,&serde_json::json!({"error":e})).code
+pub fn parse_upstream_code(bytes: &[u8]) -> Option<String> {
+    upstream_value(std::str::from_utf8(bytes).ok()?, 0, &|e| {
+        crate::refusal::fuigo_upstream(0, &serde_json::Value::Null, &serde_json::json!({"error":e}))
+            .code
     })
 }
-pub fn parse_upstream_retry_after(bytes:&[u8])->Option<u64>{
-    upstream_value(std::str::from_utf8(bytes).ok()?,0,&|e|{
-        crate::refusal::fuigo_upstream(0,&serde_json::Value::Null,&serde_json::json!({"error":e})).retry_after_s
+pub fn parse_upstream_retry_after(bytes: &[u8]) -> Option<u64> {
+    upstream_value(std::str::from_utf8(bytes).ok()?, 0, &|e| {
+        crate::refusal::fuigo_upstream(0, &serde_json::Value::Null, &serde_json::json!({"error":e}))
+            .retry_after_s
     })
 }
 /// Slug-only `error.state`, including double-encoded and LiteLLM-wrapped envelopes.
@@ -973,7 +1120,9 @@ pub const MAX_USER_ERROR_BODY_CHARS: usize = 280;
 pub fn status_user_message(status: StatusCode) -> String {
     match status.as_u16() {
         code @ 502..=504 => {
-            format!("Fuigo is temporarily unavailable. Please try again in a moment. (HTTP {code}).")
+            format!(
+                "Fuigo is temporarily unavailable. Please try again in a moment. (HTTP {code})."
+            )
         }
         // Upstream capacity, not an edge failure; see [`SamplingError::is_overloaded`]
         code @ 529 => {
@@ -1064,10 +1213,16 @@ pub fn try_parse_stream_error_for_request(data: &str, flux_routed: bool) -> Opti
     // Intercept before the typed backend drops provider_specific_fields.
     let envelope = crate::selective_error::from_slice(data.as_bytes())?;
     let event_type = envelope["type"].as_str().unwrap_or_default();
-    if flux_routed && (event_type == "response.failed" || event_type == "response.error"
-        || (event_type == "error" && envelope.get("error").is_none()))
+    if flux_routed
+        && (event_type == "response.failed"
+            || event_type == "response.error"
+            || (event_type == "error" && envelope.get("error").is_none()))
     {
-        let error = if event_type == "response.failed" { &envelope["response"]["error"] } else { &envelope };
+        let error = if event_type == "response.failed" {
+            &envelope["response"]["error"]
+        } else {
+            &envelope
+        };
         let code = error["code"].as_str();
         let message = match error["message"].as_str() {
             Some(message) => format!("{}: {message}", code.unwrap_or("error")),
@@ -1075,11 +1230,22 @@ pub fn try_parse_stream_error_for_request(data: &str, flux_routed: bool) -> Opti
         };
         let body = serde_json::json!({"error": error});
         return Some(SamplingError::Api {
-            status: StatusCode::INTERNAL_SERVER_ERROR, message,
-            model_metadata: None, retry_after_secs: None, should_retry: None,
-            error_code: code.map(ApiErrorCode::parse), upstream_state: None, upstream_type: None,
-            upstream_details: UpstreamError { flux_routed, ..Default::default() }
-                .with_body(500, &serde_json::to_vec(&body).expect("error envelope serialization")),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+            error_code: code.map(ApiErrorCode::parse),
+            upstream_state: None,
+            upstream_type: None,
+            upstream_details: UpstreamError {
+                flux_routed,
+                ..Default::default()
+            }
+            .with_body(
+                500,
+                &serde_json::to_vec(&body).expect("error envelope serialization"),
+            ),
         });
     }
     let ParsedError {
@@ -1089,8 +1255,12 @@ pub fn try_parse_stream_error_for_request(data: &str, flux_routed: bool) -> Opti
         ..
     } = try_parse_error(data)?;
     tracing::warn!(error_type, message, "Server-side stream error");
-    let mut upstream=UpstreamError { flux_routed, ..Default::default() }.with_body(0,data.as_bytes());
-    upstream.http_status=None;
+    let mut upstream = UpstreamError {
+        flux_routed,
+        ..Default::default()
+    }
+    .with_body(0, data.as_bytes());
+    upstream.http_status = None;
     Some(SamplingError::StreamError {
         upstream,
         error_type,
@@ -1139,7 +1309,7 @@ mod tests {
     fn overloaded_detects_stream_and_api_shapes() {
         assert!(
             SamplingError::StreamError {
- upstream: Default::default(),
+                upstream: Default::default(),
                 error_type: "overloaded_error".into(),
                 message: "Overloaded".into(),
                 code: None,
@@ -1221,7 +1391,7 @@ mod tests {
         // Stream errors classify on the parsed error_type only; a request-shaped stream error mentioning "overloaded" is not capacity
         assert!(
             !SamplingError::StreamError {
- upstream: Default::default(),
+                upstream: Default::default(),
                 error_type: "invalid_request_error".into(),
                 message: "tool result mentions overloaded".into(),
                 code: None,
@@ -1230,7 +1400,7 @@ mod tests {
         );
         assert!(
             SamplingError::StreamError {
- upstream: Default::default(),
+                upstream: Default::default(),
                 error_type: "service_unavailable_error".into(),
                 message: "upstream capacity".into(),
                 code: None,
@@ -1373,7 +1543,7 @@ mod tests {
         assert!(api.is_context_length_error());
         assert!(
             SamplingError::StreamError {
- upstream: Default::default(),
+                upstream: Default::default(),
                 error_type: "overloaded_error".into(),
                 message: "prompt is too long".into(),
                 code: None,
@@ -1439,7 +1609,7 @@ mod tests {
     fn structured_size_code_with_opaque_message_is_context_length_error() {
         // The code slot alone must classify when the text matches nothing.
         let stream = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "BAD_REQUEST".into(),
             message: "request rejected".into(),
             code: Some(ApiErrorCode::parse("request_too_large")),
@@ -1461,7 +1631,7 @@ mod tests {
 
         // An opaque error with a non-size code stays non-size.
         let opaque = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "server_error".into(),
             message: "internal error".into(),
             code: Some(ApiErrorCode::parse("overloaded_error")),
@@ -2163,7 +2333,7 @@ mod tests {
     #[test]
     fn image_processing_error_stream_requires_code() {
         let stream = |code: Option<&str>, message: &str| SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: message.into(),
             code: code.map(ApiErrorCode::parse),
@@ -2228,7 +2398,7 @@ mod tests {
             "429",
         ] {
             let err = SamplingError::StreamError {
- upstream: Default::default(),
+                upstream: Default::default(),
                 error_type: error_type.into(),
                 message: TPM_RATE_LIMIT_BODY.into(),
                 code: None,
@@ -2243,7 +2413,7 @@ mod tests {
     #[test]
     fn stream_rate_limit_code_is_not_a_size_overflow() {
         let err = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: TPM_RATE_LIMIT_BODY.into(),
             code: Some(ApiErrorCode::parse("rate_limit_error")),
@@ -2256,7 +2426,7 @@ mod tests {
         // The carve-out must never outrank a structured size code: a server that
         // stamps both is telling us the request itself is too big.
         let err = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "rate_limit_error".into(),
             message: TPM_RATE_LIMIT_BODY.into(),
             code: Some(ApiErrorCode::parse("request_too_large")),
@@ -2269,7 +2439,7 @@ mod tests {
         // Regression guard for the carve-out: a real overflow carries no
         // rate-limit type and must keep reaching the input ladder.
         let err = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "prompt is too long: 300000 tokens > 200000 maximum".into(),
             code: None,

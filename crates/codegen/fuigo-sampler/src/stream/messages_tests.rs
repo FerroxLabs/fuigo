@@ -2,13 +2,13 @@
 //! `#[path = "messages_tests.rs"] mod tests;` in messages.rs wires them in.
 
 use super::*;
-use futures_util::stream;
-use std::pin::pin;
 use fuigo_sampling_types::messages::{
     ContentBlock, MessageDeltaBody, MessageDeltaUsage, MessagesResponse, MessagesUsage,
     StreamDelta, StreamError,
 };
 use fuigo_sampling_types::serde_helpers::Open;
+use futures_util::stream;
+use std::pin::pin;
 
 fn rid() -> RequestId {
     RequestId::from("msg-test")
@@ -1248,7 +1248,10 @@ async fn split_signature_deltas_concatenate() {
     .await;
     let items = completed_items(&evs);
     assert_eq!(items.len(), 2, "{items:#?}");
-    assert_eq!(reasoning_of(&items[0]).encrypted_content.as_deref(), Some("AAAABBBBCC"));
+    assert_eq!(
+        reasoning_of(&items[0]).encrypted_content.as_deref(),
+        Some("AAAABBBBCC")
+    );
     let sigs: Vec<&str> = evs
         .iter()
         .filter_map(|e| match e {
@@ -1271,7 +1274,9 @@ async fn start_seeded_signature_is_replaced_by_first_delta_then_appended() {
     ])
     .await;
     assert_eq!(
-        reasoning_of(&completed_items(&evs)[0]).encrypted_content.as_deref(),
+        reasoning_of(&completed_items(&evs)[0])
+            .encrypted_content
+            .as_deref(),
         Some("AAAABBBB")
     );
 }
@@ -1285,7 +1290,9 @@ async fn start_seeded_signature_without_deltas_is_kept() {
     ])
     .await;
     assert_eq!(
-        reasoning_of(&completed_items(&evs)[0]).encrypted_content.as_deref(),
+        reasoning_of(&completed_items(&evs)[0])
+            .encrypted_content
+            .as_deref(),
         Some("SEEDSEED")
     );
 }
@@ -1316,7 +1323,9 @@ async fn every_thinking_block_is_kept_in_order() {
     assert_eq!(a.encrypted_content.as_deref(), Some("s1as1b"));
     assert_eq!(fuigo_sampling_types::reasoning_item_text(b), "second");
     assert_eq!(b.encrypted_content.as_deref(), Some("s2"));
-    assert!(matches!(&items[2], ConversationItem::Assistant(x) if x.content.as_ref() == "interlude"));
+    assert!(
+        matches!(&items[2], ConversationItem::Assistant(x) if x.content.as_ref() == "interlude")
+    );
 }
 
 /// A `redacted_thinking` block is kept in position between thinking blocks.
@@ -1337,11 +1346,17 @@ async fn redacted_thinking_block_is_kept_in_order() {
     .await;
     let items = completed_items(&evs);
     assert_eq!(items.len(), 4, "{items:#?}");
-    assert_eq!(reasoning_of(&items[0]).encrypted_content.as_deref(), Some("s1"));
+    assert_eq!(
+        reasoning_of(&items[0]).encrypted_content.as_deref(),
+        Some("s1")
+    );
     let mid = reasoning_of(&items[1]);
     assert!(fuigo_sampling_types::is_redacted_thinking_item(mid));
     assert_eq!(mid.encrypted_content.as_deref(), Some("opaque-blob"));
-    assert_eq!(reasoning_of(&items[2]).encrypted_content.as_deref(), Some("s2"));
+    assert_eq!(
+        reasoning_of(&items[2]).encrypted_content.as_deref(),
+        Some("s2")
+    );
 }
 
 /// P195 (U17): a `redacted_thinking` block is forwarded as its own event at the block's stop, in wire order with the
@@ -1381,7 +1396,8 @@ async fn redacted_thinking_block_emits_its_own_event_in_wire_order() {
 async fn an_empty_redacted_thinking_block_emits_no_event() {
     let evs = run_events(vec![redacted_block_start(0, ""), block_stop(0)]).await;
     assert!(
-        !evs.iter().any(|e| matches!(e, SamplingEvent::RedactedThinking { .. })),
+        !evs.iter()
+            .any(|e| matches!(e, SamplingEvent::RedactedThinking { .. })),
         "an empty blob is not forwarded"
     );
 }
@@ -1413,7 +1429,11 @@ async fn streamed_blocks_round_trip_unchanged_into_the_next_request() {
     let json = serde_json::to_value(fuigo_sampling_types::build_messages_request(&req)).unwrap();
     let blocks = json["messages"][1]["content"].as_array().unwrap();
     let kinds: Vec<&str> = blocks.iter().map(|b| b["type"].as_str().unwrap()).collect();
-    assert_eq!(kinds, vec!["thinking", "redacted_thinking", "thinking", "text"], "{json:#}");
+    assert_eq!(
+        kinds,
+        vec!["thinking", "redacted_thinking", "thinking", "text"],
+        "{json:#}"
+    );
     assert_eq!(blocks[0]["thinking"], "first");
     assert_eq!(blocks[0]["signature"], "s1as1b");
     assert_eq!(blocks[1]["data"], "opaque-blob");

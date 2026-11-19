@@ -2695,7 +2695,8 @@ mod tests {
         assert!(fast.findings.iter().all(|f| f.id != id));
         let unread = doctor_view_with_escape_time(&tmux_ctx, probes::TmuxProbeResult::Unavailable);
         assert!(unread.findings.iter().all(|f| f.id != id));
-        let outside = doctor_view_with_escape_time(&TerminalContext::default(), escape_time_fact("500"));
+        let outside =
+            doctor_view_with_escape_time(&TerminalContext::default(), escape_time_fact("500"));
         assert!(outside.findings.iter().all(|f| f.id != id));
     }
 

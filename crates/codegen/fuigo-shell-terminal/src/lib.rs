@@ -94,7 +94,10 @@ pub(crate) mod p113_probe {
     /// (which registers `P113_MCP_BEARER` and `GROQ_API_KEY` as configured credentials and runs the body).
     pub(crate) fn parent_env(test_name: &str) -> bool {
         if std::env::var("P113_CHILD_TEST").as_deref() == Ok(test_name) {
-            fuigo_tools::util::shell_env_policy::register_credential_env_names(["P113_MCP_BEARER", "GROQ_API_KEY"]);
+            fuigo_tools::util::shell_env_policy::register_credential_env_names([
+                "P113_MCP_BEARER",
+                "GROQ_API_KEY",
+            ]);
             return false;
         }
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
@@ -113,7 +116,10 @@ pub(crate) mod p113_probe {
             String::from_utf8_lossy(&output.stderr)
         )
         .replace("fake-p113-", "[redacted]-");
-        assert!(output.status.success(), "isolated P113 probe failed: {diagnostics}");
+        assert!(
+            output.status.success(),
+            "isolated P113 probe failed: {diagnostics}"
+        );
         assert!(
             diagnostics.contains("test result: ok. 1 passed"),
             "the P113 child must run exactly one test: {diagnostics}"

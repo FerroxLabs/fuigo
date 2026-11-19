@@ -83,7 +83,8 @@ impl SessionActor {
                 .ok_or_else(|| "goal state disappeared before evaluation".to_string())?;
             (snapshot.objective.clone(), snapshot.plan_file.clone())
         };
-        let transcript = crate::session::model_facing_reads::goal_transcript(&self.chat_state_handle).await;
+        let transcript =
+            crate::session::model_facing_reads::goal_transcript(&self.chat_state_handle).await;
         let plan = match plan_file {
             Some(path) => tokio::fs::read_to_string(path)
                 .await
@@ -106,7 +107,10 @@ impl SessionActor {
         let session_id = self.session_info.id.to_string();
         let mut last_error = String::new();
         for _ in 0..2 {
-            let client = match self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await {
+            let client = match self
+                .prepare_chat_completion(false, crate::session::acp_session::CallRole::Side)
+                .await
+            {
                 Ok(client) => client,
                 Err(error) => {
                     last_error = format!(
@@ -1218,7 +1222,9 @@ impl SessionActor {
     /// P195 (K25): the token-budget denial of an ACTIVE goal whose `--budget` the session's spend has reached, after stopping
     /// the goal budget-limited (the transition [`Self::enforce_goal_token_budget`] makes at a turn's end). `None` when no
     /// goal is active, it has no budget, or the budget is not spent.
-    pub(crate) async fn goal_budget_spent_denial(&self) -> Option<crate::acp_error::ExecutionBudgetDenial> {
+    pub(crate) async fn goal_budget_spent_denial(
+        &self,
+    ) -> Option<crate::acp_error::ExecutionBudgetDenial> {
         let budget = {
             let tracker = self.goal_tracker.lock();
             if tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active) {
@@ -2130,7 +2136,10 @@ impl SessionActor {
         GoalRoundDecision::Continue(plan.directive)
     }
 
-    #[allow(clippy::disallowed_methods, reason = "classifier details file in the goal scratch root under system temp; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "classifier details file in the goal scratch root under system temp; not inside a session folder"
+    )]
     async fn account_not_achieved_without_sampler(
         &self,
         policy: &GoalClassifierPolicy,

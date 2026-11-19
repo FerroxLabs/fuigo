@@ -7,6 +7,7 @@ use crate::diagnostics::{DiagnosticReport, FixActivation, FixPlan, ShellKind};
 
 mod human;
 mod json;
+mod report;
 
 pub const SCHEMA_VERSION: &str = "1";
 
@@ -16,6 +17,10 @@ pub struct DoctorArgs {
     /// Print the diagnostic report as JSON.
     #[arg(long)]
     pub json: bool,
+    /// Print a Markdown summary of this machine to paste into a bug report. Nothing is sent anywhere; secrets, URLs,
+    /// headers and environment values are left out.
+    #[arg(long, conflicts_with = "json")]
+    pub report: bool,
     #[command(subcommand)]
     pub command: Option<DoctorCommand>,
 }
@@ -37,6 +42,9 @@ pub struct FixArgs {
 
 pub fn run(args: DoctorArgs) -> Result<()> {
     match args.command {
+        None if args.report => {
+            run_markdown_report(&mut fuigo_tty_utils::best_effort_stdout::display_stdout())
+        }
         None => run_report(
             args.json,
             &mut fuigo_tty_utils::best_effort_stdout::display_stdout(),
@@ -52,9 +60,17 @@ pub fn run(args: DoctorArgs) -> Result<()> {
 
 pub fn run_with_writer(args: DoctorArgs, writer: &mut impl Write) -> Result<()> {
     match args.command {
+        None if args.report => run_markdown_report(writer),
         None => run_report(args.json, writer),
         Some(_) => anyhow::bail!("Doctor fixes require interactive input and output."),
     }
+}
+
+/// `fuigo doctor --report`: the Markdown summary, printed and nothing else.
+fn run_markdown_report(writer: &mut impl Write) -> Result<()> {
+    let san = report::Sanitizer::from_env();
+    write!(writer, "{}", report::render(&report::collect(), &san))?;
+    Ok(())
 }
 
 fn run_report(json_output: bool, writer: &mut impl Write) -> Result<()> {

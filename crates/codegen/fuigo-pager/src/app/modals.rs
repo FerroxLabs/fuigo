@@ -391,13 +391,19 @@ impl AgentView {
                 // A grant is the shell's `/hooks-trust`, sent as typed: one grant path (settle_session_grant, F5 reload).
                 TrustKeyOutcome::Grant => {
                     self.active_modal = None;
-                    InputOutcome::Action(Action::SendSlashCommandPreservingDraft(trust_modal::GRANT_COMMAND.to_owned()))
+                    InputOutcome::Action(Action::SendSlashCommandPreservingDraft(
+                        trust_modal::GRANT_COMMAND.to_owned(),
+                    ))
                 }
                 TrustKeyOutcome::RevokeCurrent => {
                     self.active_modal = None;
-                    InputOutcome::Action(Action::SendSlashCommandPreservingDraft(trust_modal::REVOKE_COMMAND.to_owned()))
+                    InputOutcome::Action(Action::SendSlashCommandPreservingDraft(
+                        trust_modal::REVOKE_COMMAND.to_owned(),
+                    ))
                 }
-                TrustKeyOutcome::RevokeOther(folder) => InputOutcome::Action(Action::DeclineFolderTrust(folder)),
+                TrustKeyOutcome::RevokeOther(folder) => {
+                    InputOutcome::Action(Action::DeclineFolderTrust(folder))
+                }
             };
         }
 
@@ -618,7 +624,8 @@ impl AgentView {
             return false;
         };
         let name = selected.match_text.clone();
-        let Some(route_items) = crate::slash::commands::model::route_items_for(&self.session.models, &name)
+        let Some(route_items) =
+            crate::slash::commands::model::route_items_for(&self.session.models, &name)
         else {
             return false;
         };
@@ -1624,7 +1631,12 @@ impl AgentView {
 
         // F11: folder trust. The chrome handles the close button and tab clicks; nothing else is clickable.
         if let Some(ActiveModal::FolderTrust { state }) = &mut self.active_modal {
-            return match mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row) {
+            return match mw::handle_modal_mouse(
+                &mut state.window,
+                mouse.kind,
+                mouse.column,
+                mouse.row,
+            ) {
                 ModalWindowOutcome::CloseRequested => {
                     self.active_modal = None;
                     InputOutcome::Changed
@@ -3431,9 +3443,9 @@ mod settings_memory_paste_routing_tests {
 #[cfg(test)]
 mod model_routes_picker_tests {
     use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
     use crate::app::agent_view::test_fixtures::make_agent;
     use crate::app::app_view::InputOutcome;
-    use crate::app::actions::Action;
     use crate::views::modal::ActiveModal;
     use agent_client_protocol as acp;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -3445,7 +3457,10 @@ mod model_routes_picker_tests {
     fn model(id: &str, name: &str, meta: serde_json::Value) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(std::sync::Arc::from(id));
         let meta = meta.as_object().cloned();
-        (id.clone(), acp::ModelInfo::new(id, name.to_string()).meta(meta))
+        (
+            id.clone(),
+            acp::ModelInfo::new(id, name.to_string()).meta(meta),
+        )
     }
 
     fn route(key: &str, word: &str, badge: &str, reason: &str) -> serde_json::Value {
@@ -3455,13 +3470,25 @@ mod model_routes_picker_tests {
     /// A model with three routes and one with one route.
     fn load_models(agent: &mut crate::app::agent_view::AgentView) {
         for (id, info) in [
-            model("grok-4.7", "Grok 4.7", serde_json::json!({ "routes": [
-                route("grok-4.7", "flux", "via Flux Router", "via Flux Router: $2.5 in / $10 out per 1M tokens"),
-                route("xai/grok-4.7", "grok", "included in your Grok subscription", "included in your Grok subscription: no per-token charge"),
-                route("xai-key/grok-4.7", "xai", "your xAI key", "billed to your xAI key"),
-            ]})),
-            model("xai/grok-4.7", "grok-4.7 (Grok subscription)", serde_json::json!({ "altRouteOf": "grok-4.7" })),
-            model("xai-key/grok-4.7", "grok-4.7 (xAI key)", serde_json::json!({ "altRouteOf": "grok-4.7" })),
+            model(
+                "grok-4.7",
+                "Grok 4.7",
+                serde_json::json!({ "routes": [
+                    route("grok-4.7", "flux", "via Flux Router", "via Flux Router: $2.5 in / $10 out per 1M tokens"),
+                    route("xai/grok-4.7", "grok", "included in your Grok subscription", "included in your Grok subscription: no per-token charge"),
+                    route("xai-key/grok-4.7", "xai", "your xAI key", "billed to your xAI key"),
+                ]}),
+            ),
+            model(
+                "xai/grok-4.7",
+                "grok-4.7 (Grok subscription)",
+                serde_json::json!({ "altRouteOf": "grok-4.7" }),
+            ),
+            model(
+                "xai-key/grok-4.7",
+                "grok-4.7 (xAI key)",
+                serde_json::json!({ "altRouteOf": "grok-4.7" }),
+            ),
             model("solo", "Solo", serde_json::json!({})),
         ] {
             agent.session.models.available.insert(id, info);
@@ -3476,7 +3503,14 @@ mod model_routes_picker_tests {
         load_models(&mut agent);
         let items = {
             let ctx = agent.prompt.slash_controller.app_ctx(&agent.session.models);
-            agent.prompt.slash_controller.registry().get("model").unwrap().suggest_args(&ctx, "").unwrap()
+            agent
+                .prompt
+                .slash_controller
+                .registry()
+                .get("model")
+                .unwrap()
+                .suggest_args(&ctx, "")
+                .unwrap()
         };
         agent.active_modal = Some(ActiveModal::ArgPicker {
             command: "model".into(),
@@ -3492,9 +3526,14 @@ mod model_routes_picker_tests {
 
     fn rows(agent: &crate::app::agent_view::AgentView) -> (String, Vec<(String, String)>) {
         match agent.active_modal.as_ref() {
-            Some(ActiveModal::ArgPicker { args_query, items, .. }) => (
+            Some(ActiveModal::ArgPicker {
+                args_query, items, ..
+            }) => (
                 args_query.clone(),
-                items.iter().map(|i| (i.display.clone(), i.description.clone())).collect(),
+                items
+                    .iter()
+                    .map(|i| (i.display.clone(), i.description.clone()))
+                    .collect(),
             ),
             _ => panic!("the model picker is open"),
         }
@@ -3511,8 +3550,17 @@ mod model_routes_picker_tests {
             let (query, list) = rows(&agent);
             assert_eq!(query, "Grok 4.7 via ", "{code:?}");
             assert_eq!(list.len(), 3, "{list:?}");
-            assert_eq!(list[0], ("via Flux Router".into(), "via Flux Router: $2.5 in / $10 out per 1M tokens".into()));
-            assert_eq!(list[1].1, "included in your Grok subscription: no per-token charge");
+            assert_eq!(
+                list[0],
+                (
+                    "via Flux Router".into(),
+                    "via Flux Router: $2.5 in / $10 out per 1M tokens".into()
+                )
+            );
+            assert_eq!(
+                list[1].1,
+                "included in your Grok subscription: no per-token charge"
+            );
             assert_eq!(list[2].0, "your xAI key");
         }
     }
@@ -3562,8 +3610,14 @@ mod model_routes_picker_tests {
                 .map(|r| (r.display.clone(), r.description.clone()))
                 .collect();
             assert_eq!(rows.len(), 3, "{rows:?}");
-            assert_eq!(rows[0].1, "via Flux Router: $2.5 in / $10 out per 1M tokens");
-            assert_eq!(rows[1].1, "included in your Grok subscription: no per-token charge");
+            assert_eq!(
+                rows[0].1,
+                "via Flux Router: $2.5 in / $10 out per 1M tokens"
+            );
+            assert_eq!(
+                rows[1].1,
+                "included in your Grok subscription: no per-token charge"
+            );
         }
     }
 

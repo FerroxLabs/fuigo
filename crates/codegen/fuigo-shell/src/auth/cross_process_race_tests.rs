@@ -879,7 +879,10 @@ async fn update_unless_superseded_registers_the_sibling_bearer_it_hands_out() {
     let returned = bounded(mgr.update_unless_superseded(manager_auth("sib-000001".into())))
         .await
         .unwrap();
-    assert_eq!(returned.key, "sib-000002", "the caller is handed the sibling's newer credential");
+    assert_eq!(
+        returned.key, "sib-000002",
+        "the caller is handed the sibling's newer credential"
+    );
     assert!(
         mgr.is_session_bearer("sib-000002"),
         "a session bearer handed out must be recognised as one"
@@ -898,7 +901,10 @@ async fn edit_stored_credential_registers_the_disk_bearer_it_hands_out() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(returned.key, "sib-000002", "the edited disk entry is returned");
+    assert_eq!(
+        returned.key, "sib-000002",
+        "the edited disk entry is returned"
+    );
     assert!(
         mgr.is_session_bearer("sib-000002"),
         "a session bearer handed out must be recognised as one"

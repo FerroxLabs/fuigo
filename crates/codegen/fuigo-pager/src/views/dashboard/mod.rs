@@ -20,8 +20,8 @@
 pub(crate) mod animation;
 pub mod layout;
 pub mod peek;
-pub mod peek_tail;
 pub(crate) mod peek_select;
+pub mod peek_tail;
 pub mod render;
 pub mod row;
 pub mod state;

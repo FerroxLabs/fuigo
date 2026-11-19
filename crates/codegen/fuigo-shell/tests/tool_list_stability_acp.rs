@@ -6,7 +6,9 @@
 #[allow(dead_code)]
 mod acp_harness;
 
-use acp_harness::{AutoApproveClient, RPC_TIMEOUT, connect_client, run_agent_test, spawn_agent_local_with_config};
+use acp_harness::{
+    AutoApproveClient, RPC_TIMEOUT, connect_client, run_agent_test, spawn_agent_local_with_config,
+};
 use agent_client_protocol::{self as acp, Agent as _};
 use fuigo_test_support::mock_server::{LogEntry, MockModelEntry};
 use fuigo_test_support::scripted::ScriptedResponse;
@@ -17,7 +19,11 @@ use serde_json::{Value, json};
 const STOCK_MODEL: &str = "test-model";
 const OPENAI_MODEL: &str = "gpt-5.6-acp-test";
 
-fn main_turn_requests<'a>(requests: &'a [LogEntry], path: &str, session: &str) -> Vec<&'a LogEntry> {
+fn main_turn_requests<'a>(
+    requests: &'a [LogEntry],
+    path: &str,
+    session: &str,
+) -> Vec<&'a LogEntry> {
     requests
         .iter()
         .filter(|r| r.path == path)
@@ -33,16 +39,28 @@ fn tool_names(body: &Value) -> Vec<String> {
         .map(|tools| {
             tools
                 .iter()
-                .filter_map(|t| t["function"]["name"].as_str().or_else(|| t["name"].as_str()).map(str::to_owned))
+                .filter_map(|t| {
+                    t["function"]["name"]
+                        .as_str()
+                        .or_else(|| t["name"].as_str())
+                        .map(str::to_owned)
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-async fn open_session(conn: &acp::ClientSideConnection, cwd: &std::path::Path, model: &str) -> acp::SessionId {
+async fn open_session(
+    conn: &acp::ClientSideConnection,
+    cwd: &std::path::Path,
+    model: &str,
+) -> acp::SessionId {
     tokio::time::timeout(
         RPC_TIMEOUT,
-        conn.new_session(acp::NewSessionRequest::new(cwd.to_path_buf()).meta(json!({ "modelId": model }).as_object().cloned())),
+        conn.new_session(
+            acp::NewSessionRequest::new(cwd.to_path_buf())
+                .meta(json!({ "modelId": model }).as_object().cloned()),
+        ),
     )
     .await
     .expect("session/new timed out")
@@ -57,13 +75,18 @@ async fn prompt_until_finalize(conn: &acp::ClientSideConnection, session: &acp::
         RPC_TIMEOUT,
         conn.prompt(acp::PromptRequest::new(
             session.clone(),
-            vec![acp::ContentBlock::Text(acp::TextContent::new("Read notes.txt twice, then summarize it.".to_owned()))],
+            vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "Read notes.txt twice, then summarize it.".to_owned(),
+            ))],
         )),
     )
     .await
     .expect("prompt timed out");
     if let Err(e) = &result {
-        assert!(e.to_string().contains("execution_id"), "unexpected prompt error: {e}");
+        assert!(
+            e.to_string().contains("execution_id"),
+            "unexpected prompt error: {e}"
+        );
     }
 }
 
@@ -73,7 +96,10 @@ fn agent_config() -> fuigo_shell::agent::config::Config {
     config
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn responses_profile_keeps_the_tool_list_identical_on_every_request_including_finalize() {
     // Three model calls per execution: two tool rounds, then the third call is the finalize slot.
@@ -101,7 +127,12 @@ fn responses_profile_keeps_the_tool_list_identical_on_every_request_including_fi
             ));
         }
         // The finalize request gets the fallback echo (a text reply), which ends the turn.
-        let (conn, _) = connect_client(AutoApproveClient, "tool-list-stability", spawn_agent_local_with_config(agent_config())).await;
+        let (conn, _) = connect_client(
+            AutoApproveClient,
+            "tool-list-stability",
+            spawn_agent_local_with_config(agent_config()),
+        )
+        .await;
         let session = open_session(&conn, &cwd, OPENAI_MODEL).await;
         prompt_until_finalize(&conn, &session).await;
         for expectation in &expectations {
@@ -110,11 +141,22 @@ fn responses_profile_keeps_the_tool_list_identical_on_every_request_including_fi
 
         let requests = mock.requests();
         let main = main_turn_requests(&requests, "/v1/responses", &session.0);
-        assert_eq!(main.len(), 3, "two tool rounds and one finalize request expected: {}", mock.request_log_summary());
-        let bodies: Vec<&Value> = main.iter().map(|r| r.body.as_ref().expect("json body")).collect();
+        assert_eq!(
+            main.len(),
+            3,
+            "two tool rounds and one finalize request expected: {}",
+            mock.request_log_summary()
+        );
+        let bodies: Vec<&Value> = main
+            .iter()
+            .map(|r| r.body.as_ref().expect("json body"))
+            .collect();
         let first_tools = serde_json::to_string(&bodies[0]["tools"]).unwrap();
         let names = tool_names(bodies[0]);
-        assert!(names.iter().any(|n| n == "read_file"), "main-turn tools must include read_file: {names:?}");
+        assert!(
+            names.iter().any(|n| n == "read_file"),
+            "main-turn tools must include read_file: {names:?}"
+        );
         for (i, body) in bodies.iter().enumerate() {
             assert_eq!(
                 serde_json::to_string(&body["tools"]).unwrap(),
@@ -124,8 +166,19 @@ fn responses_profile_keeps_the_tool_list_identical_on_every_request_including_fi
             );
         }
         // Tool rounds leave tool_choice open; the finalize request closes it with a real `none`.
-        assert!(bodies[0].get("tool_choice").is_none_or(|v| v.is_null() || v == "auto"), "{}", bodies[0]["tool_choice"]);
-        assert_eq!(bodies[2]["tool_choice"], json!("none"), "finalize request: {}", bodies[2]);
+        assert!(
+            bodies[0]
+                .get("tool_choice")
+                .is_none_or(|v| v.is_null() || v == "auto"),
+            "{}",
+            bodies[0]["tool_choice"]
+        );
+        assert_eq!(
+            bodies[2]["tool_choice"],
+            json!("none"),
+            "finalize request: {}",
+            bodies[2]
+        );
         // The finalize request still carried the full tool list, not an empty one.
         assert_eq!(tool_names(bodies[2]), names);
     });

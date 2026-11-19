@@ -27,7 +27,10 @@ impl SessionClientCaps {
     }
 
     /// Report the session's own folder-trust grants to `grants`.
-    pub(crate) fn with_folder_trust_grants(mut self, grants: mpsc::UnboundedSender<SessionGrant>) -> Self {
+    pub(crate) fn with_folder_trust_grants(
+        mut self,
+        grants: mpsc::UnboundedSender<SessionGrant>,
+    ) -> Self {
         self.folder_trust_grants = Some(grants);
         self
     }

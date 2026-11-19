@@ -235,7 +235,7 @@ fn git_repo_facts(cwd: &Path) -> (Option<String>, Option<String>) {
     let remote_url = repo
         .find_remote("origin")
         .ok()
-        .and_then(|r| r.url().map(crate::session::git::strip_url_credentials));
+        .and_then(|r| r.url().ok().map(crate::session::git::strip_url_credentials));
     (repo_root, remote_url)
 }
 
@@ -459,16 +459,38 @@ mod tests {
             record.recorded_at = "t".to_string();
             record
         };
-        for proxy in ["https://cli-proxy.example/v1", "http://api.fluxrouter.ai/v1", "not a url", ""] {
-            let bytes = env().for_method(&proxy_method(proxy)).to_json_bytes().unwrap();
+        for proxy in [
+            "https://cli-proxy.example/v1",
+            "http://api.fluxrouter.ai/v1",
+            "not a url",
+            "",
+        ] {
+            let bytes = env()
+                .for_method(&proxy_method(proxy))
+                .to_json_bytes()
+                .unwrap();
             let text = String::from_utf8(bytes.clone()).unwrap().to_lowercase();
-            for leaked in ["user-123", "team-456", "host-1", "server-9", "rowan", "sb_abc123", "/srv/"] {
+            for leaked in [
+                "user-123",
+                "team-456",
+                "host-1",
+                "server-9",
+                "rowan",
+                "sb_abc123",
+                "/srv/",
+            ] {
                 assert!(!text.contains(leaked), "{proxy}: {leaked} in {text}");
             }
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             for key in [
-                "user_id", "principal_id", "hostname", "server_id", "repo_root", "remote_url",
-                "sandbox_id", "sandbox_profile",
+                "user_id",
+                "principal_id",
+                "hostname",
+                "server_id",
+                "repo_root",
+                "remote_url",
+                "sandbox_id",
+                "sandbox_profile",
             ] {
                 assert_eq!(value[key], serde_json::Value::Null, "{proxy}: {key}");
             }
@@ -478,7 +500,9 @@ mod tests {
         }
         for kept in [
             proxy_method("https://api.fluxrouter.ai/v1"),
-            fuigo_file_utils::UploadMethod::Direct { service_account_key: None },
+            fuigo_file_utils::UploadMethod::Direct {
+                service_account_key: None,
+            },
         ] {
             assert_eq!(env().for_method(&kept), env(), "{kept:?}");
         }

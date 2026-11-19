@@ -6,9 +6,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 // Canonical in fuigo-workspace-types; re-exported for existing paths.
-pub use fuigo_workspace_types::rpc::search::{
-    ContentMatch, ContentMatchFile, ContentSearchData,
-};
+pub use fuigo_workspace_types::rpc::search::{ContentMatch, ContentMatchFile, ContentSearchData};
 
 #[derive(Debug, Clone, Default)]
 pub struct ContentSearchParams {
@@ -310,7 +308,8 @@ mod tests {
                 ),
             )
             .unwrap();
-            std::fs::set_permissions(&probe, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&probe, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
             let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
             cmd.arg(NAME)
                 .args(["--test-threads=1", "--nocapture"])
@@ -328,8 +327,14 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             )
             .replace("fake-p113-", "[redacted]-");
-            assert!(output.status.success(), "isolated P113 probe failed: {diagnostics}");
-            assert!(diagnostics.contains("test result: ok. 1 passed"), "one child test: {diagnostics}");
+            assert!(
+                output.status.success(),
+                "isolated P113 probe failed: {diagnostics}"
+            );
+            assert!(
+                diagnostics.contains("test result: ok. 1 passed"),
+                "one child test: {diagnostics}"
+            );
             assert_eq!(
                 std::fs::read_to_string(&marker).ok().as_deref(),
                 Some("1"),

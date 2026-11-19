@@ -14,7 +14,6 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 
-
 fn mode_of(path: &Path) -> u32 {
     crate::test_support::unix_mode(path)
 }
@@ -51,10 +50,17 @@ fn byte_counting_fake(sock: &Path) -> tokio::sync::oneshot::Receiver<usize> {
     rx
 }
 
-async fn connect_client(sock: &Path) -> Result<Result<LeaderClient, ClientError>, tokio::time::error::Elapsed> {
+async fn connect_client(
+    sock: &Path,
+) -> Result<Result<LeaderClient, ClientError>, tokio::time::error::Elapsed> {
     tokio::time::timeout(
         Duration::from_secs(5),
-        LeaderClient::connect(sock.to_path_buf(), "usock-test", ClientMode::Stdio, ClientCapabilities::default()),
+        LeaderClient::connect(
+            sock.to_path_buf(),
+            "usock-test",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        ),
     )
     .await
 }
@@ -64,7 +70,10 @@ async fn connect_client(sock: &Path) -> Result<Result<LeaderClient, ClientError>
 /// 0600 (0755 under 022), so this fails as soon as the explicit chmod is gone.
 #[test]
 fn t1_the_socket_is_0600_whatever_the_umask() {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let temp = TempDir::new().unwrap();
     let sock = temp.path().join("leader.sock");
     let handle = rt.block_on(async {
@@ -72,9 +81,20 @@ fn t1_the_socket_is_0600_whatever_the_umask() {
         tokio::time::sleep(Duration::from_millis(150)).await;
         handle
     });
-    assert_eq!(mode_of(&sock), 0o600, "the leader socket must be owner-only whatever the umask");
-    let leftovers: Vec<_> = std::fs::read_dir(temp.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
-    assert_eq!(leftovers, vec![std::ffi::OsString::from("leader.sock")], "no bind scratch dir left behind");
+    assert_eq!(
+        mode_of(&sock),
+        0o600,
+        "the leader socket must be owner-only whatever the umask"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        leftovers,
+        vec![std::ffi::OsString::from("leader.sock")],
+        "no bind scratch dir left behind"
+    );
     handle.cancel.cancel();
 }
 
@@ -84,7 +104,10 @@ async fn t2_same_uid_client_registers_with_the_product_server() {
     let sock = temp.path().join("leader.sock");
     let handle = spawn_leader_server(sock.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let client = connect_client(&sock).await.expect("no timeout").expect("same user connects");
+    let client = connect_client(&sock)
+        .await
+        .expect("no timeout")
+        .expect("same user connects");
     drop(client);
     handle.cancel.cancel();
 }
@@ -96,8 +119,15 @@ async fn t3_client_refuses_a_foreign_peer_and_sends_nothing() {
     let received = byte_counting_fake(&sock);
     set(Side::Client, &sock, Inject::ForeignUid);
     let result = connect_client(&sock).await.expect("no timeout");
-    assert!(matches!(result, Err(ClientError::PeerRefused)), "client must refuse");
-    assert_eq!(received.await.unwrap(), 0, "the fake server must have received zero bytes");
+    assert!(
+        matches!(result, Err(ClientError::PeerRefused)),
+        "client must refuse"
+    );
+    assert_eq!(
+        received.await.unwrap(),
+        0,
+        "the fake server must have received zero bytes"
+    );
 }
 
 #[tokio::test]
@@ -109,8 +139,15 @@ async fn t4_server_drops_a_foreign_peer_without_entering_the_handler() {
     set(Side::Server, &sock, Inject::ForeignUid);
     let mut stream = LeaderStream::connect(&sock).await.unwrap();
     let _ = register_frame(&mut stream).await;
-    let reply = tokio::time::timeout(Duration::from_secs(3), read_message::<_, ServerMessage>(&mut stream)).await;
-    assert!(matches!(reply, Ok(Err(_))), "the server must close without a reply, got {reply:?}");
+    let reply = tokio::time::timeout(
+        Duration::from_secs(3),
+        read_message::<_, ServerMessage>(&mut stream),
+    )
+    .await;
+    assert!(
+        matches!(reply, Ok(Err(_))),
+        "the server must close without a reply, got {reply:?}"
+    );
     assert_eq!(handle.client_count.load(Ordering::Relaxed), 0);
     handle.cancel.cancel();
 }
@@ -132,7 +169,11 @@ async fn t5_a_failed_credential_query_refuses_on_both_sides() {
     set(Side::Server, &sock, Inject::QueryError);
     let mut stream = LeaderStream::connect(&sock).await.unwrap();
     let _ = register_frame(&mut stream).await;
-    let reply = tokio::time::timeout(Duration::from_secs(3), read_message::<_, ServerMessage>(&mut stream)).await;
+    let reply = tokio::time::timeout(
+        Duration::from_secs(3),
+        read_message::<_, ServerMessage>(&mut stream),
+    )
+    .await;
     assert!(matches!(reply, Ok(Err(_))), "got {reply:?}");
     handle.cancel.cancel();
 }
@@ -146,7 +187,10 @@ fn t6_decision_table() {
     assert_eq!(peer_is_same_user::<()>(0, Ok(1000)), Refuse);
     assert_eq!(peer_is_same_user::<()>(0, Ok(0)), Accept);
     assert_eq!(peer_is_same_user(1000, Err("no credentials")), Refuse);
-    assert_eq!(peer_is_same_user(0, Err(std::io::Error::other("x"))), Refuse);
+    assert_eq!(
+        peer_is_same_user(0, Err(std::io::Error::other("x"))),
+        Refuse
+    );
 }
 
 // Reuse tests (packet 2): the extracted pieces driven with a non-leader path and a non-leader frame limit.
@@ -161,7 +205,9 @@ async fn xs2_bind_private_with_gives_a_0600_socket_for_any_listener() {
 
 #[tokio::test]
 async fn xs2_oversized_frame_is_rejected_at_a_custom_limit() {
-    use crate::leader::protocol::{FrameReader, ProtocolError, read_frame_limited, write_frame_limited};
+    use crate::leader::protocol::{
+        FrameReader, ProtocolError, read_frame_limited, write_frame_limited,
+    };
     let (mut a, mut b) = tokio::io::duplex(1024);
     assert!(matches!(
         write_frame_limited(&mut a, &[0u8; 17], 16).await,
@@ -169,9 +215,14 @@ async fn xs2_oversized_frame_is_rejected_at_a_custom_limit() {
     ));
     write_frame_limited(&mut a, &[7u8; 16], 16).await.unwrap();
     assert_eq!(read_frame_limited(&mut b, 16).await.unwrap(), vec![7u8; 16]);
-    tokio::io::AsyncWriteExt::write_all(&mut a, &17u32.to_be_bytes()).await.unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut a, &17u32.to_be_bytes())
+        .await
+        .unwrap();
     let mut reader = FrameReader::with_limit(&mut b, 16);
-    assert!(matches!(reader.read_frame().await, Err(ProtocolError::MessageTooLarge(17))));
+    assert!(matches!(
+        reader.read_frame().await,
+        Err(ProtocolError::MessageTooLarge(17))
+    ));
 }
 
 #[tokio::test]

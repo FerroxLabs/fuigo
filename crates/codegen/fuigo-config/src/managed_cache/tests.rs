@@ -9,7 +9,6 @@ fn dkey(fp: &str) -> ServingIdentity {
     }
 }
 
-
 pub(super) fn decision_is_compromised(
     signed_verdict: crate::signed_policy::SignedVerdict,
     claim_imposes: impl FnOnce() -> bool,

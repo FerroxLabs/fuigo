@@ -90,10 +90,15 @@ async fn background_task_reaped_on_quit() {
     let pid = read_pid(&pidfile);
     assert!(pid > 1, "pidfile did not contain a valid pid: {pid}");
     let child = read_pid(&childfile);
-    assert!(child > 1, "child pidfile did not contain a valid pid: {child}");
+    assert!(
+        child > 1,
+        "child pidfile did not contain a valid pid: {child}"
+    );
 
     // Sanity: the detached shell and its sleep are alive before we quit.
-    if !wait_until(Duration::from_secs(5), || pid_alive(pid) && pid_alive(child)) {
+    if !wait_until(Duration::from_secs(5), || {
+        pid_alive(pid) && pid_alive(child)
+    }) {
         panic!(
             "background sleep (pid {pid}) exited immediately; nothing to test\n\
              done={:?} err={:?}\n--- files under home ---\n{}\n--- screen ---\n{}",

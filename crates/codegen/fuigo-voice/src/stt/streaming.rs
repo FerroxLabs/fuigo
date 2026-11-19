@@ -235,7 +235,11 @@ fn insert_attribution_header(request: &mut WsRequest, url: &Url, config: &VoiceC
     if fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(url.as_str())
         .is_permitted()
     {
-        insert_optional_header(request, "x-fuigo-client-identifier", &config.client_identifier);
+        insert_optional_header(
+            request,
+            "x-fuigo-client-identifier",
+            &config.client_identifier,
+        );
     }
 }
 
@@ -279,7 +283,9 @@ mod tests {
             "ws://api.fluxrouter.ai/v1/realtime/stt",
         ] {
             assert!(
-                !handshake(url).headers().contains_key("x-fuigo-client-identifier"),
+                !handshake(url)
+                    .headers()
+                    .contains_key("x-fuigo-client-identifier"),
                 "{url} got the client identifier"
             );
         }

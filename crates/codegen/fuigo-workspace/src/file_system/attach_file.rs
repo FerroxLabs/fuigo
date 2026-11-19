@@ -1,11 +1,11 @@
 //! Attaches file content and renders it in the training format
 use agent_client_protocol::{BlobResourceContents, EmbeddedResource, EmbeddedResourceResource};
 use base64::{Engine as _, engine::general_purpose};
+use fuigo_tools::util::truncate::estimate_tokens;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tracing::warn;
-use fuigo_tools::util::truncate::estimate_tokens;
 #[cfg(test)]
 mod persistence {
     use std::path::PathBuf;

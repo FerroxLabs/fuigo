@@ -68,8 +68,14 @@ fn scan_builds_a_plan_from_snapshots_hooks_and_server_lists() {
         Some(["permission", "env", "env", "hook"].as_slice()),
         "{project:?}"
     );
-    assert!(project.contains(&"mcp"), "the .mcp.json server is project-scoped");
-    assert!(kinds(&plan.global_items).contains(&"mcp"), "the ~/.claude.json server is global");
+    assert!(
+        project.contains(&"mcp"),
+        "the .mcp.json server is project-scoped"
+    );
+    assert!(
+        kinds(&plan.global_items).contains(&"mcp"),
+        "the ~/.claude.json server is global"
+    );
     let env: Vec<_> = plan
         .project_items
         .iter()
@@ -85,8 +91,12 @@ fn scan_builds_a_plan_from_snapshots_hooks_and_server_lists() {
 fn an_empty_scan_is_an_empty_plan() {
     let dir = tempfile::tempdir().unwrap();
     let plan = scan_importable_settings(dir.path(), &[], |_| None, vec![], vec![], vec![]);
-    assert!(plan.global_items.iter().all(|i| matches!(i, ImportableItem::PathEntry { .. })),
-        "only a real ~/.claude/{{skills,rules}} on this machine could appear");
+    assert!(
+        plan.global_items
+            .iter()
+            .all(|i| matches!(i, ImportableItem::PathEntry { .. })),
+        "only a real ~/.claude/{{skills,rules}} on this machine could appear"
+    );
     assert!(plan.project_items.is_empty());
 }
 
@@ -127,7 +137,10 @@ fn summary_redacts_env_values_and_lists_each_kind() {
     assert!(!text.contains("abcdef123"), "{text}");
     assert!(text.contains("Stop [*] echo done (timeout: 3s)"), "{text}");
     assert!(text.contains("1 extra rule dir(s)"), "{text}");
-    assert_eq!(ImportPlan::default().summary(dir.path()), "No Claude settings found to import.");
+    assert_eq!(
+        ImportPlan::default().summary(dir.path()),
+        "No Claude settings found to import."
+    );
 }
 
 /// A project `.claude` linked outside the repository contributes no hooks to the import plan; the same hooks inside
@@ -154,7 +167,10 @@ fn m5_project_settings_hooks_linked_outside_the_repository_are_not_imported() {
         vec![],
     );
     assert!(
-        !plan.project_items.iter().any(|i| matches!(i, ImportableItem::Hook { .. })),
+        !plan
+            .project_items
+            .iter()
+            .any(|i| matches!(i, ImportableItem::Hook { .. })),
         "hooks from a settings file outside the repository must not be imported"
     );
 
@@ -169,7 +185,11 @@ fn m5_project_settings_hooks_linked_outside_the_repository_are_not_imported() {
         vec![],
         vec![],
     );
-    assert!(plan.project_items.iter().any(|i| matches!(i, ImportableItem::Hook { .. })));
+    assert!(
+        plan.project_items
+            .iter()
+            .any(|i| matches!(i, ImportableItem::Hook { .. }))
+    );
 }
 
 /// audit S7-F11: a server `~/.claude.json` records for this project lands in the project scope, not the global one.

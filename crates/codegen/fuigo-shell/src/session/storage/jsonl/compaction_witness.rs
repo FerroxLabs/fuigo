@@ -114,8 +114,13 @@ fn read_witness(path: &Path) -> io::Result<Option<CompactionWitness>> {
     }
 }
 
-fn write_witness(writer: &fuigo_session_writer::SessionWriter, path: &Path, witness: &CompactionWitness) -> io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(witness).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+fn write_witness(
+    writer: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+    witness: &CompactionWitness,
+) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(witness)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     crate::session::storage::write_bytes_atomic_as(writer, path, &bytes)
 }
 
@@ -150,7 +155,9 @@ pub(crate) fn write_compaction_witness_sync(
     // Earlier entries are kept: an earlier compaction's rewrite may still be outstanding, and if this one never
     // activates, its entry is the one a load needs. An unreadable witness is replaced.
     let mut witness = read_witness(&path).ok().flatten().unwrap_or_default();
-    witness.entries.retain(|entry| entry.checkpoint_id != checkpoint.checkpoint_id);
+    witness
+        .entries
+        .retain(|entry| entry.checkpoint_id != checkpoint.checkpoint_id);
     witness.entries.push(WitnessEntry {
         checkpoint_id: checkpoint.checkpoint_id.clone(),
         chat_history,
@@ -169,7 +176,9 @@ pub(crate) fn write_compaction_witness_sync(
 /// The ids dropped are recorded in `evicted`.
 fn evict_excess_entries(session_dir: &Path, witness: &mut CompactionWitness) {
     let updates_path = session_dir.join(crate::session::storage::UPDATES_FILE);
-    let committed = match crate::session::helpers::replay::find_latest_compaction_checkpoint(&updates_path) {
+    let committed = match crate::session::helpers::replay::find_latest_compaction_checkpoint(
+        &updates_path,
+    ) {
         Ok(latest) => latest.map(|latest| latest.checkpoint_id),
         Err(error) => {
             tracing::warn!(%error, "could not scan updates.jsonl; keeping every compaction witness entry");
@@ -192,12 +201,18 @@ fn evict_excess_entries(session_dir: &Path, witness: &mut CompactionWitness) {
 
 /// The marker of `checkpoint_id` is committed: entries of earlier compactions (and of attempts that never activated)
 /// are no longer needed. Best effort: a stale entry only costs a check.
-pub(crate) fn compaction_activated_sync(writer: &fuigo_session_writer::SessionWriter, session_dir: &Path, checkpoint_id: &str) {
+pub(crate) fn compaction_activated_sync(
+    writer: &fuigo_session_writer::SessionWriter,
+    session_dir: &Path,
+    checkpoint_id: &str,
+) {
     let path = session_dir.join(COMPACTION_WITNESS_FILE);
     let Ok(Some(mut witness)) = read_witness(&path) else {
         return;
     };
-    witness.entries.retain(|entry| entry.checkpoint_id == checkpoint_id);
+    witness
+        .entries
+        .retain(|entry| entry.checkpoint_id == checkpoint_id);
     witness.evicted.clear();
     if let Err(error) = write_witness(writer, &path, &witness) {
         tracing::warn!(path = %path.display(), %error, "could not prune the compaction witness");
@@ -219,7 +234,9 @@ pub(crate) fn clear_after_chat_rewrite_through(
     match session_writer.remove_sync(COMPACTION_WITNESS_FILE) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => tracing::warn!(path = %path.display(), %error, "could not remove the compaction witness"),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "could not remove the compaction witness")
+        }
     }
 }
 
@@ -234,7 +251,8 @@ fn witness_outlived_rewrite(path: &Path, written: Option<&[u8]>) -> bool {
         let len = written.len() as u64;
         let mut sha = None;
         let is_a_compaction_rewrite = witness.entries.iter().any(|entry| {
-            entry.rewrite.len == len && *sha.get_or_insert_with(|| sha256_hex(written)) == entry.rewrite.sha256
+            entry.rewrite.len == len
+                && *sha.get_or_insert_with(|| sha256_hex(written)) == entry.rewrite.sha256
         });
         if is_a_compaction_rewrite {
             return false;
@@ -278,10 +296,16 @@ fn appended_after_recorded(
 }
 
 /// [`appended_after_recorded`] on chat bytes already read.
-fn appended_in<'a>(bytes: &'a [u8], recorded: &ChatFingerprint, rewrite: &Fingerprint) -> Option<&'a [u8]> {
+fn appended_in<'a>(
+    bytes: &'a [u8],
+    recorded: &ChatFingerprint,
+    rewrite: &Fingerprint,
+) -> Option<&'a [u8]> {
     // The rewrite landed (its bytes may begin with the recorded ones, when the compaction kept the whole history it
     // started from): the file is authoritative.
-    if starts_with(bytes, rewrite.len, &rewrite.sha256) || !starts_with(bytes, recorded.len, &recorded.sha256) {
+    if starts_with(bytes, rewrite.len, &rewrite.sha256)
+        || !starts_with(bytes, recorded.len, &recorded.sha256)
+    {
         return None;
     }
     Some(&bytes[recorded.len as usize..])
@@ -296,10 +320,16 @@ enum ChatBytes<'a> {
 }
 
 impl ChatBytes<'_> {
-    fn appended_after(self, recorded: &ChatFingerprint, rewrite: &Fingerprint) -> io::Result<Option<Vec<u8>>> {
+    fn appended_after(
+        self,
+        recorded: &ChatFingerprint,
+        rewrite: &Fingerprint,
+    ) -> io::Result<Option<Vec<u8>>> {
         match self {
             Self::File(path) => appended_after_recorded(path, recorded, rewrite),
-            Self::Captured(bytes) => Ok(bytes.and_then(|bytes| appended_in(bytes, recorded, rewrite)).map(<[u8]>::to_vec)),
+            Self::Captured(bytes) => Ok(bytes
+                .and_then(|bytes| appended_in(bytes, recorded, rewrite))
+                .map(<[u8]>::to_vec)),
         }
     }
 
@@ -344,11 +374,17 @@ pub(crate) fn recover_unapplied_compaction(session_dir: &Path) -> Option<Recover
 /// [`recover_unapplied_compaction`] judged against `chat`, the bytes of `chat_history.jsonl` the caller read (`None`:
 /// no file) rather than the file as it is by now. A copy uses it: a compaction rewrite that lands after the copy read
 /// the history must not make the history it read look current (P111, Astra r8 #1).
-pub(crate) fn recover_unapplied_compaction_in(session_dir: &Path, chat: Option<&[u8]>) -> Option<RecoveredHistory> {
+pub(crate) fn recover_unapplied_compaction_in(
+    session_dir: &Path,
+    chat: Option<&[u8]>,
+) -> Option<RecoveredHistory> {
     recover_unapplied_compaction_from(session_dir, ChatBytes::Captured(chat))
 }
 
-fn recover_unapplied_compaction_from(session_dir: &Path, chat: ChatBytes<'_>) -> Option<RecoveredHistory> {
+fn recover_unapplied_compaction_from(
+    session_dir: &Path,
+    chat: ChatBytes<'_>,
+) -> Option<RecoveredHistory> {
     let witness_path = session_dir.join(COMPACTION_WITNESS_FILE);
     let witness = match read_witness(&witness_path) {
         Ok(Some(witness)) => witness,
@@ -363,7 +399,11 @@ fn recover_unapplied_compaction_from(session_dir: &Path, chat: ChatBytes<'_>) ->
     let mut candidates = Vec::new();
     for entry in witness.entries.iter().rev() {
         // An empty recorded history proves nothing: every file starts with it.
-        let Some(recorded) = entry.chat_history.as_ref().filter(|recorded| recorded.len > 0) else {
+        let Some(recorded) = entry
+            .chat_history
+            .as_ref()
+            .filter(|recorded| recorded.len > 0)
+        else {
             continue;
         };
         match chat.appended_after(recorded, &entry.rewrite) {
@@ -379,7 +419,9 @@ fn recover_unapplied_compaction_from(session_dir: &Path, chat: ChatBytes<'_>) ->
         return None;
     }
     let updates_path = session_dir.join(crate::session::storage::UPDATES_FILE);
-    let latest = match crate::session::helpers::replay::find_latest_compaction_checkpoint(&updates_path) {
+    let latest = match crate::session::helpers::replay::find_latest_compaction_checkpoint(
+        &updates_path,
+    ) {
         Ok(Some(latest)) => latest,
         Ok(None) => return None,
         Err(error) => {
@@ -387,8 +429,9 @@ fn recover_unapplied_compaction_from(session_dir: &Path, chat: ChatBytes<'_>) ->
             return None;
         }
     };
-    let Some((entry, appended)) =
-        candidates.into_iter().find(|(entry, _)| entry.checkpoint_id == latest.checkpoint_id)
+    let Some((entry, appended)) = candidates
+        .into_iter()
+        .find(|(entry, _)| entry.checkpoint_id == latest.checkpoint_id)
     else {
         // No candidate names the latest marker. Only an entry that eviction dropped leaves the history unaccounted
         // for; otherwise its entry says its rewrite landed (or the file was replaced), or the witness was removed by a
@@ -398,19 +441,31 @@ fn recover_unapplied_compaction_from(session_dir: &Path, chat: ChatBytes<'_>) ->
         }
         return rebuild_without_an_entry(session_dir, chat, &updates_path, &latest);
     };
-    let checkpoint_path = crate::extensions::notification::contained_checkpoint_path(session_dir, &latest.checkpoint_file);
-    let checkpoint: CompactionCheckpointFile = match crate::extensions::notification::read_contained_checkpoint(session_dir, &latest.checkpoint_file)
-        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)))
-    {
-        Ok(checkpoint) => checkpoint,
-        Err(error) => {
-            tracing::warn!(path = %checkpoint_path.display(), %error,
+    let checkpoint_path = crate::extensions::notification::contained_checkpoint_path(
+        session_dir,
+        &latest.checkpoint_file,
+    );
+    let checkpoint: CompactionCheckpointFile =
+        match crate::extensions::notification::read_contained_checkpoint(
+            session_dir,
+            &latest.checkpoint_file,
+        )
+        .and_then(|bytes| {
+            serde_json::from_slice(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        }) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                tracing::warn!(path = %checkpoint_path.display(), %error,
                 "the latest compaction did not reach chat_history.jsonl, but its checkpoint is unreadable; \
                  resuming from chat_history.jsonl");
-            return None;
-        }
-    };
-    if checkpoint.schema_version != 1 || latest.schema_version != 1 || checkpoint.checkpoint_id != entry.checkpoint_id {
+                return None;
+            }
+        };
+    if checkpoint.schema_version != 1
+        || latest.schema_version != 1
+        || checkpoint.checkpoint_id != entry.checkpoint_id
+    {
         tracing::warn!(path = %checkpoint_path.display(),
             "the latest compaction did not reach chat_history.jsonl, but its checkpoint does not match; \
              resuming from chat_history.jsonl");
@@ -422,7 +477,10 @@ fn recover_unapplied_compaction_from(session_dir: &Path, chat: ChatBytes<'_>) ->
          compacted history and the items written after it");
     let mut history = checkpoint.compacted_history;
     history.extend(later);
-    Some(RecoveredHistory { history, skipped_lines })
+    Some(RecoveredHistory {
+        history,
+        skipped_lines,
+    })
 }
 
 /// The latest committed compaction's entry was evicted, while the chat file is unchanged since a later witnessed
@@ -438,13 +496,19 @@ fn rebuild_without_an_entry(
     updates_path: &Path,
     latest: &crate::extensions::notification::CompactionCheckpointInfo,
 ) -> Option<RecoveredHistory> {
-    let checkpoint_path = crate::extensions::notification::contained_checkpoint_path(session_dir, &latest.checkpoint_file);
-    let projection = crate::extensions::notification::read_contained_checkpoint(session_dir, &latest.checkpoint_file)
-        .and_then(|bytes| {
-            serde_json::from_slice::<CompactionCheckpointFile>(&bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        })
-        .and_then(|checkpoint| crate::session::storage::to_jsonl_bytes(&checkpoint.compacted_history));
+    let checkpoint_path = crate::extensions::notification::contained_checkpoint_path(
+        session_dir,
+        &latest.checkpoint_file,
+    );
+    let projection = crate::extensions::notification::read_contained_checkpoint(
+        session_dir,
+        &latest.checkpoint_file,
+    )
+    .and_then(|bytes| {
+        serde_json::from_slice::<CompactionCheckpointFile>(&bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    })
+    .and_then(|checkpoint| crate::session::storage::to_jsonl_bytes(&checkpoint.compacted_history));
     let landed = match (projection, chat.read()) {
         (Ok(projection), Ok(chat)) => chat.starts_with(&projection),
         (Err(error), _) | (_, Err(error)) => {
@@ -456,12 +520,18 @@ fn rebuild_without_an_entry(
     if landed {
         return None;
     }
-    match crate::session::helpers::replay::replay_if_latest_compaction_active(updates_path, session_dir) {
+    match crate::session::helpers::replay::replay_if_latest_compaction_active(
+        updates_path,
+        session_dir,
+    ) {
         Ok(Some(history)) => {
             tracing::warn!(checkpoint = %latest.checkpoint_file,
                 "the latest compaction committed without its rewrite of chat_history.jsonl and without a witness \
                  entry; resuming from its checkpoint rebuilt from the transcript");
-            Some(RecoveredHistory { history, skipped_lines: 0 })
+            Some(RecoveredHistory {
+                history,
+                skipped_lines: 0,
+            })
         }
         Ok(None) => {
             tracing::warn!(checkpoint = %latest.checkpoint_file,
@@ -483,38 +553,47 @@ pub(crate) fn unapplied_compaction_projection(session_dir: &Path) -> Option<Vec<
     recover_unapplied_compaction(session_dir).map(|recovered| recovered.history)
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A writer of the test folder `dir` (F5-C4: the witness is written only as a session writer).
     fn test_writer(dir: &Path) -> fuigo_session_writer::SessionWriter {
-        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).unwrap()
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .unwrap()
     }
 
     fn checkpoint_line(id: &str, at: usize) -> String {
         let update = crate::session::storage::SessionUpdate::Fuigo(Box::new(
             crate::extensions::notification::SessionNotification {
                 session_id: agent_client_protocol::SessionId::new("s"),
-                update: crate::extensions::notification::SessionUpdate::CompactionCheckpoint(Box::new(
-                    crate::extensions::notification::CompactionCheckpointInfo {
+                update: crate::extensions::notification::SessionUpdate::CompactionCheckpoint(
+                    Box::new(crate::extensions::notification::CompactionCheckpointInfo {
                         checkpoint_id: id.to_string(),
                         prompt_index_at_compaction: at,
                         checkpoint_file: format!("compaction_checkpoints/{id}.json"),
                         auto_continue: None,
                         schema_version: 1,
                         created_at: "2026-01-01T00:00:00Z".to_string(),
-                    },
-                )),
+                    }),
+                ),
                 meta: None,
             },
         ));
-        let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(&update).unwrap();
+        let envelope =
+            crate::session::storage::SessionUpdateEnvelope::from_update(&update).unwrap();
         serde_json::to_string(&envelope).unwrap() + "\n"
     }
 
-    fn write_checkpoint(dir: &Path, id: &str, history: Vec<ConversationItem>) -> CompactionCheckpointFile {
+    fn write_checkpoint(
+        dir: &Path,
+        id: &str,
+        history: Vec<ConversationItem>,
+    ) -> CompactionCheckpointFile {
         std::fs::create_dir_all(dir.join("compaction_checkpoints")).unwrap();
         let file = CompactionCheckpointFile {
             inherited_prefix_len: Some(0),
@@ -541,9 +620,13 @@ mod tests {
 
     fn chat(dir: &Path, items: &[ConversationItem]) {
         let bytes = crate::session::storage::to_jsonl_bytes(items).unwrap();
-        crate::session::storage::write_bytes_atomic_reporting_as(&test_writer(dir), &dir.join("chat_history.jsonl"), &bytes)
-            .map_err(crate::session::storage::AtomicWriteError::into_io)
-            .unwrap();
+        crate::session::storage::write_bytes_atomic_reporting_as(
+            &test_writer(dir),
+            &dir.join("chat_history.jsonl"),
+            &bytes,
+        )
+        .map_err(crate::session::storage::AtomicWriteError::into_io)
+        .unwrap();
     }
 
     fn texts(items: &[ConversationItem]) -> Vec<String> {
@@ -555,8 +638,14 @@ mod tests {
     fn projection_only_while_the_chat_file_starts_with_what_the_commit_saw() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
-        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
-        let projection = vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")];
+        let old = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("P0"),
+        ];
+        let projection = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("SUMMARY"),
+        ];
         chat(dir, &old);
         let c1 = write_checkpoint(dir, "c1", projection.clone());
         write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
@@ -613,15 +702,32 @@ mod tests {
     fn a_later_unactivated_compaction_keeps_the_earlier_entry() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
-        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
+        let old = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("P0"),
+        ];
         chat(dir, &old);
-        let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY1")]);
+        let c1 = write_checkpoint(
+            dir,
+            "c1",
+            vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("SUMMARY1"),
+            ],
+        );
         write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         let mut appended = old.clone();
         appended.push(ConversationItem::user("P1"));
         std::fs::write(dir.join("chat_history.jsonl"), raw(&appended)).unwrap();
-        let c2 = write_checkpoint(dir, "c2", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY2")]);
+        let c2 = write_checkpoint(
+            dir,
+            "c2",
+            vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("SUMMARY2"),
+            ],
+        );
         write_compaction_witness_sync(&test_writer(dir), dir, &c2).unwrap();
 
         let got = unapplied_compaction_projection(dir).expect("c1 is still recoverable");
@@ -647,7 +753,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
         let head = vec![ConversationItem::system("SYS")];
-        let projection = vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")];
+        let projection = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("SUMMARY"),
+        ];
         chat(dir, &head);
         let c1 = write_checkpoint(dir, "c1", projection.clone());
         write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
@@ -673,18 +782,31 @@ mod tests {
     fn unactivated_attempts_never_evict_the_committed_entry() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
-        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
+        let old = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("P0"),
+        ];
         chat(dir, &old);
-        let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY1")]);
+        let c1 = write_checkpoint(
+            dir,
+            "c1",
+            vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("SUMMARY1"),
+            ],
+        );
         write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         compaction_activated_sync(&test_writer(dir), dir, "c1");
         for attempt in 0..3 * KEPT_ENTRIES {
             let id = format!("attempt-{attempt}");
-            let attempt = write_checkpoint(dir, &id, vec![ConversationItem::user("never activated")]);
+            let attempt =
+                write_checkpoint(dir, &id, vec![ConversationItem::user("never activated")]);
             write_compaction_witness_sync(&test_writer(dir), dir, &attempt).unwrap();
         }
-        let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE)).unwrap().unwrap();
+        let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE))
+            .unwrap()
+            .unwrap();
         assert!(witness.entries.len() <= KEPT_ENTRIES);
         let got = unapplied_compaction_projection(dir).expect("c1 is still recoverable");
         assert_eq!(texts(&got), ["SYS", "SUMMARY1"]);
@@ -698,9 +820,15 @@ mod tests {
     fn the_latest_committed_entry_survives_eviction_when_its_pruning_failed() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
-        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
+        let old = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("P0"),
+        ];
         chat(dir, &old);
-        let c0_projection = vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY0")];
+        let c0_projection = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("SUMMARY0"),
+        ];
         let c0 = write_checkpoint(dir, "c0", c0_projection.clone());
         write_compaction_witness_sync(&test_writer(dir), dir, &c0).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c0", 1)).unwrap();
@@ -711,7 +839,14 @@ mod tests {
         history.push(ConversationItem::user("P1"));
         std::fs::write(dir.join("chat_history.jsonl"), raw(&history)).unwrap();
 
-        let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY1")]);
+        let c1 = write_checkpoint(
+            dir,
+            "c1",
+            vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("SUMMARY1"),
+            ],
+        );
         write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         let mut updates = checkpoint_line("c0", 1);
         updates.push_str(&checkpoint_line("c1", 1));
@@ -722,12 +857,21 @@ mod tests {
 
         for attempt in 0..2 * KEPT_ENTRIES {
             let id = format!("attempt-{attempt}");
-            let attempt = write_checkpoint(dir, &id, vec![ConversationItem::user("never activated")]);
+            let attempt =
+                write_checkpoint(dir, &id, vec![ConversationItem::user("never activated")]);
             write_compaction_witness_sync(&test_writer(dir), dir, &attempt).unwrap();
         }
-        let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE)).unwrap().unwrap();
+        let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE))
+            .unwrap()
+            .unwrap();
         assert!(witness.entries.len() <= KEPT_ENTRIES);
-        assert!(witness.entries.iter().any(|entry| entry.checkpoint_id == "c1"), "c1's entry was evicted");
+        assert!(
+            witness
+                .entries
+                .iter()
+                .any(|entry| entry.checkpoint_id == "c1"),
+            "c1's entry was evicted"
+        );
         let got = unapplied_compaction_projection(dir).expect("c1 is still recoverable");
         assert_eq!(texts(&got), ["SYS", "SUMMARY1", "P2"]);
     }
@@ -744,25 +888,45 @@ mod tests {
     fn a_committed_marker_without_an_entry_falls_back_to_the_checkpoint_rebuild() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
-        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
+        let old = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("P0"),
+        ];
         chat(dir, &old);
-        let projection = vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY1")];
+        let projection = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("SUMMARY1"),
+        ];
         write_checkpoint(dir, "c1", projection.clone());
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
-        let attempt = write_checkpoint(dir, "attempt", vec![ConversationItem::user("never activated")]);
+        let attempt = write_checkpoint(
+            dir,
+            "attempt",
+            vec![ConversationItem::user("never activated")],
+        );
         write_compaction_witness_sync(&test_writer(dir), dir, &attempt).unwrap();
-        let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE)).unwrap().unwrap();
+        let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE))
+            .unwrap()
+            .unwrap();
         assert_eq!(witness.entries.len(), 1);
-        assert!(unapplied_compaction_projection(dir).is_none(), "no evidence of an evicted entry: the file decides");
+        assert!(
+            unapplied_compaction_projection(dir).is_none(),
+            "no evidence of an evicted entry: the file decides"
+        );
 
         // The evidence, as `evict_excess_entries` records it.
         let path = dir.join(COMPACTION_WITNESS_FILE);
-        let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         json["evicted"] = serde_json::json!(["c1"]);
         std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
         let got = unapplied_compaction_projection(dir).expect("rebuilt from the checkpoint");
         assert_eq!(texts(&got)[..2], ["SYS", "SUMMARY1"]);
-        assert!(!texts(&got).contains(&"P0".to_string()), "pre-compaction history resumed: {:?}", texts(&got));
+        assert!(
+            !texts(&got).contains(&"P0".to_string()),
+            "pre-compaction history resumed: {:?}",
+            texts(&got)
+        );
 
         // The compaction's rewrite did land (the file starts with its projection): the file stays authoritative.
         let mut landed = projection.clone();
@@ -779,21 +943,41 @@ mod tests {
     fn an_evicted_entry_is_recorded_and_lets_the_load_rebuild_its_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
-        chat(dir, &[ConversationItem::system("SYS"), ConversationItem::user("P0")]);
+        chat(
+            dir,
+            &[
+                ConversationItem::system("SYS"),
+                ConversationItem::user("P0"),
+            ],
+        );
         std::fs::write(dir.join("updates.jsonl"), "").unwrap();
-        let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY1")]);
+        let c1 = write_checkpoint(
+            dir,
+            "c1",
+            vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("SUMMARY1"),
+            ],
+        );
         write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         for attempt in 0..KEPT_ENTRIES {
             let id = format!("attempt-{attempt}");
-            let attempt = write_checkpoint(dir, &id, vec![ConversationItem::user("never activated")]);
+            let attempt =
+                write_checkpoint(dir, &id, vec![ConversationItem::user("never activated")]);
             write_compaction_witness_sync(&test_writer(dir), dir, &attempt).unwrap();
         }
-        let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE)).unwrap().unwrap();
+        let witness = read_witness(&dir.join(COMPACTION_WITNESS_FILE))
+            .unwrap()
+            .unwrap();
         assert_eq!(witness.evicted, ["c1"]);
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         let got = unapplied_compaction_projection(dir).expect("rebuilt from the checkpoint");
         assert_eq!(texts(&got)[..2], ["SYS", "SUMMARY1"]);
-        assert!(!texts(&got).contains(&"P0".to_string()), "pre-compaction history resumed: {:?}", texts(&got));
+        assert!(
+            !texts(&got).contains(&"P0".to_string()),
+            "pre-compaction history resumed: {:?}",
+            texts(&got)
+        );
     }
 
     /// P111 (Astra r6 #2): a line written after the recorded history that does not parse is counted, so the load-time
@@ -802,9 +986,19 @@ mod tests {
     fn unreadable_appended_lines_are_counted() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
-        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
+        let old = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("P0"),
+        ];
         chat(dir, &old);
-        let c1 = write_checkpoint(dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")]);
+        let c1 = write_checkpoint(
+            dir,
+            "c1",
+            vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("SUMMARY"),
+            ],
+        );
         write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         let mut bytes = raw(&old);
@@ -839,11 +1033,24 @@ mod tests {
             id: agent_client_protocol::SessionId::new("f5c-ct-b3"),
             cwd: "/work".to_string(),
         };
-        adapter.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
+        adapter
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
         let dir = adapter.session_dir(&info);
-        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
+        let old = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("P0"),
+        ];
         chat(&dir, &old);
-        let c1 = write_checkpoint(&dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")]);
+        let c1 = write_checkpoint(
+            &dir,
+            "c1",
+            vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("SUMMARY"),
+            ],
+        );
         write_compaction_witness_sync(&test_writer(&dir), &dir, &c1).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         let mut appended = old.clone();
@@ -869,17 +1076,34 @@ mod tests {
             id: agent_client_protocol::SessionId::new("s12-f4"),
             cwd: "/work".to_string(),
         };
-        adapter.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
+        adapter
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
         let dir = adapter.session_dir(&info);
-        let old = vec![ConversationItem::system("SYS"), ConversationItem::user("P0")];
+        let old = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("P0"),
+        ];
         chat(&dir, &old);
-        let c1 = write_checkpoint(&dir, "c1", vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")]);
+        let c1 = write_checkpoint(
+            &dir,
+            "c1",
+            vec![
+                ConversationItem::system("SYS"),
+                ConversationItem::user("SUMMARY"),
+            ],
+        );
         write_compaction_witness_sync(&test_writer(&dir), &dir, &c1).unwrap();
         std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
         let mut appended = old.clone();
         appended.push(ConversationItem::user_with_parts(vec![
-            fuigo_sampling_types::ContentPart::Text { text: "look".into() },
-            fuigo_sampling_types::ContentPart::Image { url: "data:image/png;base64,!!not-base64!!".into() },
+            fuigo_sampling_types::ContentPart::Text {
+                text: "look".into(),
+            },
+            fuigo_sampling_types::ContentPart::Image {
+                url: "data:image/png;base64,!!not-base64!!".into(),
+            },
         ]));
         std::fs::write(dir.join("chat_history.jsonl"), raw(&appended)).unwrap();
 

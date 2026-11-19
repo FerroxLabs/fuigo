@@ -3,9 +3,9 @@
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use fuigo_sampling_types::{ConversationItem, SamplingConfig};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use fuigo_sampling_types::{ConversationItem, SamplingConfig};
 
 use crate::StrictAppendAck;
 use crate::actor::ChatStateActor;
@@ -973,18 +973,33 @@ async fn compaction_reseed_carries_provider_overhead() {
 async fn compaction_commit_rejects_stale_and_cancelled_candidates() {
     let h = TestHarness::new();
     let (epoch, _, _) = h.handle.compaction_snapshot().await.unwrap();
-    h.handle.push_user_message(ConversationItem::user("Correction: retain the original files"));
+    h.handle.push_user_message(ConversationItem::user(
+        "Correction: retain the original files",
+    ));
     let candidate = vec![ConversationItem::system("summary")];
-    assert!(h.handle.commit_compaction(epoch, candidate.clone(), CancellationToken::new(), async {
-        panic!("stale candidate must not reach persistence")
-    }).await.is_err());
+    assert!(
+        h.handle
+            .commit_compaction(epoch, candidate.clone(), CancellationToken::new(), async {
+                panic!("stale candidate must not reach persistence")
+            })
+            .await
+            .is_err()
+    );
     let (epoch, _, before) = h.handle.compaction_snapshot().await.unwrap();
     let cancel = CancellationToken::new();
     cancel.cancel();
-    assert!(h.handle.commit_compaction(epoch, candidate, cancel, async {
-        panic!("cancelled candidate must not reach persistence")
-    }).await.is_err());
-    assert_eq!(serde_json::to_value(h.handle.get_conversation().await).unwrap(), serde_json::to_value(before).unwrap());
+    assert!(
+        h.handle
+            .commit_compaction(epoch, candidate, cancel, async {
+                panic!("cancelled candidate must not reach persistence")
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(h.handle.get_conversation().await).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
 }
 
 #[tokio::test]
@@ -992,22 +1007,35 @@ async fn compaction_commit_failure_retains_old_and_success_serializes_later_even
     let h = TestHarness::new();
     let (epoch, _, before) = h.handle.compaction_snapshot().await.unwrap();
     let candidate = vec![ConversationItem::system("committed summary")];
-    assert!(h.handle.commit_compaction(epoch, candidate.clone(), CancellationToken::new(), async {
-        Err(crate::commands::CompactionCommitError::NotCommitted(std::io::Error::other("file sync fault")))
-    }).await.is_err());
-    assert_eq!(serde_json::to_value(h.handle.get_conversation().await).unwrap(), serde_json::to_value(before).unwrap());
+    assert!(
+        h.handle
+            .commit_compaction(epoch, candidate.clone(), CancellationToken::new(), async {
+                Err(crate::commands::CompactionCommitError::NotCommitted(
+                    std::io::Error::other("file sync fault"),
+                ))
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(h.handle.get_conversation().await).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let handle = h.handle.clone();
     let commit = tokio::spawn(async move {
-        handle.commit_compaction(epoch, candidate, CancellationToken::new(), async move {
-            started_tx.send(()).unwrap();
-            release_rx.await.unwrap();
-            Ok(())
-        }).await
+        handle
+            .commit_compaction(epoch, candidate, CancellationToken::new(), async move {
+                started_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                Ok(())
+            })
+            .await
     });
     started_rx.await.unwrap();
-    h.handle.push_user_message(ConversationItem::user("later instruction"));
+    h.handle
+        .push_user_message(ConversationItem::user("later instruction"));
     release_tx.send(()).unwrap();
     commit.await.unwrap().unwrap();
     let live = h.handle.get_conversation().await;
@@ -1020,10 +1048,25 @@ async fn compaction_commit_failure_retains_old_and_success_serializes_later_even
 async fn compaction_committed_fault_converges_without_success_receipt() {
     let h = TestHarness::new();
     let (epoch, _, _) = h.handle.compaction_snapshot().await.unwrap();
-    assert!(h.handle.commit_compaction(epoch, vec![ConversationItem::system("new authority")], CancellationToken::new(), async {
-        Err(crate::commands::CompactionCommitError::Committed(std::io::Error::other("marker sync fault")))
-    }).await.is_err());
-    assert_eq!(h.handle.get_conversation().await[0].text_content(), "new authority");
+    assert!(
+        h.handle
+            .commit_compaction(
+                epoch,
+                vec![ConversationItem::system("new authority")],
+                CancellationToken::new(),
+                async {
+                    Err(crate::commands::CompactionCommitError::Committed(
+                        std::io::Error::other("marker sync fault"),
+                    ))
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        h.handle.get_conversation().await[0].text_content(),
+        "new authority"
+    );
 }
 
 #[tokio::test]
@@ -2034,31 +2077,30 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
     // The model's single assistant message contains all 3 tool calls.
     // In the real code, this is built from the streaming response and pushed
     // via `push_assistant_response`.
-    let assistant_with_tools =
-        ConversationItem::Assistant(fuigo_sampling_types::AssistantItem {
-            content: "I'll read the file, fix it, and run tests.".into(),
-            tool_calls: vec![
-                ToolCall {
-                    id: "call_1".into(),
-                    name: "read_file".to_string(),
-                    arguments: r#"{"target_file":"src/main.rs"}"#.into(),
-                },
-                ToolCall {
-                    id: "call_2".into(),
-                    name: "edit_file".to_string(),
-                    arguments: r#"{"target_file":"src/main.rs","new_string":"fixed"}"#.into(),
-                },
-                ToolCall {
-                    id: "call_3".into(),
-                    name: "run_terminal_cmd".to_string(),
-                    arguments: r#"{"command":"cargo test"}"#.into(),
-                },
-            ],
-            model_id: Some("grok-3".to_string()),
-            model_fingerprint: None,
-            reasoning_effort: None,
-            output_order: None,
-        });
+    let assistant_with_tools = ConversationItem::Assistant(fuigo_sampling_types::AssistantItem {
+        content: "I'll read the file, fix it, and run tests.".into(),
+        tool_calls: vec![
+            ToolCall {
+                id: "call_1".into(),
+                name: "read_file".to_string(),
+                arguments: r#"{"target_file":"src/main.rs"}"#.into(),
+            },
+            ToolCall {
+                id: "call_2".into(),
+                name: "edit_file".to_string(),
+                arguments: r#"{"target_file":"src/main.rs","new_string":"fixed"}"#.into(),
+            },
+            ToolCall {
+                id: "call_3".into(),
+                name: "run_terminal_cmd".to_string(),
+                arguments: r#"{"command":"cargo test"}"#.into(),
+            },
+        ],
+        model_id: Some("grok-3".to_string()),
+        model_fingerprint: None,
+        reasoning_effort: None,
+        output_order: None,
+    });
     h.handle.push_assistant_response(assistant_with_tools);
 
     // ── Tool execution results (simulating execute_tool_calls) ──────────
@@ -3256,33 +3298,77 @@ async fn state_marker_with_an_open_call_makes_no_synthetic_result_and_keeps_the_
     h.handle.push_user_message(ConversationItem::user("go"));
     h.handle
         .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
-            ToolCall { id: "a".into(), name: "t".to_string(), arguments: "{}".into() },
-            ToolCall { id: "b".into(), name: "t".to_string(), arguments: "{}".into() },
+            ToolCall {
+                id: "a".into(),
+                name: "t".to_string(),
+                arguments: "{}".into(),
+            },
+            ToolCall {
+                id: "b".into(),
+                name: "t".to_string(),
+                arguments: "{}".into(),
+            },
         ]));
-    h.handle.push_tool_result(ConversationItem::tool_result("a", "ok"));
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("a", "ok"));
     let marker = ConversationItem::peer_denial_marker("edit", "sha256:aa", 1);
     assert!(h.handle.push_state_marker_and_ack(marker).await.is_some());
     let mid = h.handle.get_conversation().await;
-    assert_eq!(mid.iter().filter(|i| matches!(i, ConversationItem::ToolResult(_))).count(), 1, "no synthetic result");
+    assert_eq!(
+        mid.iter()
+            .filter(|i| matches!(i, ConversationItem::ToolResult(_)))
+            .count(),
+        1,
+        "no synthetic result"
+    );
     assert!(mid.iter().any(ConversationItem::is_peer_denial_data_marker));
     assert!(h.handle.has_dangling_tool_calls().await, "b is still open");
-    h.handle.push_tool_result(ConversationItem::tool_result("b", "ok"));
-    assert!(!h.handle.has_dangling_tool_calls().await, "the marker did not split the result run");
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("b", "ok"));
+    assert!(
+        !h.handle.has_dangling_tool_calls().await,
+        "the marker did not split the result run"
+    );
     h.handle.push_user_message(ConversationItem::user("next"));
     let end = h.handle.get_conversation().await;
-    assert_eq!(end.iter().filter(|i| matches!(i, ConversationItem::ToolResult(_))).count(), 2, "one result per call");
-    let request = h.handle.build_request(vec![], None, false, None, "c".into(), "r".into()).await.unwrap();
-    assert!(!request.items.iter().any(ConversationItem::is_peer_denial_data_marker), "never sent to a model");
+    assert_eq!(
+        end.iter()
+            .filter(|i| matches!(i, ConversationItem::ToolResult(_)))
+            .count(),
+        2,
+        "one result per call"
+    );
+    let request = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r".into())
+        .await
+        .unwrap();
+    assert!(
+        !request
+            .items
+            .iter()
+            .any(ConversationItem::is_peer_denial_data_marker),
+        "never sent to a model"
+    );
 }
 
 #[tokio::test]
 async fn state_marker_without_an_open_call_is_appended() {
     let h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("q"));
-    h.handle.push_assistant_response(ConversationItem::assistant("a"));
-    assert!(h.handle.push_state_marker_and_ack(ConversationItem::peer_denial_marker("edit", "sha256:aa", 1)).await.is_some());
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("a"));
+    assert!(
+        h.handle
+            .push_state_marker_and_ack(ConversationItem::peer_denial_marker("edit", "sha256:aa", 1))
+            .await
+            .is_some()
+    );
     let c = h.handle.get_conversation().await;
-    assert!(c.last().is_some_and(ConversationItem::is_peer_denial_data_marker));
+    assert!(
+        c.last()
+            .is_some_and(ConversationItem::is_peer_denial_data_marker)
+    );
 }
 
 /// P29-C: the placement contract, by index. With a call open the marker goes in BEFORE the last tool-calling assistant item
@@ -3291,23 +3377,46 @@ async fn state_marker_without_an_open_call_is_appended() {
 async fn state_marker_with_an_open_call_is_inserted_before_the_last_tool_calling_assistant_item() {
     use fuigo_sampling_types::ToolCall;
     let h = TestHarness::new();
-    let call = |id: &str| ToolCall { id: id.into(), name: "t".to_string(), arguments: "{}".into() };
+    let call = |id: &str| ToolCall {
+        id: id.into(),
+        name: "t".to_string(),
+        arguments: "{}".into(),
+    };
     h.handle.push_user_message(ConversationItem::user("go"));
-    h.handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![call("old")]));
-    h.handle.push_tool_result(ConversationItem::tool_result("old", "ok"));
-    h.handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![call("a"), call("b")]));
-    h.handle.push_tool_result(ConversationItem::tool_result("a", "ok"));
-    assert!(h.handle.push_state_marker_and_ack(ConversationItem::peer_denial_marker("edit", "sha256:aa", 1)).await.is_some());
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![call("old")]));
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("old", "ok"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+            call("a"),
+            call("b"),
+        ]));
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("a", "ok"));
+    assert!(
+        h.handle
+            .push_state_marker_and_ack(ConversationItem::peer_denial_marker("edit", "sha256:aa", 1))
+            .await
+            .is_some()
+    );
     let c = h.handle.get_conversation().await;
     // user, assistant(old), result(old), MARKER, assistant(a,b), result(a)
     assert_eq!(c.len(), 6, "{c:?}");
-    assert!(c[3].is_peer_denial_data_marker(), "marker is right before the open call's assistant item: {c:?}");
+    assert!(
+        c[3].is_peer_denial_data_marker(),
+        "marker is right before the open call's assistant item: {c:?}"
+    );
     assert!(matches!(&c[4], ConversationItem::Assistant(a) if a.tool_calls.len() == 2));
     assert!(matches!(&c[5], ConversationItem::ToolResult(r) if r.tool_call_id == "a"));
-    h.handle.push_tool_result(ConversationItem::tool_result("b", "ok"));
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("b", "ok"));
     let end = h.handle.get_conversation().await;
     assert_eq!(end.len(), 7);
-    assert!(matches!(&end[6], ConversationItem::ToolResult(r) if r.tool_call_id == "b"), "the second result lands after the first");
+    assert!(
+        matches!(&end[6], ConversationItem::ToolResult(r) if r.tool_call_id == "b"),
+        "the second result lands after the first"
+    );
 }
 
 /// P29-C: with no call open the marker is appended last, even after an earlier tool-calling assistant item.
@@ -3316,13 +3425,20 @@ async fn state_marker_after_all_calls_are_answered_is_appended_last() {
     use fuigo_sampling_types::ToolCall;
     let h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("go"));
-    h.handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
-        id: "a".into(),
-        name: "t".to_string(),
-        arguments: "{}".into(),
-    }]));
-    h.handle.push_tool_result(ConversationItem::tool_result("a", "ok"));
-    assert!(h.handle.push_state_marker_and_ack(ConversationItem::peer_denial_marker("edit", "sha256:aa", 1)).await.is_some());
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "a".into(),
+            name: "t".to_string(),
+            arguments: "{}".into(),
+        }]));
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("a", "ok"));
+    assert!(
+        h.handle
+            .push_state_marker_and_ack(ConversationItem::peer_denial_marker("edit", "sha256:aa", 1))
+            .await
+            .is_some()
+    );
     let c = h.handle.get_conversation().await;
     assert_eq!(c.len(), 4);
     assert!(c[3].is_peer_denial_data_marker(), "appended last: {c:?}");
@@ -3553,23 +3669,25 @@ async fn halt_repair_writes_the_callers_answer_for_the_call_it_names() {
     let h = TestHarness::new();
     h.handle.push_user_message(ConversationItem::user("q"));
     h.handle
-        .push_assistant_response(ConversationItem::assistant_tool_calls(
-            vec![
-                ToolCall {
-                    id: "spawn-1".into(),
-                    name: "spawn_subagent".to_string(),
-                    arguments: "{}".into(),
-                },
-                ToolCall {
-                    id: "read-1".into(),
-                    name: "read_file".to_string(),
-                    arguments: "{}".into(),
-                },
-            ],
-        ));
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+            ToolCall {
+                id: "spawn-1".into(),
+                name: "spawn_subagent".to_string(),
+                arguments: "{}".into(),
+            },
+            ToolCall {
+                id: "read-1".into(),
+                name: "read_file".to_string(),
+                arguments: "{}".into(),
+            },
+        ]));
     h.handle.repair_dangling_after_harness_halt(
         "user_cancel",
-        [("spawn-1".to_owned(), "Subagent was moved to the background".to_owned())].into(),
+        [(
+            "spawn-1".to_owned(),
+            "Subagent was moved to the background".to_owned(),
+        )]
+        .into(),
     );
     let conv = h.handle.get_conversation().await;
     let results: Vec<(String, String)> = conv
@@ -3588,7 +3706,8 @@ async fn halt_repair_writes_the_callers_answer_for_the_call_it_names() {
     );
     assert_eq!("read-1", results[1].0);
     assert!(
-        results[1].1.contains("halted by the harness (user_cancel)") && results[1].1.contains("read_file"),
+        results[1].1.contains("halted by the harness (user_cancel)")
+            && results[1].1.contains("read_file"),
         "a call with no answer keeps the generic text: {}",
         results[1].1
     );
@@ -4043,9 +4162,10 @@ async fn get_last_user_query_text_skips_peer_state_markers() {
         .push_assistant_response(ConversationItem::assistant("answer"));
     h.handle
         .push_user_message(ConversationItem::peer_integrity_tripped_marker());
-    if let Some(marker) =
-        ConversationItem::peer_denial_keys_marker(&[("bash".to_owned(), "sha256:0123456789abcdef".to_owned())], 1)
-    {
+    if let Some(marker) = ConversationItem::peer_denial_keys_marker(
+        &[("bash".to_owned(), "sha256:0123456789abcdef".to_owned())],
+        1,
+    ) {
         h.handle.push_user_message(marker);
     }
 
@@ -4849,9 +4969,7 @@ async fn context_window_downgrade_triggers_auto_compact() {
 /// produced by the From impl is directly the wire shape (modulo
 /// `patch_reasoning_text_types` which only stamps a `type` field on nested
 /// reasoning content blocks and does not reorder items).
-fn serialize_via_public_api(
-    req: &fuigo_sampling_types::ConversationRequest,
-) -> serde_json::Value {
+fn serialize_via_public_api(req: &fuigo_sampling_types::ConversationRequest) -> serde_json::Value {
     use fuigo_sampling_types::rs;
     let create_response: rs::CreateResponse = req.into();
     let mut body = serde_json::to_value(&create_response).unwrap();
@@ -5442,8 +5560,14 @@ async fn build_request_budgets_images_against_the_models_request_cap() {
     else {
         panic!("expected image budget event");
     };
-    assert_eq!(trigger_bytes, crate::image_budget::IMAGE_COMPACT_TRIGGER_BYTES);
-    assert!(!needs_image_compaction, "40 MB is under the default 47 MiB trigger");
+    assert_eq!(
+        trigger_bytes,
+        crate::image_budget::IMAGE_COMPACT_TRIGGER_BYTES
+    );
+    assert!(
+        !needs_image_compaction,
+        "40 MB is under the default 47 MiB trigger"
+    );
     assert_eq!(evicted, 0);
 
     let cap = NonZeroU64::new(30_000_000);

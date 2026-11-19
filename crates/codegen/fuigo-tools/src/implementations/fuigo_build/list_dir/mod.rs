@@ -387,8 +387,13 @@ fn build_shallow_tree(
     deny: Option<crate::util::read_deny::ReadDenyFilter>,
 ) -> (DirNode, bool) {
     let mut root_node = DirNode::new(0);
-    let truncated =
-        seed_depth1_children(root, &mut root_node, respect_gitignore, MAX_SEED_ITEMS, deny);
+    let truncated = seed_depth1_children(
+        root,
+        &mut root_node,
+        respect_gitignore,
+        MAX_SEED_ITEMS,
+        deny,
+    );
     root_node.sort_recursive();
     (root_node, truncated)
 }
@@ -506,9 +511,10 @@ fn probe_listable(path: &Path) -> std::io::Result<()> {
 /// reads as an empty directory.
 fn unlistable_output(err: &std::io::Error, display_path: &Path) -> ListDirOutput {
     match err.kind() {
-        std::io::ErrorKind::PermissionDenied => {
-            ListDirOutput::PermissionDenied(format!("Permission denied: {}", display_path.display()))
-        }
+        std::io::ErrorKind::PermissionDenied => ListDirOutput::PermissionDenied(format!(
+            "Permission denied: {}",
+            display_path.display()
+        )),
         std::io::ErrorKind::NotFound => ListDirOutput::NotFound(format!(
             "Error: {} no longer exists.",
             display_path.display()
@@ -640,7 +646,8 @@ impl fuigo_tool_runtime::Tool for ListDirTool {
         }
         if !is_legacy {
             let probe_path = path.clone();
-            let probed = spawn_list_dir_walk(&display_path, move || probe_listable(&probe_path)).await?;
+            let probed =
+                spawn_list_dir_walk(&display_path, move || probe_listable(&probe_path)).await?;
             if let Err(err) = probed {
                 return Ok(unlistable_output(&err, &display_path));
             }
@@ -747,7 +754,10 @@ Other details:
     - Large directories are summarized with file counts and extension breakdowns instead of listing all files."#
     }
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1317,9 +1327,21 @@ mod tests {
         .unwrap();
         match &output {
             ListDirOutput::Content(c) => {
-                assert!(c.content.contains("network or virtual filesystem"), "no notice: {}", c.content);
-                assert!(!c.content.contains("files in subtree"), "subtree counts were computed: {}", c.content);
-                assert!(c.content.contains("status"), "the top level is still listed: {}", c.content);
+                assert!(
+                    c.content.contains("network or virtual filesystem"),
+                    "no notice: {}",
+                    c.content
+                );
+                assert!(
+                    !c.content.contains("files in subtree"),
+                    "subtree counts were computed: {}",
+                    c.content
+                );
+                assert!(
+                    c.content.contains("status"),
+                    "the top level is still listed: {}",
+                    c.content
+                );
             }
             other => panic!("unexpected output: {other:?}"),
         }
@@ -1833,7 +1855,9 @@ mod tests {
                 match fuigo_tool_runtime::Tool::run(
                     &ListDirTool,
                     test_ctx(resources.into_shared()),
-                    ListDirInput { target_directory: dir.to_string() },
+                    ListDirInput {
+                        target_directory: dir.to_string(),
+                    },
                 )
                 .await
                 .unwrap()
@@ -1845,17 +1869,31 @@ mod tests {
         };
         let deny = Some(vec!["secrets/**".to_string(), "**/*.pem".to_string()]);
         let root = list(".", deny.clone()).await;
-        assert!(root.contains("a_public.txt"), "an allowed name stays: {root}");
-        assert!(!root.contains("key_material.txt"), "a name under a denied directory is hidden: {root}");
-        assert!(!root.contains("server_token.pem"), "a denied file name is hidden: {root}");
+        assert!(
+            root.contains("a_public.txt"),
+            "an allowed name stays: {root}"
+        );
+        assert!(
+            !root.contains("key_material.txt"),
+            "a name under a denied directory is hidden: {root}"
+        );
+        assert!(
+            !root.contains("server_token.pem"),
+            "a denied file name is hidden: {root}"
+        );
         let inside = list("secrets", deny).await;
-        assert!(!inside.contains("key_material.txt"), "listing the denied directory itself: {inside}");
+        assert!(
+            !inside.contains("key_material.txt"),
+            "listing the denied directory itself: {inside}"
+        );
         // Control, and the no-rule contract: no resource and an empty list print the same bytes, with every name.
         let none = list(".", None).await;
-        assert!(none.contains("key_material.txt") && none.contains("server_token.pem"), "{none}");
+        assert!(
+            none.contains("key_material.txt") && none.contains("server_token.pem"),
+            "{none}"
+        );
         assert_eq!(none, list(".", Some(Vec::new())).await);
     }
-
 
     /// P198 r2: the current and the legacy `list_dir` walkers against the shared contract, and the no-rule contract of the
     /// legacy walker (an empty rule list prints the same bytes as none).
@@ -1872,17 +1910,25 @@ mod tests {
                 }
                 let mut ctx = test_ctx(resources.into_shared());
                 if legacy {
-                    ctx.extensions.insert(fuigo_tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
+                    ctx.extensions.insert(fuigo_tool_runtime::BehaviorVersion(
+                        "legacy-0.4.10".to_string(),
+                    ));
                 }
-                match fuigo_tool_runtime::Tool::run(&ListDirTool, ctx, ListDirInput { target_directory: dir })
-                    .await
-                    .unwrap()
+                match fuigo_tool_runtime::Tool::run(
+                    &ListDirTool,
+                    ctx,
+                    ListDirInput {
+                        target_directory: dir,
+                    },
+                )
+                .await
+                .unwrap()
                 {
                     ListDirOutput::Content(c) => c.content,
                     other => panic!("legacy={legacy}: unexpected: {other:?}"),
                 }
             };
-                        crate::util::read_deny::fixture::check_list(&list).await;
+            crate::util::read_deny::fixture::check_list(&list).await;
             crate::util::read_deny::fixture::check_list_round4(&list).await;
         }
     }
@@ -1899,11 +1945,19 @@ mod tests {
                 resources.insert(DenyReadGlobs(deny));
             }
             let mut ctx = test_ctx(resources.into_shared());
-            ctx.extensions.insert(fuigo_tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
+            ctx.extensions.insert(fuigo_tool_runtime::BehaviorVersion(
+                "legacy-0.4.10".to_string(),
+            ));
             async move {
-                match fuigo_tool_runtime::Tool::run(&ListDirTool, ctx, ListDirInput { target_directory: ".".to_string() })
-                    .await
-                    .unwrap()
+                match fuigo_tool_runtime::Tool::run(
+                    &ListDirTool,
+                    ctx,
+                    ListDirInput {
+                        target_directory: ".".to_string(),
+                    },
+                )
+                .await
+                .unwrap()
                 {
                     ListDirOutput::Content(c) => c.content,
                     other => panic!("unexpected: {other:?}"),

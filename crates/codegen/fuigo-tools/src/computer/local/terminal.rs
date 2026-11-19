@@ -32,7 +32,15 @@ struct SpawnResult {
     child: tokio::process::Child,
     process_group: crate::util::ProcessGroup,
     /// Handle for reading the state dump from fd 4 (persistent shell only).
-    state_dump_handle: Option<tokio::task::JoinHandle<std::io::Result<String>>>,
+    state_dump_handle: Option<tokio::task::JoinHandle<std::io::Result<ShellDump>>>,
+}
+
+/// A persistent-shell dump as its reader hands it back: tagged with the denylist generation its command ran under
+/// ([`tag_dump_generation`]), with how confined the spawn that wrote it ran (u46 r2).
+#[cfg_attr(not(unix), allow(dead_code))]
+struct ShellDump {
+    tagged: String,
+    producer: crate::sandbox_launch::SpawnConfinement,
 }
 
 const READ_BUFFER_SIZE: usize = 8192;
@@ -352,7 +360,7 @@ struct ProcessState {
 
     /// fd-4 state dump reader (persistent shell only); collected on exit to
     /// update the canonical `ShellState`.
-    state_dump_handle: Option<tokio::task::JoinHandle<std::io::Result<String>>>,
+    state_dump_handle: Option<tokio::task::JoinHandle<std::io::Result<ShellDump>>>,
 
     /// Scopes kill operations so subagent teardown only kills its own tasks.
     owner_session_id: Option<String>,
@@ -674,7 +682,9 @@ impl LocalTerminalActor {
     fn memory_cgroup_yields_to_session_cgroup(&self) -> bool {
         let yields = memory_cgroup_yields(
             self._cgroup_guard.is_active(),
-            self.session_scope.as_ref().is_some_and(|s| s.session_cgroup().is_some()),
+            self.session_scope
+                .as_ref()
+                .is_some_and(|s| s.session_cgroup().is_some()),
         );
         if yields {
             tracing::debug!("memory cgroup skipped: the child is placed in the session cgroup");
@@ -711,8 +721,10 @@ impl LocalTerminalActor {
 
         #[cfg(unix)]
         if self.login_env.is_none() {
-            self.login_env =
-                Some(capture_login_env_in(cwd, self.shell_env_policy.as_ref(), self.sandbox_hook()).await);
+            self.login_env = Some(
+                capture_login_env_in(cwd, self.shell_env_policy.as_ref(), self.sandbox_hook())
+                    .await,
+            );
         }
 
         #[cfg(unix)]
@@ -812,17 +824,21 @@ impl LocalTerminalActor {
         )?;
         let parts = crate::sandbox_launch::CommandParts::capture(&plain);
 
-        let child = fuigo_tty_utils::ProcessScope::spawn_placed(self.session_scope.as_ref(), || parts.new_command(), |cmd, hook| {
-            // P189: spawn_placed already registered the placement as the first pre_exec
-            // (before fd_mappings' dup2).
-            parts.apply(cmd);
+        let child = fuigo_tty_utils::ProcessScope::spawn_placed(
+            self.session_scope.as_ref(),
+            || parts.new_command(),
+            |cmd, hook| {
+                // P189: spawn_placed already registered the placement as the first pre_exec
+                // (before fd_mappings' dup2).
+                parts.apply(cmd);
 
-            cmd.fd_mappings(fd_mappings_for_spawn(hook, &mut prep.fd_mappings)?)
-                .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
+                cmd.fd_mappings(fd_mappings_for_spawn(hook, &mut prep.fd_mappings)?)
+                    .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
-            crate::sandbox_launch::wire_prepared(cmd, Stdio::piped());
-            Ok(())
-        })
+                crate::sandbox_launch::wire_prepared(cmd, Stdio::piped());
+                Ok(())
+            },
+        )
         .map_err(|e| match e {
             fuigo_tty_utils::SpawnPlacedError::Build(e) => e,
             fuigo_tty_utils::SpawnPlacedError::Stopping => {
@@ -905,6 +921,7 @@ impl LocalTerminalActor {
                     cwd: init_cwd.to_path_buf(),
                     snapshot: String::new(),
                     shell,
+                    trust: Default::default(),
                 });
             }
         }
@@ -912,10 +929,15 @@ impl LocalTerminalActor {
 
     /// Take a finished foreground command's dump back as the persistent shell's state (P86): only
     /// a dump from a command that ran on the CURRENT state and under the current credential
-    /// denylist generation is installed whole. Otherwise (the denylist grew since, or the state
-    /// was re-initialized meanwhile) only the dump's directory is kept.
+    /// denylist generation is installed whole, tagged with `producer`, how confined the spawn that
+    /// wrote it ran (u46 r2). Otherwise (the denylist grew since, or the state was re-initialized
+    /// meanwhile) only the dump's directory is kept.
     #[cfg(unix)]
-    fn install_persistent_dump(&mut self, tagged: &str) {
+    fn install_persistent_dump(
+        &mut self,
+        tagged: &str,
+        producer: crate::sandbox_launch::SpawnConfinement,
+    ) {
         let state_generation = self.shell_state_generation;
         let Some(state) = self.shell_state.as_mut() else {
             return;
@@ -926,7 +948,7 @@ impl LocalTerminalActor {
                     && generation
                         == crate::util::shell_env_policy::credential_denylist_generation() =>
             {
-                state.update_from_dump(dump);
+                state.update_from_dump_by(dump, producer);
             }
             // A foreground command's directory change stands whatever happened to the snapshot.
             Some((_, dump)) => state.update_cwd_from_dump(dump),
@@ -1003,26 +1025,39 @@ impl LocalTerminalActor {
         // The persistent backend restores login state from its snapshot, so no
         // login-env layering here.
         apply_child_env(&mut plain, self.shell_env_policy.as_ref(), None, env);
-        judge_spawn_env(&plain, || shell_state::snapshot_exports(&shell_state.snapshot), env_check)?;
-        crate::sandbox_launch::prepare_restoring(
+        let receipt = crate::sandbox_launch::prepare_restoring(
             self.sandbox_hook(),
             &mut plain,
-            || shell_state::snapshot_exports(&shell_state.snapshot),
+            || shell_state.restored_exports(),
             &crate::sandbox_launch::CallId::tool(tool_call_id),
+        )?;
+        // u46 r2/r3: state (env, options, aliases, functions) replays only into a spawn no less confined than the one
+        // that wrote it.
+        let confinement = crate::sandbox_launch::SpawnConfinement::of(receipt.as_ref());
+        // u46 r4: judged after the hook, once the confinement is known, over the env this spawn's replay exports (a
+        // less confined spawn replays the trusted state's, not the latest's).
+        judge_spawn_env(
+            &plain,
+            || shell_state.restored_exports_for(&confinement),
+            env_check,
         )?;
         let parts = crate::sandbox_launch::CommandParts::capture(&plain);
 
-        let spawned = fuigo_tty_utils::ProcessScope::spawn_placed(self.session_scope.as_ref(), || parts.new_command(), |cmd, hook| {
-            // P189: spawn_placed already registered the placement as the first pre_exec
-            // (before fd_mappings' dup2).
-            parts.apply(cmd);
+        let spawned = fuigo_tty_utils::ProcessScope::spawn_placed(
+            self.session_scope.as_ref(),
+            || parts.new_command(),
+            |cmd, hook| {
+                // P189: spawn_placed already registered the placement as the first pre_exec
+                // (before fd_mappings' dup2).
+                parts.apply(cmd);
 
-            cmd.fd_mappings(fd_mappings_for_spawn(hook, &mut prep.fd_mappings)?)
-                .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
+                cmd.fd_mappings(fd_mappings_for_spawn(hook, &mut prep.fd_mappings)?)
+                    .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
-            crate::sandbox_launch::wire_prepared(cmd, Stdio::piped());
-            Ok(())
-        });
+                crate::sandbox_launch::wire_prepared(cmd, Stdio::piped());
+                Ok(())
+            },
+        );
         drop(denylist_fence);
         let child = spawned.map_err(|e| match e {
             fuigo_tty_utils::SpawnPlacedError::Build(e) => e,
@@ -1037,6 +1072,8 @@ impl LocalTerminalActor {
         // Releases the FdMapping OwnedFds: otherwise the parent keeps the state-out
         // pipe's write end open and the dump reader never sees EOF.
         drop(std::mem::take(&mut prep.fd_mappings));
+        // A FIFO-backed dump channel (bash 3) learns from this when the shell is gone without having dumped.
+        prep.state_out_read.watch_child(child.id());
 
         let mut process_group = crate::util::ProcessGroup::new()
             .map_err(|e| ComputerError::io(format!("ProcessGroup::new: {e}")))?;
@@ -1044,7 +1081,7 @@ impl LocalTerminalActor {
             tracing::debug!("Failed to attach persistent-shell child to ProcessGroup: {e}");
         }
 
-        let snapshot = shell_state.replay_script();
+        let snapshot = shell_state.replay_script_for(&confinement);
         tokio::spawn(async move {
             if let Err(e) =
                 shell_state::write_snapshot_to_pipe(&snapshot, prep.state_in_write).await
@@ -1058,7 +1095,10 @@ impl LocalTerminalActor {
         let spawn_generation = self.shell_state_generation;
         let dump_handle = tokio::spawn(async move {
             let dump = shell_state::read_dump_from_pipe(prep.state_out_read).await?;
-            Ok(tag_dump_generation(spawn_generation, &dump))
+            Ok(ShellDump {
+                tagged: tag_dump_generation(spawn_generation, &dump),
+                producer: confinement,
+            })
         });
 
         Ok(SpawnResult {
@@ -1228,7 +1268,12 @@ impl LocalTerminalActor {
                     self.ensure_static_shell_initialized(&cwd).await;
                 } else if self.login_env.is_none() {
                     self.login_env = Some(
-                        capture_login_env_in(&cwd, self.shell_env_policy.as_ref(), self.sandbox_hook()).await,
+                        capture_login_env_in(
+                            &cwd,
+                            self.shell_env_policy.as_ref(),
+                            self.sandbox_hook(),
+                        )
+                        .await,
                     );
                 }
                 #[cfg(not(unix))]
@@ -1738,9 +1783,28 @@ impl LocalTerminalActor {
                     }
                     process.state_dump_handle.take()
                 };
-                if let Some(handle) = handle {
-                    match handle.await {
-                        Ok(Ok(dump)) => self.install_persistent_dump(&dump),
+                if let Some(mut handle) = handle {
+                    // The command is recorded as over (exited, or timed out and signalled). The reader's own
+                    // deadline starts only when the shell is gone or a byte arrives, so a shell that ignores
+                    // SIGTERM would wedge this actor: bound the wait from here and abort the reader.
+                    let joined = match tokio::time::timeout(
+                        shell_state::DUMP_READ_TIMEOUT,
+                        &mut handle,
+                    )
+                    .await
+                    {
+                        Ok(joined) => joined,
+                        Err(_) => {
+                            handle.abort();
+                            tracing::warn!(
+                                "shell state dump not delivered within {}s of the command ending; state kept",
+                                shell_state::DUMP_READ_TIMEOUT.as_secs()
+                            );
+                            continue;
+                        }
+                    };
+                    match joined {
+                        Ok(Ok(dump)) => self.install_persistent_dump(&dump.tagged, dump.producer),
                         Ok(Err(e)) => {
                             tracing::debug!("failed to read shell state dump: {e}");
                         }
@@ -3283,7 +3347,10 @@ impl LogSink {
     }
 
     /// Cut the log to `len` bytes; later writes land at the new end.
-    #[allow(clippy::disallowed_methods, reason = "OutputLog::ByPath file only (Self::File), which no session folder gets: OutputLog::open without a writer returns Unavailable; a session log is Self::Session")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "OutputLog::ByPath file only (Self::File), which no session folder gets: OutputLog::open without a writer returns Unavailable; a session log is Self::Session"
+    )]
     async fn truncate_to(&mut self, len: u64) {
         match self {
             Self::File(file) => {
@@ -3308,12 +3375,17 @@ async fn open_log_sink(
     match output_log {
         OutputLog::Session(log) => Ok(LogSink::Session(log)),
         OutputLog::ByPath => open_output_file(path).await.map(LogSink::File),
-        OutputLog::Unavailable => Err(std::io::Error::other("the session writer could not open the log")),
+        OutputLog::Unavailable => Err(std::io::Error::other(
+            "the session writer could not open the log",
+        )),
     }
 }
 
 #[tracing::instrument(name = "fs.open_output_file", skip_all)]
-#[allow(clippy::disallowed_methods, reason = "reached only by `OutputLog::ByPath`, which no session folder gets (`OutputLog::open` without a writer returns `Unavailable`); tests and non-session callers only.")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "reached only by `OutputLog::ByPath`, which no session folder gets (`OutputLog::open` without a writer returns `Unavailable`); tests and non-session callers only."
+)]
 async fn open_output_file(path: &std::path::Path) -> std::io::Result<File> {
     // A command's output log lives in `<session>/terminal/` and holds whatever the command printed (P150, D6, S14):
     // owner-only on Unix like the other session files. The folder is created 0700 and the log 0600, and an existing
@@ -3348,7 +3420,9 @@ async fn open_output_file(path: &std::path::Path) -> std::io::Result<File> {
         // On the open descriptor (no path race); only an existing log can have another mode.
         if let Ok(meta) = file.metadata().await
             && meta.permissions().mode() & 0o777 != 0o600
-            && let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)).await
+            && let Err(error) = file
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .await
         {
             tracing::debug!(path = %path.display(), %error, "terminal output: could not restrict to owner-only");
         }
@@ -3358,7 +3432,10 @@ async fn open_output_file(path: &std::path::Path) -> std::io::Result<File> {
 
 /// Set `path` to `mode` when it has any other mode (Unix). Best effort: logged, never fatal.
 #[cfg(unix)]
-#[allow(clippy::disallowed_methods, reason = "only called from open_output_file, which only OutputLog::ByPath reaches (never a session folder).")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "only called from open_output_file, which only OutputLog::ByPath reaches (never a session folder)."
+)]
 async fn tighten_owner_only(path: &std::path::Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt as _;
     let result = match tokio::fs::metadata(path).await {
@@ -3592,7 +3669,10 @@ fn apply_child_env(
 /// Attaches the child to a [`ProcessGroup`] for whole-tree teardown.
 /// P189: the memory cgroup is skipped when the child is already placed in the
 /// session cgroup (a second `cgroup.procs` write would move it out again).
-pub(crate) fn memory_cgroup_yields(memory_cgroup_active: bool, session_cgroup_present: bool) -> bool {
+pub(crate) fn memory_cgroup_yields(
+    memory_cgroup_active: bool,
+    session_cgroup_present: bool,
+) -> bool {
     memory_cgroup_active && session_cgroup_present
 }
 
@@ -3660,9 +3740,13 @@ fn judge_spawn_env(
     env_check: Option<EnvCheck<'_>>,
 ) -> Result<(), crate::sandbox_launch::SandboxLaunchError> {
     match env_check {
-        Some(check) => {
-            crate::sandbox_launch::check_child_env(cmd, &restored(), check.command, true, check.request_cwd)
-        }
+        Some(check) => crate::sandbox_launch::check_child_env(
+            cmd,
+            &restored(),
+            check.command,
+            true,
+            check.request_cwd,
+        ),
         None => Ok(()),
     }
 }
@@ -3718,7 +3802,9 @@ fn spawn_shell_command(
     // P189-placed: handed to ProcessScope::spawn_placed below, which registers the placement.
     let new_command = || parts.new_command();
     #[cfg(unix)]
-    let configure = |cmd: &mut tokio::process::Command, _hook: &fuigo_tty_utils::PlaceHook| -> std::io::Result<()> {
+    let configure = |cmd: &mut tokio::process::Command,
+                     _hook: &fuigo_tty_utils::PlaceHook|
+     -> std::io::Result<()> {
         // P189: spawn_placed already registered the placement as the first pre_exec.
         parts.apply(cmd);
         // Detached from the controlling terminal, so subprocesses cannot open /dev/tty and
@@ -3774,16 +3860,23 @@ fn spawn_shell_command(
     #[cfg(unix)]
     let mut group = crate::util::ProcessGroup::new()?;
     #[cfg(unix)]
-    let child = fuigo_tty_utils::ProcessScope::spawn_placed(session_scope, new_command, configure).map_err(|e| match e {
-        fuigo_tty_utils::SpawnPlacedError::Build(e) => e,
-        fuigo_tty_utils::SpawnPlacedError::Stopping => {
-            std::io::Error::other("session is stopping; command not started")
-        }
-        fuigo_tty_utils::SpawnPlacedError::Spawn(e) => {
-            crate::util::spawn::ShellSpawnFailure::new("bash_tool", &spawn_program, &e, spawn_path_set).log();
-            std::io::Error::new(e.kind(), format!("spawn shell in {}: {e}", cwd.display()))
-        }
-    })?;
+    let child = fuigo_tty_utils::ProcessScope::spawn_placed(session_scope, new_command, configure)
+        .map_err(|e| match e {
+            fuigo_tty_utils::SpawnPlacedError::Build(e) => e,
+            fuigo_tty_utils::SpawnPlacedError::Stopping => {
+                std::io::Error::other("session is stopping; command not started")
+            }
+            fuigo_tty_utils::SpawnPlacedError::Spawn(e) => {
+                crate::util::spawn::ShellSpawnFailure::new(
+                    "bash_tool",
+                    &spawn_program,
+                    &e,
+                    spawn_path_set,
+                )
+                .log();
+                std::io::Error::new(e.kind(), format!("spawn shell in {}: {e}", cwd.display()))
+            }
+        })?;
 
     #[cfg(not(unix))]
     // P189-unplaced: non-unix (Windows) path; the session cgroup is Linux-only.
@@ -3798,18 +3891,23 @@ fn spawn_shell_command(
                 // will also fail, but kill_on_drop still reaps the immediate child.
                 tracing::debug!(
                     "spawn with CREATE_BREAKAWAY_FROM_JOB returned ERROR_ACCESS_DENIED; \
-                     retrying without breakaway (process-tree teardown disabled for this child)"
-                // P189-unplaced: non-unix (Windows) path; the session cgroup is Linux-only.
+                     retrying without breakaway (process-tree teardown disabled for this child)" // P189-unplaced: non-unix (Windows) path; the session cgroup is Linux-only.
                 );
                 drop(cmd);
                 let mut cmd = build_cmd(false)?;
                 let child = cmd.spawn().inspect_err(|e| {
-                    crate::util::spawn::ShellSpawnFailure::for_command("bash_tool", cmd.as_std(), e).log();
+                    crate::util::spawn::ShellSpawnFailure::for_command(
+                        "bash_tool",
+                        cmd.as_std(),
+                        e,
+                    )
+                    .log();
                 })?;
                 (child, group)
             }
             Err(e) => {
-                crate::util::spawn::ShellSpawnFailure::for_command("bash_tool", cmd.as_std(), &e).log();
+                crate::util::spawn::ShellSpawnFailure::for_command("bash_tool", cmd.as_std(), &e)
+                    .log();
                 return Err(e);
             }
         }
@@ -3844,7 +3942,10 @@ fn extract_exit_status(status: std::process::ExitStatus) -> ExitStatus {
 #[path = "terminal_cli_facing_unchanged_tests.rs"]
 mod cli_facing_unchanged_tests;
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4098,9 +4199,7 @@ mod tests {
         // The old snapshot was discarded, not scrubbed: the session's own exports went with it
         // (the documented cost), its directory was kept.
         let after = backend
-            .run(make_request(
-                "printf '%s|' \"${P86_USER_MARK:-gone}\"; pwd",
-            ))
+            .run(make_request("printf '%s|' \"${P86_USER_MARK:-gone}\"; pwd"))
             .await
             .unwrap();
         assert_eq!(
@@ -4242,11 +4341,17 @@ mod tests {
         let mut request = make_request("printf 'one\\n'");
         request.output_file = folder.join(&rel);
         request.output_log = crate::computer::types::OutputLog::open(None, rel).await;
-        assert!(matches!(request.output_log, crate::computer::types::OutputLog::Unavailable));
+        assert!(matches!(
+            request.output_log,
+            crate::computer::types::OutputLog::Unavailable
+        ));
         let backend = LocalTerminalBackend::new();
         // The command still runs (the log is best effort) but nothing is written by path.
         backend.run(request).await.unwrap();
-        assert!(!folder.exists(), "a writer-less run created the session folder");
+        assert!(
+            !folder.exists(),
+            "a writer-less run created the session folder"
+        );
     }
 
     /// Through the session's writer (design F5 §5.4.2): a foreground command's log is written with the session's
@@ -4260,16 +4365,24 @@ mod tests {
         let rel = PathBuf::from("terminal").join("fg.log");
         let mut request = make_request("printf 'one\\ntwo\\n'");
         request.output_file = folder.join(&rel);
-        request.output_log = crate::computer::types::OutputLog::open(Some(&writer), rel.clone()).await;
-        assert!(matches!(request.output_log, crate::computer::types::OutputLog::Session(_)));
+        request.output_log =
+            crate::computer::types::OutputLog::open(Some(&writer), rel.clone()).await;
+        assert!(matches!(
+            request.output_log,
+            crate::computer::types::OutputLog::Session(_)
+        ));
         let backend = LocalTerminalBackend::new();
         let result = backend.run(request).await.unwrap();
         assert_eq!(result.exit_code, Some(0));
-        assert_eq!(std::fs::read_to_string(folder.join(&rel)).unwrap(), "one\ntwo\n");
+        assert_eq!(
+            std::fs::read_to_string(folder.join(&rel)).unwrap(),
+            "one\ntwo\n"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            let mode =
+                |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode(&folder.join(&rel)), 0o600);
             assert_eq!(mode(&folder.join("terminal")), 0o700);
         }
@@ -4454,26 +4567,45 @@ mod tests {
         let mut request = make_request("echo p150-fg");
         request.output_file = terminal.join("call-1.log");
         backend.run(request).await.unwrap();
-        assert_eq!(mode(&terminal), 0o700, "terminal/ must be created owner-only");
-        assert_eq!(mode(&terminal.join("call-1.log")), 0o600, "a foreground log must be owner-only");
+        assert_eq!(
+            mode(&terminal),
+            0o700,
+            "terminal/ must be created owner-only"
+        );
+        assert_eq!(
+            mode(&terminal.join("call-1.log")),
+            0o600,
+            "a foreground log must be owner-only"
+        );
 
         let mut request = make_request("echo p150-bg");
         request.output_file = terminal.join("call-2.log");
         let handle = backend.run_background(request).await.unwrap();
-        assert_eq!(mode(&terminal.join("call-2.log")), 0o600, "a background log must be owner-only");
+        assert_eq!(
+            mode(&terminal.join("call-2.log")),
+            0o600,
+            "a background log must be owner-only"
+        );
         let _ = backend
             .wait_for_completion(&handle.task_id, Some(Duration::from_secs(10)))
             .await;
 
         std::fs::set_permissions(&terminal, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(terminal.join("call-1.log"), b"old").unwrap();
-        std::fs::set_permissions(terminal.join("call-1.log"), std::fs::Permissions::from_mode(0o644))
-            .unwrap();
+        std::fs::set_permissions(
+            terminal.join("call-1.log"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         let mut request = make_request("echo p150-again");
         request.output_file = terminal.join("call-1.log");
         backend.run(request).await.unwrap();
         assert_eq!(mode(&terminal), 0o700, "a looser terminal/ is tightened");
-        assert_eq!(mode(&terminal.join("call-1.log")), 0o600, "a looser log is tightened");
+        assert_eq!(
+            mode(&terminal.join("call-1.log")),
+            0o600,
+            "a looser log is tightened"
+        );
     }
 
     #[tokio::test]
@@ -4596,7 +4728,11 @@ mod tests {
         a.unwrap();
         b.unwrap();
         let tasks = backend.list_tasks().await;
-        assert_eq!(tasks.len(), 2, "both backgrounded tasks stay listed: {tasks:?}");
+        assert_eq!(
+            tasks.len(),
+            2,
+            "both backgrounded tasks stay listed: {tasks:?}"
+        );
         for task in tasks {
             let outcome = backend.kill_task(&task.task_id).await;
             assert!(
@@ -5798,6 +5934,109 @@ mod tests {
         );
     }
 
+    /// u46 r2: a hook that leaves every command alone and reports the receipt set for its call (none: `off`).
+    #[derive(Default)]
+    struct ConfinementHook {
+        receipts: std::sync::Mutex<HashMap<String, crate::sandbox_launch::LaunchReceipt>>,
+    }
+
+    impl ConfinementHook {
+        fn sandbox(&self, call: &str, grants: &[&str]) {
+            self.receipts.lock().unwrap().insert(
+                crate::sandbox_launch::CallId::tool(call).to_string(),
+                crate::sandbox_launch::LaunchReceipt {
+                    sandboxed: true,
+                    backend: None,
+                    grants: grants.iter().map(|g| (*g).to_owned()).collect(),
+                },
+            );
+        }
+    }
+
+    impl crate::sandbox_launch::SandboxLaunch for ConfinementHook {
+        fn prepare(
+            &self,
+            _cmd: &mut tokio::process::Command,
+            _original: &crate::sandbox_launch::OriginalArgv,
+            call: &crate::sandbox_launch::CallId,
+        ) -> Result<
+            Option<crate::sandbox_launch::LaunchReceipt>,
+            crate::sandbox_launch::SandboxLaunchError,
+        > {
+            Ok(self
+                .receipts
+                .lock()
+                .unwrap()
+                .get(&call.to_string())
+                .cloned())
+        }
+    }
+
+    /// u46 r2/r3: the persistent shell tags the state each spawn leaves with that spawn's receipt. What a sandboxed
+    /// command left (env, aliases, functions) carries into the next sandboxed command, but not into the re-run of a
+    /// refused call under a grant (whose refused attempt's state is installed before it) nor into an unsandboxed one:
+    /// those get the directory and the state an unconfined spawn last wrote, and the warning once. A startup selector
+    /// (`BASH_ENV`) a sandboxed command exported carries only into the next sandboxed command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn u46_functions_from_a_sandboxed_command_skip_a_less_sandboxed_one() {
+        let hook = Arc::new(ConfinementHook::default());
+        let backend = LocalTerminalBackend::new_inner(LocalTerminalConfig {
+            persistent_shell: true,
+            sandbox_launch: Some(hook.clone()),
+            ..Default::default()
+        });
+        for call in ["define", "same", "refused", "define-again"] {
+            hook.sandbox(call, &[]);
+        }
+        hook.sandbox("rerun", &["g-1", "replay:x"]);
+        let dir = tempfile::tempdir().unwrap();
+        let run = |id: &str, command: &str| {
+            let mut request = make_request(command);
+            request.tool_call_id = id.to_owned();
+            let id = id.to_owned();
+            let backend = &backend;
+            async move { backend.run(request).await.expect(&id).combined_output }
+        };
+        let probe = "u46fn 2>/dev/null || echo no-fn; u46al 2>/dev/null || echo no-alias; pwd; \
+                     echo \"KEPT=${KEPT-unset} BE=${BASH_ENV-unset}\"";
+        let define = format!(
+            "cd {}; export KEPT='a b'; export BASH_ENV=/tmp/u46-be; alias u46al='echo al-ran'; \
+             u46fn() {{ echo fn-ran; }}",
+            dir.path().display()
+        );
+        let dir = dir.path().to_string_lossy().into_owned();
+        let warning = shell_state::SETTINGS_WITHHELD_WARNING;
+        let withheld = |out: &str| {
+            out.contains("no-fn")
+                && out.contains("no-alias")
+                && out.contains("KEPT=unset")
+                && out.contains(warning)
+                && out.contains(&dir)
+        };
+
+        run("define", &define).await;
+        let same = run("same", probe).await;
+        assert!(
+            same.contains("fn-ran")
+                && same.contains("al-ran")
+                && same.contains("KEPT=a b")
+                && !same.contains(warning),
+            "{same}"
+        );
+        assert!(same.contains("BE=/tmp/u46-be"), "{same}");
+
+        run("refused", "true").await;
+        let rerun = run("rerun", probe).await;
+        assert!(withheld(&rerun) && rerun.contains("BE=unset"), "{rerun}");
+
+        run("define-again", &define).await;
+        let off = run("off", probe).await;
+        assert!(withheld(&off) && off.contains("BE=unset"), "{off}");
+        let after = run("off-again", probe).await;
+        assert!(!after.contains(warning), "warned twice: {after}");
+    }
+
     /// u35 g9 (Astra/Grok r8 High 1, Fable r8 High): the permission check judges Fuigo's
     /// environment, but the persistent shell runs the next command under its snapshot's exports.
     /// Every call approved without a grant is judged on the environment its shell gives it and
@@ -5821,13 +6060,23 @@ mod tests {
                 panic!("{sibling}: a no-grant call ran under the steering export");
             };
             let text = refused.to_string();
-            assert!(text.contains("FUIGO_U35_CHILD_STEER") && text.contains("approval"), "{text}");
+            assert!(
+                text.contains("FUIGO_U35_CHILD_STEER") && text.contains("approval"),
+                "{text}"
+            );
         }
         let mut granted = make_request("echo granted");
         granted.tool_call_id = "u35-granted".to_owned();
         granted.approved_without_grant = false;
-        let ran = backend.run(granted).await.expect("a granted call is never refused");
-        assert!(ran.combined_output.contains("granted"), "{}", ran.combined_output);
+        let ran = backend
+            .run(granted)
+            .await
+            .expect("a granted call is never refused");
+        assert!(
+            ran.combined_output.contains("granted"),
+            "{}",
+            ran.combined_output
+        );
     }
 
     /// A hook that replaces the command the way a backend does: a wrapper shell that prints a
@@ -5867,6 +6116,7 @@ mod tests {
             Ok(Some(crate::sandbox_launch::LaunchReceipt {
                 sandboxed: true,
                 backend: None,
+                grants: Vec::new(),
             }))
         }
     }
@@ -6044,6 +6294,87 @@ mod tests {
             pwd == "/tmp" || pwd == "/private/tmp",
             "cwd should persist across commands, got: {pwd}"
         );
+    }
+
+    /// A foreground command that runs longer than the dump-read timeout must still leave its state behind.
+    #[tokio::test]
+    async fn test_persistent_shell_state_survives_long_command() {
+        let backend = LocalTerminalBackend::with_persistent_shell();
+
+        let result = backend
+            .run(make_request("sleep 7; cd /tmp; export U46_STTO=1"))
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, Some(0));
+
+        let result = backend
+            .run(make_request("pwd; echo \"v=${U46_STTO:-unset}\""))
+            .await
+            .unwrap();
+        let out = result.combined_output;
+        let mut lines = out.lines().map(str::trim);
+        let pwd = lines.next().unwrap_or_default();
+        assert!(
+            pwd == "/tmp" || pwd == "/private/tmp",
+            "cwd lost after a long command, got: {out:?}"
+        );
+        assert_eq!(lines.next(), Some("v=1"), "env lost after a long command");
+    }
+
+    /// r1h1: a foreground command that outlives its timeout and ignores SIGTERM keeps the shell (and so the dump
+    /// pipe) alive with no bytes. The actor must still bound the dump wait, escalate to SIGKILL and serve the next
+    /// command, not wait for a deadline that never starts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn r1h1_term_ignoring_timeout_does_not_wedge_the_actor() {
+        let backend = LocalTerminalBackend::with_persistent_shell();
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+
+        let mut stuck = make_request(&format!(
+            "echo $$ > '{}'; trap '' TERM; while :; do sleep 1; done",
+            pid_file.display()
+        ));
+        stuck.timeout = Duration::from_secs(1);
+        stuck.tool_call_id = "r1h1-stuck".to_owned();
+        let first = tokio::time::timeout(Duration::from_secs(20), backend.run(stuck))
+            .await
+            .expect("the timed-out command must return");
+        assert!(first.is_ok());
+
+        let mut next = make_request("echo r1h1-next");
+        next.tool_call_id = "r1h1-next".to_owned();
+        let next = tokio::time::timeout(Duration::from_secs(25), backend.run(next))
+            .await
+            .expect("the actor must serve the next command after a SIGTERM-ignoring timeout")
+            .unwrap();
+        assert!(
+            next.combined_output.contains("r1h1-next"),
+            "{}",
+            next.combined_output
+        );
+
+        // SIGKILL escalation: the shell that ignored SIGTERM is gone.
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut gone = false;
+        for _ in 0..100 {
+            // SAFETY: signal 0 only probes for existence.
+            let rc = unsafe { libc::kill(pid, 0) };
+            if rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if !gone {
+            // SAFETY: reap the stray before failing.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(gone, "the SIGTERM-ignoring shell was never killed");
     }
 
     #[tokio::test]
@@ -6993,15 +7324,30 @@ mod tests {
         backend.kill_task(&handles[1].task_id).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         let state = |snap: Option<TaskSnapshot>| snap.map(|s| (s.completed, s.explicitly_killed));
-        assert_eq!(state(backend.get_task(&handles[1].task_id).await), Some((true, true)), "the stopped command is gone");
-        assert_eq!(state(backend.get_task(&handles[0].task_id).await), Some((false, false)), "the first keeps running");
-        assert_eq!(state(backend.get_task(&handles[2].task_id).await), Some((false, false)), "the third keeps running");
+        assert_eq!(
+            state(backend.get_task(&handles[1].task_id).await),
+            Some((true, true)),
+            "the stopped command is gone"
+        );
+        assert_eq!(
+            state(backend.get_task(&handles[0].task_id).await),
+            Some((false, false)),
+            "the first keeps running"
+        );
+        assert_eq!(
+            state(backend.get_task(&handles[2].task_id).await),
+            Some((false, false)),
+            "the third keeps running"
+        );
         backend.kill_task(&handles[0].task_id).await;
         backend.kill_task(&handles[2].task_id).await;
     }
 
     fn describe_run(r: &TerminalRunResult) -> String {
-        format!("exit={:?} signal={:?} timed_out={} output={:?}", r.exit_code, r.signal, r.timed_out, r.combined_output)
+        format!(
+            "exit={:?} signal={:?} timed_out={} output={:?}",
+            r.exit_code, r.signal, r.timed_out, r.combined_output
+        )
     }
 
     /// Row 48.5, path "per-command timeout": the command that times out is torn down on its own process group;
@@ -7028,14 +7374,22 @@ mod tests {
 
             let (timed, sib) = tokio::join!(backend.run(slow), backend.run(sibling));
             let (timed, sib) = (timed.unwrap(), sib.unwrap());
-            assert!(timed.timed_out, "persistent={persistent}: the slow command must time out");
             assert!(
-                !sib.timed_out && sib.exit_code == Some(0) && sib.combined_output.contains("sibling-done"),
+                timed.timed_out,
+                "persistent={persistent}: the slow command must time out"
+            );
+            assert!(
+                !sib.timed_out
+                    && sib.exit_code == Some(0)
+                    && sib.combined_output.contains("sibling-done"),
                 "persistent={persistent}: a parallel command must finish normally, got {}",
                 describe_run(&sib)
             );
             assert!(
-                backend.get_task(&bg.task_id).await.is_some_and(|s| !s.completed),
+                backend
+                    .get_task(&bg.task_id)
+                    .await
+                    .is_some_and(|s| !s.completed),
                 "persistent={persistent}: a parallel background command must still be running"
             );
             backend.kill_task(&bg.task_id).await;
@@ -7076,7 +7430,11 @@ mod tests {
                 driver
             );
             let (v, p, u) = (v.unwrap(), p.unwrap(), u.unwrap());
-            assert_eq!(v.signal.as_deref(), Some("cancelled"), "persistent={persistent}: the owner's command is stopped");
+            assert_eq!(
+                v.signal.as_deref(),
+                Some("cancelled"),
+                "persistent={persistent}: the owner's command is stopped"
+            );
             assert!(
                 p.exit_code == Some(0) && p.combined_output.contains("parent-done"),
                 "persistent={persistent}: another session's command must finish normally, got {}",
@@ -7088,7 +7446,10 @@ mod tests {
                 describe_run(&u)
             );
             assert!(
-                backend.get_task(&other_bg.task_id).await.is_some_and(|s| !s.completed),
+                backend
+                    .get_task(&other_bg.task_id)
+                    .await
+                    .is_some_and(|s| !s.completed),
                 "persistent={persistent}: another session's background command must keep running"
             );
             backend.kill_task(&other_bg.task_id).await;

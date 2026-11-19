@@ -1,10 +1,10 @@
 //! P166 round 9 (Grok r8). Rows are `(command, blocked)`: `blocked` means the protected floor must fire, `false`
 //! means it must stay silent. `exec` rows assert the `ExecOrAmbientGit` finding instead.
 
+use super::ClassifierSecurityFinding;
 use super::p166_r7_sweep_tests::WRITERS;
 use super::p166_r8_sweep_tests::{floor, plain_slot};
 use super::{PermissionState, evaluate_bash};
-use super::ClassifierSecurityFinding;
 
 fn project() -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
@@ -20,14 +20,25 @@ fn check(rows: &[(String, bool)]) {
         .iter()
         .filter_map(|(cmd, blocked)| {
             let got = floor(project.path(), cmd);
-            (got.is_some() != *blocked).then(|| format!("{}: expected blocked={blocked}, got {got:?}", &cmd[..cmd.len().min(120)]))
+            (got.is_some() != *blocked).then(|| {
+                format!(
+                    "{}: expected blocked={blocked}, got {got:?}",
+                    &cmd[..cmd.len().min(120)]
+                )
+            })
         })
         .collect();
-    assert!(wrong.is_empty(), "protected floor mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "protected floor mismatches:\n{}",
+        wrong.join("\n")
+    );
 }
 
 fn rows(list: &[(&str, bool)]) -> Vec<(String, bool)> {
-    list.iter().map(|(cmd, blocked)| ((*cmd).to_owned(), *blocked)).collect()
+    list.iter()
+        .map(|(cmd, blocked)| ((*cmd).to_owned(), *blocked))
+        .collect()
 }
 
 fn exec(cmd: &str) -> bool {
@@ -109,8 +120,18 @@ fn p166_r9_h3_local_hosts() {
 #[test]
 fn p166_r9_m4_git_env_assignments() {
     for name in [
-        "GIT_DIR", "GIT_WORK_TREE", "GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EDITOR", "GIT_PAGER",
-        "GIT_ASKPASS", "GIT_EXTERNAL_DIFF", "GIT_PROXY_COMMAND", "GIT_TEMPLATE_DIR", "GIT_CONFIG_GLOBAL",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_EXEC_PATH",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_EDITOR",
+        "GIT_PAGER",
+        "GIT_ASKPASS",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_PROXY_COMMAND",
+        "GIT_TEMPLATE_DIR",
+        "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_SYSTEM",
     ] {
         for cmd in [
@@ -121,7 +142,12 @@ fn p166_r9_m4_git_env_assignments() {
             assert!(exec(&cmd), "{cmd}");
         }
     }
-    for cmd in ["FOO=1 git status", "git log", "GIT_AUTHOR_NAME=x git commit -m y", "RUST_LOG=debug git status"] {
+    for cmd in [
+        "FOO=1 git status",
+        "git log",
+        "GIT_AUTHOR_NAME=x git commit -m y",
+        "RUST_LOG=debug git status",
+    ] {
         assert!(!exec(cmd), "{cmd}");
     }
 }
@@ -155,7 +181,10 @@ fn p166_r9_m6_command_valued_config_set() {
         ("git config --global core.pager /tmp/evil", true),
         ("git config core.editor /tmp/evil", true),
         ("git config credential.helper '!/tmp/evil'", true),
-        ("git config credential.https://x.example.helper /tmp/evil", true),
+        (
+            "git config credential.https://x.example.helper /tmp/evil",
+            true,
+        ),
         ("git config uploadpack.packObjectsHook /tmp/evil", true),
         ("git config remote.origin.receivepack /tmp/evil", true),
         ("git config sequence.editor /tmp/evil", true),
@@ -171,7 +200,10 @@ fn p166_r9_m6_command_valued_config_set() {
         ("git config protocol.ext.allow always", true),
         // P166 r10 (H2): the command of `url.<base>.insteadOf` is `<base>` (the key), so the value test was backwards.
         // Before r10: this row was `true`. After: `false`; the key form is in `p166_r10_h2_insteadof_key_segment`.
-        ("git config url.https://x/.insteadOf 'ext::sh -c evil'", false),
+        (
+            "git config url.https://x/.insteadOf 'ext::sh -c evil'",
+            false,
+        ),
         ("git config core.hooksPath /tmp/evil", true),
         // Not command-valued, or a harmless value.
         ("git config user.name x", false),
@@ -229,7 +261,12 @@ fn p166_r9_m8_tilde_plus_minus() {
 #[test]
 fn p166_r9_l9_glob_cap() {
     // P166 r10 (L7): `*` cannot match a dot-name, so `touch */*` is no longer a protected write (before r10: true).
-    check(&rows(&[("touch */*", false), ("touch */*/*", false), ("touch .git/*/*", true), ("touch out/*.txt", false)]));
+    check(&rows(&[
+        ("touch */*", false),
+        ("touch */*/*", false),
+        ("touch .git/*/*", true),
+        ("touch out/*.txt", false),
+    ]));
 }
 
 /// (a) `git -C {a,.git/hooks} checkout main`: the second alternative becomes the git verb, so git runs nothing, but
@@ -258,7 +295,11 @@ fn p166_r9_sweep_sequence_overcap_and_loopback() {
     let cwd = project.path();
     let (mut cases, mut wrong) = (0usize, Vec::new());
     let spellings = [
-        (".mcp.json", ".mc{p..p}.json".to_owned(), format!("{}p.json", alternatives(".mc"))),
+        (
+            ".mcp.json",
+            ".mc{p..p}.json".to_owned(),
+            format!("{}p.json", alternatives(".mc")),
+        ),
         (
             ".git/hooks/pre-commit",
             ".g{i..i}t/hooks/pre-commit".to_owned(),
@@ -278,7 +319,24 @@ fn p166_r9_sweep_sequence_overcap_and_loopback() {
             }
         }
     }
-    for host in ["localhost", "127.0.0.1", "[::1]", "LocalHost", "c", "user@localhost", "user@127.0.0.1", "user@[::1]", "127.1", "127.0.1", "localhost.", "0", "[0:0:0:0:0:0:0:1]", "0x7f.1", "017700000001", "2130706433"] {
+    for host in [
+        "localhost",
+        "127.0.0.1",
+        "[::1]",
+        "LocalHost",
+        "c",
+        "user@localhost",
+        "user@127.0.0.1",
+        "user@[::1]",
+        "127.1",
+        "127.0.1",
+        "localhost.",
+        "0",
+        "[0:0:0:0:0:0:0:1]",
+        "0x7f.1",
+        "017700000001",
+        "2130706433",
+    ] {
         for dest in [".git/hooks/pre-commit", ".mcp.json"] {
             for cmd in [
                 format!("scp evil {host}:{dest}"),
@@ -294,5 +352,10 @@ fn p166_r9_sweep_sequence_overcap_and_loopback() {
         }
     }
     eprintln!("SWEEP r9 cases={cases} wrong={}", wrong.len());
-    assert!(wrong.is_empty(), "{} of {cases} generated cases wrong:\n{}", wrong.len(), wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "{} of {cases} generated cases wrong:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
 }

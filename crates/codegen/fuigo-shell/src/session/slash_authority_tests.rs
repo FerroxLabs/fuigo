@@ -66,19 +66,36 @@ fn runtime_control_is_inert_and_human_intent_continues_to_dynamic_resolution() {
 #[test]
 fn s1_2_peer_untrusted_slash_is_inert_for_every_command() {
     for text in [
-        "/compact", "/compact keep going", "/yolo", "/permissions", "/rename pwned", "/context", "/feedback",
-        "/available-skill arg", "/plugin-command x", "/loop 1m do it", "  /yolo",
+        "/compact",
+        "/compact keep going",
+        "/yolo",
+        "/permissions",
+        "/rename pwned",
+        "/context",
+        "/feedback",
+        "/available-skill arg",
+        "/plugin-command x",
+        "/loop 1m do it",
+        "  /yolo",
     ] {
         assert!(
             matches!(
-                resolve(InputAuthority::PeerUntrusted, &[text_block(text)], BUILTIN_COMMANDS),
+                resolve(
+                    InputAuthority::PeerUntrusted,
+                    &[text_block(text)],
+                    BUILTIN_COMMANDS
+                ),
                 AuthorityResolution::Inert
             ),
             "{text}"
         );
     }
     assert!(matches!(
-        resolve(InputAuthority::PeerUntrusted, &[text_block("plain")], BUILTIN_COMMANDS),
+        resolve(
+            InputAuthority::PeerUntrusted,
+            &[text_block("plain")],
+            BUILTIN_COMMANDS
+        ),
         AuthorityResolution::NotSlash
     ));
     // every builtin name, by name
@@ -86,7 +103,11 @@ fn s1_2_peer_untrusted_slash_is_inert_for_every_command() {
         let text = format!("/{}", command.name);
         assert!(
             matches!(
-                resolve(InputAuthority::PeerUntrusted, &[text_block(&text)], BUILTIN_COMMANDS),
+                resolve(
+                    InputAuthority::PeerUntrusted,
+                    &[text_block(&text)],
+                    BUILTIN_COMMANDS
+                ),
                 AuthorityResolution::Inert
             ),
             "{text}"
@@ -104,7 +125,11 @@ fn context_window_command_is_human_only() {
             .all(|command| command.name != "context-window"
                 || command.model_authored_eligibility == ModelAuthoredEligibility::Denied)
     );
-    for text in ["/context-window 400k", "/context-window", "/Context-Window 1m"] {
+    for text in [
+        "/context-window 400k",
+        "/context-window",
+        "/Context-Window 1m",
+    ] {
         assert!(matches!(
             resolve(
                 InputAuthority::ModelAuthoredUntrusted,

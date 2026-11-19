@@ -258,7 +258,12 @@ pub fn walk_for_skill_md(dir: &Path, paths: &mut Vec<PathBuf>, depth: usize) {
 
 /// [`walk_for_skill_md`] under the given walk policy. Each canonical directory is walked once (symlink loops), every
 /// subdirectory and SKILL.md must be admitted by `walk`.
-pub fn walk_for_skill_md_in(dir: &Path, paths: &mut Vec<PathBuf>, depth: usize, walk: &mut SkillWalk) {
+pub fn walk_for_skill_md_in(
+    dir: &Path,
+    paths: &mut Vec<PathBuf>,
+    depth: usize,
+    walk: &mut SkillWalk,
+) {
     if depth > MAX_SKILL_WALK_DEPTH || !walk.first_visit(dir) {
         return;
     }
@@ -830,7 +835,11 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
 /// [`parse_skill_files`] where each file carries the folder its reads must stay inside (`None`: user scope, links
 /// followed). The root is used for the reads here and recorded as [`SkillInfo::content_root`] for every later read.
 pub fn parse_skill_files_in(
-    skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)>,
+    skill_files: Vec<(
+        PathBuf,
+        SkillScope,
+        Option<fuigo_dirs::contained::PinnedRoot>,
+    )>,
 ) -> Vec<SkillInfo> {
     let mut skills: Vec<SkillInfo> = skill_files
         .into_iter()
@@ -1023,7 +1032,11 @@ pub fn discover_skills_for_paths(
         config_dir_names.push(".claude");
     }
 
-    let mut skill_files: Vec<(PathBuf, SkillScope, Option<fuigo_dirs::contained::PinnedRoot>)> = Vec::new();
+    let mut skill_files: Vec<(
+        PathBuf,
+        SkillScope,
+        Option<fuigo_dirs::contained::PinnedRoot>,
+    )> = Vec::new();
     let mut seen_canonical_paths = HashSet::new();
 
     let cwd_canonical = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -1090,7 +1103,10 @@ pub fn discover_skills_for_paths(
     skills
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1805,7 +1821,11 @@ model: test-model
         let repo = base.join("repo");
         let outside = base.join("outside");
         std::fs::create_dir_all(outside.join("secretdir")).unwrap();
-        std::fs::write(outside.join("secret.md"), "---\nname: secret-file\n---\nTOP SECRET").unwrap();
+        std::fs::write(
+            outside.join("secret.md"),
+            "---\nname: secret-file\n---\nTOP SECRET",
+        )
+        .unwrap();
         std::fs::write(
             outside.join("secretdir").join("SKILL.md"),
             "---\nname: secret-dir\n---\nTOP SECRET",
@@ -1818,7 +1838,11 @@ model: test-model
         std::fs::write(skills.join("ok").join("SKILL.md"), "---\nname: ok\n---\n").unwrap();
         std::os::unix::fs::symlink(outside.join("secretdir"), skills.join("linkdir")).unwrap();
         std::fs::create_dir_all(skills.join("linkfile")).unwrap();
-        std::os::unix::fs::symlink(outside.join("secret.md"), skills.join("linkfile").join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("secret.md"),
+            skills.join("linkfile").join("SKILL.md"),
+        )
+        .unwrap();
         let commands = sub.join(".fuigo").join("commands");
         std::fs::create_dir_all(&commands).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.md"), commands.join("leak.md")).unwrap();
@@ -1834,8 +1858,15 @@ model: test-model
             CompatConfig::default(),
         );
         let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"ok"), "regular project skill missing: {names:?}");
-        assert_eq!(names.len(), 1, "a linked-out skill or command loaded: {names:?}");
+        assert!(
+            names.contains(&"ok"),
+            "regular project skill missing: {names:?}"
+        );
+        assert_eq!(
+            names.len(),
+            1,
+            "a linked-out skill or command loaded: {names:?}"
+        );
     }
 
     /// Contained walk: links that leave the root are skipped and counted; a link that stays inside still loads;
@@ -1848,18 +1879,31 @@ model: test-model
         let root = base.join("plugin");
         let outside = base.join("outside");
         std::fs::create_dir_all(outside.join("far")).unwrap();
-        std::fs::write(outside.join("far").join("SKILL.md"), "---\nname: far\n---\n").unwrap();
+        std::fs::write(
+            outside.join("far").join("SKILL.md"),
+            "---\nname: far\n---\n",
+        )
+        .unwrap();
         std::fs::write(outside.join("x.md"), "---\nname: x\n---\n").unwrap();
 
         let skills = root.join("skills");
         std::fs::create_dir_all(skills.join("own")).unwrap();
         std::fs::write(skills.join("own").join("SKILL.md"), "---\nname: own\n---\n").unwrap();
         std::fs::create_dir_all(root.join("shared").join("inside")).unwrap();
-        std::fs::write(root.join("shared").join("inside").join("SKILL.md"), "---\nname: inside\n---\n").unwrap();
-        std::os::unix::fs::symlink(root.join("shared").join("inside"), skills.join("inside")).unwrap();
+        std::fs::write(
+            root.join("shared").join("inside").join("SKILL.md"),
+            "---\nname: inside\n---\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(root.join("shared").join("inside"), skills.join("inside"))
+            .unwrap();
         std::os::unix::fs::symlink(outside.join("far"), skills.join("far")).unwrap();
         std::fs::create_dir_all(skills.join("filelink")).unwrap();
-        std::os::unix::fs::symlink(outside.join("x.md"), skills.join("filelink").join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("x.md"),
+            skills.join("filelink").join("SKILL.md"),
+        )
+        .unwrap();
         let commands = root.join("commands");
         std::fs::create_dir_all(&commands).unwrap();
         std::fs::write(commands.join("own.md"), "x").unwrap();
@@ -1868,13 +1912,25 @@ model: test-model
         let mut walk = SkillWalk::contained(&root);
         let skill_paths = find_skill_md_paths_in(&skills, &mut walk);
         let cmd_paths = scan_md_files_in(&commands, &mut walk);
-        let rel = |p: &PathBuf| p.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        let rel = |p: &PathBuf| {
+            p.strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
         assert_eq!(
             skill_paths.iter().map(rel).collect::<Vec<_>>(),
             ["skills/inside/SKILL.md", "skills/own/SKILL.md"]
         );
-        assert_eq!(cmd_paths.iter().map(rel).collect::<Vec<_>>(), ["commands/own.md"]);
-        assert_eq!(walk.skipped(), 3, "far dir, linked SKILL.md, linked command");
+        assert_eq!(
+            cmd_paths.iter().map(rel).collect::<Vec<_>>(),
+            ["commands/own.md"]
+        );
+        assert_eq!(
+            walk.skipped(),
+            3,
+            "far dir, linked SKILL.md, linked command"
+        );
 
         // A whole skills dir linked out of the root is one skipped entry and loads nothing.
         let root2 = base.join("plugin2");
@@ -1900,9 +1956,17 @@ model: test-model
         std::fs::write(skills.join("a").join("SKILL.md"), "---\nname: a\n---\n").unwrap();
         std::os::unix::fs::symlink(skills.join("a"), skills.join("a").join("self")).unwrap();
         let found = find_skill_md_paths(&skills);
-        assert_eq!(found.len(), 1, "a self-linked skill dir was reported twice: {found:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "a self-linked skill dir was reported twice: {found:?}"
+        );
         let found = find_skill_paths(skills.parent().unwrap());
-        assert_eq!(found.len(), 1, "a self-linked skill dir was reported twice: {found:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "a self-linked skill dir was reported twice: {found:?}"
+        );
     }
 
     /// A project skill admitted by discovery is swapped for a link to an outside file afterwards: the invocation read is
@@ -1935,13 +1999,20 @@ model: test-model
             &mut checked,
             CompatConfig::default(),
         );
-        let skill = found.iter().find(|s| s.name == "ok").expect("project skill discovered").clone();
+        let skill = found
+            .iter()
+            .find(|s| s.name == "ok")
+            .expect("project skill discovered")
+            .clone();
         assert_eq!(load_skill_content(&skill).await.unwrap(), "own body");
 
         std::fs::remove_file(skill_dir.join("SKILL.md")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.md"), skill_dir.join("SKILL.md")).unwrap();
         match load_skill_content(&skill).await {
-            Ok(body) => assert!(!body.contains("TOP SECRET"), "outside file read after the swap: {body}"),
+            Ok(body) => assert!(
+                !body.contains("TOP SECRET"),
+                "outside file read after the swap: {body}"
+            ),
             Err(e) => assert!(e.contains("Failed to read"), "{e}"),
         }
 

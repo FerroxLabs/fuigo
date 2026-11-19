@@ -41,7 +41,10 @@ fn detector_entry(
 /// The sampling config points at a closed loopback port (`create_test_actor` uses `fuigo_test_support::refused_loopback_url`).
 /// `prepare_chat_completion().conversation_collect()` therefore fails with a connect error, enough to exercise every abort/idle path.
 /// Returns the actor wrapped in `Arc` and the owned tempdir (so the file outlives the actor).
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn make_laziness_actor(
     detector: LazinessDetectorPerModelConfig,
 ) -> (Arc<SessionActor>, tempfile::TempDir) {
@@ -485,7 +488,10 @@ fn arm_debug_log(actor: &mut SessionActor, path: std::path::PathBuf) {
 
 /// Build an actor with the dev flag set to `<tmp>/debug.jsonl`.
 /// Returns `(actor, tmp, log_path)`.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn make_debug_actor(
     detector: LazinessDetectorPerModelConfig,
 ) -> (Arc<SessionActor>, tempfile::TempDir, std::path::PathBuf) {

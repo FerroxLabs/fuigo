@@ -292,7 +292,12 @@ fn append_normalized_content(output: &mut String, mut content: String, is_pre: b
     // fuigo: count at most two (the cap below never needs more), so a long newline run in the
     // output is not rescanned on every append. Same result: with two or more, all of the
     // content's leading newlines are dropped either way.
-    let last_newlines = output.chars().rev().take(2).take_while(|c| *c == '\n').count();
+    let last_newlines = output
+        .chars()
+        .rev()
+        .take(2)
+        .take_while(|c| *c == '\n')
+        .count();
     let content_newlines = content.chars().take_while(|c| *c == '\n').count();
     let total_newlines = last_newlines + content_newlines;
 

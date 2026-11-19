@@ -643,7 +643,7 @@ mod tests {
         let bundle = sample_bundle();
         let (proxy_base_url, _seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
-            let proxy_base_url = front.front(&proxy_base_url);
+        let proxy_base_url = front.front(&proxy_base_url);
         let am = test_auth_manager();
         let normal = sync_bundle_to_root(&root, &proxy_base_url, Some(&am), None, None, false)
             .await
@@ -901,7 +901,7 @@ mod tests {
         let bundle = sample_bundle_with_skills();
         let (proxy_base_url, _seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
-            let proxy_base_url = front.front(&proxy_base_url);
+        let proxy_base_url = front.front(&proxy_base_url);
         let result = sync_bundle_to_root(
             &root,
             &proxy_base_url,
@@ -1014,7 +1014,7 @@ mod tests {
         let bundle = sample_bundle_with_skills();
         let (proxy_base_url, _seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
-            let proxy_base_url = front.front(&proxy_base_url);
+        let proxy_base_url = front.front(&proxy_base_url);
         let result = sync_bundle_to_root(
             &root,
             &proxy_base_url,

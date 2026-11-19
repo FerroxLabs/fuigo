@@ -22,6 +22,7 @@ pub mod archive;
 pub mod backend;
 pub mod chunker;
 mod cjk;
+mod decode;
 pub mod dream;
 pub mod dream_lock;
 pub mod embedding;
@@ -126,3 +127,9 @@ mod p91_identity_tests;
 
 #[cfg(test)]
 mod rowsa2_tests;
+
+#[cfg(test)]
+mod redteam_tests;
+
+#[cfg(test)]
+mod mem2_tests;

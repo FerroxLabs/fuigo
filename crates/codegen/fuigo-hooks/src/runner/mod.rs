@@ -106,7 +106,8 @@ impl GateHookJson {
             return Some(key);
         }
         let nested = self.hook_specific_output.as_ref()?;
-        first_unknown(&nested.rest, &["hookEventName"], &[]).map(|key| format!("hookSpecificOutput.{key}"))
+        first_unknown(&nested.rest, &["hookEventName"], &[])
+            .map(|key| format!("hookSpecificOutput.{key}"))
     }
 
     fn permission_decision(&self) -> Option<&str> {
@@ -201,8 +202,13 @@ impl GateHookJson {
 
 /// Keys Fuigo reads or knowingly ignores that the typed gate/prompt structs do not hold as fields (they arrive in the
 /// flattened `rest` map): the event name, the stop request and its reason, and the two message keys.
-const RECOGNISED_EXTRA_TOP_LEVEL_KEYS: &[&str] =
-    &["hookEventName", "continue", "stopReason", "systemMessage", "suppressOutput"];
+const RECOGNISED_EXTRA_TOP_LEVEL_KEYS: &[&str] = &[
+    "hookEventName",
+    "continue",
+    "stopReason",
+    "systemMessage",
+    "suppressOutput",
+];
 /// What a prompt hook's `hookSpecificOutput` may hold (the upstream shape carries context).
 const PROMPT_NESTED_KEYS: &[&str] = &["hookEventName", "additionalContext"];
 
@@ -216,8 +222,13 @@ fn first_unknown(
         .map(|key| key.chars().take(60).collect())
 }
 
-const SILENTLY_IGNORED_TOP_LEVEL_KEYS: &[&str] =
-    &["hookEventName", "continue", "stopReason", "systemMessage", "suppressOutput"];
+const SILENTLY_IGNORED_TOP_LEVEL_KEYS: &[&str] = &[
+    "hookEventName",
+    "continue",
+    "stopReason",
+    "systemMessage",
+    "suppressOutput",
+];
 const SILENTLY_IGNORED_NESTED_KEYS: &[&str] = &["hookEventName"];
 
 fn non_empty(text: Option<&str>) -> Option<&str> {
@@ -338,7 +349,12 @@ pub(crate) fn gate_outcome(
 
     if stop_requested && !matches!(token, DecisionToken::Unknown { .. }) {
         let denial = matches!(token, DecisionToken::Deny)
-            .then(|| reason.as_deref().and_then(|text| non_empty(Some(text))).map(clip_reason))
+            .then(|| {
+                reason
+                    .as_deref()
+                    .and_then(|text| non_empty(Some(text)))
+                    .map(clip_reason)
+            })
             .flatten();
         return GateOutcome::Stop(
             stop_reason
@@ -430,7 +446,11 @@ impl PromptHookJson {
     /// A key this document carries that Fuigo does not recognise on a prompt hook, at the top level or inside
     /// `hookSpecificOutput`.
     fn unknown_key(&self) -> Option<String> {
-        if let Some(key) = first_unknown(&self.rest, RECOGNISED_EXTRA_TOP_LEVEL_KEYS, &["hookSpecificOutput"]) {
+        if let Some(key) = first_unknown(
+            &self.rest,
+            RECOGNISED_EXTRA_TOP_LEVEL_KEYS,
+            &["hookSpecificOutput"],
+        ) {
             return Some(key);
         }
         match self.rest.get("hookSpecificOutput")? {
@@ -454,15 +474,15 @@ pub(crate) fn prompt_json_to_block(
                 .or_else(|| fallback_reason.map(str::to_string))
                 .unwrap_or_else(|| format!("Prompt blocked by hook '{hook_name}'")),
         )),
-        None | Some("approve") => Ok(
-            (json.continue_ == Some(false)).then(|| {
-                non_empty(json.stop_reason.as_deref())
-                    .or_else(|| non_empty(json.reason.as_deref()))
-                    .or_else(|| non_empty(fallback_reason))
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("Prompt stopped by hook '{hook_name}' (continue: false)"))
-            }),
-        ),
+        None | Some("approve") => Ok((json.continue_ == Some(false)).then(|| {
+            non_empty(json.stop_reason.as_deref())
+                .or_else(|| non_empty(json.reason.as_deref()))
+                .or_else(|| non_empty(fallback_reason))
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    format!("Prompt stopped by hook '{hook_name}' (continue: false)")
+                })
+        })),
         Some(other) => Err(format!(
             "unknown decision value '{other}' from hook '{hook_name}'"
         )),
@@ -671,7 +691,9 @@ pub(crate) fn gate_output_flaw(
     let text = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
     // "Looks like JSON" (command hooks): after any run of invisible characters (whitespace, control characters,
     // Unicode format characters such as a BOM or a zero-width space), an object opens.
-    let looks_like_json = text.trim_start_matches(is_invisible_prefix_char).starts_with('{');
+    let looks_like_json = text
+        .trim_start_matches(is_invisible_prefix_char)
+        .starts_with('{');
     if text.is_empty() || !(strict || looks_like_json) {
         return None;
     }
@@ -685,11 +707,17 @@ pub(crate) fn gate_output_flaw(
     // The value holds every key exactly once, so the typed documents built from it are faithful to what was sent.
     let unknown = match mode {
         GateKind::Tool => match serde_json::from_value::<GateHookJson>(value) {
-            Ok(json) => json.unknown_key().map(KeyFlaw::Unknown).or_else(|| wrong_typed_key(&json.rest)),
+            Ok(json) => json
+                .unknown_key()
+                .map(KeyFlaw::Unknown)
+                .or_else(|| wrong_typed_key(&json.rest)),
             Err(_) => return Some(FLAW_UNPARSED.to_string()),
         },
         _ => match serde_json::from_value::<PromptHookJson>(value) {
-            Ok(json) => json.unknown_key().map(KeyFlaw::Unknown).or_else(|| wrong_typed_key(&json.rest)),
+            Ok(json) => json
+                .unknown_key()
+                .map(KeyFlaw::Unknown)
+                .or_else(|| wrong_typed_key(&json.rest)),
             Err(_) => return Some(FLAW_UNPARSED.to_string()),
         },
     };
@@ -747,9 +775,11 @@ fn strict_json_value(text: &str) -> Result<serde_json::Value, StrictJsonError> {
     use serde::de::DeserializeSeed;
     let duplicate = std::cell::RefCell::new(None);
     let mut deserializer = serde_json::Deserializer::from_str(text);
-    let parsed = StrictValue { duplicate: &duplicate }
-        .deserialize(&mut deserializer)
-        .and_then(|value| deserializer.end().map(|()| value));
+    let parsed = StrictValue {
+        duplicate: &duplicate,
+    }
+    .deserialize(&mut deserializer)
+    .and_then(|value| deserializer.end().map(|()| value));
     match (parsed, duplicate.into_inner()) {
         (_, Some(key)) => Err(StrictJsonError::DuplicateKey(key)),
         (Ok(value), None) => Ok(value),
@@ -767,7 +797,10 @@ struct StrictValue<'a> {
 impl<'de> serde::de::DeserializeSeed<'de> for StrictValue<'_> {
     type Value = serde_json::Value;
 
-    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_any(self)
     }
 }
@@ -827,7 +860,9 @@ impl<'de> serde::de::Visitor<'de> for StrictValue<'_> {
             if object.contains_key(&key) {
                 let clipped: String = key.chars().take(60).collect();
                 *self.duplicate.borrow_mut() = Some(clipped.clone());
-                return Err(serde::de::Error::custom(format!("duplicate key '{clipped}'")));
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate key '{clipped}'"
+                )));
             }
             let value = map.next_value_seed(self)?;
             object.insert(key, value);
@@ -958,30 +993,54 @@ mod tests {
             r#"{"decision":"allow","continue":false,"stopReason":"enough"}"#,
             r#"{"hookSpecificOutput":{"permissionDecision":"ask"},"continue":false,"stopReason":"enough"}"#,
         ] {
-            assert!(matches!(gate(json), GateOutcome::Stop(ref reason) if reason == "enough"), "for {json}");
+            assert!(
+                matches!(gate(json), GateOutcome::Stop(ref reason) if reason == "enough"),
+                "for {json}"
+            );
         }
         assert!(
             matches!(gate(r#"{"continue":false}"#), GateOutcome::Stop(ref reason) if reason.contains("continue: false")),
             "without a stop reason the hook is named"
         );
-        assert!(matches!(gate(r#"{"continue":true,"stopReason":"enough"}"#), GateOutcome::Allow { .. }));
-        assert!(matches!(gate(r#"{"decision":"allow"}"#), GateOutcome::Allow { .. }));
+        assert!(matches!(
+            gate(r#"{"continue":true,"stopReason":"enough"}"#),
+            GateOutcome::Allow { .. }
+        ));
+        assert!(matches!(
+            gate(r#"{"decision":"allow"}"#),
+            GateOutcome::Allow { .. }
+        ));
     }
 
     #[test]
     fn continue_false_stops_a_prompt_and_a_post_tool_call() {
         let prompt: PromptHookJson =
             serde_json::from_str(r#"{"continue":false,"stopReason":"not today"}"#).unwrap();
-        assert_eq!(prompt_json_to_block(&prompt, "h", None), Ok(Some("not today".to_string())));
+        assert_eq!(
+            prompt_json_to_block(&prompt, "h", None),
+            Ok(Some("not today".to_string()))
+        );
         let prompt: PromptHookJson = serde_json::from_str(r#"{"continue":true}"#).unwrap();
         assert_eq!(prompt_json_to_block(&prompt, "h", None), Ok(None));
 
         let post: PostToolUseHookJson =
             serde_json::from_str(r#"{"continue":false,"stopReason":"enough"}"#).unwrap();
         let parsed = post_tool_use_json_to_outcome(post, "h", HookHealth::Healthy);
-        assert_eq!(parsed.outcome.force_stop.and_then(|stop| stop.reason).as_deref(), Some("enough"));
+        assert_eq!(
+            parsed
+                .outcome
+                .force_stop
+                .and_then(|stop| stop.reason)
+                .as_deref(),
+            Some("enough")
+        );
         let post: PostToolUseHookJson = serde_json::from_str(r#"{"continue":true}"#).unwrap();
-        assert!(post_tool_use_json_to_outcome(post, "h", HookHealth::Healthy).outcome.force_stop.is_none());
+        assert!(
+            post_tool_use_json_to_outcome(post, "h", HookHealth::Healthy)
+                .outcome
+                .force_stop
+                .is_none()
+        );
     }
 
     #[test]
@@ -1130,7 +1189,11 @@ mod tests {
                 );
             }
             for text in ["\u{FEFF}hello", "plain text", "\u{FEFF}", "  \u{a0} "] {
-                assert_eq!(gate_output_flaw(mode, text.as_bytes(), false, false), None, "{mode:?} {text:?}");
+                assert_eq!(
+                    gate_output_flaw(mode, text.as_bytes(), false, false),
+                    None,
+                    "{mode:?} {text:?}"
+                );
             }
         }
     }
@@ -1152,7 +1215,11 @@ mod tests {
                 );
             }
             for text in ["\u{FEFF}\u{FEFF}hello", "\u{FEFF}\u{FEFF}"] {
-                assert_eq!(gate_output_flaw(mode, text.as_bytes(), false, false), None, "{mode:?} {text:?}");
+                assert_eq!(
+                    gate_output_flaw(mode, text.as_bytes(), false, false),
+                    None,
+                    "{mode:?} {text:?}"
+                );
             }
         }
     }
@@ -1161,7 +1228,16 @@ mod tests {
     /// on both gates; plain text that starts with them and has no `{` stays plain.
     #[test]
     fn gate_output_flaw_command_invisible_prefix_chars_look_like_json() {
-        let invisible = ["\u{200B}", "\u{2060}", "\u{180E}", "\u{00AD}", "\u{202E}", "\u{0}", "\u{E0020}", "\u{1D173}"];
+        let invisible = [
+            "\u{200B}",
+            "\u{2060}",
+            "\u{180E}",
+            "\u{00AD}",
+            "\u{202E}",
+            "\u{0}",
+            "\u{E0020}",
+            "\u{1D173}",
+        ];
         for mode in [GateKind::Tool, GateKind::Prompt] {
             for ch in invisible {
                 for doc in [
@@ -1175,8 +1251,16 @@ mod tests {
                         "{mode:?} {doc:?}"
                     );
                 }
-                for text in [format!("{ch}hello"), format!("\u{FEFF}{ch}"), format!("{ch}{ch}")] {
-                    assert_eq!(gate_output_flaw(mode, text.as_bytes(), false, false), None, "{mode:?} {text:?}");
+                for text in [
+                    format!("{ch}hello"),
+                    format!("\u{FEFF}{ch}"),
+                    format!("{ch}{ch}"),
+                ] {
+                    assert_eq!(
+                        gate_output_flaw(mode, text.as_bytes(), false, false),
+                        None,
+                        "{mode:?} {text:?}"
+                    );
                 }
             }
         }
@@ -1219,7 +1303,10 @@ mod tests {
     /// allow), the same document is unchanged without the flag, and correctly typed keys still behave as before.
     #[test]
     fn gate_output_flaw_wrong_typed_recognised_keys_fail_closed_on_the_tool_gate() {
-        let allow = || HookRunnerResult::Allow { updated_input: None, additional_context: None };
+        let allow = || HookRunnerResult::Allow {
+            updated_input: None,
+            additional_context: None,
+        };
         for doc in [
             r#"{"continue":"false"}"#,
             r#"{"continue":0}"#,
@@ -1228,23 +1315,57 @@ mod tests {
             r#"{"stopReason":false}"#,
         ] {
             let flaw = gate_output_flaw(GateKind::Tool, doc.as_bytes(), false, false);
-            assert!(flaw.as_deref().is_some_and(|f| f.starts_with(FLAW_WRONG_TYPE)), "{doc}: {flaw:?}");
-            let on = enforce_fail_closed(&spec_with_flag(true), GateKind::Tool, allow(), flaw.clone(), None);
-            assert!(matches!(on, HookRunnerResult::Failed(_)), "flag on denies {doc}");
-            let off = enforce_fail_closed(&spec_with_flag(false), GateKind::Tool, allow(), flaw, None);
-            assert!(matches!(off, HookRunnerResult::Allow { .. }), "flag off unchanged {doc}");
-            assert!(matches!(gate(doc), GateOutcome::Allow { .. }), "normal handling unchanged {doc}");
+            assert!(
+                flaw.as_deref()
+                    .is_some_and(|f| f.starts_with(FLAW_WRONG_TYPE)),
+                "{doc}: {flaw:?}"
+            );
+            let on = enforce_fail_closed(
+                &spec_with_flag(true),
+                GateKind::Tool,
+                allow(),
+                flaw.clone(),
+                None,
+            );
+            assert!(
+                matches!(on, HookRunnerResult::Failed(_)),
+                "flag on denies {doc}"
+            );
+            let off =
+                enforce_fail_closed(&spec_with_flag(false), GateKind::Tool, allow(), flaw, None);
+            assert!(
+                matches!(off, HookRunnerResult::Allow { .. }),
+                "flag off unchanged {doc}"
+            );
+            assert!(
+                matches!(gate(doc), GateOutcome::Allow { .. }),
+                "normal handling unchanged {doc}"
+            );
         }
-        for doc in [r#"{"systemMessage":"x"}"#, r#"{"continue":true}"#, r#"{"suppressOutput":true,"stopReason":"r"}"#] {
-            assert_eq!(gate_output_flaw(GateKind::Tool, doc.as_bytes(), false, false), None, "{doc}");
+        for doc in [
+            r#"{"systemMessage":"x"}"#,
+            r#"{"continue":true}"#,
+            r#"{"suppressOutput":true,"stopReason":"r"}"#,
+        ] {
+            assert_eq!(
+                gate_output_flaw(GateKind::Tool, doc.as_bytes(), false, false),
+                None,
+                "{doc}"
+            );
             assert!(matches!(gate(doc), GateOutcome::Allow { .. }), "{doc}");
         }
         let stop = r#"{"continue":false}"#;
-        assert_eq!(gate_output_flaw(GateKind::Tool, stop.as_bytes(), false, false), None);
+        assert_eq!(
+            gate_output_flaw(GateKind::Tool, stop.as_bytes(), false, false),
+            None
+        );
         assert!(matches!(gate(stop), GateOutcome::Stop(_)));
         // the prompt gate already rejected typed `continue`; the untyped keys now match
         for doc in [r#"{"continue":"false"}"#, r#"{"systemMessage":5}"#] {
-            assert!(gate_output_flaw(GateKind::Prompt, doc.as_bytes(), false, false).is_some(), "{doc}");
+            assert!(
+                gate_output_flaw(GateKind::Prompt, doc.as_bytes(), false, false).is_some(),
+                "{doc}"
+            );
         }
     }
 
@@ -1254,9 +1375,18 @@ mod tests {
     fn gate_output_flaw_judges_raw_bytes_strictly() {
         let bad_utf8: &[u8] = b"{\"decision\":\"allow\",\"reason\":\"\xff\"}";
         let duplicates: &[(&str, &str)] = &[
-            (r#"{"hookSpecificOutput":{"permissionDecison":"deny"},"hookSpecificOutput":{}}"#, "hookSpecificOutput"),
-            (r#"{"systemMessage":"a","systemMessage":"b"}"#, "systemMessage"),
-            (r#"{"hookSpecificOutput":{"additionalContext":"a","additionalContext":"b"}}"#, "additionalContext"),
+            (
+                r#"{"hookSpecificOutput":{"permissionDecison":"deny"},"hookSpecificOutput":{}}"#,
+                "hookSpecificOutput",
+            ),
+            (
+                r#"{"systemMessage":"a","systemMessage":"b"}"#,
+                "systemMessage",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"additionalContext":"a","additionalContext":"b"}}"#,
+                "additionalContext",
+            ),
             (
                 r#"{"hookSpecificOutput":{"updatedInput":{"command":"rm -rf /","command":"ls"}},"decision":"allow"}"#,
                 "command",
@@ -1266,27 +1396,49 @@ mod tests {
         for mode in [GateKind::Tool, GateKind::Prompt] {
             for strict in [true, false] {
                 let flaw = gate_output_flaw(mode, bad_utf8, strict, false);
-                assert_eq!(flaw.as_deref(), Some(FLAW_NOT_UTF8), "{mode:?} strict={strict}");
+                assert_eq!(
+                    flaw.as_deref(),
+                    Some(FLAW_NOT_UTF8),
+                    "{mode:?} strict={strict}"
+                );
                 for &(doc, key) in duplicates {
-                    let flaw = gate_output_flaw(mode, doc.as_bytes(), strict, false).unwrap_or_default();
-                    assert_eq!(flaw, format!("{FLAW_DUPLICATE_KEY} ('{key}')"), "{mode:?} strict={strict} {doc}");
+                    let flaw =
+                        gate_output_flaw(mode, doc.as_bytes(), strict, false).unwrap_or_default();
+                    assert_eq!(
+                        flaw,
+                        format!("{FLAW_DUPLICATE_KEY} ('{key}')"),
+                        "{mode:?} strict={strict} {doc}"
+                    );
                 }
-                for ok in [r#"{"decision":"block","reason":"café — 日本語 ✓"}"#, r#"{"systemMessage":"naïve"}"#, "{}"] {
+                for ok in [
+                    r#"{"decision":"block","reason":"café — 日本語 ✓"}"#,
+                    r#"{"systemMessage":"naïve"}"#,
+                    "{}",
+                ] {
                     let flaw = gate_output_flaw(mode, ok.as_bytes(), strict, false);
                     assert_eq!(flaw, None, "{mode:?} strict={strict} {ok}");
                 }
             }
         }
         // a lone surrogate escape is not a string JSON can carry; trailing bytes are not one value
-        for doc in [r#"{"decision":"allow","reason":"\ud800"}"#, r#"{"decision":"allow"} {}"#] {
-            assert_eq!(gate_output_flaw(GateKind::Tool, doc.as_bytes(), true, false).as_deref(), Some(FLAW_UNPARSED));
+        for doc in [
+            r#"{"decision":"allow","reason":"\ud800"}"#,
+            r#"{"decision":"allow"} {}"#,
+        ] {
+            assert_eq!(
+                gate_output_flaw(GateKind::Tool, doc.as_bytes(), true, false).as_deref(),
+                Some(FLAW_UNPARSED)
+            );
         }
         // the decoded key is what counts: an escaped spelling of the same key is still a duplicate
         assert_eq!(
             strict_json_value(r#"{"decision":"allow","decision":"deny"}"#),
             Err(StrictJsonError::DuplicateKey("decision".into()))
         );
-        assert_eq!(strict_json_value(r#"[1,{"a":null}]"#), Ok(serde_json::json!([1, {"a": null}])));
+        assert_eq!(
+            strict_json_value(r#"[1,{"a":null}]"#),
+            Ok(serde_json::json!([1, {"a": null}]))
+        );
     }
 
     #[test]

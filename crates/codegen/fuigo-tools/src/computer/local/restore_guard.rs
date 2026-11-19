@@ -45,29 +45,133 @@
 /// with one of these names is dropped before the command runs, so the name resolves to the real program or builtin.
 /// The permission layer's lists must stay a subset of this one.
 pub const PERMISSION_SAFE_PROGRAMS: &[&str] = &[
-    "basename", "bazel", "bin/explorer", "cargo", "cat", "cd", "clippy", "cmake", "cut", "date", "df", "diff",
-    "dirname", "du", "echo", "false", "file", "find", "gh", "git", "go", "grep", "head", "hostname", "htop", "jq",
-    "just", "kubectl", "ls", "make", "mkdir", "node", "nodejs", "npm", "npx", "nproc", "perl", "php", "pnpm",
-    "popd", "printenv", "printf", "ps", "pushd", "pwd", "pytest", "python", "python3", "readlink", "realpath", "rg",
-    "ruby", "rustc", "rustfmt", "rustup", "set", "sleep", "sort", "stat", "strings", "tail", "test", "top", "touch",
-    "tr", "tree", "true", "type", "uname", "uniq", "uptime", "uv", "uvx", "wc", "which", "whoami", "yarn",
+    "basename",
+    "bazel",
+    "bin/explorer",
+    "cargo",
+    "cat",
+    "cd",
+    "clippy",
+    "cmake",
+    "cut",
+    "date",
+    "df",
+    "diff",
+    "dirname",
+    "du",
+    "echo",
+    "false",
+    "file",
+    "find",
+    "gh",
+    "git",
+    "go",
+    "grep",
+    "head",
+    "hostname",
+    "htop",
+    "jq",
+    "just",
+    "kubectl",
+    "ls",
+    "make",
+    "mkdir",
+    "node",
+    "nodejs",
+    "npm",
+    "npx",
+    "nproc",
+    "perl",
+    "php",
+    "pnpm",
+    "popd",
+    "printenv",
+    "printf",
+    "ps",
+    "pushd",
+    "pwd",
+    "pytest",
+    "python",
+    "python3",
+    "readlink",
+    "realpath",
+    "rg",
+    "ruby",
+    "rustc",
+    "rustfmt",
+    "rustup",
+    "set",
+    "sleep",
+    "sort",
+    "stat",
+    "strings",
+    "tail",
+    "test",
+    "top",
+    "touch",
+    "tr",
+    "tree",
+    "true",
+    "type",
+    "uname",
+    "uniq",
+    "uptime",
+    "uv",
+    "uvx",
+    "wc",
+    "which",
+    "whoami",
+    "yarn",
 ];
 
 /// Interpreter families with versioned spellings (`python3.13`, `node22`): the name followed by a digit.
-pub const PERMISSION_SAFE_PROGRAM_FAMILIES: &[&str] = &["lua", "node", "perl", "php", "python", "ruby"];
+pub const PERMISSION_SAFE_PROGRAM_FAMILIES: &[&str] =
+    &["lua", "node", "perl", "php", "python", "ruby"];
 
 /// Builtins (and hook functions) the wrappers call after the snapshot is replayed, plus the shell's
 /// command-not-found hooks, which would run user code for a safe-listed program that is not installed.
 const WRAPPER_BUILTINS: &[&str] = &[
-    ".", ":", "[", "alias", "base64", "builtin", "command", "command_not_found_handle", "command_not_found_handler",
-    "declare", "disable", "emulate", "enable", "eval", "exec", "exit", "export", "local", "print", "read",
-    "readonly", "return", "setopt", "shopt", "source", "trap", "typeset", "unalias", "unfunction", "unset",
-    "unsetopt", "zmodload",
+    ".",
+    ":",
+    "[",
+    "alias",
+    "base64",
+    "builtin",
+    "command",
+    "command_not_found_handle",
+    "command_not_found_handler",
+    "declare",
+    "disable",
+    "emulate",
+    "enable",
+    "eval",
+    "exec",
+    "exit",
+    "export",
+    "local",
+    "print",
+    "read",
+    "readonly",
+    "return",
+    "setopt",
+    "shopt",
+    "source",
+    "trap",
+    "typeset",
+    "unalias",
+    "unfunction",
+    "unset",
+    "unsetopt",
+    "zmodload",
 ];
 
 /// Every fixed name the guards clear, deduplicated.
 fn fixed_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = WRAPPER_BUILTINS.iter().chain(PERMISSION_SAFE_PROGRAMS).copied().collect();
+    let mut names: Vec<&'static str> = WRAPPER_BUILTINS
+        .iter()
+        .chain(PERMISSION_SAFE_PROGRAMS)
+        .copied()
+        .collect();
     names.sort_unstable();
     names.dedup();
     names
@@ -79,7 +183,11 @@ fn case_pattern(extra: &[&str]) -> String {
     fixed_names()
         .into_iter()
         .map(|n| format!("'{n}'"))
-        .chain(PERMISSION_SAFE_PROGRAM_FAMILIES.iter().map(|f| format!("'{f}'[0-9]*")))
+        .chain(
+            PERMISSION_SAFE_PROGRAM_FAMILIES
+                .iter()
+                .map(|f| format!("'{f}'[0-9]*")),
+        )
         .chain(extra.iter().map(|e| (*e).to_owned()))
         .collect::<Vec<_>>()
         .join("|")
@@ -93,13 +201,18 @@ const REFUSED: &str = "fuigo: refusing to run: the replayed shell state keeps a 
 /// name there as "not a valid identifier", even when no such function exists.
 fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
-    chars.next().is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 /// Space-separated single-quoted names.
 fn quoted(names: impl Iterator<Item = &'static str>) -> String {
-    names.map(|n| format!("'{n}'")).collect::<Vec<_>>().join(" ")
+    names
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Bash: the guard, then `rest` only when it succeeded. `rest` must be a `;`-terminated command list.
@@ -154,18 +267,35 @@ pub(crate) fn bash_guarded(rest: &str) -> String {
 
 /// The `zsh/parameter` hashes the zsh guard works through; each must still be the module's special parameter.
 const ZSH_SPECIAL_HASHES: &[&str] = &[
-    "functions", "dis_functions", "aliases", "dis_aliases", "galiases", "dis_galiases", "saliases", "dis_saliases",
+    "functions",
+    "dis_functions",
+    "aliases",
+    "dis_aliases",
+    "galiases",
+    "dis_galiases",
+    "saliases",
+    "dis_saliases",
     "options",
 ];
 
 /// Zsh hook functions: `chpwd` runs on every `cd` and `zshexit` when the shell exits, both in a non-interactive
 /// shell; the others run around prompts and history. Each also has a `<name>_functions` array.
-pub(crate) const ZSH_HOOK_FUNCTIONS: &[&str] = &["chpwd", "periodic", "precmd", "preexec", "zshaddhistory", "zshexit"];
+pub(crate) const ZSH_HOOK_FUNCTIONS: &[&str] = &[
+    "chpwd",
+    "periodic",
+    "precmd",
+    "preexec",
+    "zshaddhistory",
+    "zshexit",
+];
 
 /// A `case` pattern list for the zsh functions a state dump or capture leaves out: `TRAP*` functions install their
 /// trap as soon as they are defined (a `TRAPDEBUG` would run before the restore guard), and the hook functions.
 pub(crate) fn zsh_unreplayed_functions() -> String {
-    std::iter::once("TRAP*").chain(ZSH_HOOK_FUNCTIONS.iter().copied()).collect::<Vec<_>>().join("|")
+    std::iter::once("TRAP*")
+        .chain(ZSH_HOOK_FUNCTIONS.iter().copied())
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// Zsh: the guard, then `rest` only when it succeeded. `rest` must be a `;`-terminated command list.
@@ -178,8 +308,15 @@ pub(crate) fn zsh_unreplayed_functions() -> String {
 /// `XTRACE` off and `PS4` reset (a traced command expands `PS4`), `PROMPT_SUBST` off (it lets that expansion run
 /// command substitutions). zsh has no `keyword` option.
 pub(crate) fn zsh_guarded(rest: &str) -> String {
-    let hooks: Vec<String> = ZSH_HOOK_FUNCTIONS.iter().map(|h| format!("'{h}'")).collect();
-    let pattern = case_pattern(&std::iter::once("TRAP*").chain(hooks.iter().map(String::as_str)).collect::<Vec<_>>());
+    let hooks: Vec<String> = ZSH_HOOK_FUNCTIONS
+        .iter()
+        .map(|h| format!("'{h}'"))
+        .collect();
+    let pattern = case_pattern(
+        &std::iter::once("TRAP*")
+            .chain(hooks.iter().map(String::as_str))
+            .collect::<Vec<_>>(),
+    );
     let clear_hook_arrays = ZSH_HOOK_FUNCTIONS
         .iter()
         .map(|h| format!("{h}_functions=()"))
@@ -237,13 +374,30 @@ mod tests {
     #[test]
     fn restore_guard_posix_unset_names_are_identifiers() {
         let text = bash_guarded("");
-        let posix = text.split("unset -f -- ").nth(1).and_then(|t| t.split(" || return 1").next()).unwrap();
+        let posix = text
+            .split("unset -f -- ")
+            .nth(1)
+            .and_then(|t| t.split(" || return 1").next())
+            .unwrap();
         let names: Vec<&str> = posix.split(' ').map(|n| n.trim_matches('\'')).collect();
-        assert!(names.contains(&"builtin") && names.contains(&"ls"), "{posix}");
-        assert!(names.iter().all(|n| is_identifier(n)), "non-identifier in the POSIX-mode unset: {posix}");
-        let later = text.split("builtin unset -f -- ").nth(1).and_then(|t| t.split(" || return 1").next()).unwrap();
+        assert!(
+            names.contains(&"builtin") && names.contains(&"ls"),
+            "{posix}"
+        );
+        assert!(
+            names.iter().all(|n| is_identifier(n)),
+            "non-identifier in the POSIX-mode unset: {posix}"
+        );
+        let later = text
+            .split("builtin unset -f -- ")
+            .nth(1)
+            .and_then(|t| t.split(" || return 1").next())
+            .unwrap();
         for name in ["'.'", "':'", "'['", "'bin/explorer'"] {
-            assert!(later.split(' ').any(|n| n == name), "{name} missing from {later}");
+            assert!(
+                later.split(' ').any(|n| n == name),
+                "{name} missing from {later}"
+            );
         }
         // The non-identifier names are removed only after POSIX mode is left.
         let leave = text.find("builtin set +o posix").unwrap();

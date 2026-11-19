@@ -764,7 +764,12 @@ fn unquote_typed_path(text: &str) -> String {
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match (c, chars.peek()) {
-            ('\\', Some(next)) if matches!(next, ' ' | '"' | '\'' | '(' | ')' | '[' | ']' | '&' | ';' | '$' | '#' | '!' | '\\') => {
+            ('\\', Some(next))
+                if matches!(
+                    next,
+                    ' ' | '"' | '\'' | '(' | ')' | '[' | ']' | '&' | ';' | '$' | '#' | '!' | '\\'
+                ) =>
+            {
                 out.push(*next);
                 chars.next();
             }
@@ -2018,7 +2023,11 @@ fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Opt
     // Running subagents (background ones keep the row Working) end with the row's stop
     if let Some(session_id) = agent.session.session_id.clone() {
         let now = std::time::Instant::now();
-        for info in agent.subagent_sessions.values_mut().filter(|i| i.is_running()) {
+        for info in agent
+            .subagent_sessions
+            .values_mut()
+            .filter(|i| i.is_running())
+        {
             info.pending_kill = true;
             info.kill_requested_at = Some(now);
             effects.push(Effect::KillSubagent {
@@ -2045,7 +2054,9 @@ fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Opt
         .collect();
     let stopped_workflows = !stop_lines.is_empty();
     for line in stop_lines {
-        agent.session.enqueue_prompt_with_skill_tokens(line, Vec::new());
+        agent
+            .session
+            .enqueue_prompt_with_skill_tokens(line, Vec::new());
     }
     if stopped_workflows {
         agent.sync_queue_pane();

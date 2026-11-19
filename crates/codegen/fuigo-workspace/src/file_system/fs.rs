@@ -1,7 +1,7 @@
+use fuigo_paths::ToAbsPath;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use fuigo_paths::ToAbsPath;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FsError {

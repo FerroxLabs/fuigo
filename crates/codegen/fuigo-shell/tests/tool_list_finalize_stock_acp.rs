@@ -6,7 +6,9 @@
 #[allow(dead_code)]
 mod acp_harness;
 
-use acp_harness::{AutoApproveClient, RPC_TIMEOUT, connect_client, run_agent_test, spawn_agent_local_with_config};
+use acp_harness::{
+    AutoApproveClient, RPC_TIMEOUT, connect_client, run_agent_test, spawn_agent_local_with_config,
+};
 use agent_client_protocol::{self as acp, Agent as _};
 use fuigo_test_support::mock_server::LogEntry;
 use fuigo_test_support::scripted::ScriptedResponse;
@@ -16,7 +18,11 @@ use serde_json::{Value, json};
 
 const STOCK_MODEL: &str = "test-model";
 
-fn main_turn_requests<'a>(requests: &'a [LogEntry], path: &str, session: &str) -> Vec<&'a LogEntry> {
+fn main_turn_requests<'a>(
+    requests: &'a [LogEntry],
+    path: &str,
+    session: &str,
+) -> Vec<&'a LogEntry> {
     requests
         .iter()
         .filter(|r| r.path == path)
@@ -28,14 +34,26 @@ fn main_turn_requests<'a>(requests: &'a [LogEntry], path: &str, session: &str) -
 fn tool_names(body: &Value) -> Vec<String> {
     body["tools"]
         .as_array()
-        .map(|tools| tools.iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_owned)).collect())
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-async fn open_session(conn: &acp::ClientSideConnection, cwd: &std::path::Path, model: &str) -> acp::SessionId {
+async fn open_session(
+    conn: &acp::ClientSideConnection,
+    cwd: &std::path::Path,
+    model: &str,
+) -> acp::SessionId {
     tokio::time::timeout(
         RPC_TIMEOUT,
-        conn.new_session(acp::NewSessionRequest::new(cwd.to_path_buf()).meta(json!({ "modelId": model }).as_object().cloned())),
+        conn.new_session(
+            acp::NewSessionRequest::new(cwd.to_path_buf())
+                .meta(json!({ "modelId": model }).as_object().cloned()),
+        ),
     )
     .await
     .expect("session/new timed out")
@@ -50,13 +68,18 @@ async fn prompt_until_finalize(conn: &acp::ClientSideConnection, session: &acp::
         RPC_TIMEOUT,
         conn.prompt(acp::PromptRequest::new(
             session.clone(),
-            vec![acp::ContentBlock::Text(acp::TextContent::new("Read notes.txt twice, then summarize it.".to_owned()))],
+            vec![acp::ContentBlock::Text(acp::TextContent::new(
+                "Read notes.txt twice, then summarize it.".to_owned(),
+            ))],
         )),
     )
     .await
     .expect("prompt timed out");
     if let Err(e) = &result {
-        assert!(e.to_string().contains("execution_id"), "unexpected prompt error: {e}");
+        assert!(
+            e.to_string().contains("execution_id"),
+            "unexpected prompt error: {e}"
+        );
     }
 }
 
@@ -66,7 +89,10 @@ fn agent_config() -> fuigo_shell::agent::config::Config {
     config
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn stock_backend_finalize_advertises_no_action_tool() {
     unsafe { std::env::set_var("FUIGO_MAX_MODEL_CALLS", "3") };
@@ -87,7 +113,12 @@ fn stock_backend_finalize_advertises_no_action_tool() {
                 )),
             ));
         }
-        let (conn, _) = connect_client(AutoApproveClient, "tool-list-stability-stock", spawn_agent_local_with_config(agent_config())).await;
+        let (conn, _) = connect_client(
+            AutoApproveClient,
+            "tool-list-stability-stock",
+            spawn_agent_local_with_config(agent_config()),
+        )
+        .await;
         let session = open_session(&conn, &cwd, STOCK_MODEL).await;
         prompt_until_finalize(&conn, &session).await;
         for expectation in &expectations {
@@ -96,14 +127,37 @@ fn stock_backend_finalize_advertises_no_action_tool() {
 
         let requests = mock.requests();
         let main = main_turn_requests(&requests, "/v1/chat/completions", &session.0);
-        assert_eq!(main.len(), 3, "two tool rounds and one finalize request expected: {}", mock.request_log_summary());
-        let bodies: Vec<&Value> = main.iter().map(|r| r.body.as_ref().expect("json body")).collect();
+        assert_eq!(
+            main.len(),
+            3,
+            "two tool rounds and one finalize request expected: {}",
+            mock.request_log_summary()
+        );
+        let bodies: Vec<&Value> = main
+            .iter()
+            .map(|r| r.body.as_ref().expect("json body"))
+            .collect();
         let names = tool_names(bodies[0]);
-        assert!(names.iter().any(|n| n == "read_file"), "tool rounds must advertise read_file: {names:?}");
-        assert_eq!(tool_names(bodies[1]), names, "the second tool round keeps the same tools");
+        assert!(
+            names.iter().any(|n| n == "read_file"),
+            "tool rounds must advertise read_file: {names:?}"
+        );
+        assert_eq!(
+            tool_names(bodies[1]),
+            names,
+            "the second tool round keeps the same tools"
+        );
         // The final-answer slot offers nothing to call, and no `tool_choice` rides a request without `tools`
         // (chat-completions providers reject that pairing).
-        assert!(tool_names(bodies[2]).is_empty(), "finalize request must advertise no action tool: {}", bodies[2]["tools"]);
-        assert!(bodies[2].get("tool_choice").is_none_or(Value::is_null), "finalize request: {}", bodies[2]["tool_choice"]);
+        assert!(
+            tool_names(bodies[2]).is_empty(),
+            "finalize request must advertise no action tool: {}",
+            bodies[2]["tools"]
+        );
+        assert!(
+            bodies[2].get("tool_choice").is_none_or(Value::is_null),
+            "finalize request: {}",
+            bodies[2]["tool_choice"]
+        );
     });
 }

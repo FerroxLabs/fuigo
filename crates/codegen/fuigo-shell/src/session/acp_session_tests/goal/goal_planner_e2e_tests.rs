@@ -60,7 +60,10 @@ fn spawn_planner_coordinator(
 }
 
 /// Like [`spawn_planner_coordinator`] but also records harness flags (`fork_context`, `surface_completion`) from each spawn.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn spawn_planner_coordinator_capturing(
     behaviour: SpawnBehaviour,
 ) -> (
@@ -162,7 +165,10 @@ fn spawn_planner_coordinator_capturing(
 /// Build a `SessionActor` with goal harness enabled, planner enabled, the supplied coordinator, and a unique tempdir session dir.
 /// The tempdir isolates each test's `plan_path()`.
 /// There is **no active goal yet**; the caller drives `setup_goal` or `create_goal` directly.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn make_planner_actor(
     coordinator_tx: Option<tokio::sync::mpsc::UnboundedSender<SubagentEvent>>,
     planner_enabled: bool,
@@ -188,7 +194,10 @@ async fn make_planner_actor(
 
 /// Like [`make_planner_actor`] but retains the persistence receiver so a test can inspect the `GoalUpdated` notifications the planner run emits.
 /// Tests use it to assert the wire-only `planning` flag is set then cleared.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn make_planner_actor_capturing(
     coordinator_tx: Option<tokio::sync::mpsc::UnboundedSender<SubagentEvent>>,
     planner_enabled: bool,
@@ -372,7 +381,10 @@ async fn planner_early_exit_clears_planning_latch() {
         .await;
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn planner_success_stamps_plan_file_on_orchestration() {
@@ -491,7 +503,10 @@ async fn planner_fork_inherits_parent_model() {
 /// The planner's ORIGINAL plan is snapshotted to `plan.baseline.md` once, right after the plan is written, and is NOT re-synced to later edits.
 /// A second `maybe_run_goal_planner` early-returns because a plan already exists.
 /// It must leave the baseline pinned to the original body even after `plan.md` itself is edited on disk.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn planner_snapshots_plan_baseline_once_and_does_not_overwrite() {
@@ -1062,7 +1077,10 @@ async fn planner_subagent_tokens_fold_into_goal_total() {
 /// Lifecycle regression guard: the planner fails, the goal pauses with the canonical message, and `GoalResume` re-fires the planner.
 /// The second attempt succeeds and the goal goes Active with `plan_file` set.
 /// This pins the retry-on-resume contract; without it, the pause message ("resume with /goal to retry") would be a lie.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn lifecycle_fail_pause_resume_retry_success() {

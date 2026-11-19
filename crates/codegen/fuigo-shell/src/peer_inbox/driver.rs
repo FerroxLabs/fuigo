@@ -25,7 +25,11 @@ impl Driver {
             Self::Pager => OperatorPresence::Present,
             Self::Leader => OperatorPresence::MayReturn,
         };
-        PeerAdmissionConfig { opted_in: true, operator, ..PeerAdmissionConfig::default() }
+        PeerAdmissionConfig {
+            opted_in: true,
+            operator,
+            ..PeerAdmissionConfig::default()
+        }
     }
 }
 
@@ -47,7 +51,12 @@ pub(crate) fn admission_for(
 
 /// The admission a new session starts with in this process (see [`admission_for`]).
 pub(crate) fn default_admission(is_subagent: bool) -> Option<PeerAdmissionConfig> {
-    admission_for(peer_messaging_enabled(), DRIVER.get().copied(), is_subagent, remote_attached())
+    admission_for(
+        peer_messaging_enabled(),
+        DRIVER.get().copied(),
+        is_subagent,
+        remote_attached(),
+    )
 }
 
 fn arm_as(driver: Driver) {
@@ -97,7 +106,13 @@ fn adjust_attached(up: bool) {
         }
     }
     #[cfg(test)]
-    REMOTE_ATTACHED.with(|c| c.set(if up { c.get() + 1 } else { c.get().saturating_sub(1) }));
+    REMOTE_ATTACHED.with(|c| {
+        c.set(if up {
+            c.get() + 1
+        } else {
+            c.get().saturating_sub(1)
+        })
+    });
 }
 
 fn attached_count() -> usize {
@@ -133,27 +148,37 @@ pub(crate) fn remote_attached() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer_inbox::directory::{ConnHost, PeerDirectory};
     use crate::peer_inbox::conn::InboxHost;
-    use fuigo_peer::{DeliveryOutcome, HostId, RejectReason};
+    use crate::peer_inbox::directory::{ConnHost, PeerDirectory};
     use crate::session::message_delivery::peer_test_session;
+    use fuigo_peer::{DeliveryOutcome, HostId, RejectReason};
 
     #[test]
     fn only_a_flagged_interactive_main_session_is_opted_in() {
         let pager = admission_for(true, Some(Driver::Pager), false, false).expect("pager opts in");
         assert!(pager.opted_in && pager.operator == OperatorPresence::Present);
-        let leader = admission_for(true, Some(Driver::Leader), false, false).expect("leader opts in");
+        let leader =
+            admission_for(true, Some(Driver::Leader), false, false).expect("leader opts in");
         assert!(leader.opted_in && leader.operator == OperatorPresence::MayReturn);
         // ACP stdio and headless never arm a driver.
-        assert!(admission_for(true, None, false, false).is_none(), "ACP stdio / headless are not opted in");
+        assert!(
+            admission_for(true, None, false, false).is_none(),
+            "ACP stdio / headless are not opted in"
+        );
         // A subagent never is.
         for d in [None, Some(Driver::Pager), Some(Driver::Leader)] {
-            assert!(admission_for(true, d, true, false).is_none(), "subagent {d:?}");
+            assert!(
+                admission_for(true, d, true, false).is_none(),
+                "subagent {d:?}"
+            );
         }
         // Nothing is opted in with the flag off.
         for d in [None, Some(Driver::Pager), Some(Driver::Leader)] {
             for sub in [false, true] {
-                assert!(admission_for(false, d, sub, false).is_none(), "flag off {d:?} {sub}");
+                assert!(
+                    admission_for(false, d, sub, false).is_none(),
+                    "flag off {d:?} {sub}"
+                );
             }
         }
     }
@@ -161,7 +186,10 @@ mod tests {
     #[test]
     fn a_leader_with_a_remote_client_attached_opts_nothing_in_the_pager_is_unchanged() {
         assert!(admission_for(true, Some(Driver::Leader), false, true).is_none());
-        assert!(admission_for(true, Some(Driver::Pager), false, true).is_some(), "pager (leader off) unchanged");
+        assert!(
+            admission_for(true, Some(Driver::Pager), false, true).is_some(),
+            "pager (leader off) unchanged"
+        );
     }
 
     #[test]
@@ -185,25 +213,54 @@ mod tests {
         let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
         let host = HostId::new("0123456789abcdef0123456789abcdef").unwrap();
         let dir = PeerDirectory::new(host);
-        let (h, _r) = peer_test_session("t-1", Some(crate::session::peer_admission::PeerSubmit::Outcome(DeliveryOutcome::Delivered {})));
+        let (h, _r) = peer_test_session(
+            "t-1",
+            Some(crate::session::peer_admission::PeerSubmit::Outcome(
+                DeliveryOutcome::Delivered {},
+            )),
+        );
         let addr = dir.register("t-1", h.clone(), "", "r").unwrap();
-        let ids = |d: &PeerDirectory| d.list_page(0).0.into_iter().map(|r| r.address.session_id().to_owned()).collect::<Vec<_>>();
+        let ids = |d: &PeerDirectory| {
+            d.list_page(0)
+                .0
+                .into_iter()
+                .map(|r| r.address.session_id().to_owned())
+                .collect::<Vec<_>>()
+        };
         let conn = ConnHost::new(dir.clone());
         let env = crate::session::peer_message::test_envelope("m1", "x", "hi");
         conn.peer_hello(&HostId::of(&env.from));
         assert_eq!(ids(&dir), vec!["t-1".to_owned()]);
-        assert_eq!(conn.send(addr.clone(), env.clone()).await, DeliveryOutcome::Delivered {});
+        assert_eq!(
+            conn.send(addr.clone(), env.clone()).await,
+            DeliveryOutcome::Delivered {}
+        );
         let g = attach_remote();
         assert!(ids(&dir).is_empty(), "attached: not listed");
-        assert_eq!(conn.send(addr.clone(), env.clone()).await, DeliveryOutcome::Rejected { reason: RejectReason::Unavailable });
+        assert_eq!(
+            conn.send(addr.clone(), env.clone()).await,
+            DeliveryOutcome::Rejected {
+                reason: RejectReason::Unavailable
+            }
+        );
         assert!(matches!(
             crate::peer_inbox::host::peer_inbox_status(),
-            crate::peer_inbox::host::PeerInboxStatus::Unavailable { reason: crate::peer_inbox::Disabled::RemoteClientAttached }
+            crate::peer_inbox::host::PeerInboxStatus::Unavailable {
+                reason: crate::peer_inbox::Disabled::RemoteClientAttached
+            }
         ));
         // A local prompt while attached (re-opting the session in, as a prompt-time configure would) does not reopen it.
         h.peer_gate().set_opted_in(true);
-        assert!(ids(&dir).is_empty(), "a local action while attached does not reopen");
-        assert_eq!(conn.send(addr.clone(), env.clone()).await, DeliveryOutcome::Rejected { reason: RejectReason::Unavailable });
+        assert!(
+            ids(&dir).is_empty(),
+            "a local action while attached does not reopen"
+        );
+        assert_eq!(
+            conn.send(addr.clone(), env.clone()).await,
+            DeliveryOutcome::Rejected {
+                reason: RejectReason::Unavailable
+            }
+        );
         drop(g);
         assert_eq!(ids(&dir), vec!["t-1".to_owned()], "cleared: reopened");
         assert_eq!(conn.send(addr, env).await, DeliveryOutcome::Delivered {});
@@ -231,7 +288,9 @@ mod tests {
                         continue;
                     }
                     let text = std::fs::read_to_string(&p).unwrap();
-                    let body = text.rsplit_once("\n#[cfg(test)]\nmod tests").map_or(text.as_str(), |(a, _)| a);
+                    let body = text
+                        .rsplit_once("\n#[cfg(test)]\nmod tests")
+                        .map_or(text.as_str(), |(a, _)| a);
                     if body.to_lowercase().contains(&["fuigo", "driver"].concat()) {
                         hits.push(p.display().to_string());
                     }
@@ -239,26 +298,51 @@ mod tests {
             }
         }
         let mut hits = Vec::new();
-        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut hits);
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut hits,
+        );
         assert!(hits.is_empty(), "{hits:?}");
     }
 
     #[test]
     fn the_leader_ingress_pumps_do_not_parse_acp_or_call_the_peer_inbox() {
         let text = include_str!("../agent/app.rs");
-        let body = text.rsplit_once("\n#[cfg(test)]\nmod tests").map_or(text, |(a, _)| a);
+        let body = text
+            .rsplit_once("\n#[cfg(test)]\nmod tests")
+            .map_or(text, |(a, _)| a);
         for marker in ["ipc_to_agent_rx.recv()", "ws_to_agent_rx.recv()"] {
-            let at = body.find(marker).unwrap_or_else(|| panic!("pump {marker} not found"));
+            let at = body
+                .find(marker)
+                .unwrap_or_else(|| panic!("pump {marker} not found"));
             let pump: String = body[at..].lines().take(6).collect::<Vec<_>>().join("\n");
-            assert!(pump.contains("write_all(msg.as_bytes())"), "{marker}: forwards the line as is");
-            for banned in ["peer_inbox", "from_str", "from_slice", "serde_json", "Value"] {
-                assert!(!pump.contains(banned), "{marker}: pump touches `{banned}`:\n{pump}");
+            assert!(
+                pump.contains("write_all(msg.as_bytes())"),
+                "{marker}: forwards the line as is"
+            );
+            for banned in [
+                "peer_inbox",
+                "from_str",
+                "from_slice",
+                "serde_json",
+                "Value",
+            ] {
+                assert!(
+                    !pump.contains(banned),
+                    "{marker}: pump touches `{banned}`:\n{pump}"
+                );
             }
         }
         // The only peer_inbox calls in the leader app are the arm calls and the attach hook.
         for (i, l) in body.lines().enumerate() {
             if l.contains("peer_inbox::") && !l.trim_start().starts_with("//") {
-                assert!(l.contains("arm_peer_host") || l.contains("shutdown_peer_host") || l.contains("driver::attach_remote"), "app.rs:{}: {l}", i + 1);
+                assert!(
+                    l.contains("arm_peer_host")
+                        || l.contains("shutdown_peer_host")
+                        || l.contains("driver::attach_remote"),
+                    "app.rs:{}: {l}",
+                    i + 1
+                );
             }
         }
     }

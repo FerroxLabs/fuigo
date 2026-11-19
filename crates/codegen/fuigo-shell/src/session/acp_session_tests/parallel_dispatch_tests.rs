@@ -419,7 +419,8 @@ async fn incremental_dispatch_surfaces_fast_tool_before_slow_sibling() {
 fn lock_path_for_call_keys_a_declared_argument_outside_the_fixed_keys() {
     let cwd = Path::new("/cwd");
     let edit_a = serde_json::json!({"filePath": "src/lib.rs", "oldString": "a", "newString": "b"});
-    let edit_b = serde_json::json!({"filePath": "./src/../src/lib.rs", "oldString": "c", "newString": "d"});
+    let edit_b =
+        serde_json::json!({"filePath": "./src/../src/lib.rs", "oldString": "c", "newString": "d"});
     let key = lock_path_for_call(&edit_a, Some("filePath"), cwd);
     assert!(key.is_some(), "a declared filePath must produce a lock key");
     assert_eq!(key, lock_path_for_call(&edit_b, Some("filePath"), cwd));
@@ -459,7 +460,10 @@ fn lock_path_for_call_ignores_other_path_shaped_arguments_of_a_declaring_tool() 
 fn lock_path_for_call_falls_back_to_the_fixed_keys_without_a_declaration() {
     let cwd = Path::new("/cwd");
     let args = serde_json::json!({"file_path": "src/main.rs"});
-    assert_eq!(lock_path_for_call(&args, None, cwd), lock_path_for_args(&args, cwd));
+    assert_eq!(
+        lock_path_for_call(&args, None, cwd),
+        lock_path_for_args(&args, cwd)
+    );
     assert!(lock_path_for_call(&args, None, cwd).is_some());
 }
 

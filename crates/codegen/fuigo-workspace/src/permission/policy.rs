@@ -9,12 +9,11 @@ use crate::permission::types::{
     AccessKind, Decision, PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
 };
 use fuigo_paths::normalize_lexically;
-pub(crate) use fuigo_tools::util::path_match::{
-    literal_dir_prefix, physical_alias_pattern_string,
-    RuleBase, absolute_normalized_path, is_tilde_path, path_has_parent_dir, path_match_forms, path_match_string,
-    resolve_following_symlinks,
-};
 use fuigo_tools::implementations::fuigo_build::web_fetch::domain::normalize_domain;
+pub(crate) use fuigo_tools::util::path_match::{
+    RuleBase, absolute_normalized_path, is_tilde_path, literal_dir_prefix, path_has_parent_dir,
+    path_match_forms, path_match_string, physical_alias_pattern_string, resolve_following_symlinks,
+};
 
 /// A security-gate escalation with `Ask` provenance.
 /// The bash-command and shell-file gates only escalate (rule `Allow` is dropped), so these three arms cover every gate outcome.
@@ -101,8 +100,11 @@ pub struct CompiledPolicy {
 
 impl CompiledPolicy {
     pub fn new(config: PermissionConfig) -> Self {
-        let launch = (!config.launch_rules.is_empty())
-            .then(|| Box::new(CompiledPolicy::new(PermissionConfig::new(config.launch_rules.clone()))));
+        let launch = (!config.launch_rules.is_empty()).then(|| {
+            Box::new(CompiledPolicy::new(PermissionConfig::new(
+                config.launch_rules.clone(),
+            )))
+        });
         let matchers = config
             .rules
             .iter()
@@ -165,7 +167,8 @@ impl CompiledPolicy {
     /// prefix passes through a symlink. Used only to widen a deny/ask match, never an allow.
     fn physical_alias_pattern(&self, index: usize) -> Option<glob::Pattern> {
         let (prefix, rest) = self.alias_prefix.get(index)?.as_ref()?;
-        physical_alias_pattern_string(prefix, rest).and_then(|pattern| glob::Pattern::new(&pattern).ok())
+        physical_alias_pattern_string(prefix, rest)
+            .and_then(|pattern| glob::Pattern::new(&pattern).ok())
     }
 
     /// Evaluate managed Bash/Any deny/ask command rules against every chained segment, not just the leading command.
@@ -1014,7 +1017,8 @@ fn pattern_matches(
 /// So `Read(./**)` / `Read(src/**)` cannot be escaped via traversal.
 /// Unrooted patterns (`*`, leading `**`) keep their documented any-depth meaning.
 fn path_context_matches(path: &str, cr: &CompiledRule<'_>, base: Option<&RuleBase<'_>>) -> bool {
-    cr.matcher.is_some_and(|pat| fuigo_tools::util::path_match::path_pattern_matches(path, pat, base))
+    cr.matcher
+        .is_some_and(|pat| fuigo_tools::util::path_match::path_pattern_matches(path, pat, base))
 }
 
 fn native_file_path(access: &AccessKind) -> Option<&str> {
@@ -1109,7 +1113,9 @@ fn resolve_symlinks(path: &Path, not_a_directory_is_candidate: bool) -> Option<P
         let metadata = match std::fs::symlink_metadata(&candidate) {
             Ok(metadata) => Some(metadata),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) if enotdir && error.kind() == std::io::ErrorKind::NotADirectory => return Some(candidate),
+            Err(error) if enotdir && error.kind() == std::io::ErrorKind::NotADirectory => {
+                return Some(candidate);
+            }
             Err(_) => return None,
         };
         if metadata.is_some_and(|metadata| metadata.file_type().is_symlink()) {
@@ -1468,9 +1474,9 @@ mod tests {
     #[test]
     fn write_scoped_access_respects_edit_deny_and_not_read_allow() {
         use crate::permission::rules::parse_permission_rule;
+        use fuigo_tool_types::TaskToolInput;
         use fuigo_tools::implementations::opencode::edit::EditInput;
         use fuigo_tools::types::ToolInput;
-        use fuigo_tool_types::TaskToolInput;
 
         let edit = AccessKind::from(&ToolInput::from(EditInput {
             file_path: "/tmp/denied.txt".into(),
@@ -3047,8 +3053,14 @@ mod windows_spelling_tests {
             (r"C:\P156NoSuchDir\ws", r"C:\P156NoSuchDir\ws\secret\key"),
             (r"C:\P156NoSuchDir\ws", r"secret\key"),
             ("C:/P156NoSuchDir/ws", "C:/P156NoSuchDir/ws/secret/key"),
-            (r"\\?\C:\P156NoSuchDir\ws", r"\\?\C:\P156NoSuchDir\ws\secret\key"),
-            (r"\\wsl$\Ubuntu\home\p156", r"\\wsl$\Ubuntu\home\p156\secret\key"),
+            (
+                r"\\?\C:\P156NoSuchDir\ws",
+                r"\\?\C:\P156NoSuchDir\ws\secret\key",
+            ),
+            (
+                r"\\wsl$\Ubuntu\home\p156",
+                r"\\wsl$\Ubuntu\home\p156\secret\key",
+            ),
         ] {
             let base = RuleBase::new(Path::new(cwd));
             assert_eq!(
@@ -3069,7 +3081,11 @@ mod windows_spelling_tests {
             pattern_mode: PatternMode::Glob,
         }]));
         let cwd = Path::new(r"C:\P156NoSuchDir\ws");
-        for path in [r"C:\P156NoSuchDir\ws\secret\key", r"secret\key", "secret/key"] {
+        for path in [
+            r"C:\P156NoSuchDir\ws\secret\key",
+            r"secret\key",
+            "secret/key",
+        ] {
             assert!(
                 matches!(
                     policy.evaluate_with_cwd(&AccessKind::Read(Some(path.to_owned())), Some(cwd)),
@@ -3100,7 +3116,8 @@ struct GlobStep {
 fn glob_chars_meet(a: GlobChars, b: GlobChars) -> bool {
     match (a, b) {
         (GlobChars::Literal(x), GlobChars::Literal(y)) => x.to_lowercase().eq(y.to_lowercase()),
-        (GlobChars::Literal(c), GlobChars::NotSlash) | (GlobChars::NotSlash, GlobChars::Literal(c)) => c != '/',
+        (GlobChars::Literal(c), GlobChars::NotSlash)
+        | (GlobChars::NotSlash, GlobChars::Literal(c)) => c != '/',
         _ => true,
     }
 }
@@ -3108,22 +3125,41 @@ fn glob_chars_meet(a: GlobChars, b: GlobChars) -> bool {
 /// A glob as steps. `shell`: bash pathname expansion (`*`, `?` and `[...]` never match `/`); otherwise a rule pattern,
 /// read loosely (its wildcards may match `/`).
 fn glob_steps(pattern: &str, shell: bool) -> Vec<GlobStep> {
-    let wild = if shell { GlobChars::NotSlash } else { GlobChars::Any };
+    let wild = if shell {
+        GlobChars::NotSlash
+    } else {
+        GlobChars::Any
+    };
     let chars: Vec<char> = pattern.chars().collect();
     let mut steps = Vec::with_capacity(chars.len());
     let mut at = 0;
     while at < chars.len() {
         let step = match chars[at] {
-            '*' => GlobStep { chars: wild, repeat: true },
-            '?' => GlobStep { chars: wild, repeat: false },
+            '*' => GlobStep {
+                chars: wild,
+                repeat: true,
+            },
+            '?' => GlobStep {
+                chars: wild,
+                repeat: false,
+            },
             '[' => match chars[at + 1..].iter().skip(1).position(|c| *c == ']') {
                 Some(close) => {
                     at += close + 2;
-                    GlobStep { chars: wild, repeat: false }
+                    GlobStep {
+                        chars: wild,
+                        repeat: false,
+                    }
                 }
-                None => GlobStep { chars: GlobChars::Literal('['), repeat: false },
+                None => GlobStep {
+                    chars: GlobChars::Literal('['),
+                    repeat: false,
+                },
             },
-            c => GlobStep { chars: GlobChars::Literal(c), repeat: false },
+            c => GlobStep {
+                chars: GlobChars::Literal(c),
+                repeat: false,
+            },
         };
         steps.push(step);
         at += 1;
@@ -3168,7 +3204,10 @@ fn glob_steps_intersect(a: &[GlobStep], b: &[GlobStep]) -> bool {
         if let (Some(sa), Some(sb)) = (a.get(i), b.get(j))
             && glob_chars_meet(sa.chars, sb.chars)
         {
-            let next = (if sa.repeat { i } else { i + 1 }, if sb.repeat { j } else { j + 1 });
+            let next = (
+                if sa.repeat { i } else { i + 1 },
+                if sb.repeat { j } else { j + 1 },
+            );
             if next != (i, j) {
                 stack.push(next);
             }

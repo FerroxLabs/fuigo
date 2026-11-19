@@ -31,7 +31,10 @@ impl std::fmt::Debug for RefreshEvent {
         } = self;
         f.debug_struct("RefreshEvent")
             .field("access_token", &"<redacted>")
-            .field("new_refresh_token", &new_refresh_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "new_refresh_token",
+                &new_refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("expires_at", expires_at)
             .finish()
     }
@@ -1135,12 +1138,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }

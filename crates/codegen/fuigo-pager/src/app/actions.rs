@@ -1597,7 +1597,10 @@ pub enum Effect {
     },
     /// F5-P: close the session a durable folder-trust grant owes a reload, within
     /// [`crate::app::folder_trust_reload::CLOSE_WAIT`].
-    FolderTrustClose { agent_id: AgentId, session_id: acp::SessionId },
+    FolderTrustClose {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+    },
     /// F5-P: load the closed session again, cold and trusted, inside reload window `generation`.
     FolderTrustLoad {
         agent_id: AgentId,
@@ -2574,7 +2577,9 @@ pub enum TaskResult {
         attempt: u64,
     },
     /// A load whose response says a folder-trust reload is still owed (`_meta["fuigo/folderTrustReload"].owed`).
-    FolderTrustReloadOwed { loaded: Box<TaskResult> },
+    FolderTrustReloadOwed {
+        loaded: Box<TaskResult>,
+    },
     /// [`Effect::FolderTrustClose`] finished: the close outcome, or why there was none.
     FolderTrustClosed {
         agent_id: AgentId,

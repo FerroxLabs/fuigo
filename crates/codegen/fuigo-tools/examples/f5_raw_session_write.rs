@@ -4,7 +4,11 @@
 
 #[cfg(f5_raw_session_write)]
 async fn raw_session_rename(session_dir: &std::path::Path) {
-    let _ = tokio::fs::rename(session_dir.join("summary.json.tmp"), session_dir.join("summary.json")).await;
+    let _ = tokio::fs::rename(
+        session_dir.join("summary.json.tmp"),
+        session_dir.join("summary.json"),
+    )
+    .await;
 }
 
 fn main() {}

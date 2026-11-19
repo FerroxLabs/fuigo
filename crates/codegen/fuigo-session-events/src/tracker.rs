@@ -69,7 +69,10 @@ impl EventTracker {
 
     /// A tracker whose log is `dir/events.jsonl` by path ([`EventWriter::open_at`]): for a directory that is not a
     /// session folder, and tests.
-    #[allow(clippy::disallowed_methods, reason = "EventTracker::new_at: a tracker for a directory that is not a session folder (workspace tree, tests), through EventWriter::open_at")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "EventTracker::new_at: a tracker for a directory that is not a session folder (workspace tree, tests), through EventWriter::open_at"
+    )]
     pub fn new_at(dir: &Path) -> Self {
         Self::with_writer(EventWriter::open_at(dir))
     }
@@ -239,7 +242,10 @@ impl EventTracker {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

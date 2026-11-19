@@ -1,5 +1,5 @@
-use google_cloud_metadata::transport::RequestPolicyExt;
 use async_trait::async_trait;
+use google_cloud_metadata::transport::RequestPolicyExt;
 use serde::Deserialize;
 use time::OffsetDateTime;
 use urlencoding::encode;

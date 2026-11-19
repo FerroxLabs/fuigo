@@ -7,8 +7,11 @@
 use super::BearerTokenFileError;
 
 /// Device names Windows resolves in ANY folder (`C:\dir\NUL`), with or without an extension.
-const RESERVED: &[&str] =
-    &["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "CONIN$", "CONOUT$"];
+const RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "CONIN$",
+    "CONOUT$",
+];
 
 /// Refuse, before opening anything, a path that is not a plain file on a local drive:
 ///
@@ -34,7 +37,11 @@ pub(crate) fn path_problem(path: &str) -> Option<BearerTokenFileError> {
     }
     for component in rest.split('\\') {
         // `NUL.txt`, `nul .txt` and `NUL:` all reach the device: judge the part before the first dot, minus trailing spaces.
-        let stem = component.split('.').next().unwrap_or("").trim_end_matches(' ');
+        let stem = component
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(' ');
         if RESERVED.iter().any(|name| stem.eq_ignore_ascii_case(name)) {
             return Some(BearerTokenFileError::UnsupportedPath);
         }
@@ -46,7 +53,9 @@ pub(crate) fn path_problem(path: &str) -> Option<BearerTokenFileError> {
 #[cfg(any(windows, test))]
 pub(crate) fn drive_root(path: &str) -> Option<String> {
     match path.as_bytes() {
-        [drive, b':', ..] if drive.is_ascii_alphabetic() => Some(format!("{}:\\", char::from(*drive))),
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => {
+            Some(format!("{}:\\", char::from(*drive)))
+        }
         _ => None,
     }
 }
@@ -116,7 +125,11 @@ mod sys {
                 // Without backup semantics a directory cannot be opened as a file: "access denied". Say what it is.
                 let is_dir = error.raw_os_error() == Some(ERROR_ACCESS_DENIED)
                     && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
-                if is_dir { BearerTokenFileError::NotRegular } else { BearerTokenFileError::Unreadable }
+                if is_dir {
+                    BearerTokenFileError::NotRegular
+                } else {
+                    BearerTokenFileError::Unreadable
+                }
             })?;
         check_owner_only_file_capped(&file, Some(MAX_TOKEN_FILE_BYTES)).map_err(map_refusal)?;
         Ok(file)
@@ -143,11 +156,30 @@ mod path_tests {
     #[test]
     fn device_network_stream_and_reserved_paths_are_refused() {
         for bad in [
-            r"\\.\pipe\token", "//./pipe/token", r"\\.\COM1", r"\\?\C:\x\tok", r"\\?\GLOBALROOT\Device\x", r"\\server\share\tok",
-            "//server/share/tok", r"C:\dir\NUL", r"C:\dir\nul.txt", r"C:\dir\CON", r"C:\dir\COM1", r"C:\dir\lpt9.tok", r"C:\dir\CONIN$",
-            r"C:\dir\tok:stream", r"C:\dir\tok:stream:$DATA", r"C:\NUL\tok", "C:/dir/aux", r"C:\dir\NUL .txt",
+            r"\\.\pipe\token",
+            "//./pipe/token",
+            r"\\.\COM1",
+            r"\\?\C:\x\tok",
+            r"\\?\GLOBALROOT\Device\x",
+            r"\\server\share\tok",
+            "//server/share/tok",
+            r"C:\dir\NUL",
+            r"C:\dir\nul.txt",
+            r"C:\dir\CON",
+            r"C:\dir\COM1",
+            r"C:\dir\lpt9.tok",
+            r"C:\dir\CONIN$",
+            r"C:\dir\tok:stream",
+            r"C:\dir\tok:stream:$DATA",
+            r"C:\NUL\tok",
+            "C:/dir/aux",
+            r"C:\dir\NUL .txt",
         ] {
-            assert_eq!(path_problem(bad), Some(BearerTokenFileError::UnsupportedPath), "{bad:?}");
+            assert_eq!(
+                path_problem(bad),
+                Some(BearerTokenFileError::UnsupportedPath),
+                "{bad:?}"
+            );
         }
     }
 
@@ -162,7 +194,15 @@ mod path_tests {
 
     #[test]
     fn ordinary_local_paths_pass() {
-        for ok in [r"C:\Users\me\.config\tok", "C:/Users/me/tok", r"D:\a b\tok.txt", r"C:\dir\console", r"C:\dir\nullable", r"C:\dir\com10", r"C:\dir\LPT0"] {
+        for ok in [
+            r"C:\Users\me\.config\tok",
+            "C:/Users/me/tok",
+            r"D:\a b\tok.txt",
+            r"C:\dir\console",
+            r"C:\dir\nullable",
+            r"C:\dir\com10",
+            r"C:\dir\LPT0",
+        ] {
             assert_eq!(path_problem(ok), None, "{ok:?}");
         }
     }

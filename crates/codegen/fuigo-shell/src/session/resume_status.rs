@@ -92,7 +92,10 @@ impl ResumeStatusSnapshot {
 
 /// Write the snapshot if none is there yet (first snapshot wins), through the session's writer (design F5 §5.3,
 /// `create_new`): owner-only, and never into a folder the writer released for a delete.
-pub(crate) fn persist(session_writer: &fuigo_session_writer::SessionWriter, snapshot: &ResumeStatusSnapshot) {
+pub(crate) fn persist(
+    session_writer: &fuigo_session_writer::SessionWriter,
+    snapshot: &ResumeStatusSnapshot,
+) {
     if snapshot.is_empty() {
         return;
     }
@@ -126,7 +129,13 @@ pub(crate) fn load_and_clear(
     let path = session_dir.join(FILENAME);
     let data = match std::fs::read(&path) {
         Ok(d) => d,
-        Err(_) => return merge_legacy_manifest(session_dir, session_writer, ResumeStatusSnapshot::default()),
+        Err(_) => {
+            return merge_legacy_manifest(
+                session_dir,
+                session_writer,
+                ResumeStatusSnapshot::default(),
+            );
+        }
     };
     let snapshot = match serde_json::from_slice(&data) {
         Ok(s) => s,
@@ -135,7 +144,11 @@ pub(crate) fn load_and_clear(
             if let Some(writer) = session_writer {
                 let _ = writer.remove_sync(FILENAME);
             }
-            return merge_legacy_manifest(session_dir, session_writer, ResumeStatusSnapshot::default());
+            return merge_legacy_manifest(
+                session_dir,
+                session_writer,
+                ResumeStatusSnapshot::default(),
+            );
         }
     };
     if let Some(writer) = session_writer {
@@ -418,12 +431,16 @@ fn one_line(s: &str) -> String {
         .join(" ")
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     /// A writer for `dir` under a fresh id (design F5: the snapshot is written and removed only through one).
     fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
-        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim")
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .expect("claim")
     }
     use super::*;
 
@@ -514,8 +531,15 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(dir.path().join(FILENAME)).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "P150: resume_status.json is a session file, owner-only");
+            let mode = std::fs::metadata(dir.path().join(FILENAME))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "P150: resume_status.json is a session file, owner-only"
+            );
         }
         let loaded = load_and_clear(dir.path(), Some(&test_writer(dir.path())));
         assert_eq!(loaded, snapshot);
@@ -533,7 +557,8 @@ mod tests {
     #[test]
     fn persist_keeps_first_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        persist(&test_writer(dir.path()),
+        persist(
+            &test_writer(dir.path()),
             &ResumeStatusSnapshot {
                 background: vec![ResumeTask {
                     task_id: "bg1".into(),
@@ -542,7 +567,8 @@ mod tests {
                 ..ResumeStatusSnapshot::default()
             },
         );
-        persist(&test_writer(dir.path()),
+        persist(
+            &test_writer(dir.path()),
             &ResumeStatusSnapshot {
                 loops: vec![ResumeLoop {
                     id: "loop1".into(),
@@ -564,7 +590,8 @@ mod tests {
         let loaded = load_and_clear(dir.path(), Some(&test_writer(dir.path())));
         assert!(loaded.is_empty());
         assert!(!exists(dir.path()));
-        persist(&test_writer(dir.path()),
+        persist(
+            &test_writer(dir.path()),
             &ResumeStatusSnapshot {
                 loops: vec![ResumeLoop {
                     id: "loop1".into(),

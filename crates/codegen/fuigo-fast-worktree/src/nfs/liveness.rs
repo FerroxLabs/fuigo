@@ -872,7 +872,10 @@ mod tests {
             r.examined,
             "an examined orphan must be counted in exactly one outcome: {r:?}"
         );
-        assert_eq!(r.kept_live, 1, "absent pin is kept (nothing to prune): {r:?}");
+        assert_eq!(
+            r.kept_live, 1,
+            "absent pin is kept (nothing to prune): {r:?}"
+        );
     }
     #[test]
     #[cfg(feature = "metadata")]

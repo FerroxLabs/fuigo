@@ -37,9 +37,9 @@ pub use keyboard::{
     keyboard_capabilities_for_host,
 };
 pub use kitty_keyboard::{
-    kitty_event_types_withheld, kitty_flags_pushed, kitty_probe_unsupported, kitty_releases_reported,
-    negotiated_kitty_flags, pushed_kitty_flags, set_kitty_probe_unsupported, set_pushed_kitty_flags,
-    take_kitty_flags_pushed,
+    kitty_event_types_withheld, kitty_flags_pushed, kitty_probe_unsupported,
+    kitty_releases_reported, negotiated_kitty_flags, pushed_kitty_flags,
+    set_kitty_probe_unsupported, set_pushed_kitty_flags, take_kitty_flags_pushed,
 };
 pub use pop_fence::{PopFence, PopFenceOutcome};
 pub use term_version::{TermVersion, TermVersionSource};
@@ -181,7 +181,6 @@ impl TerminalName {
                 | Self::Zed
         )
     }
-
 }
 
 impl TerminalContext {

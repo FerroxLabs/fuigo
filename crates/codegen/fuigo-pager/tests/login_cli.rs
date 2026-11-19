@@ -50,7 +50,11 @@ fn run_with_stdin(
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("TERM", "xterm-256color")
         .env("NO_COLOR", "1")
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .args(args)
@@ -58,7 +62,12 @@ fn run_with_stdin(
     let mut child = command.spawn().expect("spawn the pager binary");
     if let Some(text) = stdin {
         use std::io::Write as _;
-        child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
     }
     let output = child.wait_with_output().expect("run the pager binary");
     (
@@ -80,7 +89,13 @@ const IGNORE: &str = "spawns the real pager binary; CI/Bazel provides PAGER_BINA
 fn bare_login_without_a_terminal_prints_the_options_and_exits_2() {
     let _ = IGNORE;
     let out = run(&["login"], &[]);
-    assert_eq!(out.code, Some(2), "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert_eq!(
+        out.code,
+        Some(2),
+        "stdout: {} stderr: {}",
+        out.stdout,
+        out.stderr
+    );
     for expected in [
         "Choose how Fuigo reaches a model.",
         "Flux Router: one key, every model (recommended)",
@@ -88,13 +103,20 @@ fn bare_login_without_a_terminal_prints_the_options_and_exits_2() {
         "fuigo login --provider chatgpt",
         "fuigo login --provider xai",
     ] {
-        assert!(out.stdout.contains(expected), "missing {expected:?} in:\n{}", out.stdout);
+        assert!(
+            out.stdout.contains(expected),
+            "missing {expected:?} in:\n{}",
+            out.stdout
+        );
     }
     let all = format!("{}{}", out.stdout, out.stderr);
     assert!(!all.contains("OAuth2 issuer"), "{all}");
     assert!(!all.to_lowercase().contains("enterprise"), "{all}");
     // The upstream product name, built from parts so this guard adds no line naming it to the tree.
-    assert!(!all.contains(concat!("Grok", " Build")) && !all.contains("grok.com"), "{all}");
+    assert!(
+        !all.contains(concat!("Grok", " Build")) && !all.contains("grok.com"),
+        "{all}"
+    );
     // Flux is first.
     assert!(
         out.stdout.find("Flux Router").unwrap() < out.stdout.find("ChatGPT subscription").unwrap(),
@@ -121,30 +143,77 @@ fn status_lists_every_connection_with_flux_first_and_masks_keys() {
         &["login", "--status"],
         &[("OPENAI_API_KEY", "sk-test-openai-key-SECRETBODY-9876")],
     );
-    assert_eq!(out.code, Some(0), "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {} stderr: {}",
+        out.stdout,
+        out.stderr
+    );
     let lines: Vec<&str> = out.stdout.lines().collect();
-    assert!(lines[0].starts_with("Flux Router [Recommended]: Not set"), "{}", out.stdout);
+    assert!(
+        lines[0].starts_with("Flux Router [Recommended]: Not set"),
+        "{}",
+        out.stdout
+    );
     assert!(lines[0].contains("fluxrouter.ai"), "{}", out.stdout);
-    assert!(out.stdout.contains("ChatGPT subscription: not signed in: /login"), "{}", out.stdout);
-    assert!(out.stdout.contains("Grok subscription: not signed in: /login"), "{}", out.stdout);
-    assert!(out.stdout.contains("OpenAI API key: ready: OPENAI_API_KEY \u{2022}\u{2022}\u{2022}\u{2022}9876"), "{}", out.stdout);
-    assert!(!out.stdout.contains("SECRETBODY"), "a key leaked: {}", out.stdout);
-    assert!(!out.stderr.contains("SECRETBODY"), "a key leaked: {}", out.stderr);
+    assert!(
+        out.stdout
+            .contains("ChatGPT subscription: not signed in: /login"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("Grok subscription: not signed in: /login"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("OpenAI API key: ready: OPENAI_API_KEY \u{2022}\u{2022}\u{2022}\u{2022}9876"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("SECRETBODY"),
+        "a key leaked: {}",
+        out.stdout
+    );
+    assert!(
+        !out.stderr.contains("SECRETBODY"),
+        "a key leaked: {}",
+        out.stderr
+    );
 }
 
 #[test]
 #[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
 fn a_provider_key_login_reports_readiness_and_never_stores_the_key() {
     let missing = run(&["login", "--provider", "anthropic"], &[]);
-    assert_eq!(missing.code, Some(2), "{}{}", missing.stdout, missing.stderr);
-    assert!(missing.stderr.contains("not set: export ANTHROPIC_API_KEY"), "{}", missing.stderr);
+    assert_eq!(
+        missing.code,
+        Some(2),
+        "{}{}",
+        missing.stdout,
+        missing.stderr
+    );
+    assert!(
+        missing.stderr.contains("not set: export ANTHROPIC_API_KEY"),
+        "{}",
+        missing.stderr
+    );
 
     let ready = run(
         &["login", "--provider", "openai"],
         &[("OPENAI_API_KEY", "sk-test-openai-key-SECRETBODY-9876")],
     );
     assert_eq!(ready.code, Some(0), "{}{}", ready.stdout, ready.stderr);
-    assert!(ready.stderr.contains("/provider openai <model-id>"), "{}", ready.stderr);
+    assert!(
+        ready.stderr.contains("/provider openai <model-id>"),
+        "{}",
+        ready.stderr
+    );
     assert!(!ready.stderr.contains("SECRETBODY") && !ready.stdout.contains("SECRETBODY"));
 }
 
@@ -154,17 +223,37 @@ fn a_provider_key_login_reports_readiness_and_never_stores_the_key() {
 #[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
 fn flux_login_reads_a_key_piped_on_stdin() {
     const FAKE: &str = "flx-fake-key-0123456789abcdef";
-    let (out, temp) = run_with_stdin(&["login", "--provider", "flux"], &[], Some(&format!("  {FAKE}  \n")));
-    assert_eq!(out.code, Some(0), "stdout: {} stderr: {}", out.stdout, out.stderr);
-    assert!(!out.stdout.contains(FAKE) && !out.stderr.contains(FAKE), "the key must never be echoed");
-    assert!(!out.stderr.contains("could not read a key"), "{}", out.stderr);
+    let (out, temp) = run_with_stdin(
+        &["login", "--provider", "flux"],
+        &[],
+        Some(&format!("  {FAKE}  \n")),
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout: {} stderr: {}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains(FAKE) && !out.stderr.contains(FAKE),
+        "the key must never be echoed"
+    );
+    assert!(
+        !out.stderr.contains("could not read a key"),
+        "{}",
+        out.stderr
+    );
     let auth = temp.path().join("fuigo-home").join("auth.json");
     let text = std::fs::read_to_string(&auth).expect("auth.json written");
     assert!(text.contains(FAKE), "the trimmed key is stored");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        assert_eq!(std::fs::metadata(&auth).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&auth).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
 
@@ -173,6 +262,12 @@ fn flux_login_reads_a_key_piped_on_stdin() {
 #[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
 fn flux_login_with_an_empty_stdin_fails_without_storing() {
     let (out, temp) = run_with_stdin(&["login", "--provider", "flux"], &[], Some("\n"));
-    assert_ne!(out.code, Some(0), "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert_ne!(
+        out.code,
+        Some(0),
+        "stdout: {} stderr: {}",
+        out.stdout,
+        out.stderr
+    );
     assert!(!temp.path().join("fuigo-home").join("auth.json").exists());
 }

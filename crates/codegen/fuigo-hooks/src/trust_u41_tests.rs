@@ -31,8 +31,14 @@ fn disabling_a_project_hook_leaves_the_same_named_hook_in_another_repo_running()
     disable_hook_with_file(&disable_key(&a), &file).unwrap();
 
     let disabled = DisabledHooks::from_file(&file, false);
-    assert!(disabled.blocks(&a), "disabled in the repo it was disabled in");
-    assert!(!disabled.blocks(&b), "the other repo's same-named hook still runs");
+    assert!(
+        disabled.blocks(&a),
+        "disabled in the repo it was disabled in"
+    );
+    assert!(
+        !disabled.blocks(&b),
+        "the other repo's same-named hook still runs"
+    );
 }
 
 #[test]
@@ -75,7 +81,11 @@ fn a_legacy_bare_disable_still_applies_in_every_repo_and_is_not_rewritten() {
     let disabled = DisabledHooks::from_file(&file, false);
     assert!(disabled.blocks(&a), "still disabled in repo-a");
     assert!(disabled.blocks(&b), "still disabled in repo-b");
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), legacy, "reading never rewrites the file");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        legacy,
+        "reading never rewrites the file"
+    );
 }
 
 #[test]
@@ -100,11 +110,17 @@ fn disabling_beside_a_legacy_entry_keeps_it_and_enabling_removes_both() {
 
     disable_hook_with_file(&disable_key(&a), &file).unwrap();
     let disabled = DisabledHooks::from_file(&file, false);
-    assert!(disabled.blocks(&a) && disabled.blocks(&b), "the bare line still covers repo-b");
+    assert!(
+        disabled.blocks(&a) && disabled.blocks(&b),
+        "the bare line still covers repo-b"
+    );
 
     assert!(enable_hook_with_file(&disable_key(&a), &file).unwrap());
     let disabled = DisabledHooks::from_file(&file, false);
-    assert!(!disabled.blocks(&a) && !disabled.blocks(&b), "the user enabled the hook");
+    assert!(
+        !disabled.blocks(&a) && !disabled.blocks(&b),
+        "the user enabled the hook"
+    );
     assert!(std::fs::read_to_string(&file).unwrap().contains("global/x"));
 }
 
@@ -153,7 +169,11 @@ fn repo_paths_that_differ_only_in_edge_whitespace_or_odd_bytes_stay_distinct() {
 fn the_scope_encoding_is_injective_for_odd_bytes_and_keeps_the_old_form() {
     use std::os::unix::ffi::OsStrExt;
     let raw = |b: &[u8]| escape_scope(Path::new(std::ffi::OsStr::from_bytes(b)));
-    assert_ne!(raw(b"/r/\xff"), raw(b"/r/\xfe"), "two non-UTF-8 names do not both become U+FFFD");
+    assert_ne!(
+        raw(b"/r/\xff"),
+        raw(b"/r/\xfe"),
+        "two non-UTF-8 names do not both become U+FFFD"
+    );
     assert_ne!(raw(b"/r/\xff"), raw("/r/\u{fffd}".as_bytes()));
     assert_ne!(raw(b"/r/a%20"), raw(b"/r/a "));
     assert_ne!(raw(b"/r/a\t"), raw(b"/r/a "));

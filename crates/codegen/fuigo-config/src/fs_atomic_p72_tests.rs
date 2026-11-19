@@ -102,7 +102,10 @@ fn worst_overtakes(trace: &[(String, u32)]) -> (usize, String) {
         if let Some((other, n)) = grants.iter().max_by_key(|(_, n)| **n)
             && *n > worst.0
         {
-            worst = (*n, format!("pid {other} granted {n}x while pid {pid} waited (trace line {i})"));
+            worst = (
+                *n,
+                format!("pid {other} granted {n}x while pid {pid} waited (trace line {i})"),
+            );
         }
     }
     worst
@@ -174,7 +177,10 @@ fn n_processes_contending_are_served_in_turn_and_never_refused() {
     assert_eq!(per_pid.len(), PROCS, "{per_pid:?}");
     for (p, events) in &per_pid {
         let want: Vec<&str> = (0..EACH).flat_map(|_| ["Q", "G"]).collect();
-        assert_eq!(events, &want, "pid {p}: every grant must follow its own queueing");
+        assert_eq!(
+            events, &want,
+            "pid {p}: every grant must follow its own queueing"
+        );
     }
     // ...and there WAS contention: most acquisitions waited behind another
     // process's grant (else this proves nothing about the order).
@@ -190,7 +196,10 @@ fn n_processes_contending_are_served_in_turn_and_never_refused() {
         })
         .count();
     let (worst, detail) = worst_overtakes(&trace);
-    println!("P72_CONTENTION worst_overtakes={worst} waited_behind={waited_behind}/{} {detail}", PROCS * EACH);
+    println!(
+        "P72_CONTENTION worst_overtakes={worst} waited_behind={waited_behind}/{} {detail}",
+        PROCS * EACH
+    );
     assert!(
         waited_behind * 2 >= PROCS * EACH,
         "only {waited_behind} of {} acquisitions met contention",
@@ -231,9 +240,11 @@ fn waiters_behind_moving_holders_in_other_processes_are_not_refused() {
     let (first, second) = std::thread::scope(|s| {
         let a = s.spawn(|| lock_at_within(&lock, stall).map(|l| (l, started.elapsed())));
         // The second thread queues behind the first, in this process.
-        spin_until("first thread to take its turn", Duration::from_secs(10), || {
-            turn::outstanding(&turn::key_for(&lock)) >= 1
-        });
+        spin_until(
+            "first thread to take its turn",
+            Duration::from_secs(10),
+            || turn::outstanding(&turn::key_for(&lock)) >= 1,
+        );
         let b = s.spawn(|| lock_at_within(&lock, stall).map(|l| (l, started.elapsed())));
         let first = a.join().unwrap().map(|(l, t)| {
             drop(l);
@@ -295,7 +306,11 @@ fn a_dead_writers_ticket_is_skipped_and_a_live_one_is_waited_for() {
     std::fs::write(&dead, "").unwrap();
     let started = Instant::now();
     drop(lock_at_within(&lock, Duration::from_secs(5)).expect("a dead ticket is not waited on"));
-    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
     assert!(!dead.exists(), "the dead ticket must be removed");
 
     // A live ticket: locked through its own open file description (as another
@@ -305,7 +320,8 @@ fn a_dead_writers_ticket_is_skipped_and_a_live_one_is_waited_for() {
     let live = queue.join(format!("{:032}.{:010}.{:020}.t", 2, 2, 2));
     let owner = std::fs::File::create(&live).unwrap();
     owner.lock_exclusive().unwrap();
-    let err = lock_at_within(&lock, Duration::from_millis(200)).expect_err("a live ticket is ahead");
+    let err =
+        lock_at_within(&lock, Duration::from_millis(200)).expect_err("a live ticket is ahead");
     assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err}");
     assert!(live.exists(), "a live ticket must never be removed");
     let releaser = std::thread::spawn(move || {
@@ -359,9 +375,11 @@ fn the_last_holder_ahead_leaving_restarts_the_wait_of_threads_behind() {
     let lock = dir.path().join("handoff.lock");
     enable_trace(&lock);
     let mut holder = spawn_role(&format!("wedge|{}", lock.display()));
-    spin_until("the other process to hold the lock", Duration::from_secs(30), || {
-        trace_of(&lock).iter().any(|(w, _)| w == "G")
-    });
+    spin_until(
+        "the other process to hold the lock",
+        Duration::from_secs(30),
+        || trace_of(&lock).iter().any(|(w, _)| w == "G"),
+    );
     let stall = Duration::from_secs(2);
     let key = turn::key_for(&lock);
     let (a, b) = std::thread::scope(|s| {
@@ -371,13 +389,17 @@ fn the_last_holder_ahead_leaving_restarts_the_wait_of_threads_behind() {
             drop(l);
             Ok::<_, std::io::Error>(())
         });
-        spin_until("the first thread to take its turn", Duration::from_secs(10), || {
-            turn::outstanding(&key) >= 1
-        });
+        spin_until(
+            "the first thread to take its turn",
+            Duration::from_secs(10),
+            || turn::outstanding(&key) >= 1,
+        );
         let b = s.spawn(|| lock_at_within(&lock, stall).map(drop));
-        spin_until("the thread behind to queue", Duration::from_secs(10), || {
-            turn::outstanding(&key) >= 2
-        });
+        spin_until(
+            "the thread behind to queue",
+            Duration::from_secs(10),
+            || turn::outstanding(&key) >= 2,
+        );
         std::thread::sleep(stall * 7 / 10);
         drop(holder.stdin.take());
         (a.join().unwrap(), b.join().unwrap())
@@ -406,13 +428,17 @@ fn a_thread_behind_moving_holders_in_this_process_is_not_refused() {
             })
         })
         .collect();
-    spin_until("holders to queue", Duration::from_secs(10), || turn::outstanding(&key) == 9);
+    spin_until("holders to queue", Duration::from_secs(10), || {
+        turn::outstanding(&key) == 9
+    });
     let started = Instant::now();
     let waiter = {
         let lock = lock.clone();
         std::thread::spawn(move || lock_at_within(&lock, stall).map(drop))
     };
-    spin_until("waiter to queue", Duration::from_secs(10), || turn::outstanding(&key) == 10);
+    spin_until("waiter to queue", Duration::from_secs(10), || {
+        turn::outstanding(&key) == 10
+    });
     drop(first);
     for h in holders {
         h.join().unwrap();
@@ -422,7 +448,10 @@ fn a_thread_behind_moving_holders_in_this_process_is_not_refused() {
         .unwrap()
         .expect("the waiter must not be refused while the queue moves");
     let waited = started.elapsed();
-    assert!(waited > stall, "held {waited:?} in all; this test proves nothing");
+    assert!(
+        waited > stall,
+        "held {waited:?} in all; this test proves nothing"
+    );
 }
 
 /// The state-file lock sits under `<fuigo home>/locks/`, one per file
@@ -455,7 +484,12 @@ fn a_state_file_is_locked_out_of_its_directory_by_identity() {
     edit_state_file(
         &path,
         |bytes| stage_atomically(&path, bytes, None),
-        |_| Ok::<_, std::io::Error>(Edit::Replace { contents: b"x".to_vec(), value: () }),
+        |_| {
+            Ok::<_, std::io::Error>(Edit::Replace {
+                contents: b"x".to_vec(),
+                value: (),
+            })
+        },
     )
     .unwrap();
     assert_eq!(names_in(&real), ["f.json"]);
@@ -480,7 +514,10 @@ fn p72_child_role() {
             let go = go_file(lock);
             let started = Instant::now();
             while !go.exists() {
-                assert!(started.elapsed() < Duration::from_secs(120), "never told to go");
+                assert!(
+                    started.elapsed() < Duration::from_secs(120),
+                    "never told to go"
+                );
                 std::thread::sleep(Duration::from_millis(1));
             }
             for i in 0..n {
@@ -500,7 +537,10 @@ fn p72_child_role() {
                 drop(f);
                 drop(held); // ...and straight back in
             }
-            println!("P72_WAIT {prefix} worst={worst:?} mean={:?}", total / n as u32);
+            println!(
+                "P72_WAIT {prefix} worst={worst:?} mean={:?}",
+                total / n as u32
+            );
         }
         ["hold", lock, ms, times] => {
             let lock = Path::new(lock);

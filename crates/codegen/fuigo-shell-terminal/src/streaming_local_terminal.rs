@@ -843,7 +843,8 @@ fn spawn_with_argv(
         // setsid: detach from the TTY and start a new process group for tree teardown
         cmd.wrap(ProcessSession);
         cmd.wrap(KillOnDrop);
-        cmd.spawn().inspect_err(|e| log_spawn_failure(program, e, path_set))
+        cmd.spawn()
+            .inspect_err(|e| log_spawn_failure(program, e, path_set))
     }
     #[cfg(not(unix))]
     {
@@ -868,7 +869,8 @@ fn spawn_with_argv(
         // JobObject and KillOnDrop: dropping terminates every descendant
         cmd.wrap(JobObject);
         cmd.wrap(KillOnDrop);
-        cmd.spawn().inspect_err(|e| log_spawn_failure(program, e, path_set))
+        cmd.spawn()
+            .inspect_err(|e| log_spawn_failure(program, e, path_set))
     }
 }
 
@@ -1112,7 +1114,10 @@ async fn run_output_collector(
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1516,6 +1521,9 @@ mod tests {
         assert!(line.contains("site=\"streaming_local_terminal\""), "{line}");
         assert!(line.contains("os_error=Some("), "{line}");
         assert!(line.contains("path_set=true"), "{line}");
-        assert!(!logged.contains("u35-canary"), "an environment value was logged: {logged}");
+        assert!(
+            !logged.contains("u35-canary"),
+            "an environment value was logged: {logged}"
+        );
     }
 }

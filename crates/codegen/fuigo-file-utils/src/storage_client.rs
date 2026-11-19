@@ -408,8 +408,10 @@ impl StaticFuigoAuth {
 pub fn service_session_destination(base: &str) -> fuigo_auth::BearerDestination {
     let base = base.to_owned();
     fuigo_auth::BearerDestination::Checked(Arc::new(move |url: &reqwest::Url| {
-        fuigo_extra_ca::service_trust::session_may_reach_service(url.as_str(), Some(&base), |_| false)
-            .map_err(|refused| fuigo_auth::BearerDestinationRefused(refused.to_string()))
+        fuigo_extra_ca::service_trust::session_may_reach_service(url.as_str(), Some(&base), |_| {
+            false
+        })
+        .map_err(|refused| fuigo_auth::BearerDestinationRefused(refused.to_string()))
     }))
 }
 
@@ -1138,10 +1140,12 @@ impl StorageClient {
         // Step 2: fetch the object via the signed URL, streaming to dest.
         // Use the raw client — signed URLs carry their own auth and must
         // NOT go through the AuthRetryMiddleware.
-        let object_resp =
-            fuigo_extra_ca::dispatch::send(self.client_for_signed_url(&download_resp.signed_url).get(&download_resp.signed_url))
-                .await
-                .context("Failed to fetch blob from signed URL")?;
+        let object_resp = fuigo_extra_ca::dispatch::send(
+            self.client_for_signed_url(&download_resp.signed_url)
+                .get(&download_resp.signed_url),
+        )
+        .await
+        .context("Failed to fetch blob from signed URL")?;
 
         if !object_resp.status().is_success() {
             let status = object_resp.status();
@@ -1844,7 +1848,9 @@ impl StorageClient {
             .iter()
             .find_map(|(_, e)| fuigo_auth::find_bearer_refusal(e.as_ref()))
         {
-            return Err(anyhow::Error::new(refused.clone()).context("Multipart upload part was not sent"));
+            return Err(
+                anyhow::Error::new(refused.clone()).context("Multipart upload part was not sent")
+            );
         }
         if !upload_errors.is_empty() {
             let error_msgs: Vec<String> = upload_errors
@@ -2194,7 +2200,10 @@ async fn upload_part_streaming(
 }
 
 fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]" || host == "::1"
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "[::1]"
+        || host == "::1"
 }
 
 fn refuse_signed_url(why: &str) -> anyhow::Error {
@@ -2208,8 +2217,11 @@ fn refuse_signed_url(why: &str) -> anyhow::Error {
 /// Plain `http` is accepted only when both the URL and the proxy are on loopback (a local development or test proxy).
 /// The error names the scheme and host, never the query, which carries the signature.
 fn signed_url_host_to_resolve(signed_url: &str, proxy_base_url: &str) -> Result<Option<String>> {
-    let url = url::Url::parse(signed_url).map_err(|_| refuse_signed_url("it is not a valid URL"))?;
-    let host = url.host().ok_or_else(|| refuse_signed_url("it has no host"))?;
+    let url =
+        url::Url::parse(signed_url).map_err(|_| refuse_signed_url("it is not a valid URL"))?;
+    let host = url
+        .host()
+        .ok_or_else(|| refuse_signed_url("it has no host"))?;
     let host_text = url.host_str().unwrap_or_default().to_ascii_lowercase();
     let proxy_host = url::Url::parse(proxy_base_url)
         .ok()
@@ -2220,19 +2232,32 @@ fn signed_url_host_to_resolve(signed_url: &str, proxy_base_url: &str) -> Result<
                 return Ok(None);
             }
             match host {
-                url::Host::Ipv4(ip) => ensure_public_addrs(&host_text, &[std::net::IpAddr::V4(ip)]).map(|()| None),
-                url::Host::Ipv6(ip) => ensure_public_addrs(&host_text, &[std::net::IpAddr::V6(ip)]).map(|()| None),
+                url::Host::Ipv4(ip) => {
+                    ensure_public_addrs(&host_text, &[std::net::IpAddr::V4(ip)]).map(|()| None)
+                }
+                url::Host::Ipv6(ip) => {
+                    ensure_public_addrs(&host_text, &[std::net::IpAddr::V6(ip)]).map(|()| None)
+                }
                 url::Host::Domain(domain) => {
                     if domain == "localhost" || domain.ends_with(".localhost") {
-                        Err(refuse_signed_url(&format!("host {host_text} is this machine")))
+                        Err(refuse_signed_url(&format!(
+                            "host {host_text} is this machine"
+                        )))
                     } else {
                         Ok(Some(domain.to_owned()))
                     }
                 }
             }
         }
-        "http" if is_loopback_host(&host_text) && proxy_host.as_deref().is_some_and(is_loopback_host) => Ok(None),
-        scheme => Err(refuse_signed_url(&format!("scheme {scheme} is not allowed for host {host_text}"))),
+        "http"
+            if is_loopback_host(&host_text)
+                && proxy_host.as_deref().is_some_and(is_loopback_host) =>
+        {
+            Ok(None)
+        }
+        scheme => Err(refuse_signed_url(&format!(
+            "scheme {scheme} is not allowed for host {host_text}"
+        ))),
     }
 }
 
@@ -2241,8 +2266,13 @@ fn ensure_public_addrs(host: &str, addrs: &[std::net::IpAddr]) -> Result<()> {
     if addrs.is_empty() {
         return Err(refuse_signed_url(&format!("host {host} did not resolve")));
     }
-    match addrs.iter().find(|ip| !fuigo_extra_ca::ip::is_public_ip(**ip)) {
-        Some(_) => Err(refuse_signed_url(&format!("host {host} is a private or local address"))),
+    match addrs
+        .iter()
+        .find(|ip| !fuigo_extra_ca::ip::is_public_ip(**ip))
+    {
+        Some(_) => Err(refuse_signed_url(&format!(
+            "host {host} is a private or local address"
+        ))),
         None => Ok(()),
     }
 }
@@ -2260,13 +2290,19 @@ async fn lookup_addrs(domain: &str, port: u16) -> std::io::Result<Vec<std::net::
         LOOKUPS.with(|n| n.set(n.get() + 1));
         return Ok(addrs);
     }
-    Ok(tokio::net::lookup_host((domain, port)).await?.map(|a| a.ip()).collect())
+    Ok(tokio::net::lookup_host((domain, port))
+        .await?
+        .map(|a| a.ip())
+        .collect())
 }
 
 /// Refuse a signed URL the storage proxy returned unless it is `https` and its host is a public address
 /// ([`signed_url_host_to_resolve`], [`ensure_public_addrs`]). Checked before any byte is sent.
 async fn check_signed_url(signed_url: &str, proxy_base_url: &str) -> Result<()> {
-    check_signed_url_with(signed_url, proxy_base_url, &|_| proxy_carries_signed_url(signed_url)).await
+    check_signed_url_with(signed_url, proxy_base_url, &|_| {
+        proxy_carries_signed_url(signed_url)
+    })
+    .await
 }
 
 /// The proxy selection of the HTTP library itself (delta review D2-03): the configured client is built with the
@@ -2275,7 +2311,8 @@ async fn check_signed_url(signed_url: &str, proxy_base_url: &str) -> Result<()> 
 /// `NO_PROXY` matching, and the platform settings where the library is built to read them). Read once per process,
 /// as each client reads it once when it is built, so this decision and the connection cannot disagree.
 fn library_proxy_matcher() -> &'static hyper_util::client::proxy::matcher::Matcher {
-    static MATCHER: std::sync::OnceLock<hyper_util::client::proxy::matcher::Matcher> = std::sync::OnceLock::new();
+    static MATCHER: std::sync::OnceLock<hyper_util::client::proxy::matcher::Matcher> =
+        std::sync::OnceLock::new();
     MATCHER.get_or_init(hyper_util::client::proxy::matcher::Matcher::from_system)
 }
 
@@ -2283,9 +2320,12 @@ fn library_proxy_matcher() -> &'static hyper_util::client::proxy::matcher::Match
 /// the library selects it ([`library_proxy_matcher`]). `HTTP_PROXY` serves `http` only, and a `NO_PROXY` host
 /// connects directly, so neither skips the local address check (review M2 residual).
 fn proxy_carries_signed_url(signed_url: &str) -> bool {
-    signed_url
-        .parse::<http::Uri>()
-        .is_ok_and(|uri| library_proxy_matcher().intercept(&uri).is_some())
+    // The library hands its matcher the `url::Url`-normalized text, not the raw string (a percent-encoded host
+    // character parses as a `Url` but not as an `http::Uri`), so match the same representation (delta review D3-03).
+    url::Url::parse(signed_url)
+        .ok()
+        .and_then(|url| url.as_str().parse::<http::Uri>().ok())
+        .is_some_and(|uri| library_proxy_matcher().intercept(&uri).is_some())
 }
 
 /// [`check_signed_url`] with the proxy decision made by the caller. Behind a proxy the proxy resolves the host, so
@@ -2302,7 +2342,10 @@ async fn check_signed_url_with(
     if proxy_in_effect(&domain) {
         return Ok(());
     }
-    let port = url::Url::parse(signed_url).ok().and_then(|u| u.port_or_known_default()).unwrap_or(443);
+    let port = url::Url::parse(signed_url)
+        .ok()
+        .and_then(|u| u.port_or_known_default())
+        .unwrap_or(443);
     let addrs = lookup_addrs(&domain, port)
         .await
         .map_err(|_| refuse_signed_url(&format!("host {domain} did not resolve")))?;
@@ -2314,7 +2357,10 @@ async fn check_signed_url_with(
 /// by which [`check_signed_url`] skips the local lookup) the connection goes to the proxy, which may be a private
 /// corporate host the checked resolver would refuse; the configured client carries it and the proxy resolves the host.
 fn signed_url_uses_checked_client(signed_url: &str, proxy_base_url: &str) -> bool {
-    matches!(signed_url_host_to_resolve(signed_url, proxy_base_url), Ok(Some(_))) && !proxy_carries_signed_url(signed_url)
+    matches!(
+        signed_url_host_to_resolve(signed_url, proxy_base_url),
+        Ok(Some(_))
+    ) && !proxy_carries_signed_url(signed_url)
 }
 
 /// The shared client for signed URLs on a public domain: pooled as the upload client is, with a resolver that refuses
@@ -2739,7 +2785,9 @@ mod download_blob_tests {
                 if url.path().ends_with("/init") {
                     Ok(())
                 } else {
-                    Err(fuigo_auth::BearerDestinationRefused("p47 refused part".into()))
+                    Err(fuigo_auth::BearerDestinationRefused(
+                        "p47 refused part".into(),
+                    ))
                 }
             }
         }
@@ -2770,8 +2818,15 @@ mod download_blob_tests {
             .upload_multipart("p/large.bin", tmp.path(), "application/octet-stream", None)
             .await
             .unwrap_err();
-        assert!(fuigo_auth::find_bearer_refusal(err.as_ref()).is_some(), "{err:#}");
-        assert_eq!(parts.load(std::sync::atomic::Ordering::SeqCst), 0, "a refused part was sent");
+        assert!(
+            fuigo_auth::find_bearer_refusal(err.as_ref()).is_some(),
+            "{err:#}"
+        );
+        assert_eq!(
+            parts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a refused part was sent"
+        );
     }
 
     /// P47 (s12 regression): an EMPTY `user_token` is no credential, so the static path applies no destination rule and
@@ -2790,10 +2845,19 @@ mod download_blob_tests {
             fuigo_auth::BearerDestination::Unrestricted
         ));
         let rule = StaticFuigoAuth::new(Some("p47-session".into())).bearer_destination(base);
-        assert!(rule.check(&reqwest::Url::parse(&format!("{base}/storage")).unwrap()).is_err());
+        assert!(
+            rule.check(&reqwest::Url::parse(&format!("{base}/storage")).unwrap())
+                .is_err()
+        );
         // End to end: no refusal reaches the caller for the empty token (a transport error to the closed port instead).
-        let err = StorageClient::new(base, "").get_upload_limits().await.unwrap_err();
-        assert!(fuigo_auth::find_bearer_refusal(err.as_ref()).is_none(), "{err:#}");
+        let err = StorageClient::new(base, "")
+            .get_upload_limits()
+            .await
+            .unwrap_err();
+        assert!(
+            fuigo_auth::find_bearer_refusal(err.as_ref()).is_none(),
+            "{err:#}"
+        );
     }
 
     /// P47: the static session-token constructor never contacts a cleartext loopback proxy (the request is not
@@ -2902,17 +2966,44 @@ mod download_blob_tests {
             assert!(domain.is_some(), "{ok}");
         }
         assert!(check_signed_url("https://8.8.8.8/obj", proxy).await.is_ok());
-        assert!(check_signed_url("https://[2001:4860:4860::8888]/obj", proxy).await.is_ok());
+        assert!(
+            check_signed_url("https://[2001:4860:4860::8888]/obj", proxy)
+                .await
+                .is_ok()
+        );
         // A name that resolves to a private address is refused; a public one is accepted.
         assert!(ensure_public_addrs("h", &["10.0.0.7".parse().unwrap()]).is_err());
-        assert!(ensure_public_addrs("h", &["8.8.8.8".parse().unwrap(), "169.254.169.254".parse().unwrap()]).is_err());
+        assert!(
+            ensure_public_addrs(
+                "h",
+                &[
+                    "8.8.8.8".parse().unwrap(),
+                    "169.254.169.254".parse().unwrap()
+                ]
+            )
+            .is_err()
+        );
         assert!(ensure_public_addrs("h", &["93.184.216.34".parse().unwrap()]).is_ok());
         assert!(ensure_public_addrs("h", &[]).is_err());
         // A loopback proxy (tests, local development) may hand out loopback http URLs; a public proxy may not.
-        assert!(check_signed_url("http://127.0.0.1:9/obj", "http://127.0.0.1:8/v1").await.is_ok());
-        assert!(check_signed_url("http://127.0.0.1:9/obj", proxy).await.is_err());
-        assert!(check_signed_url("http://evil.example/obj", "http://127.0.0.1:8/v1").await.is_err());
-        let err = check_signed_url("https://10.1.2.3/obj?sig=SECRET-SIG", proxy).await.unwrap_err();
+        assert!(
+            check_signed_url("http://127.0.0.1:9/obj", "http://127.0.0.1:8/v1")
+                .await
+                .is_ok()
+        );
+        assert!(
+            check_signed_url("http://127.0.0.1:9/obj", proxy)
+                .await
+                .is_err()
+        );
+        assert!(
+            check_signed_url("http://evil.example/obj", "http://127.0.0.1:8/v1")
+                .await
+                .is_err()
+        );
+        let err = check_signed_url("https://10.1.2.3/obj?sig=SECRET-SIG", proxy)
+            .await
+            .unwrap_err();
         assert!(!format!("{err}").contains("SECRET-SIG"));
     }
 
@@ -2923,11 +3014,31 @@ mod download_blob_tests {
         use super::check_signed_url_with;
         let proxy = "https://proxy.example/v1";
         let unresolvable = "https://bucket.store.invalid/o?sig=x";
-        assert!(check_signed_url_with(unresolvable, proxy, &|_| false).await.is_err());
-        assert!(check_signed_url_with(unresolvable, proxy, &|_| true).await.is_ok());
-        assert!(check_signed_url_with("https://10.1.2.3/o", proxy, &|_| true).await.is_err());
-        assert!(check_signed_url_with("http://bucket.store.invalid/o", proxy, &|_| true).await.is_err());
-        assert!(check_signed_url_with("https://localhost/o", proxy, &|_| true).await.is_err());
+        assert!(
+            check_signed_url_with(unresolvable, proxy, &|_| false)
+                .await
+                .is_err()
+        );
+        assert!(
+            check_signed_url_with(unresolvable, proxy, &|_| true)
+                .await
+                .is_ok()
+        );
+        assert!(
+            check_signed_url_with("https://10.1.2.3/o", proxy, &|_| true)
+                .await
+                .is_err()
+        );
+        assert!(
+            check_signed_url_with("http://bucket.store.invalid/o", proxy, &|_| true)
+                .await
+                .is_err()
+        );
+        assert!(
+            check_signed_url_with("https://localhost/o", proxy, &|_| true)
+                .await
+                .is_err()
+        );
     }
 
     /// Audit S11-F9: a proxy that returns a URL on a private host gets no request made to it.
@@ -2948,7 +3059,10 @@ mod download_blob_tests {
             .download_blob("changes_dedup/v2/blobs/sha256_abc123", &dest)
             .await
             .unwrap_err();
-        assert!(format!("{err:#}").contains("Refusing the signed URL"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("Refusing the signed URL"),
+            "{err:#}"
+        );
         assert!(!dest.exists());
     }
 
@@ -4052,8 +4166,15 @@ mod p43_identity_tests {
         };
         let request = build("https://api.fluxrouter.ai/v1");
         assert_eq!(request.headers()["x-fuigo-client-version"], "1.0.21");
-        assert_eq!(request.headers()["x-fuigo-client-identifier"], "fuigo-shell");
-        for base in ["https://storage-proxy.example/v1", "http://127.0.0.1:9/v1", "http://api.fluxrouter.ai/v1"] {
+        assert_eq!(
+            request.headers()["x-fuigo-client-identifier"],
+            "fuigo-shell"
+        );
+        for base in [
+            "https://storage-proxy.example/v1",
+            "http://127.0.0.1:9/v1",
+            "http://api.fluxrouter.ai/v1",
+        ] {
             let request = build(base);
             for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
                 assert!(!request.headers().contains_key(name), "{base} got {name}");

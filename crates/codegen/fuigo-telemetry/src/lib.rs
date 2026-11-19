@@ -55,3 +55,14 @@ pub use session_ctx::{
     EmitterOrigin, TelemetryCtx, emit_event, emit_event_with_origin, log_event, log_session_event,
     log_session_event_with_origin, spawn_local_in_session_ctx, with_session_ctx,
 };
+
+/// Test harness: hold a second live dispatcher for the duration of a thread-local `set_default`/`with_default` capture.
+/// tracing-core keeps a process-wide callsite interest cache. While at most ONE dispatcher is alive it derives a new
+/// callsite's interest from the *registering thread's* default, so a parallel sibling test (no subscriber on its thread)
+/// that first hits a span or event caches "never" for every thread and the capture silently loses it. A second live
+/// dispatcher keeps tracing-core in multi-dispatcher mode, where every registration consults all live dispatchers.
+/// Declare the returned value BEFORE the capture guard so it outlives it.
+#[cfg(test)]
+pub(crate) fn hold_second_dispatcher() -> tracing::Dispatch {
+    tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default())
+}

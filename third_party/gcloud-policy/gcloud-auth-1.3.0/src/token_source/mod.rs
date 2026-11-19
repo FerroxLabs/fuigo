@@ -82,14 +82,17 @@ mod tests {
     fn fixture_credentials(token_uri: &str) -> CredentialsFile {
         // Ephemeral test-only key; never reads ambient Google credentials.
         let output = std::process::Command::new("openssl")
-            .args(["genrsa", "2048"]).output().expect("openssl test-key generator");
+            .args(["genrsa", "2048"])
+            .output()
+            .expect("openssl test-key generator");
         assert!(output.status.success());
         serde_json::from_value(serde_json::json!({
             "type": "service_account", "project_id": "local-test",
             "private_key_id": "test-key", "private_key": String::from_utf8(output.stdout).unwrap(),
             "client_email": "test@local.invalid", "client_id": "test-client",
             "token_uri": token_uri
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     #[tokio::test]
@@ -122,7 +125,9 @@ mod tests {
                         // why this only ever showed up off the CI host. Clear it
                         // explicitly; the 3s read timeout below is the real bound.
                         stream.set_nonblocking(false).unwrap();
-                        stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                            .unwrap();
                         let mut bytes = Vec::new();
                         let mut buffer = [0; 4096];
                         loop {
@@ -131,8 +136,16 @@ mod tests {
                             bytes.extend_from_slice(&buffer[..n]);
                             if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
                                 let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
-                                let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
-                                if bytes.len() >= end + 4 + length { break; }
+                                let length: usize = headers
+                                    .lines()
+                                    .find_map(|l| l.strip_prefix("content-length:"))
+                                    .unwrap()
+                                    .trim()
+                                    .parse()
+                                    .unwrap();
+                                if bytes.len() >= end + 4 + length {
+                                    break;
+                                }
                             }
                         }
                         let request = String::from_utf8_lossy(&bytes);

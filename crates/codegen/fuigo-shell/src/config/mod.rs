@@ -230,7 +230,9 @@ impl SubagentsConfig {
         let dir = cwd.join(".fuigo").join("personas");
         match fuigo_dirs::contained::PinnedRoot::pin(cwd) {
             Ok(root) => self.discover_personas_in_dir_contained(&dir, Some(&root)),
-            Err(e) => tracing::debug!(error = %e, "Cannot pin project root; skipping project personas"),
+            Err(e) => {
+                tracing::debug!(error = %e, "Cannot pin project root; skipping project personas")
+            }
         }
     }
     /// Validate all role definitions. Returns a list of (role_name, error_message) for invalid entries.
@@ -274,7 +276,9 @@ impl SubagentsConfig {
         let roles_dir = cwd.join(".fuigo").join("roles");
         match fuigo_dirs::contained::PinnedRoot::pin(cwd) {
             Ok(root) => self.discover_roles_in_dir_contained(&roles_dir, Some(&root)),
-            Err(e) => tracing::debug!(error = %e, "Cannot pin project root; skipping project roles"),
+            Err(e) => {
+                tracing::debug!(error = %e, "Cannot pin project root; skipping project roles")
+            }
         }
     }
     pub const ENV_MAX_DEPTH: &'static str = "FUIGO_SUBAGENTS_MAX_DEPTH";
@@ -572,11 +576,17 @@ pub struct ExplicitHelperModels {
 }
 impl ExplicitHelperModels {
     /// How the session-summary helper `slug` was chosen.
-    pub(crate) fn session_summary_choice(&self, slug: &str) -> crate::agent::config::HelperModelChoice {
+    pub(crate) fn session_summary_choice(
+        &self,
+        slug: &str,
+    ) -> crate::agent::config::HelperModelChoice {
         crate::agent::config::HelperModelChoice::of(self.session_summary.as_deref(), slug)
     }
     /// How the image-description helper `slug` was chosen.
-    pub(crate) fn image_description_choice(&self, slug: &str) -> crate::agent::config::HelperModelChoice {
+    pub(crate) fn image_description_choice(
+        &self,
+        slug: &str,
+    ) -> crate::agent::config::HelperModelChoice {
         crate::agent::config::HelperModelChoice::of(self.image_description.as_deref(), slug)
     }
 }
@@ -1001,9 +1011,9 @@ pub use fuigo_config::{
     is_managed_config_hard_stale_for, is_managed_config_stale_for, load_config_file,
     load_from_disk, load_managed_config, load_merged_requirements, load_system_managed_config,
     load_toml_file, managed_config_identity_changed_at, managed_deployment_id,
-    managed_policy_compromise_for, managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
-    normalize_identity, requirements_layers, resolved_env_overlay, system_config_dir,
-    user_fuigo_home,
+    managed_policy_compromise_for, managed_policy_compromised_for, mark_managed_config_synced,
+    mark_managed_config_synced_at, normalize_identity, requirements_layers, resolved_env_overlay,
+    system_config_dir, user_fuigo_home,
 };
 /// Map of "dotted.path" to which config file the value came from.
 pub(crate) fn config_origins(
@@ -1061,10 +1071,10 @@ fn walk_toml(
 pub(crate) use crate::config::reloader::parse_skills_config;
 /// Effective config: the layers plus the campaign overlay (remote cache and `FUIGO_CAMPAIGNS_OVERRIDE`).
 pub use crate::util::config::load_effective_config;
-pub use crate::util::config::load_effective_config_with_campaign_free;
 /// Effective config with disk campaigns only, for one-shot entrypoints that never fetch remote settings.
 /// This avoids resolving against a never-seeded cache.
 pub use crate::util::config::load_effective_config_disk_only;
+pub use crate::util::config::load_effective_config_with_campaign_free;
 /// Where a requirement or permission rule was loaded from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequirementSource {
@@ -1428,17 +1438,17 @@ fn apply_requirements_inner(
             } else {
                 val.join(", ")
             };
-            config
-                .requirements
-                .allowed_models
-                .pin(crate::agent::config::AllowlistPin::List(val), source.clone());
+            config.requirements.allowed_models.pin(
+                crate::agent::config::AllowlistPin::List(val),
+                source.clone(),
+            );
             push("models.allowed_models", reported);
         }
         ReqStrArray::Malformed => {
-            config
-                .requirements
-                .allowed_models
-                .pin(crate::agent::config::AllowlistPin::FailClosed, source.clone());
+            config.requirements.allowed_models.pin(
+                crate::agent::config::AllowlistPin::FailClosed,
+                source.clone(),
+            );
             push(
                 "models.allowed_models",
                 "(invalid; nothing selectable)".to_owned(),
@@ -1661,7 +1671,10 @@ pub fn apply_sandbox(
     let resolved = config.resolve_profile(cli_profile, profile_req);
     fuigo_sandbox::set_auto_allow_bash(config.resolve_auto_allow_bash(auto_allow_req).value);
     let sandbox_profile: fuigo_sandbox::ProfileName = resolved.value.parse().unwrap_or_else(|e| {
-        fuigo_tty_utils::cli_eprintln!("warning: {}, defaulting to no sandbox", fuigo_tty_utils::untrusted(&e));
+        fuigo_tty_utils::cli_eprintln!(
+            "warning: {}, defaulting to no sandbox",
+            fuigo_tty_utils::untrusted(&e)
+        );
         fuigo_sandbox::ProfileName::Off
     });
     fuigo_sandbox::set_configured_profile(&resolved.value);
@@ -1704,7 +1717,9 @@ pub fn apply_sandbox(
         let refuse_unprotected = |cause: &str| {
             fuigo_tty_utils::cli_eprintln!(
                 "error: this sandbox could not enforce its deny list or read-only launch folder on Linux: \
-                 {} Refusing to start with denied paths unprotected.", fuigo_tty_utils::untrusted(&cause));
+                 {} Refusing to start with denied paths unprotected.",
+                fuigo_tty_utils::untrusted(&cause)
+            );
         };
         let command = fuigo_sandbox::bwrap_reexec_for_profile(&sandbox_profile, &workspace);
         match route_bwrap_startup(command, fuigo_sandbox::is_inside_bwrap(), requires_bwrap) {
@@ -1723,23 +1738,26 @@ pub fn apply_sandbox(
                 fuigo_tty_utils::cli_eprintln!(
                     "WARNING: bwrap exec failed: {}. \
                      Falling back to Landlock sandbox. \
-                     Install bubblewrap: apt install -y bubblewrap", fuigo_tty_utils::untrusted(&err));
+                     Install bubblewrap: apt install -y bubblewrap",
+                    fuigo_tty_utils::untrusted(&err)
+                );
             }
             BwrapStartup::Verify => {
                 if requires_hook_write_deny
-                    && let Err(e) = fuigo_sandbox::verify_hook_write_deny_enforced().and_then(
-                        |()| {
+                    && let Err(e) =
+                        fuigo_sandbox::verify_hook_write_deny_enforced().and_then(|()| {
                             fuigo_sandbox::verify_git_write_deny_enforced(
                                 &sandbox_profile,
                                 &workspace,
                             )
-                        },
-                    )
+                        })
                 {
                     fuigo_tty_utils::cli_eprintln!(
                         "error: sandbox reports bwrap but required hook write-deny \
                          mounts are missing or writable ({}); refusing to start \
-                         (possible __FUIGO_INSIDE_BWRAP spoof)", fuigo_tty_utils::untrusted(&e));
+                         (possible __FUIGO_INSIDE_BWRAP spoof)",
+                        fuigo_tty_utils::untrusted(&e)
+                    );
                     std::process::exit(1);
                 }
                 if requires_read_deny
@@ -1749,7 +1767,9 @@ pub fn apply_sandbox(
                     fuigo_tty_utils::cli_eprintln!(
                         "error: sandbox reports bwrap but required read-deny mounts \
                          are not in effect ({}); refusing to start \
-                         (possible __FUIGO_INSIDE_BWRAP spoof)", fuigo_tty_utils::untrusted(&e));
+                         (possible __FUIGO_INSIDE_BWRAP spoof)",
+                        fuigo_tty_utils::untrusted(&e)
+                    );
                     std::process::exit(1);
                 }
                 if requires_data_write_deny
@@ -1759,7 +1779,9 @@ pub fn apply_sandbox(
                     fuigo_tty_utils::cli_eprintln!(
                         "error: sandbox reports bwrap but the required /data write-deny \
                          mount is not in effect ({}); refusing to start \
-                         (possible __FUIGO_INSIDE_BWRAP spoof)", fuigo_tty_utils::untrusted(&e));
+                         (possible __FUIGO_INSIDE_BWRAP spoof)",
+                        fuigo_tty_utils::untrusted(&e)
+                    );
                     std::process::exit(1);
                 }
             }
@@ -1782,7 +1804,10 @@ pub fn apply_sandbox(
         };
         let mut sandbox = fuigo_sandbox::SandboxManager::new(sandbox_profile, &workspace);
         if let Err(e) = sandbox.apply(&workspace) {
-            fuigo_tty_utils::cli_eprintln!("warning: sandbox could not be applied: {}", fuigo_tty_utils::untrusted(&e));
+            fuigo_tty_utils::cli_eprintln!(
+                "warning: sandbox could not be applied: {}",
+                fuigo_tty_utils::untrusted(&e)
+            );
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -1805,7 +1830,9 @@ pub fn apply_sandbox(
             {
                 fuigo_tty_utils::cli_eprintln!(
                     "error: required hook write-deny mounts not verified after apply ({}); \
-                     refusing to start", fuigo_tty_utils::untrusted(&e));
+                     refusing to start",
+                    fuigo_tty_utils::untrusted(&e)
+                );
                 std::process::exit(1);
             }
         }
@@ -1825,11 +1852,12 @@ pub(crate) fn resolve_effective_plugins_config(
     cwd: &std::path::Path,
 ) -> crate::agent::config::PluginsConfig {
     // Per-field lenient read: a malformed field must not drop `disabled` (fail-open re-enable).
-    let extract = |toml_val: &toml::Value, source: &str| -> Option<crate::agent::config::PluginsConfig> {
-        toml_val
-            .get("plugins")
-            .map(|_| crate::agent::config::PluginsConfig::from_config_warn(toml_val, source))
-    };
+    let extract =
+        |toml_val: &toml::Value, source: &str| -> Option<crate::agent::config::PluginsConfig> {
+            toml_val
+                .get("plugins")
+                .map(|_| crate::agent::config::PluginsConfig::from_config_warn(toml_val, source))
+        };
     let mut plugins_cfg = load_effective_config()
         .ok()
         .and_then(|t| extract(&t, "user config"))
@@ -1849,7 +1877,11 @@ pub(crate) fn resolve_effective_plugins_config(
                     .unwrap_or_else(|_| owner.to_path_buf());
                 for entry in proj.paths {
                     let path = std::path::Path::new(&entry);
-                    let dir = if path.is_absolute() { path.to_path_buf() } else { owner.join(path) };
+                    let dir = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        owner.join(path)
+                    };
                     plugins_cfg.project_paths.push((dir, repository.clone()));
                 }
             }
@@ -2373,6 +2405,9 @@ pub(crate) fn remove_hooks_path_from_file(
     )
     .map_err(edit_error_into_box)
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests;

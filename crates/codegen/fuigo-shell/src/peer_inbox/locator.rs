@@ -35,7 +35,7 @@ pub(crate) use imp::{read_locator, update_locator, update_locator_rewriting};
 #[cfg(unix)]
 mod imp {
     use super::super::dirs::{check_file, cstr, errno, fstat};
-    use super::super::{Disabled, Reject, MAX_LOCATOR_BYTES};
+    use super::super::{Disabled, MAX_LOCATOR_BYTES, Reject};
     use super::CheckedDir;
     use std::io::{Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -55,7 +55,11 @@ mod imp {
             || name.contains(['/', '\0'])
             || name == LOCK_NAME
             || name.starts_with(TMP_PREFIX);
-        if bad { Err(Disabled::InvalidName) } else { Ok(()) }
+        if bad {
+            Err(Disabled::InvalidName)
+        } else {
+            Ok(())
+        }
     }
 
     /// Read a locator file. `Ok(None)` if absent. A file failing any check returns
@@ -78,7 +82,9 @@ mod imp {
         if fd < 0 {
             return match errno() {
                 libc::ENOENT => Ok(None),
-                e if e == libc::ELOOP || e == libc::EMLINK => Err(Disabled::Rejected(Reject::Symlink)),
+                e if e == libc::ELOOP || e == libc::EMLINK => {
+                    Err(Disabled::Rejected(Reject::Symlink))
+                }
                 e => Err(Disabled::Io(e)),
             };
         }
@@ -114,7 +120,12 @@ mod imp {
         for _ in 0..4 {
             // SAFETY: valid dirfd and name.
             fd = unsafe {
-                libc::openat(dirfd, c.as_ptr(), base | libc::O_CREAT | libc::O_EXCL, 0o600 as libc::c_uint)
+                libc::openat(
+                    dirfd,
+                    c.as_ptr(),
+                    base | libc::O_CREAT | libc::O_EXCL,
+                    0o600 as libc::c_uint,
+                )
             };
             if fd >= 0 {
                 // We created it: set the mode exactly (umask may have stripped bits).
@@ -200,7 +211,11 @@ mod imp {
                 libc::openat(
                     dirfd,
                     tmp.as_ptr(),
-                    libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
                     0o600 as libc::c_uint,
                 )
             };
@@ -212,14 +227,20 @@ mod imp {
             }
             // SAFETY: fresh descriptor.
             let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-            let mut guard = TempGuard { dirfd, name: &tmp, armed: true };
+            let mut guard = TempGuard {
+                dirfd,
+                name: &tmp,
+                armed: true,
+            };
             // SAFETY: valid fd.
             if unsafe { libc::fchmod(owned.as_raw_fd(), 0o600) } != 0 {
                 return Err(Disabled::Io(errno()));
             }
             let mut file = std::fs::File::from(owned);
-            file.write_all(bytes).map_err(|e| Disabled::Io(e.raw_os_error().unwrap_or(0)))?;
-            file.sync_all().map_err(|e| Disabled::Io(e.raw_os_error().unwrap_or(0)))?;
+            file.write_all(bytes)
+                .map_err(|e| Disabled::Io(e.raw_os_error().unwrap_or(0)))?;
+            file.sync_all()
+                .map_err(|e| Disabled::Io(e.raw_os_error().unwrap_or(0)))?;
             drop(file);
             // SAFETY: valid dirfd and names.
             if unsafe { libc::renameat(dirfd, tmp.as_ptr(), dirfd, target.as_ptr()) } != 0 {

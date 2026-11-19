@@ -4,8 +4,8 @@ pub mod command_display;
 pub mod env;
 pub mod file_reader;
 pub mod fs;
-pub mod git_detect;
 pub mod fuigo_home;
+pub mod git_detect;
 pub mod hash;
 pub mod image_compress;
 pub mod image_validate;
@@ -13,24 +13,33 @@ pub mod lock_path;
 pub mod mcp_truncate;
 pub mod path_match;
 pub mod path_suggestions;
+pub(crate) mod query_tools;
 pub mod read_deny;
+pub mod remap;
 pub mod rg_json;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 pub(crate) mod rg_json_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[cfg(unix)]
 mod search_proof_tests;
-pub(crate) mod query_tools;
-pub mod remap;
 pub mod serde_base64;
 pub(crate) mod shared_http;
 pub mod shell_env_policy;
 pub mod spawn;
 pub mod truncate;
 pub mod unicode_confusables;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(any(bundle_rg, bundle_fd, bundle_bfs, bundle_ugrep, test))]
 pub(crate) mod vendor;
 
@@ -45,23 +54,23 @@ pub use fs::{
     try_resolve_unicode_filename_for_edit,
 };
 pub use fuigo_home::{fuigo_application, fuigo_home};
+pub use fuigo_tty_utils::detach_std_command;
+pub use fuigo_tty_utils::session_cgroup;
 pub use path_suggestions::format_not_found_error;
 pub use remap::{remap_json_keys, remap_schema_properties, reverse_map};
 pub use shell_env_policy::{
     EnvironmentVariablePattern, ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit,
     apply_shell_environment_policy,
 };
-pub use fuigo_tty_utils::session_cgroup;
 pub use spawn::{
-    ProcessGroup, ProcessScope, SpawnPlacedError,  detach_command, detach_search_command, global_process_scope,
-    new_process_group, reap_killed_search_child,
+    ProcessGroup, ProcessScope, SpawnPlacedError, detach_command, detach_search_command,
+    global_process_scope, new_process_group, reap_killed_search_child,
 };
 pub use truncate::{
     DEFAULT_SOFT_WRAP_WIDTH, ceil_char_boundary, estimate_tokens, floor_char_boundary,
     format_bytes, soft_wrap_line, soft_wrap_lines, truncate_line, truncate_str,
     truncate_str_with_marker,
 };
-pub use fuigo_tty_utils::detach_std_command;
 
 /// A lease on one operation: runs the closure only while the operation is still current (under the owner's
 /// lock) and returns whether it ran. Handed to crates that cannot see the session registry.

@@ -28,7 +28,9 @@ impl acp::Client for ProcessGrantClient {
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        Ok(acp::RequestPermissionResponse::new(acp_harness::allow_once(&args)))
+        Ok(acp::RequestPermissionResponse::new(
+            acp_harness::allow_once(&args),
+        ))
     }
     async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
         Ok(())
@@ -36,7 +38,8 @@ impl acp::Client for ProcessGrantClient {
     async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
         if args.method.as_ref() == "fuigo/folder_trust/request" {
             *self.trust_requests.borrow_mut() += 1;
-            let reply = json!({ "outcome": "trust", "scope": "configAndCommands", "duration": "process" });
+            let reply =
+                json!({ "outcome": "trust", "scope": "configAndCommands", "duration": "process" });
             let raw = serde_json::value::to_raw_value(&reply).expect("raw");
             return Ok(acp::ExtResponse::new(std::sync::Arc::from(raw)));
         }
@@ -47,7 +50,10 @@ impl acp::Client for ProcessGrantClient {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_process_reply_trusts_the_folder_and_saves_nothing() {
     run_agent_test(|cwd, _mock| async move {
@@ -72,7 +78,10 @@ fn a_process_reply_trusts_the_folder_and_saves_nothing() {
         .await;
         auth.expect("authenticate");
         let key = fuigo_workspace::trust::workspace_key(&cwd);
-        assert!(!fuigo_workspace::folder_trust::decide_key(&key, false).is_trusted(), "premise: undecided");
+        assert!(
+            !fuigo_workspace::folder_trust::decide_key(&key, false).is_trusted(),
+            "premise: undecided"
+        );
         let _session = new_session(&conn, &cwd).await;
 
         // The grant runs on a detached task after the client's answer.
@@ -83,12 +92,20 @@ fn a_process_reply_trusts_the_folder_and_saves_nothing() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        assert_eq!(*client.trust_requests.borrow(), 1, "premise: the client is asked once");
+        assert_eq!(
+            *client.trust_requests.borrow(),
+            1,
+            "premise: the client is asked once"
+        );
         assert!(
             fuigo_workspace::folder_trust::decide_key(&key, false).is_trusted(),
             "the process reply trusts the folder for this process"
         );
         let store = fuigo_workspace::trust::TrustStore::default_path().expect("store path");
-        assert!(!store.exists(), "a process grant saves nothing: {}", store.display());
+        assert!(
+            !store.exists(),
+            "a process grant saves nothing: {}",
+            store.display()
+        );
     });
 }

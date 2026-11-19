@@ -568,7 +568,10 @@ mod tests {
             copy_parallel(src.path(), dest.path(), config, CancellationToken::new()).unwrap();
 
         assert_eq!(result.stats.failed.len(), 1, "{:?}", result.stats.failed);
-        assert_eq!(result.stats.failed[0].rel_path, PathBuf::from("blocked.txt"));
+        assert_eq!(
+            result.stats.failed[0].rel_path,
+            PathBuf::from("blocked.txt")
+        );
         assert!(!result.stats.failed[0].storage_full);
         assert_eq!(result.stats.issues.len(), 1);
         assert!(result.stats.issues[0].starts_with("copy blocked.txt:"));

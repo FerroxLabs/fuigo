@@ -416,7 +416,8 @@ pub(crate) fn persist_and_prepend_image_files(
 #[cfg(test)]
 mod tests {
     fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
-        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).unwrap()
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .unwrap()
     }
     use super::*;
     use fuigo_sampling_types::conversation::{ConversationItem, UserItem};
@@ -431,7 +432,8 @@ mod tests {
             0xd4, 0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ]);
         let img = ImageContent::new(png, "image/png");
-        let msg = persist_and_prepend_image_files(&test_writer(dir.path()), &[img], "hello").unwrap();
+        let msg =
+            persist_and_prepend_image_files(&test_writer(dir.path()), &[img], "hello").unwrap();
         assert!(msg.contains("<image_files>"));
         assert!(msg.contains("/assets/image-"));
         assert!(msg.ends_with("hello") || msg.contains("\n\nhello"));

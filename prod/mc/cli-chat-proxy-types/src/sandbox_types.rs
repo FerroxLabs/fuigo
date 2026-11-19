@@ -462,9 +462,7 @@ pub struct SandboxRestoreRequest {
 /// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
 impl std::fmt::Debug for SandboxRestoreRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            server_key: _,
-        } = self;
+        let Self { server_key: _ } = self;
         f.debug_struct("SandboxRestoreRequest")
             .field("server_key", &"<redacted>")
             .finish()
@@ -564,10 +562,7 @@ pub struct SandboxEnvironmentVariable {
 /// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
 impl std::fmt::Debug for SandboxEnvironmentVariable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            key,
-            value,
-        } = self;
+        let Self { key, value } = self;
         f.debug_struct("SandboxEnvironmentVariable")
             .field("key", key)
             .field("value", &value.as_ref().map(|_| "<redacted>"))
@@ -589,10 +584,7 @@ pub struct SandboxSecretInput {
 /// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
 impl std::fmt::Debug for SandboxSecretInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            key,
-            value,
-        } = self;
+        let Self { key, value } = self;
         f.debug_struct("SandboxSecretInput")
             .field("key", key)
             .field("value", &value.as_ref().map(|_| "<redacted>"))
@@ -631,7 +623,13 @@ impl std::fmt::Debug for SandboxEnvironmentWithMetadata {
         f.debug_struct("SandboxEnvironmentWithMetadata")
             .field("environment", environment)
             .field("environment_variables", environment_variables)
-            .field("secrets", &secrets.iter().map(|v| (&v.key, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "secrets",
+                &secrets
+                    .iter()
+                    .map(|v| (&v.key, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("user_role", user_role)
             .finish()
     }
@@ -806,12 +804,18 @@ mod p70_redacted_debug {
     /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
     fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
         for out in [format!("{debug:?}"), format!("{debug:#?}")] {
-            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            assert!(
+                out.contains("<redacted>"),
+                "control: the secret field is printed as redacted: {out}"
+            );
             for secret in secrets {
                 let chars: Vec<char> = secret.chars().collect();
                 for w in chars.windows(6) {
                     let frag: String = w.iter().collect();
-                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                    assert!(
+                        !out.contains(&frag),
+                        "Debug output holds {frag:?} of a secret: {out}"
+                    );
                 }
             }
         }
@@ -821,22 +825,42 @@ mod p70_redacted_debug {
     fn sandbox_secret_types_debug_redact() {
         let forked = SandboxForkedSession {
             sandbox_id: "p70-sbx".into(),
-            websocket_url: "wss://p70user:p70pw-FAKE-4d5e6f7a@p70.invalid/ws/@x?token=p70wq-FAKE-0b1c2d3e".into(),
+            websocket_url:
+                "wss://p70user:p70pw-FAKE-4d5e6f7a@p70.invalid/ws/@x?token=p70wq-FAKE-0b1c2d3e"
+                    .into(),
             jwt_token: "p70jw-FAKE-8f9a0b1c".into(),
         };
-        assert_redacted(&forked, &["p70jw-FAKE-8f9a0b1c", "p70pw-FAKE-4d5e6f7a", "p70wq-FAKE-0b1c2d3e"]);
-        let restore = SandboxRestoreRequest { server_key: "p70rk-FAKE-8e9f0a1b".into() };
+        assert_redacted(
+            &forked,
+            &[
+                "p70jw-FAKE-8f9a0b1c",
+                "p70pw-FAKE-4d5e6f7a",
+                "p70wq-FAKE-0b1c2d3e",
+            ],
+        );
+        let restore = SandboxRestoreRequest {
+            server_key: "p70rk-FAKE-8e9f0a1b".into(),
+        };
         assert_redacted(&restore, &["p70rk-FAKE-8e9f0a1b"]);
-        let secret = SandboxSecretInput { key: Some("P70_NAME".into()), value: Some("p70sv-FAKE-2d3e4f5a".into()) };
+        let secret = SandboxSecretInput {
+            key: Some("P70_NAME".into()),
+            value: Some("p70sv-FAKE-2d3e4f5a".into()),
+        };
         assert_redacted(&secret, &["p70sv-FAKE-2d3e4f5a"]);
         let with_meta = SandboxEnvironmentWithMetadata {
             environment: None,
             environment_variables: Vec::new(),
-            secrets: vec![SandboxEnvironmentVariable { key: Some("P70_NAME".into()), value: Some("p70se-FAKE-6b7c8d9e".into()) }],
+            secrets: vec![SandboxEnvironmentVariable {
+                key: Some("P70_NAME".into()),
+                value: Some("p70se-FAKE-6b7c8d9e".into()),
+            }],
             user_role: None,
         };
         assert_redacted(&with_meta, &["p70se-FAKE-6b7c8d9e"]);
-        let element = SandboxEnvironmentVariable { key: Some("P70_NAME".into()), value: Some("p70ev-FAKE-0f1a2b3c".into()) };
+        let element = SandboxEnvironmentVariable {
+            key: Some("P70_NAME".into()),
+            value: Some("p70ev-FAKE-0f1a2b3c".into()),
+        };
         assert_redacted(&vec![element], &["p70ev-FAKE-0f1a2b3c"]);
     }
 }

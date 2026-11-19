@@ -124,7 +124,11 @@ fn max_turns_with_a_foreground_child_stops_on_the_flag_for_both() {
         config.cli_agent_overrides.max_turns = Some(MAX_TURNS);
 
         let steps = [
-            expect_foreground(&mock, "parent-round-1-spawns-child", spawn_foreground_child()),
+            expect_foreground(
+                &mock,
+                "parent-round-1-spawns-child",
+                spawn_foreground_child(),
+            ),
             expect_foreground(&mock, "child-round-1", todo_call("call_child_1")),
             expect_foreground(&mock, "child-round-2", todo_call("call_child_2")),
             expect_foreground(&mock, "parent-round-2", todo_call("call_parent_2")),
@@ -220,14 +224,19 @@ fn max_turns_with_a_foreground_child_stops_on_the_flag_for_both() {
              it; tool results seen by the parent: {results:?}"
         );
         assert!(
-            !results.iter().any(|text| text.contains("Session error")
-                || text.contains("not durable or finalizing")),
+            !results
+                .iter()
+                .any(|text| text.contains("Session error")
+                    || text.contains("not durable or finalizing")),
             "a child's round inside its bound was denied: {results:?}"
         );
 
-        tokio::time::timeout(RPC_TIMEOUT, conn.close_session(acp::CloseSessionRequest::new(session)))
-            .await
-            .expect("close_session timed out")
-            .expect("close_session");
+        tokio::time::timeout(
+            RPC_TIMEOUT,
+            conn.close_session(acp::CloseSessionRequest::new(session)),
+        )
+        .await
+        .expect("close_session timed out")
+        .expect("close_session");
     });
 }

@@ -135,11 +135,19 @@ fn backup_before_repair(
         RepairBackup::AlreadyPresent(backup.clone())
     } else if let Some(writer) = writer {
         let inside = |path: &Path| -> io::Result<PathBuf> {
-            path.strip_prefix(writer.dir()).map(Path::to_path_buf).map_err(|_| {
-                io::Error::other(format!("{} is outside the session folder {}", path.display(), writer.dir().display()))
-            })
+            path.strip_prefix(writer.dir())
+                .map(Path::to_path_buf)
+                .map_err(|_| {
+                    io::Error::other(format!(
+                        "{} is outside the session folder {}",
+                        path.display(),
+                        writer.dir().display()
+                    ))
+                })
         };
-        let staging = inside(&chat_path.with_extension(format!("jsonl.pre-repair.{}.tmp", uuid::Uuid::now_v7())))?;
+        let staging = inside(
+            &chat_path.with_extension(format!("jsonl.pre-repair.{}.tmp", uuid::Uuid::now_v7())),
+        )?;
         let backup_rel = inside(&backup)?;
         let published = writer.copy_in_sync(chat_path, &staging).and_then(|_| {
             match writer.hard_link_in_no_replace_sync(&staging, &backup_rel) {
@@ -157,7 +165,9 @@ fn backup_before_repair(
         let _ = writer.remove_sync(&staging);
         published?
     } else {
-        return Err(crate::session::storage::jsonl::no_writer_error(chat_path.parent().unwrap_or(chat_path)));
+        return Err(crate::session::storage::jsonl::no_writer_error(
+            chat_path.parent().unwrap_or(chat_path),
+        ));
     };
     if let Some(dir) = backup.parent() {
         sync_backup_dir(dir)?;
@@ -241,8 +251,11 @@ pub(crate) fn rewrite_gate(chat_path: &Path) -> io::Result<()> {
 /// A writer of `chat_path`'s folder, for tests that drive the gate directly.
 #[cfg(test)]
 pub(crate) fn tests_writer(chat_path: &Path) -> fuigo_session_writer::SessionWriter {
-    fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), chat_path.parent().unwrap())
-        .unwrap()
+    fuigo_session_writer::SessionWriter::try_claim(
+        uuid::Uuid::now_v7().to_string(),
+        chat_path.parent().unwrap(),
+    )
+    .unwrap()
 }
 
 /// [`rewrite_gate`] for a caller that holds the session's writer: the owed backup is made through it.
@@ -265,11 +278,19 @@ pub(crate) fn rewrite_gate_as(
 /// session still owes its backup, [`rewrite_gate`] refuses that rewrite, so the file would keep the messages the
 /// operation dropped and the next load would hand them back to the model. The caller therefore asks first and refuses
 /// before it changes anything. Asking retries the backup; once it is made the gate is open and nothing is refused.
-pub(crate) fn history_rewrite_refusal(session_info: &Info, writer: Option<&fuigo_session_writer::SessionWriter>, action: &str) -> Option<String> {
+pub(crate) fn history_rewrite_refusal(
+    session_info: &Info,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    action: &str,
+) -> Option<String> {
     refusal_for_chat_file(&chat_path_of(session_info), writer, action)
 }
 
-fn refusal_for_chat_file(chat_path: &Path, writer: Option<&fuigo_session_writer::SessionWriter>, action: &str) -> Option<String> {
+fn refusal_for_chat_file(
+    chat_path: &Path,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    action: &str,
+) -> Option<String> {
     let error = rewrite_gate_as(chat_path, writer).err()?;
     Some(refusal_text(chat_path, &error, action))
 }
@@ -291,7 +312,8 @@ pub(crate) fn backup_is_owed(session_info: &Info) -> bool {
 
 /// Where the session's `chat_history.jsonl` is.
 fn chat_path_of(session_info: &Info) -> PathBuf {
-    crate::session::persistence::session_dir(session_info).join(crate::session::storage::CHAT_HISTORY_FILE)
+    crate::session::persistence::session_dir(session_info)
+        .join(crate::session::storage::CHAT_HISTORY_FILE)
 }
 
 /// The sentence every note shares: why the history file is not being rewritten (retries the backup).
@@ -307,13 +329,21 @@ fn not_rewritten_cause(chat_path: &Path, error: &io::Error) -> String {
 /// refused because the backup is owed, or `None` when nothing is owed, the backup could be made just now, or this session
 /// already showed this note. The change itself was made in memory; only the file is behind, so the note says so instead of
 /// the refusal being logged and nothing else (P123, K14; Astra P96 r3).
-pub(crate) fn note_for_refused_rewrite(session_info: &Info, writer: Option<&fuigo_session_writer::SessionWriter>, what: &str) -> Option<String> {
+pub(crate) fn note_for_refused_rewrite(
+    session_info: &Info,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    what: &str,
+) -> Option<String> {
     note_for_refused_rewrite_at(&chat_path_of(session_info), writer, what, true)
 }
 
 /// [`note_for_refused_rewrite`] for a change that is NOT applied again when the session is resumed (pruning goal directives
 /// after the goal has ended: nothing prunes them on the next load), so the note must not promise that (P135).
-pub(crate) fn note_for_refused_unrepeated_rewrite(session_info: &Info, writer: Option<&fuigo_session_writer::SessionWriter>, what: &str) -> Option<String> {
+pub(crate) fn note_for_refused_unrepeated_rewrite(
+    session_info: &Info,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+    what: &str,
+) -> Option<String> {
     note_for_refused_rewrite_at(&chat_path_of(session_info), writer, what, false)
 }
 
@@ -349,11 +379,17 @@ pub(crate) struct RefusedAutoCompaction {
 
 /// `Err` when an automatic compaction must not start because the backup is owed (asking retries the backup); `Ok(())`
 /// when nothing is owed or the backup could be made just now.
-pub(crate) fn refused_auto_compaction(session_info: &Info, writer: Option<&fuigo_session_writer::SessionWriter>) -> Result<(), RefusedAutoCompaction> {
+pub(crate) fn refused_auto_compaction(
+    session_info: &Info,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+) -> Result<(), RefusedAutoCompaction> {
     refused_auto_compaction_at(&chat_path_of(session_info), writer)
 }
 
-fn refused_auto_compaction_at(chat_path: &Path, writer: Option<&fuigo_session_writer::SessionWriter>) -> Result<(), RefusedAutoCompaction> {
+fn refused_auto_compaction_at(
+    chat_path: &Path,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+) -> Result<(), RefusedAutoCompaction> {
     let Err(error) = rewrite_gate_as(chat_path, writer) else {
         return Ok(());
     };
@@ -370,11 +406,17 @@ fn refused_auto_compaction_at(chat_path: &Path, writer: Option<&fuigo_session_wr
 
 /// For an image strip the history file could not take: the sentence that says the saved history still holds the image and
 /// why, or `None` when the file is not behind.
-pub(crate) fn image_strip_not_saved_note(session_info: &Info, writer: Option<&fuigo_session_writer::SessionWriter>) -> Option<String> {
+pub(crate) fn image_strip_not_saved_note(
+    session_info: &Info,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+) -> Option<String> {
     image_strip_not_saved_note_at(&chat_path_of(session_info), writer)
 }
 
-fn image_strip_not_saved_note_at(chat_path: &Path, writer: Option<&fuigo_session_writer::SessionWriter>) -> Option<String> {
+fn image_strip_not_saved_note_at(
+    chat_path: &Path,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+) -> Option<String> {
     let error = rewrite_gate_as(chat_path, writer).err()?;
     Some(format!(
         "The saved history still holds the image: {}.",
@@ -532,7 +574,10 @@ impl JsonlStorageAdapter {
         };
         // Decide on what the file holds now, under the lock: the first read was made without it.
         match self
-            .load_session_without_updates(info, crate::session::storage::Access::Owner(&repair_writer))
+            .load_session_without_updates(
+                info,
+                crate::session::storage::Access::Owner(&repair_writer),
+            )
             .await
         {
             Ok(fresh) => *data = fresh,
@@ -614,7 +659,10 @@ impl JsonlStorageAdapter {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,20 +686,42 @@ mod tests {
         other.try_lock().unwrap();
         let writer = fuigo_session_writer::SessionWriter::try_claim(&id, &session).unwrap();
         let error = backup_before_repair(&chat, Some(&writer)).expect_err("held elsewhere");
-        assert_eq!(fuigo_session_writer::refusal(&error), Some(fuigo_session_writer::Refusal::HeldElsewhere), "{error}");
+        assert_eq!(
+            fuigo_session_writer::refusal(&error),
+            Some(fuigo_session_writer::Refusal::HeldElsewhere),
+            "{error}"
+        );
         let names = || -> Vec<String> {
-            let mut v: Vec<String> =
-                std::fs::read_dir(&session).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            let mut v: Vec<String> = std::fs::read_dir(&session)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
             v.sort();
             v
         };
-        assert_eq!(names(), vec!["chat_history.jsonl".to_string(), "session_writer.lock".to_string()]);
+        assert_eq!(
+            names(),
+            vec![
+                "chat_history.jsonl".to_string(),
+                "session_writer.lock".to_string()
+            ]
+        );
         other.unlock().unwrap();
         drop(other);
-        assert_eq!(backup_before_repair(&chat, Some(&writer)).unwrap(), RepairBackup::Created(backup_path(&chat)));
+        assert_eq!(
+            backup_before_repair(&chat, Some(&writer)).unwrap(),
+            RepairBackup::Created(backup_path(&chat))
+        );
         assert_eq!(std::fs::read(backup_path(&chat)).unwrap(), b"{\"torn\"\n");
-        assert_eq!(backup_before_repair(&chat, Some(&writer)).unwrap(), RepairBackup::AlreadyPresent(backup_path(&chat)));
-        assert!(!names().iter().any(|n| n.ends_with(".tmp")), "{:?}", names());
+        assert_eq!(
+            backup_before_repair(&chat, Some(&writer)).unwrap(),
+            RepairBackup::AlreadyPresent(backup_path(&chat))
+        );
+        assert!(
+            !names().iter().any(|n| n.ends_with(".tmp")),
+            "{:?}",
+            names()
+        );
     }
     use crate::sampling::ConversationItem;
     use crate::session::persistence::default_model_id;
@@ -738,7 +808,10 @@ mod tests {
 
     /// The state an earlier release left behind: the first load after the tear kept the raw file as `.corrupt`, and
     /// its snapshot rewrote the chat file without the torn line. Returns (the `.corrupt` bytes, the chat file bytes).
-    fn broken_before_this_release(adapter: &JsonlStorageAdapter, info: &Info) -> (Vec<u8>, Vec<u8>) {
+    fn broken_before_this_release(
+        adapter: &JsonlStorageAdapter,
+        info: &Info,
+    ) -> (Vec<u8>, Vec<u8>) {
         let torn = tear(adapter, info, 2);
         std::fs::write(corrupt_copy(adapter, info), &torn).expect("write the .corrupt copy");
         (torn, scrub(adapter, info, 2))
@@ -756,8 +829,14 @@ mod tests {
         let (adapter, info) = seed(tmp.path(), "019f3df7-3d70-7f60-8ca0-a38d2d0056a1").await;
         let original = tear(&adapter, &info, 2);
 
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
-        assert_eq!(data.skipped_chat_lines, 1, "the reader reports the torn line");
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
+        assert_eq!(
+            data.skipped_chat_lines, 1,
+            "the reader reports the torn line"
+        );
         assert!(
             has_result(&data.chat_history, "call_LOST"),
             "fixture: the loaded history carries the orphaned result"
@@ -770,16 +849,39 @@ mod tests {
         assert!(!has_result(&data.chat_history, "call_LOST"));
         assert_eq!(repair.report.stripped_tool_result_ids, vec!["call_LOST"]);
         let backup = backup_path(&adapter.chat_file(&info));
-        assert_eq!(repair.disk, RepairDisk::Rewritten(RepairBackup::Created(backup.clone())));
-        assert_eq!(std::fs::read(&backup).unwrap(), original, "the backup is the file as found");
+        assert_eq!(
+            repair.disk,
+            RepairDisk::Rewritten(RepairBackup::Created(backup.clone()))
+        );
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            original,
+            "the backup is the file as found"
+        );
         // The file on disk now loads clean, and a second load has nothing to repair.
-        let mut again = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut again = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         assert_eq!(again.skipped_chat_lines, 0);
         assert!(!has_result(&again.chat_history, "call_LOST"));
         assert_eq!(again.chat_history.len(), 3);
-        assert!(adapter.repair_after_corrupt_load(&info, &mut again, crate::session::storage::Access::Reader).await.is_none());
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut again,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_none()
+        );
         let notice = repair.notice();
-        for want in ["1 unreadable line", "removed 1 tool result", &backup.display().to_string()] {
+        for want in [
+            "1 unreadable line",
+            "removed 1 tool result",
+            &backup.display().to_string(),
+        ] {
             assert!(notice.contains(want), "notice lacks {want:?}: {notice}");
         }
     }
@@ -806,8 +908,14 @@ mod tests {
         );
         repair.disk = RepairDisk::BackupFailed("no space".into());
         let notice = repair.notice();
-        assert!(notice.starts_with("Session history repaired: removed 2 tool results"), "{notice}");
-        assert!(notice.contains("could not be backed up (no space)"), "{notice}");
+        assert!(
+            notice.starts_with("Session history repaired: removed 2 tool results"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("could not be backed up (no space)"),
+            "{notice}"
+        );
         assert!(!notice.to_lowercase().contains("image"), "{notice}");
     }
 
@@ -818,10 +926,22 @@ mod tests {
         let path = adapter.chat_file(&info);
         let original = std::fs::read(&path).unwrap();
 
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         let loaded = data.chat_history.len();
         assert_eq!(data.skipped_chat_lines, 0);
-        assert!(adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader).await.is_none());
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut data,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_none()
+        );
 
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert_eq!(data.chat_history.len(), loaded);
@@ -836,9 +956,21 @@ mod tests {
         // Skipped line, valid history: the final answer is torn.
         let (adapter, info) = seed(tmp.path(), "019f3df7-3d70-7f60-8ca0-a38d2d0056a3").await;
         let original = tear(&adapter, &info, 4);
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         assert_eq!(data.skipped_chat_lines, 1);
-        assert!(adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader).await.is_none());
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut data,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_none()
+        );
         let path = adapter.chat_file(&info);
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert!(!backup_path(&path).exists());
@@ -855,11 +987,29 @@ mod tests {
             .flat_map(|(_, l)| l.iter().copied().chain(std::iter::once(b'\n')))
             .collect();
         std::fs::write(&path, &kept).unwrap();
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         assert_eq!(data.skipped_chat_lines, 0);
-        assert!(has_result(&data.chat_history, "call_LOST"), "fixture: orphan present");
-        assert!(!corrupt_copy(&adapter, &info).exists(), "fixture: no .corrupt copy");
-        assert!(adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader).await.is_none());
+        assert!(
+            has_result(&data.chat_history, "call_LOST"),
+            "fixture: orphan present"
+        );
+        assert!(
+            !corrupt_copy(&adapter, &info).exists(),
+            "fixture: no .corrupt copy"
+        );
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut data,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_none()
+        );
         assert!(has_result(&data.chat_history, "call_LOST"));
         assert_eq!(std::fs::read(&path).unwrap(), kept);
         assert!(!backup_path(&path).exists());
@@ -876,15 +1026,29 @@ mod tests {
         let blocker = backup_path(&path);
         std::fs::create_dir(&blocker).unwrap();
 
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         let repair = adapter
             .repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader)
             .await
             .expect("a repair");
 
-        assert!(matches!(repair.disk, RepairDisk::BackupFailed(_)), "{:?}", repair.disk);
-        assert!(!has_result(&data.chat_history, "call_LOST"), "repaired in memory");
-        assert_eq!(std::fs::read(&path).unwrap(), original, "disk left as found");
+        assert!(
+            matches!(repair.disk, RepairDisk::BackupFailed(_)),
+            "{:?}",
+            repair.disk
+        );
+        assert!(
+            !has_result(&data.chat_history, "call_LOST"),
+            "repaired in memory"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "disk left as found"
+        );
         assert!(blocker.is_dir());
         assert!(repair.notice().contains("could not be backed up"));
 
@@ -909,7 +1073,10 @@ mod tests {
             .await
             .expect("rewrite after the backup succeeded");
         assert_eq!(std::fs::read(backup_path(&path)).unwrap(), with_append);
-        let reloaded = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let reloaded = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         assert_eq!(reloaded.skipped_chat_lines, 0);
         assert!(!has_result(&reloaded.chat_history, "call_LOST"));
     }
@@ -923,8 +1090,14 @@ mod tests {
         std::fs::write(&backup, b"the first copy").unwrap();
         std::fs::write(&staging, b"a later copy").unwrap();
         // F5-C4: the publish is the writer's no-replace hard link.
-        let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), tmp.path()).unwrap();
-        let error = writer.hard_link_in_no_replace_sync("staged.tmp", "chat_history.jsonl.pre-repair").unwrap_err();
+        let writer = fuigo_session_writer::SessionWriter::try_claim(
+            uuid::Uuid::now_v7().to_string(),
+            tmp.path(),
+        )
+        .unwrap();
+        let error = writer
+            .hard_link_in_no_replace_sync("staged.tmp", "chat_history.jsonl.pre-repair")
+            .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&backup).unwrap(), b"the first copy");
     }
@@ -936,20 +1109,45 @@ mod tests {
         let (adapter, info) = seed(tmp.path(), "019f3df7-3d70-7f60-8ca0-a38d2d0056a7").await;
         let original = tear(&adapter, &info, 2);
         let path = adapter.chat_file(&info);
-        let held = crate::session::turn_owner_lock::TurnOwnerLock::acquire(&adapter.session_dir(&info))
-            .await
-            .expect("lock not busy")
-            .expect("fixture: the actor's shared lock is held");
+        let held =
+            crate::session::turn_owner_lock::TurnOwnerLock::acquire(&adapter.session_dir(&info))
+                .await
+                .expect("lock not busy")
+                .expect("fixture: the actor's shared lock is held");
 
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
-        assert!(adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader).await.is_none());
-        assert!(has_result(&data.chat_history, "call_LOST"), "the loaded history is left as read");
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut data,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_none()
+        );
+        assert!(
+            has_result(&data.chat_history, "call_LOST"),
+            "the loaded history is left as read"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert!(!backup_path(&path).exists());
 
         // Once the actor is gone the same load repairs it.
         drop(held);
-        assert!(adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader).await.is_some());
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut data,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -960,13 +1158,19 @@ mod tests {
         let backup = backup_path(&adapter.chat_file(&info));
         std::fs::write(&backup, b"first backup").unwrap();
 
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         let repair = adapter
             .repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader)
             .await
             .expect("a repair");
 
-        assert_eq!(repair.disk, RepairDisk::Rewritten(RepairBackup::AlreadyPresent(backup.clone())));
+        assert_eq!(
+            repair.disk,
+            RepairDisk::Rewritten(RepairBackup::AlreadyPresent(backup.clone()))
+        );
         assert_eq!(std::fs::read(&backup).unwrap(), b"first backup");
         assert!(repair.notice().contains("earlier repair"));
     }
@@ -982,11 +1186,18 @@ mod tests {
         let original = tear(&adapter, &info, 2);
         let path = adapter.chat_file(&info);
         let dir = adapter.session_dir(&info);
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
 
         let (started, release) = seams::hold_next_write(&path);
         {
-            let repair = adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader);
+            let repair = adapter.repair_after_corrupt_load(
+                &info,
+                &mut data,
+                crate::session::storage::Access::Reader,
+            );
             tokio::pin!(repair);
             tokio::select! {
                 _ = &mut repair => panic!("the repair finished although its rewrite is held"),
@@ -998,7 +1209,11 @@ mod tests {
             matches!(try_recovery_lock(&dir), RecoveryLock::HeldElsewhere),
             "the session lock was released while the repair's rewrite was still running"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), original, "fixture: the rewrite is still held");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "fixture: the rewrite is still held"
+        );
 
         // Once the rewrite is done, the lock is let go and the file holds the repaired history.
         release.send(()).unwrap();
@@ -1007,13 +1222,19 @@ mod tests {
             match try_recovery_lock(&dir) {
                 RecoveryLock::Acquired(_) => break,
                 RecoveryLock::HeldElsewhere => {
-                    assert!(std::time::Instant::now() < deadline, "the lock was never let go");
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the lock was never let go"
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
                 RecoveryLock::Unknown(error) => panic!("lock state unknown: {error}"),
             }
         }
-        let reloaded = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let reloaded = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         assert_eq!(reloaded.skipped_chat_lines, 0);
         assert!(!has_result(&reloaded.chat_history, "call_LOST"));
         assert_eq!(std::fs::read(backup_path(&path)).unwrap(), original);
@@ -1029,13 +1250,24 @@ mod tests {
         let path = adapter.chat_file(&info);
         let dir = adapter.session_dir(&info);
         seams::fail_dir_sync(&dir, true);
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         let repair = adapter
             .repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader)
             .await
             .expect("a repair");
-        assert!(matches!(repair.disk, RepairDisk::BackupFailed(_)), "{:?}", repair.disk);
-        assert_eq!(std::fs::read(&path).unwrap(), original, "disk left as found");
+        assert!(
+            matches!(repair.disk, RepairDisk::BackupFailed(_)),
+            "{:?}",
+            repair.disk
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "disk left as found"
+        );
         assert_eq!(
             std::fs::read(backup_path(&path)).unwrap(),
             original,
@@ -1071,7 +1303,9 @@ mod tests {
         std::fs::create_dir(&blocker).unwrap();
         BACKUP_OWED.lock().insert(chat.clone());
 
-        let message = refusal_for_chat_file(&chat, Some(&tests_writer(&chat)), "rewind the conversation").expect("refused");
+        let message =
+            refusal_for_chat_file(&chat, Some(&tests_writer(&chat)), "rewind the conversation")
+                .expect("refused");
         for want in [
             "Cannot rewind the conversation",
             "could not be backed up",
@@ -1081,10 +1315,24 @@ mod tests {
             assert!(message.contains(want), "message lacks {want:?}: {message}");
         }
         std::fs::remove_dir(&blocker).unwrap();
-        assert_eq!(refusal_for_chat_file(&chat, Some(&tests_writer(&chat)), "compact the conversation"), None);
+        assert_eq!(
+            refusal_for_chat_file(
+                &chat,
+                Some(&tests_writer(&chat)),
+                "compact the conversation"
+            ),
+            None
+        );
         assert_eq!(std::fs::read(&blocker).unwrap(), b"{}\n");
         let untouched = tmp.path().join("other").join("chat_history.jsonl");
-        assert_eq!(refusal_for_chat_file(&untouched, Some(&tests_writer(&untouched)), "compact the conversation"), None);
+        assert_eq!(
+            refusal_for_chat_file(
+                &untouched,
+                Some(&tests_writer(&untouched)),
+                "compact the conversation"
+            ),
+            None
+        );
     }
 
     /// A session that broke before this release: no line is unreadable any more, but the `.corrupt` copy says an
@@ -1097,9 +1345,15 @@ mod tests {
         let path = adapter.chat_file(&info);
         let corrupt = corrupt_copy(&adapter, &info);
 
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         assert_eq!(data.skipped_chat_lines, 0, "fixture: every line parses");
-        assert!(has_result(&data.chat_history, "call_LOST"), "fixture: orphan present");
+        assert!(
+            has_result(&data.chat_history, "call_LOST"),
+            "fixture: orphan present"
+        );
         let repair = adapter
             .repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader)
             .await
@@ -1109,9 +1363,20 @@ mod tests {
         assert_eq!(repair.skipped_lines, 0);
         assert_eq!(repair.report.stripped_tool_result_ids, vec!["call_LOST"]);
         let backup = backup_path(&path);
-        assert_eq!(repair.disk, RepairDisk::Rewritten(RepairBackup::Created(backup.clone())));
-        assert_eq!(std::fs::read(&backup).unwrap(), as_found, "the backup is the file as found");
-        assert_eq!(std::fs::read(&corrupt).unwrap(), corrupt_bytes, "the .corrupt copy is left alone");
+        assert_eq!(
+            repair.disk,
+            RepairDisk::Rewritten(RepairBackup::Created(backup.clone()))
+        );
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            as_found,
+            "the backup is the file as found"
+        );
+        assert_eq!(
+            std::fs::read(&corrupt).unwrap(),
+            corrupt_bytes,
+            "the .corrupt copy is left alone"
+        );
         let notice = repair.notice();
         for want in [
             "Session history repaired: removed 1 tool result",
@@ -1125,10 +1390,22 @@ mod tests {
 
         // A second load finds nothing to do: the file, the backup and the .corrupt copy stay as they are.
         let repaired_bytes = std::fs::read(&path).unwrap();
-        let mut again = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut again = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         assert_eq!(again.skipped_chat_lines, 0);
         assert!(!has_result(&again.chat_history, "call_LOST"));
-        assert!(adapter.repair_after_corrupt_load(&info, &mut again, crate::session::storage::Access::Reader).await.is_none());
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut again,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_none()
+        );
         assert_eq!(std::fs::read(&path).unwrap(), repaired_bytes);
         assert_eq!(std::fs::read(&backup).unwrap(), as_found);
         assert_eq!(std::fs::read(&corrupt).unwrap(), corrupt_bytes);
@@ -1144,10 +1421,22 @@ mod tests {
         let corrupt = corrupt_copy(&adapter, &info);
         std::fs::write(&corrupt, b"{\"torn").unwrap();
 
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         let loaded = data.chat_history.len();
         assert_eq!(data.skipped_chat_lines, 0);
-        assert!(adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader).await.is_none());
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut data,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_none()
+        );
 
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert_eq!(data.chat_history.len(), loaded);
@@ -1164,9 +1453,24 @@ mod tests {
         let path = adapter.chat_file(&info);
         std::fs::create_dir(corrupt_copy(&adapter, &info)).unwrap();
 
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
-        assert!(has_result(&data.chat_history, "call_LOST"), "fixture: orphan present");
-        assert!(adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader).await.is_none());
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
+        assert!(
+            has_result(&data.chat_history, "call_LOST"),
+            "fixture: orphan present"
+        );
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut data,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_none()
+        );
         assert!(has_result(&data.chat_history, "call_LOST"));
         assert_eq!(std::fs::read(&path).unwrap(), as_found);
         assert!(!backup_path(&path).exists());
@@ -1181,15 +1485,32 @@ mod tests {
         let (corrupt_bytes, as_found) = broken_before_this_release(&adapter, &info);
         let path = adapter.chat_file(&info);
         std::fs::create_dir(backup_path(&path)).unwrap();
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
+            .await
+            .unwrap();
         let repair = adapter
             .repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader)
             .await
             .expect("a repair");
-        assert!(matches!(repair.disk, RepairDisk::BackupFailed(_)), "{:?}", repair.disk);
-        assert!(!has_result(&data.chat_history, "call_LOST"), "repaired in memory");
-        assert_eq!(std::fs::read(&path).unwrap(), as_found, "disk left as found");
-        assert_eq!(std::fs::read(corrupt_copy(&adapter, &info)).unwrap(), corrupt_bytes);
+        assert!(
+            matches!(repair.disk, RepairDisk::BackupFailed(_)),
+            "{:?}",
+            repair.disk
+        );
+        assert!(
+            !has_result(&data.chat_history, "call_LOST"),
+            "repaired in memory"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            as_found,
+            "disk left as found"
+        );
+        assert_eq!(
+            std::fs::read(corrupt_copy(&adapter, &info)).unwrap(),
+            corrupt_bytes
+        );
         adapter
             .replace_chat_history(&info, &data.chat_history)
             .await
@@ -1200,17 +1521,42 @@ mod tests {
         let (adapter, info) = seed(tmp.path(), "019f3df7-3d70-7f60-8ca0-a38d2d0056b5").await;
         let (_, as_found) = broken_before_this_release(&adapter, &info);
         let path = adapter.chat_file(&info);
-        let held = crate::session::turn_owner_lock::TurnOwnerLock::acquire(&adapter.session_dir(&info))
+        let held =
+            crate::session::turn_owner_lock::TurnOwnerLock::acquire(&adapter.session_dir(&info))
+                .await
+                .expect("lock not busy")
+                .expect("fixture: the actor's shared lock is held");
+        let mut data = adapter
+            .load_session_without_updates(&info, crate::session::storage::Access::Reader)
             .await
-            .expect("lock not busy")
-            .expect("fixture: the actor's shared lock is held");
-        let mut data = adapter.load_session_without_updates(&info, crate::session::storage::Access::Reader).await.unwrap();
-        assert!(adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader).await.is_none());
-        assert!(has_result(&data.chat_history, "call_LOST"), "the loaded history is left as read");
+            .unwrap();
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut data,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_none()
+        );
+        assert!(
+            has_result(&data.chat_history, "call_LOST"),
+            "the loaded history is left as read"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), as_found);
         assert!(!backup_path(&path).exists());
         drop(held);
-        assert!(adapter.repair_after_corrupt_load(&info, &mut data, crate::session::storage::Access::Reader).await.is_some());
+        assert!(
+            adapter
+                .repair_after_corrupt_load(
+                    &info,
+                    &mut data,
+                    crate::session::storage::Access::Reader
+                )
+                .await
+                .is_some()
+        );
     }
     /// P120 (Astra r2 #6): the pre-repair backup of a loose chat file is owner-only.
     #[cfg(unix)]
@@ -1222,7 +1568,11 @@ mod tests {
         std::fs::write(&chat, b"{}\n").unwrap();
         std::fs::set_permissions(&chat, std::fs::Permissions::from_mode(0o644)).unwrap();
         backup_before_repair(&chat, Some(&tests_writer(&chat))).unwrap();
-        let mode = std::fs::metadata(backup_path(&chat)).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(backup_path(&chat))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
     }
 
@@ -1237,9 +1587,18 @@ mod tests {
         std::fs::create_dir(&blocker).unwrap();
         BACKUP_OWED.lock().insert(chat.clone());
         assert!(rewrite_gate(&chat).is_err(), "the debt is real");
-        assert!(first_note(&chat, NoteKind::AutoCompaction), "the first note is shown");
-        assert!(!first_note(&chat, NoteKind::AutoCompaction), "the second is not");
-        assert!(first_note(&chat, NoteKind::FileNotRewritten), "each kind has its own note");
+        assert!(
+            first_note(&chat, NoteKind::AutoCompaction),
+            "the first note is shown"
+        );
+        assert!(
+            !first_note(&chat, NoteKind::AutoCompaction),
+            "the second is not"
+        );
+        assert!(
+            first_note(&chat, NoteKind::FileNotRewritten),
+            "each kind has its own note"
+        );
         assert!(!first_note(&chat, NoteKind::FileNotRewritten));
         std::fs::remove_dir(&blocker).unwrap();
         rewrite_gate(&chat).expect("the backup can be made now");
@@ -1248,7 +1607,10 @@ mod tests {
         std::fs::create_dir(&blocker).unwrap();
         BACKUP_OWED.lock().insert(chat.clone());
         assert!(rewrite_gate(&chat).is_err());
-        assert!(first_note(&chat, NoteKind::AutoCompaction), "a new debt shows its note again");
+        assert!(
+            first_note(&chat, NoteKind::AutoCompaction),
+            "a new debt shows its note again"
+        );
     }
 
     /// P135: pruning goal directives is not made again when the session is resumed, so its note must not promise that.
@@ -1260,8 +1622,17 @@ mod tests {
         let blocker = backup_path(&chat);
         std::fs::create_dir(&blocker).unwrap();
         BACKUP_OWED.lock().insert(chat.clone());
-        let note = note_for_refused_rewrite_at(&chat, Some(&tests_writer(&chat)), "removing the earlier goal directives", false).expect("a note");
-        assert!(!note.contains("applied again when the session is resumed"), "{note}");
+        let note = note_for_refused_rewrite_at(
+            &chat,
+            Some(&tests_writer(&chat)),
+            "removing the earlier goal directives",
+            false,
+        )
+        .expect("a note");
+        assert!(
+            !note.contains("applied again when the session is resumed"),
+            "{note}"
+        );
         assert!(note.contains("a resumed session loads it again"), "{note}");
         assert!(note.contains("this run only"), "{note}");
     }
@@ -1273,11 +1644,26 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let chat = tmp.path().join("chat_history.jsonl");
         std::fs::write(&chat, b"{}\n").unwrap();
-        assert_eq!(note_for_refused_rewrite_at(&chat, Some(&tests_writer(&chat)), "the new mode's instructions", true), None, "nothing is owed");
+        assert_eq!(
+            note_for_refused_rewrite_at(
+                &chat,
+                Some(&tests_writer(&chat)),
+                "the new mode's instructions",
+                true
+            ),
+            None,
+            "nothing is owed"
+        );
         let blocker = backup_path(&chat);
         std::fs::create_dir(&blocker).unwrap();
         BACKUP_OWED.lock().insert(chat.clone());
-        let note = note_for_refused_rewrite_at(&chat, Some(&tests_writer(&chat)), "the new mode's instructions", true).expect("a note");
+        let note = note_for_refused_rewrite_at(
+            &chat,
+            Some(&tests_writer(&chat)),
+            "the new mode's instructions",
+            true,
+        )
+        .expect("a note");
         for want in [
             "Session history file not rewritten: the new mode's instructions",
             "could not be backed up",
@@ -1286,14 +1672,44 @@ mod tests {
         ] {
             assert!(note.contains(want), "note lacks {want:?}: {note}");
         }
-        assert_eq!(note_for_refused_rewrite_at(&chat, Some(&tests_writer(&chat)), "the new mode's instructions", true), None, "shown once");
-        let refused = refused_auto_compaction_at(&chat, Some(&tests_writer(&chat))).expect_err("refused");
-        assert!(refused.refusal.contains("Cannot compact the conversation"), "{}", refused.refusal);
+        assert_eq!(
+            note_for_refused_rewrite_at(
+                &chat,
+                Some(&tests_writer(&chat)),
+                "the new mode's instructions",
+                true
+            ),
+            None,
+            "shown once"
+        );
+        let refused =
+            refused_auto_compaction_at(&chat, Some(&tests_writer(&chat))).expect_err("refused");
+        assert!(
+            refused.refusal.contains("Cannot compact the conversation"),
+            "{}",
+            refused.refusal
+        );
         assert!(refused.note.expect("first").contains("not compacted"));
-        assert!(refused_auto_compaction_at(&chat, Some(&tests_writer(&chat))).expect_err("refused again").note.is_none(), "the second is quiet");
-        assert!(image_strip_not_saved_note_at(&chat, Some(&tests_writer(&chat))).expect("note").contains("still holds the image"));
+        assert!(
+            refused_auto_compaction_at(&chat, Some(&tests_writer(&chat)))
+                .expect_err("refused again")
+                .note
+                .is_none(),
+            "the second is quiet"
+        );
+        assert!(
+            image_strip_not_saved_note_at(&chat, Some(&tests_writer(&chat)))
+                .expect("note")
+                .contains("still holds the image")
+        );
         std::fs::remove_dir(&blocker).unwrap();
-        assert!(refused_auto_compaction_at(&chat, Some(&tests_writer(&chat))).is_ok(), "the backup could be made, nothing is refused");
-        assert_eq!(image_strip_not_saved_note_at(&chat, Some(&tests_writer(&chat))), None);
+        assert!(
+            refused_auto_compaction_at(&chat, Some(&tests_writer(&chat))).is_ok(),
+            "the backup could be made, nothing is refused"
+        );
+        assert_eq!(
+            image_strip_not_saved_note_at(&chat, Some(&tests_writer(&chat))),
+            None
+        );
     }
 }

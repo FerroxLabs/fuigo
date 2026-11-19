@@ -1975,7 +1975,10 @@ mod permission_denial {
             lines[1]
         );
         assert_eq!(
-            emitter.take_permission_denial().and_then(|d| d.tool_title).as_deref(),
+            emitter
+                .take_permission_denial()
+                .and_then(|d| d.tool_title)
+                .as_deref(),
             Some("Write src/main.rs"),
             "the latch still keeps the first denial"
         );
@@ -2131,7 +2134,12 @@ mod permission_denial {
                 d.remedy()
             );
         }
-        for title in ["echo hi > out.txt", "echo hi >> out.txt", "ls 2>/dev/null > out.txt", "cat a >/dev/nullx"] {
+        for title in [
+            "echo hi > out.txt",
+            "echo hi >> out.txt",
+            "ls 2>/dev/null > out.txt",
+            "cat a >/dev/nullx",
+        ] {
             let d = HeadlessDenial {
                 tool_kind: Some("execute".to_owned()),
                 tool_title: Some(title.to_owned()),
@@ -2149,7 +2157,10 @@ mod permission_denial {
             ..denial()
         };
         let line = d.refusal_line();
-        assert!(line.contains("headless_never_approves") && line.contains(d.remedy()), "{line}");
+        assert!(
+            line.contains("headless_never_approves") && line.contains(d.remedy()),
+            "{line}"
+        );
         assert_eq!(line.lines().count(), 1);
     }
 
@@ -4306,11 +4317,22 @@ fn json_formats_print_the_sandbox_warning_once() {
     let notice = Lifecycle::ConfigNotice { message: w.clone() };
     assert_eq!(config_notice_stderr_line(&notice, Some(&w)), None);
     // Without a startup line (nothing printed it) the notice still reaches stderr, and other notices always do.
-    assert_eq!(config_notice_stderr_line(&notice, None), Some(notice.plain_message()));
-    let other = Lifecycle::ConfigNotice { message: "something else".to_string() };
-    assert_eq!(config_notice_stderr_line(&other, Some(&w)), Some(other.plain_message()));
+    assert_eq!(
+        config_notice_stderr_line(&notice, None),
+        Some(notice.plain_message())
+    );
+    let other = Lifecycle::ConfigNotice {
+        message: "something else".to_string(),
+    };
+    assert_eq!(
+        config_notice_stderr_line(&other, Some(&w)),
+        Some(other.plain_message())
+    );
     // A lifecycle event that is not a config notice has no stderr line in these formats.
-    assert_eq!(config_notice_stderr_line(&Lifecycle::CompactCancelled, Some(&w)), None);
+    assert_eq!(
+        config_notice_stderr_line(&Lifecycle::CompactCancelled, Some(&w)),
+        None
+    );
 }
 
 impl crate::headless::InterruptSource for tokio::sync::mpsc::UnboundedReceiver<i32> {
@@ -4337,7 +4359,10 @@ async fn a_second_interrupt_is_the_hard_stop_after_the_first_is_latched() {
     });
 
     code_tx.send(143).unwrap();
-    latched.changed().await.expect("the first interrupt is latched");
+    latched
+        .changed()
+        .await
+        .expect("the first interrupt is latched");
     assert_eq!(Some(143), *latched.borrow());
     for _ in 0..8 {
         tokio::task::yield_now().await;
@@ -4452,7 +4477,8 @@ mod goal_wait {
         let (acp_tx, _agent_rx) =
             tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
         let session_id = acp::SessionId::new("sess-1");
-        let mut emitter = super::super::HeadlessEmitter::new(super::super::OutputFormat::Json, false);
+        let mut emitter =
+            super::super::HeadlessEmitter::new(super::super::OutputFormat::Json, false);
         let mut options = timeout_test_options(None);
         options.background_wait_timeout = bg_timeout;
         let mut ttf_logged = false;
@@ -4491,7 +4517,10 @@ mod goal_wait {
         )
         .await
         .expect("the run must end once the goal completes");
-        assert!(took >= Duration::from_millis(500), "returned before the goal finished: {took:?}");
+        assert!(
+            took >= Duration::from_millis(500),
+            "returned before the goal finished: {took:?}"
+        );
         assert!(!outcome.goal_unfinished, "the goal finished in time");
         assert!(matches!(outcome.prompt_result, Some(Ok(_))));
     }
@@ -4508,7 +4537,10 @@ mod goal_wait {
         .await
         .expect("the wait timeout must end the run");
         assert!(took >= Duration::from_millis(350), "{took:?}");
-        assert!(outcome.goal_unfinished, "an unfinished goal makes the run fail");
+        assert!(
+            outcome.goal_unfinished,
+            "an unfinished goal makes the run fail"
+        );
     }
 
     #[tokio::test]
@@ -4555,10 +4587,12 @@ mod goal_wait {
         .unwrap();
         let (tx, _rx) = tokio::sync::oneshot::channel();
         client_tx
-            .send(fuigo_acp_lib::AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
-                request: acp::ExtNotification::new("fuigo/task_backgrounded", raw.into()),
-                response_tx: tx,
-            }))
+            .send(fuigo_acp_lib::AcpClientMessage::ExtNotification(
+                fuigo_acp_lib::AcpArgs {
+                    request: acp::ExtNotification::new("fuigo/task_backgrounded", raw.into()),
+                    response_tx: tx,
+                },
+            ))
             .unwrap();
         let sender = client_tx.clone();
         tokio::spawn(async move {
@@ -4570,15 +4604,19 @@ mod goal_wait {
             .unwrap();
             let (tx, _rx) = tokio::sync::oneshot::channel();
             sender
-                .send(fuigo_acp_lib::AcpClientMessage::ExtNotification(fuigo_acp_lib::AcpArgs {
-                    request: acp::ExtNotification::new("fuigo/task_completed", raw.into()),
-                    response_tx: tx,
-                }))
+                .send(fuigo_acp_lib::AcpClientMessage::ExtNotification(
+                    fuigo_acp_lib::AcpArgs {
+                        request: acp::ExtNotification::new("fuigo/task_completed", raw.into()),
+                        response_tx: tx,
+                    },
+                ))
                 .unwrap();
             // The follow-up turn starts a moment later, outside the original prompt, and ends
             tokio::time::sleep(Duration::from_millis(700)).await;
             sender
-                .send(ext_update(serde_json::json!({"sessionUpdate": "response_started"})))
+                .send(ext_update(
+                    serde_json::json!({"sessionUpdate": "response_started"}),
+                ))
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(500)).await;
             sender
@@ -4618,15 +4656,26 @@ fn the_remedy_fits_the_refused_tool() {
     };
     for kind in ["edit", "delete", "move"] {
         let d = with_kind(Some(kind));
-        assert!(d.remedy().contains("--permission-mode acceptEdits"), "{kind}: {}", d.remedy());
+        assert!(
+            d.remedy().contains("--permission-mode acceptEdits"),
+            "{kind}: {}",
+            d.remedy()
+        );
         assert!(d.human_line().contains(d.remedy()));
         assert_eq!(d.wire_record(true)["remedy"], d.remedy());
     }
     let shell = with_kind(Some("execute"));
     assert!(shell.remedy().contains("--allow"), "{}", shell.remedy());
-    assert!(shell.remedy().contains("not shell commands"), "{}", shell.remedy());
+    assert!(
+        shell.remedy().contains("not shell commands"),
+        "{}",
+        shell.remedy()
+    );
     for kind in [None, Some("fetch"), Some("other")] {
-        assert_eq!(with_kind(kind).remedy(), HeadlessDenialRule::HeadlessNeverApproves.remedy());
+        assert_eq!(
+            with_kind(kind).remedy(),
+            HeadlessDenialRule::HeadlessNeverApproves.remedy()
+        );
     }
     for kind in [None, Some("edit"), Some("execute")] {
         let r = with_kind(kind).remedy();
@@ -4635,13 +4684,20 @@ fn the_remedy_fits_the_refused_tool() {
     // Only a shell command that redirects into a file gets the redirect remedy: no --allow rule can cover it.
     let mut redirect = with_kind(Some("execute"));
     redirect.tool_title = Some("Execute `echo x > notes.txt`".to_owned());
-    assert!(redirect.remedy().contains("--always-approve") && redirect.remedy().contains("redirect"));
-    assert!(!redirect.remedy().contains("--allow rule that covers"), "{}", redirect.remedy());
+    assert!(
+        redirect.remedy().contains("--always-approve") && redirect.remedy().contains("redirect")
+    );
+    assert!(
+        !redirect.remedy().contains("--allow rule that covers"),
+        "{}",
+        redirect.remedy()
+    );
 }
 
 #[test]
 fn headless_refuses_permission_mode_plan_with_a_clear_error() {
-    let err = super::reject_headless_plan_mode(Some("plan")).expect_err("plan must be refused headless");
+    let err =
+        super::reject_headless_plan_mode(Some("plan")).expect_err("plan must be refused headless");
     let msg = err.to_string();
     assert!(msg.contains("--permission-mode plan"), "{msg}");
     assert!(msg.contains("headless"), "{msg}");
@@ -4649,8 +4705,16 @@ fn headless_refuses_permission_mode_plan_with_a_clear_error() {
 
 #[test]
 fn headless_accepts_every_other_permission_mode() {
-    for mode in [None, Some("default"), Some("acceptEdits"), Some("auto"), Some("dontAsk"), Some("bypassPermissions")] {
-        super::reject_headless_plan_mode(mode).unwrap_or_else(|e| panic!("{mode:?} must be accepted: {e}"));
+    for mode in [
+        None,
+        Some("default"),
+        Some("acceptEdits"),
+        Some("auto"),
+        Some("dontAsk"),
+        Some("bypassPermissions"),
+    ] {
+        super::reject_headless_plan_mode(mode)
+            .unwrap_or_else(|e| panic!("{mode:?} must be accepted: {e}"));
     }
 }
 
@@ -4674,7 +4738,10 @@ async fn a_failed_session_load_reports_the_agents_reason() {
         Ok(_) => panic!("the agent refused the load"),
         Err(e) => e.to_string(),
     };
-    assert!(msg.contains("bad checksum"), "the reason must survive: {msg}");
+    assert!(
+        msg.contains("bad checksum"),
+        "the reason must survive: {msg}"
+    );
     assert!(!msg.contains("Session does not exist"), "{msg}");
 }
 

@@ -24,8 +24,8 @@ use super::conn::serve_one;
 use super::dial::Locations;
 use super::directory::{ConnHost, PeerDirectory};
 use super::reap::{
-    LOCATOR_NAME, ReapReport, TRY_GAP, decode_rows, encode_rows, is_our_socket, mode_of, reap_pass, sock_name,
-    unlink_if_identity,
+    LOCATOR_NAME, ReapReport, TRY_GAP, decode_rows, encode_rows, is_our_socket, mode_of, reap_pass,
+    sock_name, unlink_if_identity,
 };
 use super::{CheckedDir, Disabled, update_locator, update_locator_rewriting};
 use crate::leader::peer_check::{PeerVerdict, Side, bind_private_with, verdict_for};
@@ -56,7 +56,8 @@ fn io_err(e: &std::io::Error) -> Disabled {
 /// 32 lower-case hex characters from the thread CSPRNG.
 fn mint_host_id() -> HostId {
     let n: u128 = rand::random();
-    HostId::new(&format!("{n:032x}")).unwrap_or_else(|_| unreachable!("32 lower-case hex characters"))
+    HostId::new(&format!("{n:032x}"))
+        .unwrap_or_else(|_| unreachable!("32 lower-case hex characters"))
 }
 
 /// Create and check `<runtime>/fuigo/<hash>/peers` one component at a time relative to a directory fd, with
@@ -66,15 +67,22 @@ fn mint_host_id() -> HostId {
 /// socket fd cannot be used: it reports the socket file system, not the bound path.)
 fn same_file_as_bound(bound: Option<(u64, u64)>, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let Ok(on_disk) = std::fs::symlink_metadata(path) else { return false };
+    let Ok(on_disk) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
     bound == Some((on_disk.dev(), on_disk.ino()))
 }
 
 fn open_runtime_peers(loc: &Locations) -> Result<CheckedDir, Disabled> {
     let rt_home = loc.runtime_home().ok_or(Disabled::SocketDirUnavailable)?;
     let base = loc.runtime_base().ok_or(Disabled::SocketDirUnavailable)?;
-    let rel = rt_home.strip_prefix(base).map_err(|_| Disabled::SocketDirUnavailable)?;
-    let levels: Vec<&str> = rel.components().filter_map(|c| c.as_os_str().to_str()).collect();
+    let rel = rt_home
+        .strip_prefix(base)
+        .map_err(|_| Disabled::SocketDirUnavailable)?;
+    let levels: Vec<&str> = rel
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
     if levels.len() != 2 {
         return Err(Disabled::SocketDirUnavailable);
     }
@@ -83,7 +91,12 @@ fn open_runtime_peers(loc: &Locations) -> Result<CheckedDir, Disabled> {
 
 /// Remove our socket (only while it is still ours) and our row. Bounded: the lock wait gives up after 2 s and the
 /// stale row is then left for the reaper.
-fn undo_all(sock_dir: &CheckedDir, home_dir: &CheckedDir, host_id: &HostId, bound: Option<(u64, u64)>) {
+fn undo_all(
+    sock_dir: &CheckedDir,
+    home_dir: &CheckedDir,
+    host_id: &HostId,
+    bound: Option<(u64, u64)>,
+) {
     unlink_if_identity(sock_dir, &sock_name(host_id), bound);
     remove_own_row(home_dir, host_id);
 }
@@ -158,7 +171,10 @@ impl Drop for SocketGuard {
 }
 
 /// Every blocking step of `start`, in order. Runs in `spawn_blocking`.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn prepare(home: &Path, runtime_dir: Option<&Path>, host_id: HostId) -> Result<Prepared, Disabled> {
     let loc = Locations::new(home, runtime_dir);
     // Decide the directory FIRST: when it is unavailable nothing is created.
@@ -176,7 +192,9 @@ fn prepare(home: &Path, runtime_dir: Option<&Path>, host_id: HostId) -> Result<P
         None => (home_dir.clone(), HostDir::Home),
         Some(rt) => (rt, HostDir::Runtime),
     };
-    let peers = loc.peers_path(dir_tag).ok_or(Disabled::SocketDirUnavailable)?;
+    let peers = loc
+        .peers_path(dir_tag)
+        .ok_or(Disabled::SocketDirUnavailable)?;
     let sock_path = socket_path(&peers, &host_id);
     let name = sock_name(&host_id);
     // Fail closed on anything already at the path (a planted file or link); `bind_private_with` would rename over it.
@@ -190,7 +208,9 @@ fn prepare(home: &Path, runtime_dir: Option<&Path>, host_id: HostId) -> Result<P
     let listener = bind_private_with(&sock_path, |p: &Path| {
         use std::os::unix::fs::MetadataExt;
         let l = std::os::unix::net::UnixListener::bind(p)?;
-        bound = std::fs::symlink_metadata(p).ok().map(|m| (m.dev(), m.ino()));
+        bound = std::fs::symlink_metadata(p)
+            .ok()
+            .map(|m| (m.dev(), m.ino()));
         Ok(l)
     })
     .map_err(|e| io_err(&e))?;
@@ -204,7 +224,10 @@ fn prepare(home: &Path, runtime_dir: Option<&Path>, host_id: HostId) -> Result<P
         // Another socket takes the path (mode 0600, ours) after our bind.
         let _ = std::fs::remove_file(&sock_path);
         if let Ok(other) = std::os::unix::net::UnixListener::bind(&sock_path) {
-            let _ = std::fs::set_permissions(&sock_path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+            let _ = std::fs::set_permissions(
+                &sock_path,
+                std::os::unix::fs::PermissionsExt::from_mode(0o600),
+            );
             std::mem::forget(other);
         }
     }
@@ -213,17 +236,44 @@ fn prepare(home: &Path, runtime_dir: Option<&Path>, host_id: HostId) -> Result<P
         return Err(undo(Disabled::SocketCheckFailed));
     }
     // lstat the result: a socket, ours, mode 0600 (and nothing else, in particular not a link).
-    if !is_our_socket(&sock_dir, &name) || mode_of(&sock_dir, &name).map(|m| m & 0o7777) != Some(0o600) {
+    if !is_our_socket(&sock_dir, &name)
+        || mode_of(&sock_dir, &name).map(|m| m & 0o7777) != Some(0o600)
+    {
         return Err(undo(Disabled::SocketCheckFailed));
     }
-    listener.set_nonblocking(true).map_err(|e| undo(io_err(&e)))?;
-    let row = HostRow { host_id: host_id.clone(), pid: std::process::id(), started: now_secs(), dir: dir_tag };
-    let guard = SocketGuard { sock_dir: sock_dir.clone(), name, bound, armed: true };
-    Ok(Prepared { host_id, loc, home_dir, sock_dir, row, listener, sock_path, bound, guard })
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| undo(io_err(&e)))?;
+    let row = HostRow {
+        host_id: host_id.clone(),
+        pid: std::process::id(),
+        started: now_secs(),
+        dir: dir_tag,
+    };
+    let guard = SocketGuard {
+        sock_dir: sock_dir.clone(),
+        name,
+        bound,
+        armed: true,
+    };
+    Ok(Prepared {
+        host_id,
+        loc,
+        home_dir,
+        sock_dir,
+        row,
+        listener,
+        sock_path,
+        bound,
+        guard,
+    })
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Write our row (after the reap pass). On failure the socket (identity-checked) is undone.
@@ -275,7 +325,11 @@ impl PeerInbox {
     }
 
     /// `start_with` with a chosen host id (tests plant a file at the socket path of a known id).
-    pub(crate) async fn start_inner(home: &Path, opts: StartOptions, host_id: HostId) -> Result<PeerInbox, Disabled> {
+    pub(crate) async fn start_inner(
+        home: &Path,
+        opts: StartOptions,
+        host_id: HostId,
+    ) -> Result<PeerInbox, Disabled> {
         // Before ANY file system call, thread or task.
         if !opts.enabled {
             return Err(Disabled::FeatureOff);
@@ -303,7 +357,12 @@ impl PeerInbox {
             Ok(l) => l,
             Err(e) => {
                 // Every failure after the bind undoes the socket and the row.
-                let (sd, hd, id, bound) = (p.sock_dir.clone(), p.home_dir.clone(), p.host_id.clone(), p.bound);
+                let (sd, hd, id, bound) = (
+                    p.sock_dir.clone(),
+                    p.home_dir.clone(),
+                    p.host_id.clone(),
+                    p.bound,
+                );
                 let _ = tokio::task::spawn_blocking(move || undo_all(&sd, &hd, &id, bound)).await;
                 return Err(io_err(&e));
             }
@@ -311,8 +370,18 @@ impl PeerInbox {
         // One bounded reap pass BEFORE our row is written (a full locator would otherwise refuse us). Never repeated on a
         // timer. Probes are async (no thread is blocked); each is under its 2 s connect timeout and the whole pass
         // under REAP_BUDGET. A failed or cut-short pass changes nothing else.
-        let _ = tokio::time::timeout(REAP_BUDGET, reap_pass(&p.loc, &p.home_dir, &p.host_id, TRY_GAP)).await;
-        let (sd, hd, hid, row, bound) = (p.sock_dir.clone(), p.home_dir.clone(), p.host_id.clone(), p.row.clone(), p.bound);
+        let _ = tokio::time::timeout(
+            REAP_BUDGET,
+            reap_pass(&p.loc, &p.home_dir, &p.host_id, TRY_GAP),
+        )
+        .await;
+        let (sd, hd, hid, row, bound) = (
+            p.sock_dir.clone(),
+            p.home_dir.clone(),
+            p.host_id.clone(),
+            p.row.clone(),
+            p.bound,
+        );
         tokio::task::spawn_blocking(move || publish_row(&sd, &hd, &hid, row, bound))
             .await
             .map_err(|_| Disabled::Io(libc::EIO))??;
@@ -328,10 +397,20 @@ impl PeerInbox {
         // Packet 11: notices produced by this host's sessions go out through one pump; watches are probed once a minute.
         let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
         directory.set_notice_out(notice_tx);
-        let pump = tokio::spawn(super::watch::io::pump(notice_rx, directory.clone(), p.loc.clone(), p.home_dir.clone(), None));
+        let pump = tokio::spawn(super::watch::io::pump(
+            notice_rx,
+            directory.clone(),
+            p.loc.clone(),
+            p.home_dir.clone(),
+            None,
+        ));
         let ticker = tokio::spawn(super::watch::io::ticker(
             directory.clone(),
-            super::watch::io::SocketProber { loc: p.loc.clone(), home_dir: p.home_dir.clone(), own: p.host_id.clone() },
+            super::watch::io::SocketProber {
+                loc: p.loc.clone(),
+                home_dir: p.home_dir.clone(),
+                own: p.host_id.clone(),
+            },
             token.clone(),
         ));
         // The inbox owns the cleanup from here on (shutdown / Drop).
@@ -393,7 +472,12 @@ impl PeerInbox {
         // still work; bounded to `ANNOUNCE_BUDGET`.
         self.announce_exit().await;
         self.stop_accepting();
-        let (sd, hd, id, bound) = (self.sock_dir.clone(), self.home_dir.clone(), self.host_id.clone(), self.bound);
+        let (sd, hd, id, bound) = (
+            self.sock_dir.clone(),
+            self.home_dir.clone(),
+            self.host_id.clone(),
+            self.bound,
+        );
         let _ = tokio::task::spawn_blocking(move || undo_all(&sd, &hd, &id, bound)).await;
     }
 
@@ -402,7 +486,11 @@ impl PeerInbox {
         self.directory.announce_exit();
         // Dropping the directory's sender lets the pump end once it has delivered what is queued (the sessions' records are gone).
         drop(self.directory.take_notice_out());
-        let pump = self.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let pump = self
+            .pump
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         if let Some(p) = pump {
             let _ = tokio::time::timeout(ANNOUNCE_BUDGET, p).await;
         }
@@ -410,13 +498,28 @@ impl PeerInbox {
 
     fn stop_accepting(&self) {
         self.token.cancel();
-        if let Some(t) = self.ticker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        if let Some(t) = self
+            .ticker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             t.abort();
         }
-        if let Some(t) = self.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        if let Some(t) = self
+            .pump
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             t.abort();
         }
-        if let Some(t) = self.task.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        if let Some(t) = self
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             t.abort();
         }
     }
@@ -465,7 +568,12 @@ async fn accept_loop(
             drop(stream);
             continue;
         };
-        let (our, directory, token, path) = (our.clone(), directory.clone(), token.clone(), sock_path.clone());
+        let (our, directory, token, path) = (
+            our.clone(),
+            directory.clone(),
+            token.clone(),
+            sock_path.clone(),
+        );
         // One task per connection. A panic stays inside it (the runtime catches it; the permit is released on
         // unwind), so the loop never goes down with a connection.
         tokio::spawn(async move {
@@ -505,6 +613,10 @@ pub(super) mod fault {
         FAULTS.lock().unwrap().push((id.clone(), f));
     }
     pub(crate) fn is(id: &HostId, f: Fault) -> bool {
-        FAULTS.lock().unwrap().iter().any(|(i, x)| i == id && *x == f)
+        FAULTS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(i, x)| i == id && *x == f)
     }
 }

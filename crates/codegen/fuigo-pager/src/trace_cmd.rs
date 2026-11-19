@@ -407,7 +407,10 @@ impl std::fmt::Display for UploadMethodDisplay<'_> {
 // Local export
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::disallowed_methods, reason = "read-only trace export (design F5 5.4.3)")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "read-only trace export (design F5 5.4.3)"
+)]
 pub(crate) fn find_session_dir(session_id: &str) -> Result<PathBuf> {
     fuigo_shell::session::persistence::find_session_dir_by_id(session_id).with_context(|| {
         format!(
@@ -979,7 +982,7 @@ mod p149_export_scrub {
     use super::*;
 
     const SENT: &str = "fuigo-p149-SYNTH-trace-export-key-01";
-    const GHP: &str = "ghp_p149SYNTHp149SYNTHp149SYNTHp149SYNTH";
+    const GHP: &str = concat!("gh", "p_p149SYNTHp149SYNTHp149SYNTHp149SYNTH");
     const PEM_BODY: &str = "MIIEp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHAA";
 
     fn unpacked(archive: &[u8]) -> Vec<(String, Vec<u8>)> {

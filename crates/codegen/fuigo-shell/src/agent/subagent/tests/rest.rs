@@ -1,4 +1,8 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "test fixture files in a tempdir, never inside a session folder"
+)]
 use super::*;
 use super::super::resume_window::resume_inherited_prefix_len;
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway};

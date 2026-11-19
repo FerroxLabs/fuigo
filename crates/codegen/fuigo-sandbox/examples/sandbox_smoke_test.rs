@@ -16,9 +16,9 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 #[cfg(unix)]
-use std::path::Path;
-#[cfg(unix)]
 use fuigo_sandbox::{ProfileName, SandboxManager};
+#[cfg(unix)]
+use std::path::Path;
 
 #[cfg(not(unix))]
 fn main() {

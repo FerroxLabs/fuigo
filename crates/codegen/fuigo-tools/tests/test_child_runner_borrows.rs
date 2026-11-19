@@ -84,6 +84,13 @@ async fn a_coordinator_serves_a_runner_that_borrows_from_its_caller() {
         () = coordinator.run() => panic!("the coordinator stopped while its backend was alive"),
         outcome = backend.validate_type("explore", "parent") => outcome,
     };
-    assert!(matches!(outcome, SubagentValidateTypeOutcome::Ok), "{outcome:?}");
-    assert_eq!(validations.get(), 1, "the borrowing runner served the validation");
+    assert!(
+        matches!(outcome, SubagentValidateTypeOutcome::Ok),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        validations.get(),
+        1,
+        "the borrowing runner served the validation"
+    );
 }

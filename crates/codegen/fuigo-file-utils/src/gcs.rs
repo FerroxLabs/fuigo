@@ -774,7 +774,10 @@ mod tests {
             "the source must have received the request (the redirect is what is under test)"
         );
         let err = format!("{:#}", result.unwrap_err());
-        assert!(!err.contains("The request was not made"), "not a P47 refusal: {err}");
+        assert!(
+            !err.contains("The request was not made"),
+            "not a P47 refusal: {err}"
+        );
     }
 
     fn proxy_config() -> TraceExportConfig {
@@ -827,15 +830,28 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let small_file = temp.path().join("small.bin");
         std::fs::write(&small_file, vec![0u8; 1024]).unwrap();
-        let err = upload_file(&config, "s/turn_0/small.bin", &small_file, "application/octet-stream")
-            .await
-            .unwrap_err();
+        let err = upload_file(
+            &config,
+            "s/turn_0/small.bin",
+            &small_file,
+            "application/octet-stream",
+        )
+        .await
+        .unwrap_err();
         assert!(
             fuigo_auth::find_bearer_refusal(err.as_ref()).is_some(),
             "the refusal must survive typed: {err:#}"
         );
-        assert!(!state.storage_called.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(!state.multipart_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            !state
+                .storage_called
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(
+            !state
+                .multipart_called
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
         let _ = upload_file(
             &StaticKeyProxy(config),
             "s/turn_0/small.bin",
@@ -843,7 +859,11 @@ mod tests {
             "application/octet-stream",
         )
         .await;
-        assert!(state.storage_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            state
+                .storage_called
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
     }
 
     fn direct_config() -> TraceExportConfig {
@@ -1104,12 +1124,27 @@ mod p71_gate_tests {
         let file = dir.path().join("archive.bin");
         std::fs::write(&file, CONTENT).unwrap();
         vec![
-            ("upload_bytes", upload_bytes(config, "s/a.bin", CONTENT, "application/gzip").await),
-            ("upload_bytes_signed", upload_bytes_signed(config, "s/b.bin", CONTENT, "application/gzip").await),
-            ("upload_file", upload_file(config, "s/c.bin", &file, "application/gzip").await),
+            (
+                "upload_bytes",
+                upload_bytes(config, "s/a.bin", CONTENT, "application/gzip").await,
+            ),
+            (
+                "upload_bytes_signed",
+                upload_bytes_signed(config, "s/b.bin", CONTENT, "application/gzip").await,
+            ),
+            (
+                "upload_file",
+                upload_file(config, "s/c.bin", &file, "application/gzip").await,
+            ),
             (
                 "upload_stream",
-                upload_stream(config, "s/d.bin", std::io::Cursor::new(CONTENT.to_vec()), "application/gzip").await,
+                upload_stream(
+                    config,
+                    "s/d.bin",
+                    std::io::Cursor::new(CONTENT.to_vec()),
+                    "application/gzip",
+                )
+                .await,
             ),
         ]
     }
@@ -1124,7 +1159,11 @@ mod p71_gate_tests {
             assert!(is_withheld(&err), "{name}: {err:#}");
         }
         mock.settle(std::time::Duration::from_millis(300)).await;
-        assert_eq!(mock.connections(), 0, "a connection reached the third-party proxy");
+        assert_eq!(
+            mock.connections(),
+            0,
+            "a connection reached the third-party proxy"
+        );
         assert!(mock.received().is_empty());
         assert!(!mock.received_contains(b"P71-ARCHIVE"));
     }
@@ -1140,34 +1179,69 @@ mod p71_gate_tests {
         let dir = tempfile::TempDir::new().unwrap();
         let file = dir.path().join("archive.bin");
         std::fs::write(&file, CONTENT).unwrap();
-        let files = || vec![("s/a.bin".to_string(), CONTENT.to_vec(), "application/gzip".to_string())];
+        let files = || {
+            vec![(
+                "s/a.bin".to_string(),
+                CONTENT.to_vec(),
+                "application/gzip".to_string(),
+            )]
+        };
 
         let withheld: Vec<(&str, bool)> = vec![
-            ("upload", client.upload("s/a.bin", CONTENT, "application/gzip").await.is_err_and(|e| is_withheld(&e))),
-            ("upload_file", client.upload_file("s/b.bin", &file, "application/gzip").await.is_err_and(|e| is_withheld(&e))),
+            (
+                "upload",
+                client
+                    .upload("s/a.bin", CONTENT, "application/gzip")
+                    .await
+                    .is_err_and(|e| is_withheld(&e)),
+            ),
+            (
+                "upload_file",
+                client
+                    .upload_file("s/b.bin", &file, "application/gzip")
+                    .await
+                    .is_err_and(|e| is_withheld(&e)),
+            ),
             (
                 "upload_stream",
                 client
-                    .upload_stream("s/c.bin", std::io::Cursor::new(CONTENT.to_vec()), "application/gzip")
+                    .upload_stream(
+                        "s/c.bin",
+                        std::io::Cursor::new(CONTENT.to_vec()),
+                        "application/gzip",
+                    )
                     .await
                     .is_err_and(|e| is_withheld(&e)),
             ),
             (
                 "upload_multipart",
-                client.upload_multipart("s/d.bin", &file, "application/gzip", None).await.is_err_and(|e| is_withheld(&e)),
+                client
+                    .upload_multipart("s/d.bin", &file, "application/gzip", None)
+                    .await
+                    .is_err_and(|e| is_withheld(&e)),
             ),
             (
                 "upload_bytes_signed",
-                client.upload_bytes_signed("s/f.bin", CONTENT, "application/gzip").await.is_err_and(|e| is_withheld(&e)),
+                client
+                    .upload_bytes_signed("s/f.bin", CONTENT, "application/gzip")
+                    .await
+                    .is_err_and(|e| is_withheld(&e)),
             ),
             ("batch_upload", client.batch_upload(files()).await.is_none()),
-            ("batch_upload_json", client.batch_upload_json(files()).await.is_none()),
+            (
+                "batch_upload_json",
+                client.batch_upload_json(files()).await.is_none(),
+            ),
         ];
         for (name, refused) in &withheld {
             assert!(refused, "{name}: not refused as withheld");
         }
         mock.settle(std::time::Duration::from_millis(300)).await;
-        assert_eq!(mock.connections(), 0, "a storage client reached the third-party proxy");
+        assert_eq!(
+            mock.connections(),
+            0,
+            "a storage client reached the third-party proxy"
+        );
         assert!(mock.received().is_empty());
     }
 
@@ -1179,14 +1253,28 @@ mod p71_gate_tests {
         let _ = run_all(&config).await;
         let _ = run_all(&config).await;
         let notices = withheld_notices();
-        assert_eq!(notices.iter().filter(|n| n.as_str() == WITHHELD_NOTICE).count(), 1);
-        assert!(WITHHELD_NOTICE.contains("NOT uploaded") && WITHHELD_NOTICE.contains("trace_upload_bucket"));
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|n| n.as_str() == WITHHELD_NOTICE)
+                .count(),
+            1
+        );
+        assert!(
+            WITHHELD_NOTICE.contains("NOT uploaded")
+                && WITHHELD_NOTICE.contains("trace_upload_bucket")
+        );
     }
 
     /// Fail closed: a proxy that cannot be classified is class 3.
     #[tokio::test]
     async fn unclassifiable_destination_receives_nothing() {
-        for base in ["not a url", "", "ftp://127.0.0.1/v1", "http://api.fluxrouter.ai.evil.example/v1"] {
+        for base in [
+            "not a url",
+            "",
+            "ftp://127.0.0.1/v1",
+            "http://api.fluxrouter.ai.evil.example/v1",
+        ] {
             let config = proxy(base);
             for (name, outcome) in run_all(&config).await {
                 let err = outcome.expect_err(name);
@@ -1206,28 +1294,57 @@ mod p71_gate_tests {
             let file = dir.path().join("archive.bin");
             std::fs::write(&file, CONTENT).unwrap();
             let outcome = match name {
-                "upload_bytes" => upload_bytes(&config, "s/a.bin", CONTENT, "application/gzip").await,
+                "upload_bytes" => {
+                    upload_bytes(&config, "s/a.bin", CONTENT, "application/gzip").await
+                }
                 "upload_file" => upload_file(&config, "s/c.bin", &file, "application/gzip").await,
-                _ => upload_stream(&config, "s/d.bin", std::io::Cursor::new(CONTENT.to_vec()), "application/gzip").await,
+                _ => {
+                    upload_stream(
+                        &config,
+                        "s/d.bin",
+                        std::io::Cursor::new(CONTENT.to_vec()),
+                        "application/gzip",
+                    )
+                    .await
+                }
             };
             if let Err(err) = &outcome {
                 assert!(!is_withheld(err), "{name}: {err:#}");
             }
-            assert!(mock.requests() >= 1, "{name}: no request reached the class 1 mock");
-            assert!(mock.received_contains(CONTENT), "{name}: bytes not received unchanged");
+            assert!(
+                mock.requests() >= 1,
+                "{name}: no request reached the class 1 mock"
+            );
+            assert!(
+                mock.received_contains(CONTENT),
+                "{name}: bytes not received unchanged"
+            );
         }
         // The signed-URL flow asks the proxy for a URL, then PUTs the payload to it (the mock answers with
         // a URL on itself): both requests arrive, and the payload arrives unchanged.
         let mock = RecordingEndpoint::fluxrouter_class().await;
-        let outcome =
-            upload_bytes_signed(&proxy(&mock.proxy_base_url()), "s/b.bin", CONTENT, "application/gzip").await;
+        let outcome = upload_bytes_signed(
+            &proxy(&mock.proxy_base_url()),
+            "s/b.bin",
+            CONTENT,
+            "application/gzip",
+        )
+        .await;
         outcome.expect("the signed-URL upload to a class 1 mock completes");
-        assert!(mock.received_contains(b"/storage/signed-upload-url"), "no signed-URL request reached the mock");
         assert!(
-            mock.received_contains(format!("PUT {}", crate::gate_testkit::SIGNED_PUT_PATH).as_bytes()),
+            mock.received_contains(b"/storage/signed-upload-url"),
+            "no signed-URL request reached the mock"
+        );
+        assert!(
+            mock.received_contains(
+                format!("PUT {}", crate::gate_testkit::SIGNED_PUT_PATH).as_bytes()
+            ),
             "upload_bytes_signed never PUT its payload"
         );
-        assert!(mock.received_contains(CONTENT), "upload_bytes_signed: bytes not received unchanged");
+        assert!(
+            mock.received_contains(CONTENT),
+            "upload_bytes_signed: bytes not received unchanged"
+        );
     }
 
     /// Class 2: the operator's own S3 bucket receives the bytes unchanged, through each dispatcher that
@@ -1244,13 +1361,27 @@ mod p71_gate_tests {
             let outcome = match name {
                 "upload_bytes" => upload_bytes(&config, &key, CONTENT, "application/gzip").await,
                 "upload_file" => upload_file(&config, &key, &file, "application/gzip").await,
-                _ => upload_stream(&config, &key, std::io::Cursor::new(CONTENT.to_vec()), "application/gzip").await,
+                _ => {
+                    upload_stream(
+                        &config,
+                        &key,
+                        std::io::Cursor::new(CONTENT.to_vec()),
+                        "application/gzip",
+                    )
+                    .await
+                }
             };
             if let Err(err) = &outcome {
                 assert!(!is_withheld(err), "{name}: {err:#}");
             }
-            assert!(mock.received_contains(key.as_bytes()), "{name}: the S3 bucket saw no request for {key}");
-            assert!(mock.received_contains(CONTENT), "{name}: the S3 bucket did not receive the bytes unchanged");
+            assert!(
+                mock.received_contains(key.as_bytes()),
+                "{name}: the S3 bucket saw no request for {key}"
+            );
+            assert!(
+                mock.received_contains(CONTENT),
+                "{name}: the S3 bucket did not receive the bytes unchanged"
+            );
         }
     }
 
@@ -1258,7 +1389,9 @@ mod p71_gate_tests {
     /// mock stands in for GCS; the gate decision is what is asserted.)
     #[test]
     fn direct_gcs_is_the_operators_bucket() {
-        let method = UploadMethod::Direct { service_account_key: None };
+        let method = UploadMethod::Direct {
+            service_account_key: None,
+        };
         assert!(crate::destination_gate::gate_upload(&method, "s/a.bin").is_ok());
     }
 }

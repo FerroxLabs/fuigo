@@ -36,11 +36,11 @@ use crate::implementations::opencode::write::WriteInput;
 use crate::implementations::search_tool::SearchToolInput;
 use crate::implementations::skills::skill::SkillInput;
 use crate::implementations::use_tool::UseToolInput;
-use serde::{Deserialize, Serialize};
 use fuigo_tool_types::KillTaskToolInput;
 use fuigo_tool_types::TaskOutputToolInput;
 use fuigo_tool_types::TaskToolInput;
 use fuigo_tool_types::WaitTasksToolInput;
+use serde::{Deserialize, Serialize};
 /// Raw input for an MCP (Model Context Protocol) tool call.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MCPToolInput {

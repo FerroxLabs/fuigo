@@ -1584,9 +1584,9 @@ mod tests {
             // is about the shutdown drain clamp.
             fn proxy_credentials(&self) -> Option<Arc<dyn fuigo_auth::AuthCredentialProvider>> {
                 Some(Arc::new(fuigo_auth::StaticAuthCredentialProvider::new(
-                    Box::new(fuigo_file_utils::storage_client::StaticFuigoAuth::new(Some(
-                        "test-token".into(),
-                    ))),
+                    Box::new(fuigo_file_utils::storage_client::StaticFuigoAuth::new(
+                        Some("test-token".into()),
+                    )),
                     Some("test-token".into()),
                     fuigo_auth::BearerDestination::Unrestricted,
                 )))

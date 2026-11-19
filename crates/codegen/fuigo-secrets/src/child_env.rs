@@ -143,9 +143,8 @@ where
         .into_iter()
         .filter_map(|name| {
             let name = name.as_ref();
-            let usable = !name.is_empty()
-                && !name.contains(['=', '\0'])
-                && !is_never_credential_name(name);
+            let usable =
+                !name.is_empty() && !name.contains(['=', '\0']) && !is_never_credential_name(name);
             usable.then(|| name.to_ascii_uppercase())
         })
         // P113 r3 (Astra r3 #1): a built-in provider name a config names (an MCP `bearer_token_env_var =
@@ -272,7 +271,9 @@ pub fn windows_env_names_equal(a: &str, b: &str) -> bool {
     if a.is_ascii() && b.is_ascii() {
         return a.eq_ignore_ascii_case(b);
     }
-    a.chars().map(windows_upcase).eq(b.chars().map(windows_upcase))
+    a.chars()
+        .map(windows_upcase)
+        .eq(b.chars().map(windows_upcase))
 }
 
 /// `name` mapped through [`windows_upcase`]: equal keys are exactly the names
@@ -295,7 +296,9 @@ pub fn credential_names_match(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
         || windows_env_names_equal(a, b)
         || (!(a.is_ascii() && b.is_ascii())
-            && a.chars().map(fold_lower_then_upcase).eq(b.chars().map(fold_lower_then_upcase)))
+            && a.chars()
+                .map(fold_lower_then_upcase)
+                .eq(b.chars().map(fold_lower_then_upcase)))
 }
 
 /// Every built-in credential name: the provider keys, then Fuigo's own.
@@ -409,10 +412,16 @@ mod u35_winenv_tests {
     #[test]
     fn windows_env_names_equal_folds_unicode_case() {
         assert!(windows_env_names_equal("Path", "PATH"));
-        assert!(windows_env_names_equal("\u{f6}auth", "\u{d6}AUTH"), "\u{f6} uppercases to \u{d6}");
+        assert!(
+            windows_env_names_equal("\u{f6}auth", "\u{d6}AUTH"),
+            "\u{f6} uppercases to \u{d6}"
+        );
         assert!(windows_env_names_equal("caf\u{e9}_key", "CAF\u{c9}_KEY"));
         assert!(!windows_env_names_equal("PATH", "PATHS"));
-        assert!(!windows_env_names_equal("STRASSE", "stra\u{df}e"), "\u{df} has no one-to-one uppercase");
+        assert!(
+            !windows_env_names_equal("STRASSE", "stra\u{df}e"),
+            "\u{df} has no one-to-one uppercase"
+        );
         assert_eq!(windows_env_name_key("\u{f6}auth"), "\u{d6}AUTH");
         // A character outside the BMP is a surrogate pair to Windows and is never case-mapped.
         assert!(!windows_env_names_equal("\u{10428}", "\u{10400}"));
@@ -424,8 +433,14 @@ mod u35_winenv_tests {
     #[test]
     fn provider_credentials_match_unicode_spellings() {
         assert!(is_provider_credential("openai_api_key"));
-        assert!(is_provider_credential("OPENA\u{131}_API_KEY"), "dotless i aliases I");
-        assert!(is_provider_credential("GROQ_API_\u{212A}EY"), "Kelvin sign aliases K");
+        assert!(
+            is_provider_credential("OPENA\u{131}_API_KEY"),
+            "dotless i aliases I"
+        );
+        assert!(
+            is_provider_credential("GROQ_API_\u{212A}EY"),
+            "Kelvin sign aliases K"
+        );
         assert!(is_fuigo_secret("FUIGO_AP\u{131}_KEY"));
         assert!(is_fuigo_owned_secret("flux_ap\u{131}_key"));
         assert!(!is_provider_credential("OPENAI_API_KEYS"));
@@ -465,23 +480,40 @@ mod u35_winenv_tests {
         if cfg!(windows) {
             assert!(!is_provider_credential("\u{17f}HELL"));
         } else {
-            assert!(is_provider_credential("\u{17f}HELL"), "the credential must be removed from children");
+            assert!(
+                is_provider_credential("\u{17f}HELL"),
+                "the credential must be removed from children"
+            );
             assert!(is_fuigo_secret("\u{17f}HELL"));
             assert!(
-                credential_env_names().iter().any(|name| name == "\u{17f}HELL"),
+                credential_env_names()
+                    .iter()
+                    .any(|name| name == "\u{17f}HELL"),
                 "listed as denied"
             );
         }
-        assert!(!is_provider_credential("SHELL"), "SHELL itself is never a credential");
+        assert!(
+            !is_provider_credential("SHELL"),
+            "SHELL itself is never a credential"
+        );
         assert!(!is_fuigo_secret("SHELL"));
     }
 
     /// Whether a name is a never-credential name is the host's own name rule, never the wide fold.
     #[test]
     fn never_credential_rule_is_the_hosts_name_rule() {
-        assert!(is_never_credential_name_on("\u{17f}HELL", true), "Windows: one variable with SHELL");
-        assert!(!is_never_credential_name_on("\u{17f}HELL", false), "Unix: a distinct variable");
-        assert!(is_never_credential_name_on("Shell", false), "Unix registry rule stays ASCII-insensitive");
+        assert!(
+            is_never_credential_name_on("\u{17f}HELL", true),
+            "Windows: one variable with SHELL"
+        );
+        assert!(
+            !is_never_credential_name_on("\u{17f}HELL", false),
+            "Unix: a distinct variable"
+        );
+        assert!(
+            is_never_credential_name_on("Shell", false),
+            "Unix registry rule stays ASCII-insensitive"
+        );
         assert!(is_never_credential_name_on("Path", true));
     }
 }

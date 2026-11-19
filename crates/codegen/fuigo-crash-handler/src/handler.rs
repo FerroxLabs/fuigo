@@ -532,7 +532,10 @@ mod imp {
     /// so a symlinked or foreign directory keeps its mode. Tighten failure is ignored.
     fn create_crash_dir(dir: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
         if let Ok(handle) = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
@@ -610,7 +613,8 @@ mod imp {
             unsafe {
                 libc::close(fd);
             }
-            static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
             report_slot_refused_once(&mut std::io::stderr(), &REPORTED, &crash_file);
             return false;
         }
@@ -1205,7 +1209,10 @@ mod tests {
         super::imp::report_slot_refused_once(&mut out, &reported, slot);
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text.lines().count(), 1, "{text}");
-        assert!(text.contains("crash reporting is off") && text.contains("/crash/slot.bin"), "{text}");
+        assert!(
+            text.contains("crash reporting is off") && text.contains("/crash/slot.bin"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1338,7 +1345,10 @@ mod tests {
         let link = base.join("crash");
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
         let _ = super::install(&link, "test-version");
-        let mode = std::fs::metadata(&target).expect("meta").permissions().mode();
+        let mode = std::fs::metadata(&target)
+            .expect("meta")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o755, "symlink target must be untouched");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1359,7 +1369,10 @@ mod tests {
         std::fs::write(&sentinel, b"keep me").expect("seed");
         std::os::unix::fs::symlink(&sentinel, dir.join(crate::slot_file_name(pid, token)))
             .expect("symlink");
-        assert!(!super::install(&dir, "test-version"), "the symlinked slot is refused");
+        assert!(
+            !super::install(&dir, "test-version"),
+            "the symlinked slot is refused"
+        );
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep me");
         let _ = std::fs::remove_dir_all(&dir);
     }

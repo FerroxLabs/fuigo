@@ -139,7 +139,10 @@ pub(super) fn deliver_at_open(
     deliver_withheld_instructions(
         conversation,
         inherited_prefix_len,
-        &WithheldInstructions { reminder: agent.agents_md_user_reminder(), workspace_rules },
+        &WithheldInstructions {
+            reminder: agent.agents_md_user_reminder(),
+            workspace_rules,
+        },
     )
 }
 
@@ -215,7 +218,9 @@ impl SessionActor {
             deliver_withheld_instructions(&mut conversation, inherited_prefix_len, &instructions)
         };
         let still_withheld = (!delivered && holder_owed)
-            || conversation.iter().any(ConversationItem::project_files_withheld);
+            || conversation
+                .iter()
+                .any(ConversationItem::project_files_withheld);
         if delivered
             && let Err(error) = self
                 .chat_state_handle
@@ -235,7 +240,11 @@ impl SessionActor {
         self.refresh_classifier_project_instructions();
         let mut prompt_context = self.agent.borrow().prompt_context().clone();
         prompt_context.normalize_for_persistence();
-        save_prompt_context(&self.session_info, self.rebuild_spec.session_writer.as_ref(), &prompt_context);
+        save_prompt_context(
+            &self.session_info,
+            self.rebuild_spec.session_writer.as_ref(),
+            &prompt_context,
+        );
     }
 
     /// The agent's current list, split for delivery.
@@ -247,7 +256,9 @@ impl SessionActor {
         }
     }
 
-    async fn rediscover_agents_md_files(&self) -> Vec<fuigo_agent::prompt::agents_md::AgentConfigFile> {
+    async fn rediscover_agents_md_files(
+        &self,
+    ) -> Vec<fuigo_agent::prompt::agents_md::AgentConfigFile> {
         #[cfg(test)]
         {
             let (delay, panic) =

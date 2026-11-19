@@ -1335,22 +1335,42 @@ fn the_history_repair_note_is_not_replayed_on_a_later_full_load() {
     );
     let raw = format!("{prompt}\n{note}\n{answer}\n");
 
-    assert!(line_is_dropped_on_full_replay(&note), "a full replay leaves the note out");
-    assert!(!line_is_dropped_on_replay(&note), "the note is not dropped by every replay");
+    assert!(
+        line_is_dropped_on_full_replay(&note),
+        "a full replay leaves the note out"
+    );
+    assert!(
+        !line_is_dropped_on_replay(&note),
+        "the note is not dropped by every replay"
+    );
     assert!(!line_is_dropped_on_full_replay(&prompt) && !line_is_dropped_on_full_replay(&answer));
     let full = prepare_replay_lines(&raw, None);
-    assert_eq!(full.lines.len(), 2, "a full replay holds the prompt and the answer, not the note: {:?}", full.lines);
-    assert!(full.lines.iter().all(|line| !line.contains("history_repaired")));
+    assert_eq!(
+        full.lines.len(),
+        2,
+        "a full replay holds the prompt and the answer, not the note: {:?}",
+        full.lines
+    );
+    assert!(
+        full.lines
+            .iter()
+            .all(|line| !line.contains("history_repaired"))
+    );
     // A client that was disconnected before the note comes back with the cursor of the prompt: the note is new to it.
     let resumed = prepare_replay_lines(&raw, Some("ev1"));
     assert!(!resumed.mark_replay);
     assert!(
-        resumed.lines.iter().any(|line| line.contains("history_repaired")),
+        resumed
+            .lines
+            .iter()
+            .any(|line| line.contains("history_repaired")),
         "an incremental replay carries the note the client has not seen: {:?}",
         resumed.lines
     );
     assert!(
-        filter_delta_replay_lines(&raw).iter().any(|line| line.contains("history_repaired")),
+        filter_delta_replay_lines(&raw)
+            .iter()
+            .any(|line| line.contains("history_repaired")),
         "the delta replay carries it too"
     );
 }

@@ -193,7 +193,10 @@ fn load_envrc_with_timeout(
 
     // Also asked here so the direct `load_envrc` callers get the same answer as the spawned load.
     if !crate::folder_trust::dir_trust(dir).is_trusted() {
-        tracing::debug!(?dir, "folder trust: .envrc not evaluated in an untrusted folder");
+        tracing::debug!(
+            ?dir,
+            "folder trust: .envrc not evaluated in an untrusted folder"
+        );
         return None;
     }
     match try_direnv_export(dir, deadline, sandbox) {
@@ -546,88 +549,98 @@ struct Wake {
 
 impl PipeDrain {
     #[cfg(unix)]
-    fn start(mut pipe: impl std::io::Read + std::os::fd::AsRawFd + Send + 'static, wake: Arc<Wake>) -> Self {
+    fn start(
+        mut pipe: impl std::io::Read + std::os::fd::AsRawFd + Send + 'static,
+        wake: Arc<Wake>,
+    ) -> Self {
         let fd = pipe.as_raw_fd();
         // Our read end only; the child's write end stays blocking.
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFL);
             libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
-        Self::spawn_reader(move |stop, sink, cut| {
-            let mut chunk = [0u8; 8192];
-            loop {
-                if stop.load(Ordering::Relaxed) {
-                    // `finish` stopped waiting (EOF, cap, or a quiet spell). A reader that the scheduler starved for that long has not yet taken what the evaluator wrote before it exited, and it is still in the pipe: take it now (the read end is non-blocking, so this ends at the first empty read).
-                    loop {
-                        let n = match pipe.read(&mut chunk) {
-                            Ok(n) => n,
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                            Err(_) => break,
-                        };
-                        let mut buf = lock_ignore_poison(&sink);
-                        if n == 0 || buf.len() + n > MAX_DRAIN_BYTES {
-                            if n != 0 {
-                                cut.store(true, Ordering::Relaxed);
+        Self::spawn_reader(
+            move |stop, sink, cut| {
+                let mut chunk = [0u8; 8192];
+                loop {
+                    if stop.load(Ordering::Relaxed) {
+                        // `finish` stopped waiting (EOF, cap, or a quiet spell). A reader that the scheduler starved for that long has not yet taken what the evaluator wrote before it exited, and it is still in the pipe: take it now (the read end is non-blocking, so this ends at the first empty read).
+                        loop {
+                            let n = match pipe.read(&mut chunk) {
+                                Ok(n) => n,
+                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                                Err(_) => break,
+                            };
+                            let mut buf = lock_ignore_poison(&sink);
+                            if n == 0 || buf.len() + n > MAX_DRAIN_BYTES {
+                                if n != 0 {
+                                    cut.store(true, Ordering::Relaxed);
+                                }
+                                break;
                             }
-                            break;
+                            buf.extend_from_slice(&chunk[..n]);
                         }
-                        buf.extend_from_slice(&chunk[..n]);
+                        break;
                     }
-                    break;
-                }
-                let mut pollfd = libc::pollfd {
-                    fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                let ready = unsafe { libc::poll(&mut pollfd, 1, POLL_INTERVAL.as_millis() as i32) };
-                if ready <= 0 {
-                    continue; // timeout or EINTR; re-check `stop`
-                }
-                match pipe.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let mut buf = lock_ignore_poison(&sink);
-                        if buf.len() + n > MAX_DRAIN_BYTES {
-                            cut.store(true, Ordering::Relaxed);
-                            break;
+                    let mut pollfd = libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let ready =
+                        unsafe { libc::poll(&mut pollfd, 1, POLL_INTERVAL.as_millis() as i32) };
+                    if ready <= 0 {
+                        continue; // timeout or EINTR; re-check `stop`
+                    }
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let mut buf = lock_ignore_poison(&sink);
+                            if buf.len() + n > MAX_DRAIN_BYTES {
+                                cut.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
                         }
-                        buf.extend_from_slice(&chunk[..n]);
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::Interrupted =>
+                        {
+                            continue;
+                        }
+                        Err(_) => break,
                     }
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::Interrupted =>
-                    {
-                        continue;
-                    }
-                    Err(_) => break,
                 }
-            }
-        }, wake)
+            },
+            wake,
+        )
     }
 
     #[cfg(not(unix))]
     fn start(mut pipe: impl std::io::Read + Send + 'static, wake: Arc<Wake>) -> Self {
-        Self::spawn_reader(move |stop, sink, cut| {
-            let mut chunk = [0u8; 8192];
-            loop {
-                match pipe.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if stop.load(Ordering::Relaxed) {
-                            cut.store(true, Ordering::Relaxed);
-                            break;
+        Self::spawn_reader(
+            move |stop, sink, cut| {
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if stop.load(Ordering::Relaxed) {
+                                cut.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            let mut buf = lock_ignore_poison(&sink);
+                            if buf.len() + n > MAX_DRAIN_BYTES {
+                                cut.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
                         }
-                        let mut buf = lock_ignore_poison(&sink);
-                        if buf.len() + n > MAX_DRAIN_BYTES {
-                            cut.store(true, Ordering::Relaxed);
-                            break;
-                        }
-                        buf.extend_from_slice(&chunk[..n]);
                     }
                 }
-            }
-        }, wake)
+            },
+            wake,
+        )
     }
 
     fn spawn_reader(
@@ -737,7 +750,8 @@ impl Drop for PipeDrain {
 
 /// Reap a killed child; abandon a D-state corpse (the zombie pins its pid).
 fn reap_with_timeout(child: &mut std::process::Child, label: &str) {
-    if let Ok(None) = wait_timeout::ChildExt::wait_timeout(child, fuigo_tty_utils::KILL_REAP_TIMEOUT)
+    if let Ok(None) =
+        wait_timeout::ChildExt::wait_timeout(child, fuigo_tty_utils::KILL_REAP_TIMEOUT)
     {
         tracing::warn!(
             label,
@@ -748,7 +762,8 @@ fn reap_with_timeout(child: &mut std::process::Child, label: &str) {
 }
 
 fn lock_ignore_poison_unit(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
-    lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn lock_ignore_poison(buf: &Mutex<Vec<u8>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
@@ -852,17 +867,33 @@ mod tests {
         let before = waits();
         let t = Instant::now();
         let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET, None).unwrap();
-        eprintln!("envrc plain load: {:?} grace_waits={}", t.elapsed(), waits() - before);
+        eprintln!(
+            "envrc plain load: {:?} grace_waits={}",
+            t.elapsed(),
+            waits() - before
+        );
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
-        assert_eq!(waits() - before, 0, "a plain .envrc must not wait out a grace window");
+        assert_eq!(
+            waits() - before,
+            0,
+            "a plain .envrc must not wait out a grace window"
+        );
 
         fs::write(dir.path().join(".envrc"), "export FOO=bar\nsleep 5 &\n").unwrap();
         let before = waits();
         let t = Instant::now();
         let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET, None).unwrap();
-        eprintln!("envrc held-pipe load: {:?} grace_waits={}", t.elapsed(), waits() - before);
+        eprintln!(
+            "envrc held-pipe load: {:?} grace_waits={}",
+            t.elapsed(),
+            waits() - before
+        );
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
-        assert_eq!(waits() - before, 1, "stdout and stderr share one grace window");
+        assert_eq!(
+            waits() - before,
+            1,
+            "stdout and stderr share one grace window"
+        );
     }
 
     /// Descendant output after the sentinel must be ignored, not treated as an incomplete capture.
@@ -936,12 +967,20 @@ mod p120_tests {
         fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
         let dir = probe::scratch_dir("p120-envrc");
         let out = dir.join("envrc-env.txt");
-        std::fs::write(dir.join(".envrc"), format!("env > '{}'\nexport P120_FROM_ENVRC=1\n", out.display())).unwrap();
+        std::fs::write(
+            dir.join(".envrc"),
+            format!("env > '{}'\nexport P120_FROM_ENVRC=1\n", out.display()),
+        )
+        .unwrap();
         let loaded = load_envrc_or_empty(&dir);
         let dump = std::fs::read_to_string(&out).expect("the .envrc ran");
         probe::assert_clean(&dump, &[]);
         probe::assert_kept(&dump, REGISTERED);
-        assert_eq!(loaded.get("P120_FROM_ENVRC").map(String::as_str), Some("1"), "control: the .envrc's own export is still imported");
+        assert_eq!(
+            loaded.get("P120_FROM_ENVRC").map(String::as_str),
+            Some("1"),
+            "control: the .envrc's own export is still imported"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

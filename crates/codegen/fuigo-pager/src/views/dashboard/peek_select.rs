@@ -113,7 +113,10 @@ mod tests {
     fn single_row_selection_reads_back_the_dragged_cells() {
         let buf = buf_with(&["hello world", "second", "third"]);
         let cells = capture_cells(&buf, rect());
-        let sel = PeekTailSelection { anchor: (2, 1), head: (6, 1) };
+        let sel = PeekTailSelection {
+            anchor: (2, 1),
+            head: (6, 1),
+        };
         assert_eq!(selected_text(&cells, rect(), &sel), "hello");
     }
 
@@ -122,13 +125,19 @@ mod tests {
         let buf = buf_with(&["alpha", "beta", "gamma"]);
         let cells = capture_cells(&buf, rect());
         // Drag from the middle of row 3 back up to the middle of row 1
-        let sel = PeekTailSelection { anchor: (4, 3), head: (4, 1) };
+        let sel = PeekTailSelection {
+            anchor: (4, 3),
+            head: (4, 1),
+        };
         assert_eq!(selected_text(&cells, rect(), &sel), "pha\nbeta\ngam");
     }
 
     #[test]
     fn a_click_without_a_drag_selects_nothing() {
-        let sel = PeekTailSelection { anchor: (3, 1), head: (3, 1) };
+        let sel = PeekTailSelection {
+            anchor: (3, 1),
+            head: (3, 1),
+        };
         assert!(sel.is_empty());
     }
 
@@ -142,7 +151,10 @@ mod tests {
     #[test]
     fn painting_inverts_exactly_the_selected_cells() {
         let mut buf = buf_with(&["hello world"]);
-        let sel = PeekTailSelection { anchor: (2, 1), head: (4, 1) };
+        let sel = PeekTailSelection {
+            anchor: (2, 1),
+            head: (4, 1),
+        };
         paint_selection(&mut buf, rect(), &sel);
         for x in 2..=4 {
             assert!(buf[(x, 1)].modifier.contains(Modifier::REVERSED), "col {x}");

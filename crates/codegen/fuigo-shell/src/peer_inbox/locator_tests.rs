@@ -4,7 +4,7 @@
 
 use super::*;
 use std::fs;
-use std::os::unix::fs::{symlink, DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -50,7 +50,10 @@ fn symlinked_home_fails_closed_with_fixed_text() {
     mkdir(&real.join("peers"), 0o700);
     let link = td.path().join("link");
     symlink(&real, &link).unwrap();
-    assert_eq!(CheckedDir::open(&link).unwrap_err(), Disabled::SymlinkedHome);
+    assert_eq!(
+        CheckedDir::open(&link).unwrap_err(),
+        Disabled::SymlinkedHome
+    );
     let e = CheckedDir::create_or_open(&link).unwrap_err();
     assert_eq!(e, Disabled::SymlinkedHome);
     assert_eq!(
@@ -69,7 +72,10 @@ fn symlinked_peers_refused() {
     mkdir(&td.path().join("elsewhere"), 0o700);
     symlink(td.path().join("elsewhere"), home.join("peers")).unwrap();
     assert_eq!(CheckedDir::open(&home).unwrap_err(), Disabled::PeersSymlink);
-    assert_eq!(CheckedDir::create_or_open(&home).unwrap_err(), Disabled::PeersSymlink);
+    assert_eq!(
+        CheckedDir::create_or_open(&home).unwrap_err(),
+        Disabled::PeersSymlink
+    );
 }
 
 #[test]
@@ -77,7 +83,10 @@ fn symlinked_locator_refused() {
     let (td, home, dir) = setup();
     write_file(&td.path().join("target"), b"x", 0o600);
     symlink(td.path().join("target"), home.join("peers/hosts.json")).unwrap();
-    assert_eq!(read_locator(&dir, "hosts.json"), Err(Disabled::Rejected(Reject::Symlink)));
+    assert_eq!(
+        read_locator(&dir, "hosts.json"),
+        Err(Disabled::Rejected(Reject::Symlink))
+    );
 }
 
 #[test]
@@ -87,14 +96,20 @@ fn hard_linked_locator_refused() {
     write_file(&p, b"x", 0o600);
     fs::hard_link(&p, td.path().join("other")).unwrap();
     assert_eq!(fs::metadata(&p).unwrap().nlink(), 2);
-    assert_eq!(read_locator(&dir, "hosts.json"), Err(Disabled::Rejected(Reject::HardLinked)));
+    assert_eq!(
+        read_locator(&dir, "hosts.json"),
+        Err(Disabled::Rejected(Reject::HardLinked))
+    );
 }
 
 #[test]
 fn wrong_file_mode_refused() {
     let (_td, home, dir) = setup();
     write_file(&home.join("peers/hosts.json"), b"x", 0o644);
-    assert_eq!(read_locator(&dir, "hosts.json"), Err(Disabled::Rejected(Reject::WrongMode)));
+    assert_eq!(
+        read_locator(&dir, "hosts.json"),
+        Err(Disabled::Rejected(Reject::WrongMode))
+    );
 }
 
 #[test]
@@ -103,8 +118,14 @@ fn wrong_dir_mode_refused() {
     let home = td.path().join("home");
     mkdir(&home, 0o700);
     mkdir(&home.join("peers"), 0o755);
-    assert_eq!(CheckedDir::open(&home).unwrap_err(), Disabled::PeersWrongMode);
-    assert_eq!(CheckedDir::create_or_open(&home).unwrap_err(), Disabled::PeersWrongMode);
+    assert_eq!(
+        CheckedDir::open(&home).unwrap_err(),
+        Disabled::PeersWrongMode
+    );
+    assert_eq!(
+        CheckedDir::create_or_open(&home).unwrap_err(),
+        Disabled::PeersWrongMode
+    );
 }
 
 #[test]
@@ -120,7 +141,9 @@ fn fifo_does_not_block() {
         let u = update_locator(&dir, "hosts.json", |_| Some(b"y".to_vec()));
         let _ = tx.send((r, u));
     });
-    let (r, u) = rx.recv_timeout(Duration::from_secs(10)).expect("read blocked on FIFO");
+    let (r, u) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("read blocked on FIFO");
     assert_eq!(r, Err(Disabled::Rejected(Reject::NotRegular)));
     assert_eq!(u, Err(Disabled::Rejected(Reject::NotRegular)));
 }
@@ -130,9 +153,15 @@ fn size_cap_is_exact() {
     let (_td, home, dir) = setup();
     let p = home.join("peers/hosts.json");
     write_file(&p, &vec![b'a'; 64 * 1024], 0o600);
-    assert_eq!(read_locator(&dir, "hosts.json").unwrap().unwrap().len(), 64 * 1024);
+    assert_eq!(
+        read_locator(&dir, "hosts.json").unwrap().unwrap().len(),
+        64 * 1024
+    );
     write_file(&p, &vec![b'a'; 64 * 1024 + 1], 0o600);
-    assert_eq!(read_locator(&dir, "hosts.json"), Err(Disabled::Rejected(Reject::TooLarge)));
+    assert_eq!(
+        read_locator(&dir, "hosts.json"),
+        Err(Disabled::Rejected(Reject::TooLarge))
+    );
     let big = update_locator_rewriting(&dir, "hosts.json", |_| Some(vec![0; 64 * 1024 + 1]));
     assert_eq!(big, Err(Disabled::OutputTooLarge));
 }
@@ -141,7 +170,10 @@ fn size_cap_is_exact() {
 fn directory_in_place_of_file_refused() {
     let (_td, home, dir) = setup();
     mkdir(&home.join("peers/hosts.json"), 0o700);
-    assert_eq!(read_locator(&dir, "hosts.json"), Err(Disabled::Rejected(Reject::NotRegular)));
+    assert_eq!(
+        read_locator(&dir, "hosts.json"),
+        Err(Disabled::Rejected(Reject::NotRegular))
+    );
     assert_eq!(
         update_locator(&dir, "hosts.json", |_| Some(vec![1])),
         Err(Disabled::Rejected(Reject::NotRegular))
@@ -159,7 +191,10 @@ fn ancestor_owned_by_other_uid_refused() {
         eprintln!("skipped: not root");
         return;
     }
-    assert_eq!(CheckedDir::open(&home).unwrap_err(), Disabled::AncestorWrongOwner);
+    assert_eq!(
+        CheckedDir::open(&home).unwrap_err(),
+        Disabled::AncestorWrongOwner
+    );
 }
 
 #[test]
@@ -170,12 +205,18 @@ fn world_writable_ancestor_refused_sticky_allowed() {
     let home = a.join("home");
     mkdir(&home, 0o700);
     mkdir(&home.join("peers"), 0o700);
-    assert_eq!(CheckedDir::open(&home).unwrap_err(), Disabled::AncestorWritableByOthers);
+    assert_eq!(
+        CheckedDir::open(&home).unwrap_err(),
+        Disabled::AncestorWritableByOthers
+    );
     fs::set_permissions(&a, fs::Permissions::from_mode(0o1777)).unwrap();
     CheckedDir::open(&home).unwrap();
     // group-writable non-sticky is refused too
     fs::set_permissions(&a, fs::Permissions::from_mode(0o770)).unwrap();
-    assert_eq!(CheckedDir::open(&home).unwrap_err(), Disabled::AncestorWritableByOthers);
+    assert_eq!(
+        CheckedDir::open(&home).unwrap_err(),
+        Disabled::AncestorWritableByOthers
+    );
 }
 
 #[test]
@@ -187,8 +228,16 @@ fn a_group_or_world_writable_home_is_refused_even_when_sticky() {
     CheckedDir::open(&home).unwrap();
     for mode in [0o1777, 0o1770, 0o777, 0o770, 0o720, 0o702] {
         fs::set_permissions(&home, fs::Permissions::from_mode(mode)).unwrap();
-        assert_eq!(CheckedDir::open(&home).unwrap_err(), Disabled::HomeWritableByOthers, "mode {mode:o}");
-        assert_eq!(CheckedDir::create_or_open(&home).unwrap_err(), Disabled::HomeWritableByOthers, "mode {mode:o}");
+        assert_eq!(
+            CheckedDir::open(&home).unwrap_err(),
+            Disabled::HomeWritableByOthers,
+            "mode {mode:o}"
+        );
+        assert_eq!(
+            CheckedDir::create_or_open(&home).unwrap_err(),
+            Disabled::HomeWritableByOthers,
+            "mode {mode:o}"
+        );
     }
     // an ordinary 0755 home keeps working
     fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
@@ -281,13 +330,19 @@ fn panic_in_f_leaves_no_temp_and_releases_lock() {
     })
     .join();
     assert!(r.is_err());
-    assert!(!names(&home.join("peers")).iter().any(|n| n.starts_with(".tmp-")));
+    assert!(
+        !names(&home.join("peers"))
+            .iter()
+            .any(|n| n.starts_with(".tmp-"))
+    );
     // lock is free again: this would hang otherwise
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(update_locator(&dir, "hosts.json", |_| Some(b"ok".to_vec())));
     });
-    rx.recv_timeout(Duration::from_secs(10)).expect("lock leaked").unwrap();
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("lock leaked")
+        .unwrap();
 }
 
 #[test]
@@ -300,7 +355,11 @@ fn none_removes_the_file() {
     })
     .unwrap();
     assert!(!home.join("peers/hosts.json").exists());
-    assert!(!names(&home.join("peers")).iter().any(|n| n.starts_with(".tmp-")));
+    assert!(
+        !names(&home.join("peers"))
+            .iter()
+            .any(|n| n.starts_with(".tmp-"))
+    );
 }
 
 #[test]
@@ -311,7 +370,10 @@ fn only_create_or_open_creates_peers() {
     assert_eq!(CheckedDir::open(&home).unwrap_err(), Disabled::PeersMissing);
     assert!(!home.join("peers").exists());
     let d = CheckedDir::create_or_open(&home).unwrap();
-    assert_eq!(fs::metadata(home.join("peers")).unwrap().mode() & 0o7777, 0o700);
+    assert_eq!(
+        fs::metadata(home.join("peers")).unwrap().mode() & 0o7777,
+        0o700
+    );
     drop(d);
     CheckedDir::open(&home).unwrap();
 }
@@ -332,12 +394,24 @@ fn home_created_under_umask_002_is_private_and_accepted() {
     const CHILD: &str = "FUIGO_TEST_UMASK_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "peer_inbox::locator_tests::home_created_under_umask_002_is_private_and_accepted", "--test-threads=1"])
+            .args([
+                "--exact",
+                "peer_inbox::locator_tests::home_created_under_umask_002_is_private_and_accepted",
+                "--test-threads=1",
+            ])
             .env(CHILD, "1")
             .output()
             .unwrap();
-        assert!(out.status.success(), "child failed:\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        assert!(String::from_utf8_lossy(&out.stdout).contains("1 passed"), "the child test did not run");
+        assert!(
+            out.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+            "the child test did not run"
+        );
         return;
     }
     let td = tempfile::tempdir().unwrap();
@@ -345,7 +419,10 @@ fn home_created_under_umask_002_is_private_and_accepted() {
     // SAFETY: umask only; this is the child process and nothing else runs in it.
     unsafe { libc::umask(0o002) };
     fuigo_dirs::ensure_private_home(&home).unwrap();
-    assert_eq!(fs::metadata(&home).unwrap().permissions().mode() & 0o7777, 0o700);
+    assert_eq!(
+        fs::metadata(&home).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
     drop(CheckedDir::create_or_open(&home).expect("the inbox accepts a home made under umask 002"));
 }
 
@@ -356,7 +433,10 @@ fn existing_group_writable_home_is_not_modified_and_reason_names_chmod() {
     let home = td.path().join(".fuigo");
     mkdir(&home, 0o775);
     fuigo_dirs::ensure_private_home(&home).unwrap();
-    assert_eq!(fs::metadata(&home).unwrap().permissions().mode() & 0o7777, 0o775);
+    assert_eq!(
+        fs::metadata(&home).unwrap().permissions().mode() & 0o7777,
+        0o775
+    );
     let e = CheckedDir::open(&home).unwrap_err();
     assert_eq!(e, Disabled::HomeWritableByOthers);
     let text = super::host::reason_message_for(e, Some(&home));
@@ -381,7 +461,18 @@ fn reason_message_prints_a_command_only_for_a_shell_safe_path() {
         let m = super::host::reason_message_for(e, Some(Path::new(ok)));
         assert_eq!(m, format!("{plain}{ok})"));
     }
-    for bad in ["/tmp/a b", "/tmp/a;b", "/tmp/$(x)", "/tmp/`x`", "/tmp/it's", "/tmp/a\nb", "-rf", "/tmp/a\"b", "/tmp/a*", "/tmp/\u{e9}"] {
+    for bad in [
+        "/tmp/a b",
+        "/tmp/a;b",
+        "/tmp/$(x)",
+        "/tmp/`x`",
+        "/tmp/it's",
+        "/tmp/a\nb",
+        "-rf",
+        "/tmp/a\"b",
+        "/tmp/a*",
+        "/tmp/\u{e9}",
+    ] {
         let m = super::host::reason_message_for(e, Some(Path::new(bad)));
         assert!(m.starts_with(none), "{bad:?}: {m}");
         assert!(!m.contains("chmod"), "{bad:?}: {m}");
@@ -389,5 +480,8 @@ fn reason_message_prints_a_command_only_for_a_shell_safe_path() {
         assert!(!m.contains('\n'), "{bad:?}: {m}");
     }
     // Empty path: generic text.
-    assert_eq!(super::host::reason_message_for(e, Some(Path::new(""))), e.reason_text());
+    assert_eq!(
+        super::host::reason_message_for(e, Some(Path::new(""))),
+        e.reason_text()
+    );
 }

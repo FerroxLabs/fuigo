@@ -370,7 +370,11 @@ mod u35_winenv {
     fn windows_collapses_case_variants_keeping_the_first_spelling_and_value() {
         let policy = ShellEnvironmentPolicy::default();
         let env = create_env_for(
-            vars(&[("Path", "C:\\good"), ("PATH", "C:\\bad"), ("path", "C:\\worse")]),
+            vars(&[
+                ("Path", "C:\\good"),
+                ("PATH", "C:\\bad"),
+                ("path", "C:\\worse"),
+            ]),
             &policy,
             EnvPlatform::Windows,
         );
@@ -391,7 +395,10 @@ mod u35_winenv {
         let out = collapse_env_names(
             vars(&[("Path", "C:\\block-first"), ("PATH", "C:\\block-second")]),
             EnvPlatform::Windows,
-            |name| name.eq_ignore_ascii_case("path").then(|| "C:\\resolved".to_string()),
+            |name| {
+                name.eq_ignore_ascii_case("path")
+                    .then(|| "C:\\resolved".to_string())
+            },
         );
         assert_eq!(out, vars(&[("Path", "C:\\resolved")]));
         // No resolution: the first entry's value.
@@ -412,7 +419,10 @@ mod u35_winenv {
         );
         assert_eq!(env["Path"], "/a");
         assert_eq!(env["PATH"], "/b");
-        assert!(!env.contains_key("PATHEXT"), "PATHEXT is a Windows default only");
+        assert!(
+            !env.contains_key("PATHEXT"),
+            "PATHEXT is a Windows default only"
+        );
     }
 
     #[test]
@@ -524,19 +534,29 @@ mod u35_winenv {
         let names: Vec<OsString> = inherited.iter().map(|(k, _)| OsString::from(k)).collect();
         let mut removed = names_to_remove(names.clone(), &base, EnvPlatform::Windows);
         removed.sort();
-        assert_eq!(removed, vec![OsString::from("DROP_ME"), OsString::from("Drop_Me")]);
+        assert_eq!(
+            removed,
+            vec![OsString::from("DROP_ME"), OsString::from("Drop_Me")]
+        );
         // Unix: `PATH` is its own variable, carried; nothing named PATH is removed.
         let base = create_env_for(inherited, &policy, EnvPlatform::Unix);
         let mut removed = names_to_remove(names, &base, EnvPlatform::Unix);
         removed.sort();
-        assert_eq!(removed, vec![OsString::from("DROP_ME"), OsString::from("Drop_Me")]);
+        assert_eq!(
+            removed,
+            vec![OsString::from("DROP_ME"), OsString::from("Drop_Me")]
+        );
     }
 
     // A guard, not proof of 1.0.35: ASCII-case credential matching predates it.
     #[test]
     fn windows_credentials_are_dropped_in_any_spelling() {
         let env = create_env_for(
-            vars(&[("OpenAI_Api_Key", "fake"), ("OPENAI_API_KEY", "fake2"), ("Path", "C:\\p")]),
+            vars(&[
+                ("OpenAI_Api_Key", "fake"),
+                ("OPENAI_API_KEY", "fake2"),
+                ("Path", "C:\\p"),
+            ]),
             &ShellEnvironmentPolicy::default(),
             EnvPlatform::Windows,
         );
@@ -551,15 +571,29 @@ mod u35_winenv {
     #[test]
     fn windows_unicode_case_alias_cannot_carry_a_registered_credential() {
         super::super::register_credential_env_names(["\u{d6}AUTH_U35W"]);
-        let block = vars(&[("\u{d6}AUTH_U35W", "secret"), ("\u{f6}auth_u35w", "benign"), ("Path", "C:\\p")]);
+        let block = vars(&[
+            ("\u{d6}AUTH_U35W", "secret"),
+            ("\u{f6}auth_u35w", "benign"),
+            ("Path", "C:\\p"),
+        ]);
         let collapsed = collapse_env_names(block, EnvPlatform::Windows, |name| {
-            fuigo_secrets::child_env::windows_env_names_equal(name, "\u{d6}AUTH_U35W").then(|| "secret".to_string())
+            fuigo_secrets::child_env::windows_env_names_equal(name, "\u{d6}AUTH_U35W")
+                .then(|| "secret".to_string())
         });
-        assert_eq!(collapsed.len(), 2, "one entry per Windows variable: {collapsed:?}");
-        let env = create_env_for(collapsed, &ShellEnvironmentPolicy::default(), EnvPlatform::Windows);
+        assert_eq!(
+            collapsed.len(),
+            2,
+            "one entry per Windows variable: {collapsed:?}"
+        );
+        let env = create_env_for(
+            collapsed,
+            &ShellEnvironmentPolicy::default(),
+            EnvPlatform::Windows,
+        );
         assert!(!env.values().any(|v| v == "secret"), "{env:?}");
         assert!(
-            !env.keys().any(|k| fuigo_secrets::child_env::windows_env_names_equal(k, "\u{d6}AUTH_U35W")),
+            !env.keys()
+                .any(|k| fuigo_secrets::child_env::windows_env_names_equal(k, "\u{d6}AUTH_U35W")),
             "{env:?}"
         );
         assert_eq!(env["Path"], "C:\\p");
@@ -598,7 +632,11 @@ mod u35_winenv {
         assert!(!exclude.allows_on("api_auth", EnvPlatform::Windows));
         assert!(!exclude.allows_on("AP\u{131}_AUTH", EnvPlatform::Windows));
         assert!(exclude.allows_on("APX_AUTH", EnvPlatform::Windows));
-        let env = create_env_for(vars(&[("API_AUTH", "v"), ("Keep", "k")]), &exclude, EnvPlatform::Windows);
+        let env = create_env_for(
+            vars(&[("API_AUTH", "v"), ("Keep", "k")]),
+            &exclude,
+            EnvPlatform::Windows,
+        );
         assert!(!env.contains_key("API_AUTH"), "{env:?}");
         assert_eq!(env["Keep"], "k");
         // Unix: names are exact; `\u{131}` is not `i` to the glob.
@@ -609,9 +647,15 @@ mod u35_winenv {
                 include_only: patterns(&[pattern]),
                 ..ShellEnvironmentPolicy::default()
             };
-            assert!(include.allows_on(name, EnvPlatform::Windows), "{pattern} keeps {name}");
+            assert!(
+                include.allows_on(name, EnvPlatform::Windows),
+                "{pattern} keeps {name}"
+            );
             assert!(!include.allows_on("OTHER", EnvPlatform::Windows));
-            assert!(!include.allows_on(name, EnvPlatform::Unix), "{pattern} vs {name} on Unix");
+            assert!(
+                !include.allows_on(name, EnvPlatform::Unix),
+                "{pattern} vs {name} on Unix"
+            );
         }
     }
 
@@ -632,7 +676,10 @@ mod u35_winenv {
             ..ShellEnvironmentPolicy::default()
         };
         assert!(!include.allows_on(name, EnvPlatform::Windows));
-        assert!(include.allows_on("\u{3b8}eep_u35r2", EnvPlatform::Windows), "the glob's own fold still applies");
+        assert!(
+            include.allows_on("\u{3b8}eep_u35r2", EnvPlatform::Windows),
+            "the glob's own fold still applies"
+        );
     }
 
     /// `inherit = "core"` matches core names exactly on Unix (`path` is a different variable from
@@ -645,7 +692,10 @@ mod u35_winenv {
         };
         let block = vars(&[("path", "/x"), ("home", "/h"), ("PATH", "/bin")]);
         let env = create_env_for(block, &policy, EnvPlatform::Unix);
-        assert!(!env.contains_key("path") && !env.contains_key("home"), "{env:?}");
+        assert!(
+            !env.contains_key("path") && !env.contains_key("home"),
+            "{env:?}"
+        );
         assert_eq!(env["PATH"], "/bin");
         assert!(!policy.allows_with_inherit_on("path", EnvPlatform::Unix));
         assert!(!policy.allows_with_inherit_on("user", EnvPlatform::Unix));
@@ -659,8 +709,9 @@ mod u35_winenv {
     /// spelling; names the base does not carry are removed.
     #[test]
     fn windows_command_gets_one_path_edit_and_no_path_removal() {
-        let base: HashMap<String, String> =
-            [("Path".to_string(), "C:\\p".to_string())].into_iter().collect();
+        let base: HashMap<String, String> = [("Path".to_string(), "C:\\p".to_string())]
+            .into_iter()
+            .collect();
         let mut cmd = tokio::process::Command::new("unused");
         install_base_env_for(
             &mut cmd,
@@ -671,11 +722,22 @@ mod u35_winenv {
         let edits: Vec<(String, Option<String>)> = cmd
             .as_std()
             .get_envs()
-            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
             .collect();
-        let path_edits: Vec<&(String, Option<String>)> =
-            edits.iter().filter(|(k, _)| k.eq_ignore_ascii_case("PATH")).collect();
-        assert_eq!(path_edits, vec![&("Path".to_string(), Some("C:\\p".to_string()))], "{edits:?}");
+        let path_edits: Vec<&(String, Option<String>)> = edits
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+            .collect();
+        assert_eq!(
+            path_edits,
+            vec![&("Path".to_string(), Some("C:\\p".to_string()))],
+            "{edits:?}"
+        );
         assert!(edits.contains(&("DROPPED".to_string(), None)), "{edits:?}");
     }
 }
@@ -685,7 +747,10 @@ mod u35_winenv {
 fn wrap_nonce_is_scrubbed_from_spawned_commands() {
     let mut set = HashMap::new();
     set.insert("FUIGO_WRAP_NONCE".to_string(), "from-policy".to_string());
-    let policy = ShellEnvironmentPolicy { set, ..Default::default() };
+    let policy = ShellEnvironmentPolicy {
+        set,
+        ..Default::default()
+    };
     for policy in [None, Some(&policy)] {
         let mut cmd = tokio::process::Command::new("true");
         cmd.env("LC_FUIGO_WRAP_NONCE", "planted");

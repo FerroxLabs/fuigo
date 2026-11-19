@@ -468,9 +468,7 @@ impl SessionActor {
                     .kill_all_background_tasks_by_owner(&self.session_info.id.0)
                     .await;
             } else {
-                self.tool_bridge_handle()
-                    .kill_all_background_tasks()
-                    .await;
+                self.tool_bridge_handle().kill_all_background_tasks().await;
             }
         }
 
@@ -684,16 +682,18 @@ impl SessionActor {
                 // A foreground `task` call the turn was blocked in: its child is moved to the background and its tool
                 // result says so. The answers must exist before the repair below writes its generic text.
                 // A user Stop that cancels subagents kills the child instead, and keeps the generic text.
-                let answers = if !cancel_subagents && let Some(prompt_id) = cancelled_prompt_id.as_deref() {
-                    let interrupt = if send_now {
-                        fuigo_tool_types::ForegroundSpawnInterrupt::UserSentMessage
+                let answers =
+                    if !cancel_subagents && let Some(prompt_id) = cancelled_prompt_id.as_deref() {
+                        let interrupt = if send_now {
+                            fuigo_tool_types::ForegroundSpawnInterrupt::UserSentMessage
+                        } else {
+                            fuigo_tool_types::ForegroundSpawnInterrupt::UserStoppedTurn
+                        };
+                        self.hand_off_foreground_subagents(prompt_id, interrupt)
+                            .await
                     } else {
-                        fuigo_tool_types::ForegroundSpawnInterrupt::UserStoppedTurn
+                        std::collections::HashMap::new()
                     };
-                    self.hand_off_foreground_subagents(prompt_id, interrupt).await
-                } else {
-                    std::collections::HashMap::new()
-                };
                 // The aborted turn can strand a continue reminder awaiting its continuation, plus dangling tool calls
                 // Repair now so the on-disk tail is clean even if the session ends here (the next push would otherwise repair lazily)
                 // Rewinds skip this: they replace the turn's history wholesale
@@ -856,7 +856,9 @@ impl SessionActor {
                 prompt_id,
                 &runtime_limit_denial
                     .as_ref()
-                    .map_or(Ok(acp::StopReason::Cancelled), |denial| Err(denial.to_acp_error())),
+                    .map_or(Ok(acp::StopReason::Cancelled), |denial| {
+                        Err(denial.to_acp_error())
+                    }),
                 cancelled_usage.clone(),
                 trigger.as_ref().map(crate::session::CancelTrigger::as_str),
                 // A no-task pinned cancel reaches here too; only a torn-down task is a mid-turn abort.
@@ -901,7 +903,10 @@ impl SessionActor {
                 };
                 let _ = input
                     .respond_to
-                    .send(Err(crate::sampling::error::attach_prompt_usage(denial.to_acp_error(), usage)))
+                    .send(Err(crate::sampling::error::attach_prompt_usage(
+                        denial.to_acp_error(),
+                        usage,
+                    )))
                     .ok();
                 continue;
             }
@@ -997,9 +1002,7 @@ impl SessionActor {
                 .kill_foreground_commands_by_owner(&self.session_info.id.0)
                 .await;
         } else {
-            self.tool_bridge_handle()
-                .kill_foreground_commands()
-                .await;
+            self.tool_bridge_handle().kill_foreground_commands().await;
         }
     }
 }

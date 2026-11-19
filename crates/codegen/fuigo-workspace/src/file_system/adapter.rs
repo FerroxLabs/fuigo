@@ -136,7 +136,10 @@ mod tests {
             .read_file_bounded(Path::new("/x"), 5)
             .await
             .unwrap_err();
-        assert_eq!(Some(std::io::ErrorKind::FileTooLarge), error.io_error_kind());
+        assert_eq!(
+            Some(std::io::ErrorKind::FileTooLarge),
+            error.io_error_kind()
+        );
         drop(adapter);
         client.abort();
     }

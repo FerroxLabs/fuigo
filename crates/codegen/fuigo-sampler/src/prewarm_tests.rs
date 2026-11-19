@@ -121,7 +121,10 @@ fn status_strings_are_stable() {
         (PrewarmOutcome::Truncated, "truncated"),
         (PrewarmOutcome::Failed, "failed"),
         (PrewarmOutcome::TimedOut, "timed_out"),
-        (PrewarmOutcome::SubscriptionEndpoint, "subscription_endpoint"),
+        (
+            PrewarmOutcome::SubscriptionEndpoint,
+            "subscription_endpoint",
+        ),
     ] {
         assert_eq!(<&'static str>::from(outcome), status);
     }

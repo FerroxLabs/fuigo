@@ -1053,11 +1053,23 @@ fn a_marker_the_replay_already_read_is_not_forwarded_again() {
     assert!(marker_within_replayed_range(&path, marker, through_marker));
     assert!(marker_within_replayed_range(&path, marker, u64::MAX));
     // The marker landed after the replay's last read: it must be forwarded live.
-    assert!(!marker_within_replayed_range(&path, marker, through_earlier));
+    assert!(!marker_within_replayed_range(
+        &path,
+        marker,
+        through_earlier
+    ));
     // A read that stops mid-marker did not carry it.
-    assert!(!marker_within_replayed_range(&path, marker, through_marker - 5));
+    assert!(!marker_within_replayed_range(
+        &path,
+        marker,
+        through_marker - 5
+    ));
     // No updates file, or an empty marker: forward.
-    assert!(!marker_within_replayed_range(&dir.path().join("none.jsonl"), marker, u64::MAX));
+    assert!(!marker_within_replayed_range(
+        &dir.path().join("none.jsonl"),
+        marker,
+        u64::MAX
+    ));
     assert!(!marker_within_replayed_range(&path, "", u64::MAX));
 }
 
@@ -1072,7 +1084,11 @@ fn the_replayed_marker_search_is_bounded_to_a_tail_window() {
     let mut body = format!("{marker}\n");
     body.push_str(&filler.repeat(2048));
     std::fs::write(&path, &body).expect("write");
-    assert!(!marker_within_replayed_range(&path, marker, body.len() as u64));
+    assert!(!marker_within_replayed_range(
+        &path,
+        marker,
+        body.len() as u64
+    ));
 }
 
 /// Mutant discriminated: searching for the bare marker string instead of its stored form (Astra, P09-F2 audit 2).
@@ -1137,7 +1153,9 @@ async fn deferred_from(
     dir: &std::path::Path,
     append: impl FnOnce(
         crate::session::storage::SessionUpdate,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DurableAppendError>>>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), DurableAppendError>>>,
+    >,
 ) -> DeferredRecovery {
     let summary = summary_with_open_turn(dir);
     match recover_interrupted_turn(
@@ -1164,8 +1182,7 @@ fn live_delivery(count: &Arc<AtomicUsize>) -> impl FnOnce() -> std::future::Read
 }
 
 fn updates_len(dir: &std::path::Path) -> u64 {
-    std::fs::metadata(dir.join("updates.jsonl"))
-        .map_or(0, |meta| meta.len())
+    std::fs::metadata(dir.join("updates.jsonl")).map_or(0, |meta| meta.len())
 }
 
 fn seed_updates(dir: &std::path::Path) {
@@ -1201,7 +1218,11 @@ async fn an_untargeted_replay_that_carried_the_marker_is_not_forwarded_again() {
     .await;
 
     assert!(!forwarded);
-    assert_eq!(live.load(Ordering::SeqCst), 0, "no duplicate for either client");
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "no duplicate for either client"
+    );
 }
 
 /// The marker lands after the replay's last read, so only the live forward can tell the clients; an earlier,
@@ -1216,7 +1237,10 @@ async fn a_marker_that_lands_after_the_replay_read_is_forwarded_once() {
     let replay_read_through = updates_len(dir.path());
 
     let recovered = deferred.finish().await.expect("committed");
-    assert!(updates_len(dir.path()) > replay_read_through, "it landed after the read");
+    assert!(
+        updates_len(dir.path()) > replay_read_through,
+        "it landed after the read"
+    );
     let live = Arc::new(AtomicUsize::new(0));
     let forwarded = forward_late_marker_unless_replayed(
         BroadcastReplay::new(
@@ -1250,14 +1274,21 @@ async fn a_targeted_replay_does_not_suppress_the_other_clients_live_delivery() {
         Some(replay_read_through),
         Some(&serde_json::json!("client-a")),
     );
-    assert!(replay.is_none(), "a replay aimed at one client carried nothing to the others");
+    assert!(
+        replay.is_none(),
+        "a replay aimed at one client carried nothing to the others"
+    );
     let live = Arc::new(AtomicUsize::new(0));
     let forwarded =
         forward_late_marker_unless_replayed(replay, &recovered.marker_line, live_delivery(&live))
             .await;
 
     assert!(forwarded);
-    assert_eq!(live.load(Ordering::SeqCst), 1, "B still hears of the lost turn");
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        1,
+        "B still hears of the lost turn"
+    );
 }
 
 /// A load that replays nothing (`session/resume`, or a no-replay load) carried nothing: the live forward runs.
@@ -1340,8 +1371,14 @@ async fn a_failed_late_marker_after_the_hook_closed_the_turn_does_not_claim_it_s
     assert!(deferred.finish().await.is_none());
 
     let text = logs.text();
-    assert!(text.contains("late interrupted-turn marker not committed"), "{text}");
-    assert!(text.contains("pre-turn hook already took the closure"), "{text}");
+    assert!(
+        text.contains("late interrupted-turn marker not committed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("pre-turn hook already took the closure"),
+        "{text}"
+    );
     assert!(!text.contains("stays open"), "{text}");
 }
 
@@ -1356,11 +1393,15 @@ async fn a_failed_late_marker_with_no_hook_says_the_turn_stays_open() {
     assert!(deferred.finish().await.is_none());
 
     let text = logs.text();
-    assert!(text.contains("the turn stays open for the next load"), "{text}");
+    assert!(
+        text.contains("the turn stays open for the next load"),
+        "{text}"
+    );
     assert!(!text.contains("pre-turn hook"), "{text}");
 }
 
 /// A writer for `dir` under a fresh id (design F5: the recovery and its closures write only through one).
 fn test_session_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
-    fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim")
+    fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+        .expect("claim")
 }

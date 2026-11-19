@@ -32,10 +32,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use fuigo_peer::DenialStamp;
-use fuigo_peer::limits::{DENIAL_RING, DENIAL_STAMP_SECS, MAX_CARRIED_KEYS, MAX_DENIAL_FIELD_BYTES};
+use fuigo_peer::limits::{
+    DENIAL_RING, DENIAL_STAMP_SECS, MAX_CARRIED_KEYS, MAX_DENIAL_FIELD_BYTES,
+};
 use sha2::{Digest, Sha256};
 
-use crate::permission::types::{AccessKind, EditTargets, PermissionRequest, ReadResolution, ReadTargets};
+use crate::permission::types::{
+    AccessKind, EditTargets, PermissionRequest, ReadResolution, ReadTargets,
+};
 
 /// Carried denial keys kept per receiving session. Never evicts: when full the newest key is dropped and counted.
 const MAX_CARRIED: usize = MAX_CARRIED_KEYS;
@@ -72,7 +76,10 @@ pub enum DenialCause {
 pub fn records_denial(cause: DenialCause) -> bool {
     matches!(
         cause,
-        DenialCause::Policy | DenialCause::HumanReject | DenialCause::HumanFollowup | DenialCause::ShownThenCancelled
+        DenialCause::Policy
+            | DenialCause::HumanReject
+            | DenialCause::HumanFollowup
+            | DenialCause::ShownThenCancelled
     )
 }
 
@@ -81,7 +88,11 @@ pub fn cap_keys(mut keys: Vec<DenialKey>) -> Vec<DenialKey> {
     if keys.len() <= MAX_KEYS_PER_DENIAL {
         return keys;
     }
-    let markers: Vec<DenialKey> = keys.iter().filter(|k| k.hash == MANY_TARGETS_HASH).cloned().collect();
+    let markers: Vec<DenialKey> = keys
+        .iter()
+        .filter(|k| k.hash == MANY_TARGETS_HASH)
+        .cloned()
+        .collect();
     keys.retain(|k| k.hash != MANY_TARGETS_HASH);
     keys.truncate(MAX_KEYS_PER_DENIAL - markers.len().min(MAX_KEYS_PER_DENIAL));
     keys.extend(markers);
@@ -98,7 +109,10 @@ pub struct DenialKey {
 
 impl std::fmt::Debug for DenialKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DenialKey").field("kind", &self.kind).field("hash", &self.hash).finish()
+        f.debug_struct("DenialKey")
+            .field("kind", &self.kind)
+            .field("hash", &self.hash)
+            .finish()
     }
 }
 
@@ -143,7 +157,10 @@ pub struct DenialLog(Arc<Mutex<Inner>>, Arc<std::sync::atomic::AtomicBool>);
 /// Seconds on a monotonic clock, for the stamp window (a wall-clock jump cannot extend or cut it).
 pub fn mono_secs() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_secs()
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -159,7 +176,13 @@ pub(crate) fn key_computations() -> usize {
 
 fn short_hash(s: &str) -> String {
     let d = Sha256::digest(s.as_bytes());
-    format!("sha256:{}", d.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>())
+    format!(
+        "sha256:{}",
+        d.iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
 }
 
 fn collapse_ws(s: &str) -> String {
@@ -172,7 +195,12 @@ fn collapse_ws(s: &str) -> String {
 /// has the same target, so one denied file is one key. When resolution fails (loop, unreadable link, depth cap) the lexical
 /// spelling is the key: the best effort, and a request spelled the same way is still refused. `literal` is a reader that
 /// opens the path exactly as spelled. Never panics; only `lstat`/`readlink`/`canonicalize`, no network.
-pub(crate) fn path_key_target(raw: &str, cwd: &Path, display: Option<&Path>, literal: bool) -> Option<String> {
+pub(crate) fn path_key_target(
+    raw: &str,
+    cwd: &Path,
+    display: Option<&Path>,
+    literal: bool,
+) -> Option<String> {
     if raw.trim().is_empty() {
         return None;
     }
@@ -183,7 +211,11 @@ pub(crate) fn path_key_target(raw: &str, cwd: &Path, display: Option<&Path>, lit
         fuigo_tools::types::resources::resolve_model_path(cwd, display, raw)
     };
     let target = crate::permission::policy::resolve_following_symlinks(&abs).unwrap_or(abs);
-    Some(fuigo_paths::normalize_lexically(&target).to_string_lossy().into_owned())
+    Some(
+        fuigo_paths::normalize_lexically(&target)
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// The spellings a REQUEST for a path is matched by (decision 63, round 3): the lexical one (as a denial stores it when
@@ -200,10 +232,14 @@ fn path_key_spellings(raw: &str, cwd: &Path, display: Option<&Path>, literal: bo
     } else {
         fuigo_tools::types::resources::resolve_model_path(cwd, display, raw)
     };
-    let lexical = fuigo_paths::normalize_lexically(&abs).to_string_lossy().into_owned();
+    let lexical = fuigo_paths::normalize_lexically(&abs)
+        .to_string_lossy()
+        .into_owned();
     let mut out = vec![lexical];
     if let Some(r) = crate::permission::policy::resolve_following_symlinks(&abs) {
-        let r = fuigo_paths::normalize_lexically(&r).to_string_lossy().into_owned();
+        let r = fuigo_paths::normalize_lexically(&r)
+            .to_string_lossy()
+            .into_owned();
         if !out.contains(&r) {
             out.push(r);
         }
@@ -220,13 +256,24 @@ fn canonical_json(v: &serde_json::Value) -> String {
             keys.sort();
             let parts: Vec<String> = keys
                 .into_iter()
-                .map(|k| format!("{}:{}", serde_json::Value::String(k.clone()), canonical_json(&m[k])))
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::Value::String(k.clone()),
+                        canonical_json(&m[k])
+                    )
+                })
                 .collect();
             format!("{{{}}}", parts.join(","))
         }
-        Value::Array(a) => format!("[{}]", a.iter().map(canonical_json).collect::<Vec<_>>().join(",")),
+        Value::Array(a) => format!(
+            "[{}]",
+            a.iter().map(canonical_json).collect::<Vec<_>>().join(",")
+        ),
         Value::Number(n) => match n.as_f64() {
-            Some(f) if n.is_f64() && f.fract() == 0.0 && f.abs() < 9.0e15 => format!("{}", f as i64),
+            Some(f) if n.is_f64() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
+                format!("{}", f as i64)
+            }
             _ => n.to_string(),
         },
         other => other.to_string(),
@@ -253,8 +300,15 @@ fn normalise_url(u: &str) -> String {
 
 /// A tool name as a kind: the safe alphabet only, else a hash of it.
 fn safe_kind(prefix: &str, name: &str) -> String {
-    let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
-    let mut k = if ok { format!("{prefix}{name}") } else { format!("{prefix}{}", short_hash(name)) };
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
+    let mut k = if ok {
+        format!("{prefix}{name}")
+    } else {
+        format!("{prefix}{}", short_hash(name))
+    };
     k.truncate(MAX_DENIAL_FIELD_BYTES);
     k
 }
@@ -271,7 +325,14 @@ pub fn denial_keys_for(
     real_cwd: &Path,
     display_cwd: Option<&Path>,
 ) -> Vec<DenialKey> {
-    keys_impl(access, edit_targets, read_targets, real_cwd, display_cwd, false)
+    keys_impl(
+        access,
+        edit_targets,
+        read_targets,
+        real_cwd,
+        display_cwd,
+        false,
+    )
 }
 
 /// The keys a REQUEST is matched by: [`denial_keys_for`] plus, for every path target, the other spelling (lexical and
@@ -285,7 +346,14 @@ pub fn match_keys_for(
     real_cwd: &Path,
     display_cwd: Option<&Path>,
 ) -> Vec<DenialKey> {
-    keys_impl(access, edit_targets, read_targets, real_cwd, display_cwd, true)
+    keys_impl(
+        access,
+        edit_targets,
+        read_targets,
+        real_cwd,
+        display_cwd,
+        true,
+    )
 }
 
 fn keys_impl(
@@ -300,16 +368,19 @@ fn keys_impl(
     KEY_COMPUTATIONS.with(|c| c.set(c.get() + 1));
     // One group per target; a group holds the spellings of that target (one when recording).
     let mut primary: Vec<Vec<String>> = Vec::new();
-    let paths = |raws: &mut dyn Iterator<Item = &String>, literal: bool, primary: &mut Vec<Vec<String>>| {
-        for raw in raws {
-            let g = if both {
-                path_key_spellings(raw, real_cwd, display_cwd, literal)
-            } else {
-                path_key_target(raw, real_cwd, display_cwd, literal).into_iter().collect()
-            };
-            primary.push(g);
-        }
-    };
+    let paths =
+        |raws: &mut dyn Iterator<Item = &String>, literal: bool, primary: &mut Vec<Vec<String>>| {
+            for raw in raws {
+                let g = if both {
+                    path_key_spellings(raw, real_cwd, display_cwd, literal)
+                } else {
+                    path_key_target(raw, real_cwd, display_cwd, literal)
+                        .into_iter()
+                        .collect()
+                };
+                primary.push(g);
+            }
+        };
     let kind = match access {
         AccessKind::Bash(cmd) => {
             primary.push(vec![collapse_ws(cmd)]);
@@ -318,7 +389,11 @@ fn keys_impl(
         AccessKind::Read(p) => {
             match read_targets {
                 Some(rt) if !rt.paths.is_empty() => {
-                    paths(&mut rt.paths.iter(), rt.resolution == ReadResolution::Literal, &mut primary);
+                    paths(
+                        &mut rt.paths.iter(),
+                        rt.resolution == ReadResolution::Literal,
+                        &mut primary,
+                    );
                 }
                 _ => {
                     if let Some(p) = p {
@@ -389,7 +464,10 @@ fn keys_impl(
                 continue;
             }
             any = true;
-            let key = DenialKey { kind: kind.clone(), hash: short_hash(&t) };
+            let key = DenialKey {
+                kind: kind.clone(),
+                hash: short_hash(&t),
+            };
             if !keys.contains(&key) {
                 keys.push(key);
             }
@@ -405,7 +483,10 @@ fn keys_impl(
         if !both {
             keys.truncate(MAX_KEYS_PER_DENIAL - 1);
         }
-        keys.push(DenialKey { kind, hash: MANY_TARGETS_HASH.to_owned() });
+        keys.push(DenialKey {
+            kind,
+            hash: MANY_TARGETS_HASH.to_owned(),
+        });
         return keys;
     }
     if !both {
@@ -418,18 +499,36 @@ fn keys_impl(
 pub fn denial_keys(request: &PermissionRequest) -> Vec<DenialKey> {
     let (cwd, display) = match &request.path_context {
         Some(c) => (c.real_cwd.clone(), c.display_cwd.clone()),
-        None => (std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")), None),
+        None => (
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            None,
+        ),
     };
-    denial_keys_for(&request.access, request.edit_targets.as_ref(), request.read_targets.as_ref(), &cwd, display.as_deref())
+    denial_keys_for(
+        &request.access,
+        request.edit_targets.as_ref(),
+        request.read_targets.as_ref(),
+        &cwd,
+        display.as_deref(),
+    )
 }
 
 /// The keys `request` is MATCHED by (either spelling of every path target); see [`match_keys_for`].
 pub fn match_keys(request: &PermissionRequest) -> Vec<DenialKey> {
     let (cwd, display) = match &request.path_context {
         Some(c) => (c.real_cwd.clone(), c.display_cwd.clone()),
-        None => (std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")), None),
+        None => (
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            None,
+        ),
     };
-    match_keys_for(&request.access, request.edit_targets.as_ref(), request.read_targets.as_ref(), &cwd, display.as_deref())
+    match_keys_for(
+        &request.access,
+        request.edit_targets.as_ref(),
+        request.read_targets.as_ref(),
+        &cwd,
+        display.as_deref(),
+    )
 }
 
 /// What [`denial_keys`] needs from a request, copied so the keys can be computed after the request has been handed on, and
@@ -454,29 +553,41 @@ impl KeyBasis {
     pub fn keys(&self) -> Vec<DenialKey> {
         let (cwd, display) = match &self.path_context {
             Some(c) => (c.real_cwd.clone(), c.display_cwd.clone()),
-            None => (std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")), None),
+            None => (
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                None,
+            ),
         };
-        denial_keys_for(&self.access, self.edit_targets.as_ref(), self.read_targets.as_ref(), &cwd, display.as_deref())
+        denial_keys_for(
+            &self.access,
+            self.edit_targets.as_ref(),
+            self.read_targets.as_ref(),
+            &cwd,
+            display.as_deref(),
+        )
     }
 }
 
 /// The first key of `request` (kept for older callers); for a targetless request, the kind with an empty hash, which
 /// [`DenialLog`] never records or matches.
 pub fn denial_key(request: &PermissionRequest) -> DenialKey {
-    denial_keys(request).into_iter().next().unwrap_or_else(|| DenialKey {
-        kind: match &request.access {
-            AccessKind::Bash(_) => "bash".to_owned(),
-            AccessKind::Read(_) | AccessKind::Session => "read".to_owned(),
-            AccessKind::Grep { .. } => "grep".to_owned(),
-            AccessKind::Edit(_) => "edit".to_owned(),
-            AccessKind::WebFetch(_) => "web_fetch".to_owned(),
-            AccessKind::WebSearch(_) => "web_search".to_owned(),
-            AccessKind::MCPTool { name, .. } => safe_kind("mcp:", name),
-            AccessKind::AgentMessage { .. } => "agent_message".to_owned(),
-            AccessKind::Tool(id) => safe_kind("tool:", id),
-        },
-        hash: String::new(),
-    })
+    denial_keys(request)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| DenialKey {
+            kind: match &request.access {
+                AccessKind::Bash(_) => "bash".to_owned(),
+                AccessKind::Read(_) | AccessKind::Session => "read".to_owned(),
+                AccessKind::Grep { .. } => "grep".to_owned(),
+                AccessKind::Edit(_) => "edit".to_owned(),
+                AccessKind::WebFetch(_) => "web_fetch".to_owned(),
+                AccessKind::WebSearch(_) => "web_search".to_owned(),
+                AccessKind::MCPTool { name, .. } => safe_kind("mcp:", name),
+                AccessKind::AgentMessage { .. } => "agent_message".to_owned(),
+                AccessKind::Tool(id) => safe_kind("tool:", id),
+            },
+            hash: String::new(),
+        })
 }
 
 fn lock(m: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
@@ -499,7 +610,11 @@ impl DenialLog {
             return;
         }
         let mut g = lock(&self.0);
-        if let Some(i) = g.ring.iter().position(|e| e.keys.len() == keys.len() && keys.iter().all(|k| e.keys.contains(k))) {
+        if let Some(i) = g
+            .ring
+            .iter()
+            .position(|e| e.keys.len() == keys.len() && keys.iter().all(|k| e.keys.contains(k)))
+        {
             g.ring.remove(i);
         } else if g.ring.len() >= DENIAL_RING {
             g.ring.pop_front();
@@ -509,7 +624,11 @@ impl DenialLog {
 
     /// Every key in the ring, oldest denial first (kind and hash), whatever its age.
     pub fn snapshot(&self) -> Vec<DenialKey> {
-        lock(&self.0).ring.iter().flat_map(|e| e.keys.iter().cloned()).collect()
+        lock(&self.0)
+            .ring
+            .iter()
+            .flat_map(|e| e.keys.iter().cloned())
+            .collect()
     }
 
     /// The key set of every denial in the ring, oldest first (kind and hash only), whatever its age. What the session stores,
@@ -529,9 +648,16 @@ impl DenialLog {
     pub fn stamps(&self, now: u64) -> Vec<DenialStamp> {
         let g = lock(&self.0);
         let mut out: Vec<DenialStamp> = Vec::new();
-        for e in g.ring.iter().filter(|e| now.saturating_sub(e.at) < DENIAL_STAMP_SECS) {
+        for e in g
+            .ring
+            .iter()
+            .filter(|e| now.saturating_sub(e.at) < DENIAL_STAMP_SECS)
+        {
             for key in &e.keys {
-                let stamp = DenialStamp { tool_kind: key.kind.clone(), target_hash: key.hash.clone() };
+                let stamp = DenialStamp {
+                    tool_kind: key.kind.clone(),
+                    target_hash: key.hash.clone(),
+                };
                 if !out.contains(&stamp) {
                     out.push(stamp);
                 }
@@ -546,7 +672,10 @@ impl DenialLog {
     pub fn carry(&self, message_id: &str, stamps: &[DenialStamp]) {
         let mut g = lock(&self.0);
         for s in stamps {
-            let key = DenialKey { kind: s.tool_kind.clone(), hash: s.target_hash.clone() };
+            let key = DenialKey {
+                kind: s.tool_kind.clone(),
+                hash: s.target_hash.clone(),
+            };
             if key.hash.is_empty() || g.carried.iter().any(|c| c.key == key) {
                 continue;
             }
@@ -554,7 +683,10 @@ impl DenialLog {
                 g.overflow += 1;
                 continue;
             }
-            g.carried.push(Carried { key, message_id: message_id.to_owned() });
+            g.carried.push(Carried {
+                key,
+                message_id: message_id.to_owned(),
+            });
             self.1.store(true, std::sync::atomic::Ordering::Release);
         }
     }
@@ -567,7 +699,10 @@ impl DenialLog {
     /// The carried count and how many keys were dropped because the list was full, for the held row.
     pub fn carried_stats(&self) -> CarriedStats {
         let g = lock(&self.0);
-        CarriedStats { carried: g.carried.len(), overflow: g.overflow }
+        CarriedStats {
+            carried: g.carried.len(),
+            overflow: g.overflow,
+        }
     }
 
     /// `/peers clear-influence`: forget the carried denials. The session's own ring stays.
@@ -590,7 +725,10 @@ impl DenialLog {
             .carried
             .iter()
             .find(|c| !c.key.hash.is_empty() && keys.contains(&c.key))
-            .map(|c| LaunderingHit { message_id: c.message_id.clone(), kind: c.key.kind.clone() })?;
+            .map(|c| LaunderingHit {
+                message_id: c.message_id.clone(),
+                kind: c.key.kind.clone(),
+            })?;
         if g.hits.len() >= 64 {
             g.hits.pop_front();
         }

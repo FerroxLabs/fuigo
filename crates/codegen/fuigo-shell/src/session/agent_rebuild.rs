@@ -336,7 +336,8 @@ impl AgentRebuildSpec {
             builder = builder.with_attribution_callback(attribution_callback);
         }
         // The web search tool dispatches its own model request; it honors the session's STOP/PAUSE veto.
-        builder = builder.with_dispatch_gate(crate::session::acp_session::side_model_gate(session_id_str));
+        builder = builder
+            .with_dispatch_gate(crate::session::acp_session::side_model_gate(session_id_str));
         if let Some(bash_params_json) = tool_params_json.bash.clone() {
             builder = builder.with_bash_params(bash_params_json);
         }
@@ -514,7 +515,10 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         parent_scheduler_handle: None,
     })
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,11 +785,19 @@ mod tests {
                         .into_iter()
                         .find(|definition| definition.function.name == task_name)
                         .expect("Task definition");
-                    let has_model_argument =
-                        definition.function.parameters["properties"].get("model").is_some();
+                    let has_model_argument = definition.function.parameters["properties"]
+                        .get("model")
+                        .is_some();
                     let description = definition.function.description.unwrap_or_default();
-                    assert_eq!(has_model_argument, expect_model_argument, "inherit={inherit}");
-                    assert_eq!(description.contains("alpha-public"), expect_model_argument, "inherit={inherit}: {description}");
+                    assert_eq!(
+                        has_model_argument, expect_model_argument,
+                        "inherit={inherit}"
+                    );
+                    assert_eq!(
+                        description.contains("alpha-public"),
+                        expect_model_argument,
+                        "inherit={inherit}: {description}"
+                    );
                 }
             })
             .await;

@@ -7,7 +7,11 @@ pub(crate) const LOCATOR_NAME: &str = "hosts.json";
 
 /// Serialize rows the way `parse_rows` reads them; `None` (remove the file) when there are none.
 pub(crate) fn encode_rows(rows: &[HostRow]) -> Option<Vec<u8>> {
-    if rows.is_empty() { None } else { serde_json::to_vec(rows).ok() }
+    if rows.is_empty() {
+        None
+    } else {
+        serde_json::to_vec(rows).ok()
+    }
 }
 
 /// Parse an existing file's bytes; a file that does not parse counts as no rows (it is rewritten, S3.4).

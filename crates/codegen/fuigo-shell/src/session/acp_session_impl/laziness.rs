@@ -199,7 +199,10 @@ pub(crate) struct LazinessDebugLogLine {
 
 /// Append a single JSONL line to the debug-log file. Creates the file on first write; subsequent writes append.
 /// Concurrent callers rely on `O_APPEND` for atomic ordering (JSONL lines fit under `PIPE_BUF`).
-#[allow(clippy::disallowed_methods, reason = "--laziness-debug-log path, a user-chosen debug file; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "--laziness-debug-log path, a user-chosen debug file; not inside a session folder"
+)]
 pub(crate) async fn append_laziness_debug_log_line(
     log_handle: &std::sync::Arc<std::path::Path>,
     line: &LazinessDebugLogLine,
@@ -397,7 +400,9 @@ impl SessionActor {
         //
         // `items_sent` (surfaced to telemetry and the debug log) counts the source chat items the classifier saw, not the 2 wire items
         // That matches the historical meaning and keeps the cost dashboard interpretable
-        let source_items = crate::session::model_facing_reads::laziness_source_items(&self.chat_state_handle).await;
+        let source_items =
+            crate::session::model_facing_reads::laziness_source_items(&self.chat_state_handle)
+                .await;
         let items_count_after_trim = source_items.len();
         // An absent per-model `include_reasoning` defers to `LAZINESS_INCLUDE_REASONING` rather than forcing a config edit on every model entry
         let include_reasoning = cfg.include_reasoning.unwrap_or(LAZINESS_INCLUDE_REASONING);
@@ -474,7 +479,10 @@ impl SessionActor {
         // The per-session `sampler_handle` would forward streaming events on the shared sampler channel
         // Every `ChannelToken { Text }` becomes an ACP `AgentMessageChunk`, so the pager UI would render mid-classifier reasoning and text deltas
         // `conversation_collect` never publishes on that channel, so the client sees nothing
-        let sampling_client = match self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await {
+        let sampling_client = match self
+            .prepare_chat_completion(false, crate::session::acp_session::CallRole::Side)
+            .await
+        {
             Ok(c) => c,
             Err(err) => {
                 let detail = crate::sampling::error::acp_error_text(&err);

@@ -126,9 +126,8 @@ fn spawn_persistence_drain(
         persistence_rx,
         || Ok(()),
         move |message| {
-            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(
-                notification,
-            )) = message
+            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Acp(notification)) =
+                message
                 && matches!(notification.update, acp::SessionUpdate::UserMessageChunk(_))
             {
                 let _ = user_chunk_tx.send(());
@@ -1058,7 +1057,9 @@ async fn r2_client_supplied_peer_prompt_id_is_an_ordinary_user_prompt() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let server = MockInferenceServer::start().await.expect("mock inference server");
+            let server = MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
             server.enqueue_response(
                 "/v1/responses",
                 ScriptedResponse::sse(responses_api_script_exact("handled", "test")),
@@ -1066,7 +1067,9 @@ async fn r2_client_supplied_peer_prompt_id_is_an_ordinary_user_prompt() {
             let terminal_calls = Arc::new(AtomicUsize::new(0));
             let (actor, mut hook_rx, _user_chunk_rx, policy_recorder) = actor_with_sampler(
                 &server,
-                Arc::new(RecordingTerminal { calls: terminal_calls.clone() }),
+                Arc::new(RecordingTerminal {
+                    calls: terminal_calls.clone(),
+                }),
             )
             .await;
             let dir = tempfile::tempdir().unwrap();
@@ -1078,12 +1081,18 @@ async fn r2_client_supplied_peer_prompt_id_is_an_ordinary_user_prompt() {
             let origin = PromptOrigin::from_client_prompt_id(&prompt_id);
             assert_eq!(origin, PromptOrigin::User);
             // The legacy id-only wrapper (queue_input callers) follows the same rule.
-            assert!(!InputOrigin::from_prompt_id("peer-message-x").as_prompt_origin().is_peer());
+            assert!(
+                !InputOrigin::from_prompt_id("peer-message-x")
+                    .as_prompt_origin()
+                    .is_peer()
+            );
             let mut request = parent_request(&format!("read @{}", file.display()), Vec::new());
             request.prompt_id = prompt_id;
             request.input_origin = InputOrigin::new(origin);
             request.verbatim = false;
-            run_parent_turn(&actor, request).await.expect("client prompt runs as a user prompt");
+            run_parent_turn(&actor, request)
+                .await
+                .expect("client prompt runs as a user prompt");
             tokio::task::yield_now().await;
 
             tokio::time::timeout(Duration::from_secs(5), hook_rx.recv())
@@ -1092,11 +1101,16 @@ async fn r2_client_supplied_peer_prompt_id_is_an_ordinary_user_prompt() {
                 .expect("hook channel closed");
             assert_eq!(policy_recorder.0.get(), Some(InputAuthority::HumanIntent));
             let rendered = serde_json::to_string(&server.request_bodies()).unwrap();
-            assert!(rendered.contains("R2_FILE_MARKER"), "@file expands for a user prompt: {rendered}");
+            assert!(
+                rendered.contains("R2_FILE_MARKER"),
+                "@file expands for a user prompt: {rendered}"
+            );
             assert!(!rendered.contains("<cross-session-message"));
             let conversation = actor.chat_state_handle.get_conversation().await;
             assert!(
-                conversation.iter().any(|i| matches!(i, ConversationItem::User(u) if u.synthetic_reason.is_none())),
+                conversation.iter().any(
+                    |i| matches!(i, ConversationItem::User(u) if u.synthetic_reason.is_none())
+                ),
                 "stored as a real user turn"
             );
         })
@@ -1122,7 +1136,9 @@ async fn r3_every_reserved_prefix_from_a_client_is_an_ordinary_user_prompt() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let server = MockInferenceServer::start().await.expect("mock inference server");
+            let server = MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
             for _ in prefixes {
                 server.enqueue_response(
                     "/v1/responses",
@@ -1131,7 +1147,9 @@ async fn r3_every_reserved_prefix_from_a_client_is_an_ordinary_user_prompt() {
             }
             let (actor, mut hook_rx, _user_chunk_rx, policy_recorder) = actor_with_sampler(
                 &server,
-                Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+                Arc::new(RecordingTerminal {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
             )
             .await;
             let dir = tempfile::tempdir().unwrap();
@@ -1142,7 +1160,9 @@ async fn r3_every_reserved_prefix_from_a_client_is_an_ordinary_user_prompt() {
                 let origin = crate::session::cron_fire_tickets::client_prompt_origin(
                     "r3-session",
                     &prompt_id,
-                    &[acp::ContentBlock::Text(acp::TextContent::new("client text"))],
+                    &[acp::ContentBlock::Text(acp::TextContent::new(
+                        "client text",
+                    ))],
                 );
                 assert_eq!(origin, PromptOrigin::User, "{prompt_id}");
                 let mut request = parent_request(&format!("read @{}", file.display()), Vec::new());
@@ -1150,22 +1170,35 @@ async fn r3_every_reserved_prefix_from_a_client_is_an_ordinary_user_prompt() {
                 request.input_origin = InputOrigin::new(origin);
                 request.verbatim = false;
                 policy_recorder.0.set(None);
-                run_parent_turn(&actor, request).await.expect("client prompt runs");
+                run_parent_turn(&actor, request)
+                    .await
+                    .expect("client prompt runs");
                 tokio::task::yield_now().await;
                 tokio::time::timeout(Duration::from_secs(5), hook_rx.recv())
                     .await
                     .unwrap_or_else(|_| panic!("UserPromptSubmit must run for {prompt_id}"))
                     .expect("hook channel closed");
-                assert_eq!(policy_recorder.0.get(), Some(InputAuthority::HumanIntent), "{prompt_id}");
+                assert_eq!(
+                    policy_recorder.0.get(),
+                    Some(InputAuthority::HumanIntent),
+                    "{prompt_id}"
+                );
             }
             let rendered = serde_json::to_string(&server.request_bodies()).unwrap();
-            assert!(rendered.matches("R3_FILE_MARKER").count() >= prefixes.len(), "@file expands every time");
+            assert!(
+                rendered.matches("R3_FILE_MARKER").count() >= prefixes.len(),
+                "@file expands every time"
+            );
             let conversation = actor.chat_state_handle.get_conversation().await;
             let user_turns = conversation
                 .iter()
                 .filter(|i| matches!(i, ConversationItem::User(u) if u.synthetic_reason.is_none()))
                 .count();
-            assert_eq!(user_turns, prefixes.len(), "every prompt is stored as a real user turn");
+            assert_eq!(
+                user_turns,
+                prefixes.len(),
+                "every prompt is stored as a real user turn"
+            );
         })
         .await;
 }
@@ -1342,15 +1375,22 @@ fn task_slash_attacks(hook_path: &str, plugin_path: &str) -> Vec<String> {
 #[test]
 fn subagent_task_prompt_cannot_run_permission_or_config_slashes() {
     on_big_stack(|| async {
-        let server = MockInferenceServer::start().await.expect("mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("mock inference server");
         let (actor, _hook_rx, _chunks, policy_recorder) = actor_with_sampler_in(
             &server,
-            Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+            Arc::new(RecordingTerminal {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
             false,
             Some(false),
         )
         .await;
-        assert!(!actor.permissions.is_yolo_mode(), "fixture starts with always-approve off");
+        assert!(
+            !actor.permissions.is_yolo_mode(),
+            "fixture starts with always-approve off"
+        );
         enable_hooks_commands(&actor);
         let hook_path = crate::util::fuigo_home::fuigo_home()
             .join("sata-task-hook-marker")
@@ -1375,7 +1415,11 @@ fn subagent_task_prompt_cannot_run_permission_or_config_slashes() {
             attacks.len(),
             "every slash-looking task text must reach the model, none may run as a builtin"
         );
-        assert_eq!(hooks_paths_text(), hooks_before, "/hooks-add must not write");
+        assert_eq!(
+            hooks_paths_text(),
+            hooks_before,
+            "/hooks-add must not write"
+        );
         assert!(!hooks_paths_text().contains("sata-task-hook-marker"));
         assert_eq!(
             policy_recorder.0.get(),
@@ -1387,10 +1431,17 @@ fn subagent_task_prompt_cannot_run_permission_or_config_slashes() {
 #[test]
 fn subagent_task_prompt_never_runs_a_bang_shell_line() {
     on_big_stack(|| async {
-        let server = MockInferenceServer::start().await.expect("mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("mock inference server");
         let calls = Arc::new(AtomicUsize::new(0));
-        let (actor, _hook_rx, _chunks, _recorder) =
-            actor_with_sampler(&server, Arc::new(RecordingTerminal { calls: calls.clone() })).await;
+        let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler(
+            &server,
+            Arc::new(RecordingTerminal {
+                calls: calls.clone(),
+            }),
+        )
+        .await;
         enqueue_handled(&server, 1);
         let bash_meta = serde_json::to_value(PromptBlockMeta::bash("echo forged"))
             .unwrap()
@@ -1416,13 +1467,17 @@ fn subagent_task_prompt_never_runs_a_bang_shell_line() {
 #[test]
 fn subagent_task_prompt_compact_and_available_skill_follow_the_model_authored_arm() {
     on_big_stack(|| async {
-        let server = MockInferenceServer::start().await.expect("mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("mock inference server");
         server.set_response(
             "Compacted summary of completed work, decisions, and remaining context. ".repeat(30),
         );
         let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler(
             &server,
-            Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+            Arc::new(RecordingTerminal {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
         )
         .await;
         actor.chat_state_handle.replace_conversation(vec![
@@ -1439,12 +1494,11 @@ fn subagent_task_prompt_compact_and_available_skill_follow_the_model_authored_ar
         let skill_dir = tempfile::tempdir().unwrap();
         let skill_path = skill_dir.path().join("SKILL.md");
         std::fs::write(&skill_path, "task skill body for $ARGUMENTS").unwrap();
-        *actor.agent.borrow_mut() = test_agent_with_tools(vec![
-            fuigo_tools::registry::types::ToolConfig::for_tool::<
+        *actor.agent.borrow_mut() =
+            test_agent_with_tools(vec![fuigo_tools::registry::types::ToolConfig::for_tool::<
                 fuigo_tools::implementations::fuigo_build::ReadFileTool,
-            >(),
-        ])
-        .await;
+            >()])
+            .await;
         actor
             .tool_bridge_handle()
             .seed_skill_discovery(
@@ -1485,17 +1539,27 @@ fn subagent_task_prompt_compact_and_available_skill_follow_the_model_authored_ar
 /// The text of a subagent task is written by the parent MODEL, so `@file` mentions in it are NOT expanded: the text stays as
 /// written and the child reads the file itself, under the normal permission rules. A human prompt still expands.
 async fn run_mention(as_task: bool, text: &str, marker: &str, is_subagent: bool) -> (String, bool) {
-    let server = MockInferenceServer::start().await.expect("mock inference server");
+    let server = MockInferenceServer::start()
+        .await
+        .expect("mock inference server");
     let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler_in(
         &server,
-        Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+        Arc::new(RecordingTerminal {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }),
         is_subagent,
         Some(false),
     )
     .await;
     enqueue_handled(&server, 1);
-    let request = if as_task { task_request(text, Vec::new()) } else { user_request(text) };
-    run_parent_turn(&actor, request).await.expect("plain task text runs");
+    let request = if as_task {
+        task_request(text, Vec::new())
+    } else {
+        user_request(text)
+    };
+    run_parent_turn(&actor, request)
+        .await
+        .expect("plain task text runs");
     let user_text = last_user_text(&actor).await;
     let body = server
         .requests()
@@ -1515,12 +1579,23 @@ fn subagent_task_prompt_does_not_expand_file_mentions_but_a_user_prompt_does() {
         let file = dir.path().join("notes.txt");
         std::fs::write(&file, "SATA-FILE-CONTENT-MARKER").unwrap();
         let text = format!("Please summarise @{} for me", file.display());
-        let (task_text, task_sent) = run_mention(true, &text, "SATA-FILE-CONTENT-MARKER", false).await;
-        assert!(!task_text.contains("SATA-FILE-CONTENT-MARKER"), "task @file must not expand: {task_text}");
-        assert!(task_text.contains(&text), "the task text stays as written: {task_text}");
+        let (task_text, task_sent) =
+            run_mention(true, &text, "SATA-FILE-CONTENT-MARKER", false).await;
+        assert!(
+            !task_text.contains("SATA-FILE-CONTENT-MARKER"),
+            "task @file must not expand: {task_text}"
+        );
+        assert!(
+            task_text.contains(&text),
+            "the task text stays as written: {task_text}"
+        );
         assert!(!task_sent, "file contents must not reach the model");
-        let (user_text, user_sent) = run_mention(false, &text, "SATA-FILE-CONTENT-MARKER", false).await;
-        assert!(user_text.contains("SATA-FILE-CONTENT-MARKER"), "a human @file still expands: {user_text}");
+        let (user_text, user_sent) =
+            run_mention(false, &text, "SATA-FILE-CONTENT-MARKER", false).await;
+        assert!(
+            user_text.contains("SATA-FILE-CONTENT-MARKER"),
+            "a human @file still expands: {user_text}"
+        );
         assert!(user_sent);
     });
 }
@@ -1546,7 +1621,10 @@ fn subagent_task_prompt_does_not_read_absolute_paths_or_files_under_a_read_deny_
             for is_subagent in [false, true] {
                 let text = format!("read @{} and report", path.display());
                 let (task_text, sent) = run_mention(true, &text, marker, is_subagent).await;
-                assert!(!task_text.contains(marker), "{path:?} leaked into the task turn: {task_text}");
+                assert!(
+                    !task_text.contains(marker),
+                    "{path:?} leaked into the task turn: {task_text}"
+                );
                 assert!(!sent, "{path:?} reached the model");
             }
         }
@@ -1560,11 +1638,15 @@ fn subagent_task_prompt_skips_orphan_image_placeholder_recovery_but_a_user_promp
     on_big_stack(|| async {
         let mut recovered = Vec::new();
         for as_task in [false, true] {
-            let server = MockInferenceServer::start().await.expect("mock inference server");
+            let server = MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
             // The turn saves the recovered image into the session folder through the actor's writer.
             let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler_opts(
                 &server,
-                Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+                Arc::new(RecordingTerminal {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
                 false,
                 None,
                 true,
@@ -1576,7 +1658,11 @@ fn subagent_task_prompt_skips_orphan_image_placeholder_recovery_but_a_user_promp
             image::RgbaImage::new(64, 64).save(&png).unwrap();
             enqueue_handled(&server, 1);
             let text = format!("look at [Image #1: {}]", png.display());
-            let request = if as_task { task_request(&text, Vec::new()) } else { user_request(&text) };
+            let request = if as_task {
+                task_request(&text, Vec::new())
+            } else {
+                user_request(&text)
+            };
             run_parent_turn(&actor, request).await.expect("turn runs");
             let _ = std::fs::remove_file(&png);
             let conversation = actor.chat_state_handle.get_conversation().await;
@@ -1586,8 +1672,14 @@ fn subagent_task_prompt_skips_orphan_image_placeholder_recovery_but_a_user_promp
             });
             recovered.push(has_image);
         }
-        assert!(recovered[0], "control: a human prompt recovers the orphan placeholder image");
-        assert!(!recovered[1], "a subagent task must not trigger a disk read through a placeholder");
+        assert!(
+            recovered[0],
+            "control: a human prompt recovers the orphan placeholder image"
+        );
+        assert!(
+            !recovered[1],
+            "a subagent task must not trigger a disk read through a placeholder"
+        );
     });
 }
 
@@ -1596,10 +1688,14 @@ fn subagent_task_prompt_skips_orphan_image_placeholder_recovery_but_a_user_promp
 #[test]
 fn subagent_task_prompt_in_a_subagent_session_refuses_permission_and_config_slashes() {
     on_big_stack(|| async {
-        let server = MockInferenceServer::start().await.expect("mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("mock inference server");
         let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler_in(
             &server,
-            Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+            Arc::new(RecordingTerminal {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
             true,
             Some(false),
         )
@@ -1620,7 +1716,10 @@ fn subagent_task_prompt_in_a_subagent_session_refuses_permission_and_config_slas
             run_parent_turn(&actor, task_request(&text, Vec::new()))
                 .await
                 .unwrap_or_else(|e| panic!("{text:?} gives a normal result: {e:?}"));
-            assert!(!actor.permissions.is_yolo_mode(), "{text:?} changed permissions");
+            assert!(
+                !actor.permissions.is_yolo_mode(),
+                "{text:?} changed permissions"
+            );
             assert_eq!(hooks_paths_text(), hooks_before, "{text:?} changed hooks");
             // A task is model-authored, so these never resolve as commands at all (plain model text): state is unchanged.
         }
@@ -1632,10 +1731,14 @@ fn subagent_task_prompt_in_a_subagent_session_refuses_permission_and_config_slas
 #[test]
 fn human_prompt_in_a_top_level_session_still_runs_always_approve() {
     on_big_stack(|| async {
-        let server = MockInferenceServer::start().await.expect("mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("mock inference server");
         let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler_in(
             &server,
-            Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+            Arc::new(RecordingTerminal {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
             false,
             Some(false),
         )
@@ -1644,7 +1747,10 @@ fn human_prompt_in_a_top_level_session_still_runs_always_approve() {
         run_parent_turn(&actor, user_request("/always-approve on"))
             .await
             .expect("human builtin runs");
-        assert!(actor.permissions.is_yolo_mode(), "a typed /always-approve still works");
+        assert!(
+            actor.permissions.is_yolo_mode(),
+            "a typed /always-approve still works"
+        );
         assert_eq!(response_count(&server), 0);
     });
 }
@@ -1652,10 +1758,14 @@ fn human_prompt_in_a_top_level_session_still_runs_always_approve() {
 #[test]
 fn subagent_session_refuses_permission_and_config_slashes_for_a_user_origin_prompt() {
     on_big_stack(|| async {
-        let server = MockInferenceServer::start().await.expect("mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("mock inference server");
         let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler_in(
             &server,
-            Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+            Arc::new(RecordingTerminal {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
             true,
             Some(false),
         )
@@ -1673,14 +1783,20 @@ fn subagent_session_refuses_permission_and_config_slashes_for_a_user_origin_prom
             run_parent_turn(&actor, user_request(&text))
                 .await
                 .unwrap_or_else(|e| panic!("{text:?} is refused with a normal result: {e:?}"));
-            assert!(!actor.permissions.is_yolo_mode(), "{text:?} changed permissions in a subagent");
+            assert!(
+                !actor.permissions.is_yolo_mode(),
+                "{text:?} changed permissions in a subagent"
+            );
             reached.push((text.clone(), response_count(&server)));
         }
         assert_eq!(hooks_paths_text(), hooks_before);
         // The yolo spellings and `/hooks-add` are refused without a model turn. (`/plugins` and `/memory` are availability-gated
         // out of this fixture; `builtin_classification_covers_the_permission_and_config_families` covers them.)
         assert_eq!(response_count(&server), 3, "{reached:?}");
-        assert_eq!(reached[5].1, 0, "/hooks-add must be refused, not sent to the model: {reached:?}");
+        assert_eq!(
+            reached[5].1, 0,
+            "/hooks-add must be refused, not sent to the model: {reached:?}"
+        );
     });
 }
 
@@ -1690,10 +1806,14 @@ fn subagent_session_refuses_permission_and_config_slashes_for_a_user_origin_prom
 #[test]
 fn subagent_session_executes_the_refusal_for_hooks_trust_and_hooks_remove() {
     on_big_stack(|| async {
-        let server = MockInferenceServer::start().await.expect("mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("mock inference server");
         let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler_in(
             &server,
-            Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+            Arc::new(RecordingTerminal {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
             true,
             Some(false),
         )
@@ -1704,7 +1824,11 @@ fn subagent_session_executes_the_refusal_for_hooks_trust_and_hooks_remove() {
             run_parent_turn(&actor, user_request(text))
                 .await
                 .unwrap_or_else(|e| panic!("{text:?} is refused with a normal result: {e:?}"));
-            assert_eq!(response_count(&server), 0, "{text:?} must be refused by the host, not sent to the model");
+            assert_eq!(
+                response_count(&server),
+                0,
+                "{text:?} must be refused by the host, not sent to the model"
+            );
             assert_eq!(hooks_paths_text(), hooks_before, "{text:?} changed hooks");
         }
     });
@@ -1742,7 +1866,13 @@ fn builtin_classification_covers_the_permission_and_config_families() {
             "/{name} {args} must be refused in a subagent session"
         );
     }
-    for (name, args) in [("compact", ""), ("hooks-list", ""), ("plugins", "list"), ("memory", ""), ("context", "")] {
+    for (name, args) in [
+        ("compact", ""),
+        ("hooks-list", ""),
+        ("plugins", "list"),
+        ("memory", ""),
+        ("context", ""),
+    ] {
         assert!(
             !resolve(name, args).changes_permissions_or_config(),
             "/{name} {args} is read-only or in-session"
@@ -1759,31 +1889,53 @@ fn builtin_classification_covers_the_permission_and_config_families() {
 async fn runtime_origins_do_not_expand_file_mentions() {
     let origins = [
         ("scheduler-fired-", PromptOrigin::SchedulerFired),
-        ("subagent-completed-", PromptOrigin::SubagentCompleted { subagent_id: "s1".into() }),
+        (
+            "subagent-completed-",
+            PromptOrigin::SubagentCompleted {
+                subagent_id: "s1".into(),
+            },
+        ),
         ("notifications-", PromptOrigin::NotificationDrain),
-        ("task-completed-", PromptOrigin::TaskCompleted { task_id: "t1".into() }),
+        (
+            "task-completed-",
+            PromptOrigin::TaskCompleted {
+                task_id: "t1".into(),
+            },
+        ),
     ];
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let server = MockInferenceServer::start().await.expect("mock inference server");
+            let server = MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
             enqueue_handled(&server, origins.len());
             let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler(
                 &server,
-                Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+                Arc::new(RecordingTerminal {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
             )
             .await;
             let dir = tempfile::tempdir().unwrap();
             let file = dir.path().join("rta-marker.txt");
             std::fs::write(&file, "RTA_RUNTIME_MARKER").unwrap();
             for (prefix, origin) in origins {
-                let mut request = runtime_request(&format!("see @{} and @relative.txt and @/etc/hostname", file.display()));
+                let mut request = runtime_request(&format!(
+                    "see @{} and @relative.txt and @/etc/hostname",
+                    file.display()
+                ));
                 request.prompt_id = format!("{prefix}{}", uuid::Uuid::new_v4());
                 request.input_origin = InputOrigin::new(origin);
-                run_parent_turn(&actor, request).await.expect("runtime prompt runs");
+                run_parent_turn(&actor, request)
+                    .await
+                    .expect("runtime prompt runs");
             }
             let rendered = serde_json::to_string(&server.request_bodies()).unwrap();
-            assert!(!rendered.contains("RTA_RUNTIME_MARKER"), "a runtime origin read a file: {rendered}");
+            assert!(
+                !rendered.contains("RTA_RUNTIME_MARKER"),
+                "a runtime origin read a file: {rendered}"
+            );
             assert!(!rendered.contains("<file_contents"), "{rendered}");
         })
         .await;
@@ -1795,10 +1947,14 @@ async fn runtime_origins_do_not_expand_file_mentions() {
 #[test]
 fn unverified_scheduled_prompt_has_no_slash_or_file_authority() {
     on_big_stack(|| async {
-        let server = MockInferenceServer::start().await.expect("mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("mock inference server");
         let (actor, _hook_rx, _chunks, policy_recorder) = actor_with_sampler_in(
             &server,
-            Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+            Arc::new(RecordingTerminal {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
             false,
             Some(false),
         )
@@ -1808,21 +1964,40 @@ fn unverified_scheduled_prompt_has_no_slash_or_file_authority() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("rta-unverified.txt");
         std::fs::write(&file, "RTA_UNVERIFIED_MARKER").unwrap();
-        for text in ["/always-approve on".to_string(), format!("check @{}", file.display())] {
+        for text in [
+            "/always-approve on".to_string(),
+            format!("check @{}", file.display()),
+        ] {
             let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(&text))];
             let id = format!("scheduler-fired-{}", uuid::Uuid::new_v4().simple());
-            let origin = crate::session::cron_fire_tickets::client_prompt_origin("rta-session", &id, &blocks);
+            let origin = crate::session::cron_fire_tickets::client_prompt_origin(
+                "rta-session",
+                &id,
+                &blocks,
+            );
             assert_eq!(origin, PromptOrigin::UnverifiedScheduled);
             let mut request = user_request(&text);
             request.prompt_id = id;
             request.input_origin = InputOrigin::new(origin);
-            run_parent_turn(&actor, request).await.expect("unverified prompt reaches the model as text");
-            assert!(!actor.permissions.is_yolo_mode(), "{text:?} changed the permission mode");
+            run_parent_turn(&actor, request)
+                .await
+                .expect("unverified prompt reaches the model as text");
+            assert!(
+                !actor.permissions.is_yolo_mode(),
+                "{text:?} changed the permission mode"
+            );
         }
-        assert_eq!(response_count(&server), 2, "both texts reached the model, no builtin ran");
+        assert_eq!(
+            response_count(&server),
+            2,
+            "both texts reached the model, no builtin ran"
+        );
         let rendered = serde_json::to_string(&server.request_bodies()).unwrap();
         assert!(!rendered.contains("RTA_UNVERIFIED_MARKER"), "{rendered}");
-        assert_eq!(policy_recorder.0.get(), Some(InputAuthority::ModelAuthoredUntrusted));
+        assert_eq!(
+            policy_recorder.0.get(),
+            Some(InputAuthority::ModelAuthoredUntrusted)
+        );
         let conversation = actor.chat_state_handle.get_conversation().await;
         assert!(conversation.iter().any(|i| matches!(
             i,
@@ -1835,10 +2010,14 @@ fn unverified_scheduled_prompt_has_no_slash_or_file_authority() {
 #[test]
 fn human_file_mention_still_expands_and_verified_fire_slash_stays_inert() {
     on_big_stack(|| async {
-        let server = MockInferenceServer::start().await.expect("mock inference server");
+        let server = MockInferenceServer::start()
+            .await
+            .expect("mock inference server");
         let (actor, _hook_rx, _chunks, _recorder) = actor_with_sampler_in(
             &server,
-            Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+            Arc::new(RecordingTerminal {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
             false,
             Some(false),
         )
@@ -1851,9 +2030,17 @@ fn human_file_mention_still_expands_and_verified_fire_slash_stays_inert() {
         human.verbatim = false;
         run_parent_turn(&actor, human).await.expect("human prompt");
         let rendered = serde_json::to_string(&server.request_bodies()).unwrap();
-        assert!(rendered.contains("RTA_HUMAN_MARKER"), "a typed @file still expands");
-        run_parent_turn(&actor, runtime_request("/always-approve on")).await.expect("verified fire");
-        assert!(!actor.permissions.is_yolo_mode(), "a verified fire's slash text is inert");
+        assert!(
+            rendered.contains("RTA_HUMAN_MARKER"),
+            "a typed @file still expands"
+        );
+        run_parent_turn(&actor, runtime_request("/always-approve on"))
+            .await
+            .expect("verified fire");
+        assert!(
+            !actor.permissions.is_yolo_mode(),
+            "a verified fire's slash text is inert"
+        );
     });
 }
 

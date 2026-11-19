@@ -307,7 +307,12 @@ async fn run_command(
             };
             configure(&mut shell);
             shell.spawn().map_err(|error| {
-                fuigo_tools::util::spawn::ShellSpawnFailure::for_command("status_line", shell.as_std(), &error).log();
+                fuigo_tools::util::spawn::ShellSpawnFailure::for_command(
+                    "status_line",
+                    shell.as_std(),
+                    &error,
+                )
+                .log();
                 RunError::Spawn(error)
             })?
         }

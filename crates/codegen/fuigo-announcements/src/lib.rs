@@ -182,7 +182,10 @@ pub fn update_hidden_announcement_ids_at(
         |current| {
             let (mut ids, exists) = match current {
                 // Malformed reads as nothing hidden, as `read_hidden_announcement_ids` does.
-                Ok(Some(bytes)) => (parse_hidden_announcement_ids(&String::from_utf8_lossy(bytes)), true),
+                Ok(Some(bytes)) => (
+                    parse_hidden_announcement_ids(&String::from_utf8_lossy(bytes)),
+                    true,
+                ),
                 Ok(None) => (BTreeSet::new(), false),
                 Err(e) => return Err(std::io::Error::new(e.kind(), e.to_string())),
             };
@@ -322,7 +325,8 @@ mod tests {
                 for i in 0..30 {
                     let id = format!("{tag}{i}");
                     hidden.insert(id.clone());
-                    update_hidden_announcement_ids_at(&path, &hidden, &BTreeSet::from([id])).unwrap();
+                    update_hidden_announcement_ids_at(&path, &hidden, &BTreeSet::from([id]))
+                        .unwrap();
                 }
                 if tag == "b" {
                     // b shows one it never had in memory; only that id goes.

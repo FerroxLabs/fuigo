@@ -135,7 +135,11 @@ impl Cursor<'_> {
     }
 
     fn expect(&mut self, c: u8) -> Result<(), RowsError> {
-        if self.next() == Some(c) { Ok(()) } else { Err(RowsError::Malformed) }
+        if self.next() == Some(c) {
+            Ok(())
+        } else {
+            Err(RowsError::Malformed)
+        }
     }
 
     /// A string with no escapes and no control characters, returned as a borrowed slice.
@@ -164,7 +168,10 @@ impl Cursor<'_> {
         }
         let mut n: u64 = 0;
         for d in digits {
-            n = n.checked_mul(10).and_then(|n| n.checked_add(u64::from(d - b'0'))).ok_or(RowsError::Malformed)?;
+            n = n
+                .checked_mul(10)
+                .and_then(|n| n.checked_add(u64::from(d - b'0')))
+                .ok_or(RowsError::Malformed)?;
         }
         Ok(n)
     }
@@ -180,7 +187,8 @@ impl Cursor<'_> {
             self.ws();
             match key.as_slice() {
                 b"host_id" if host.is_none() => {
-                    let s = std::str::from_utf8(self.string()?).map_err(|_| RowsError::Malformed)?;
+                    let s =
+                        std::str::from_utf8(self.string()?).map_err(|_| RowsError::Malformed)?;
                     host = Some(HostId::new(s).map_err(|_| RowsError::Malformed)?);
                 }
                 b"pid" if pid.is_none() => {
@@ -204,7 +212,12 @@ impl Cursor<'_> {
             }
         }
         match (host, pid, started, dir) {
-            (Some(host_id), Some(pid), Some(started), Some(dir)) => Ok(HostRow { host_id, pid, started, dir }),
+            (Some(host_id), Some(pid), Some(started), Some(dir)) => Ok(HostRow {
+                host_id,
+                pid,
+                started,
+                dir,
+            }),
             _ => Err(RowsError::Malformed),
         }
     }
@@ -301,7 +314,11 @@ pub fn reap_decision(
     use TryResult::*;
     match (first, second) {
         (Refused, Refused) => Reap::Reap,
-        (Refused | NoSuchFile, Refused | NoSuchFile) if dir == HostDir::Home || same_runtime_dir => Reap::Reap,
+        (Refused | NoSuchFile, Refused | NoSuchFile)
+            if dir == HostDir::Home || same_runtime_dir =>
+        {
+            Reap::Reap
+        }
         (Hello(a), Hello(b)) if a == b && a != expected => Reap::Reap,
         _ => Reap::Keep,
     }

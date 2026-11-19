@@ -257,7 +257,8 @@ impl<W: Write> Write for DisplayWriter<W> {
             let tail = self.pending.split_off(split);
             let text = String::from_utf8_lossy(&self.pending).into_owned();
             self.pending = tail;
-            self.inner.write_all(crate::scrub_terminal_text(&text).as_bytes())?;
+            self.inner
+                .write_all(crate::scrub_terminal_text(&text).as_bytes())?;
         }
         self.inner.flush()
     }
@@ -301,7 +302,10 @@ mod tests {
     /// P181 (Grok round): on a terminal, stdout text is display text; on a pipe it stays exact (it may be data).
     #[test]
     fn terminal_text_is_scrubbed_and_piped_text_is_not() {
-        assert_eq!(stdout_text("plug\x1b]0;t\x07in\u{2028}\n", true), "plug ]0;t in \n");
+        assert_eq!(
+            stdout_text("plug\x1b]0;t\x07in\u{2028}\n", true),
+            "plug ]0;t in \n"
+        );
         assert_eq!(stdout_text("a\x1bb\u{2028}\n", false), "a\x1bb\u{2028}\n");
     }
 
@@ -316,7 +320,10 @@ mod tests {
             w.write_all(b"]0;owned\x07 \xe2\x80").unwrap();
             w.write_all(b"\xa8end\n").unwrap();
         }
-        assert_eq!(String::from_utf8(shown).unwrap(), "branch  ]0;owned   end\n");
+        assert_eq!(
+            String::from_utf8(shown).unwrap(),
+            "branch  ]0;owned   end\n"
+        );
         let mut piped = Vec::new();
         {
             let mut w = DisplayWriter::new(&mut piped, false);

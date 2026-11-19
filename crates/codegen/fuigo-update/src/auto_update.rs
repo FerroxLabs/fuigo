@@ -183,8 +183,15 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     }
 
     if let Some(error) = status.error.as_deref() {
-        fuigo_tty_utils::cli_println!("Fuigo - v{} [{}]", fuigo_tty_utils::untrusted(&status.current_version), fuigo_tty_utils::untrusted(&status.channel));
-        fuigo_tty_utils::cli_println!("Update check failed: {}", fuigo_tty_utils::untrusted(&error));
+        fuigo_tty_utils::cli_println!(
+            "Fuigo - v{} [{}]",
+            fuigo_tty_utils::untrusted(&status.current_version),
+            fuigo_tty_utils::untrusted(&status.channel)
+        );
+        fuigo_tty_utils::cli_println!(
+            "Update check failed: {}",
+            fuigo_tty_utils::untrusted(&error)
+        );
         return Ok(());
     }
 
@@ -214,7 +221,11 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
         return Ok(());
     }
 
-    fuigo_tty_utils::cli_println!("Fuigo - v{}{}", fuigo_tty_utils::untrusted(&status.current_version), fuigo_tty_utils::untrusted(&channel_label));
+    fuigo_tty_utils::cli_println!(
+        "Fuigo - v{}{}",
+        fuigo_tty_utils::untrusted(&status.current_version),
+        fuigo_tty_utils::untrusted(&channel_label)
+    );
     Ok(())
 }
 
@@ -817,7 +828,10 @@ pub async fn run_update_if_available(
                     if let Err(e) =
                         run_update_subcommand(run_mode, CliUpdateTrigger::UserCommand).await
                     {
-                        fuigo_tty_utils::cli_eprintln!("Update failed: {}", fuigo_tty_utils::untrusted(&e));
+                        fuigo_tty_utils::cli_eprintln!(
+                            "Update failed: {}",
+                            fuigo_tty_utils::untrusted(&e)
+                        );
                     } else if matches!(run_mode, UpdateRunMode::Blocking) {
                         return Ok(true);
                     } else {
@@ -960,7 +974,10 @@ pub async fn run_install_script(
         && let Some(version) = target
         && auto_update_block_for(false, latched_start_failure().as_deref(), version).is_some()
     {
-        anyhow::bail!(auto_update_block_notice(AutoUpdateBlock::FailedToStart, version));
+        anyhow::bail!(auto_update_block_notice(
+            AutoUpdateBlock::FailedToStart,
+            version
+        ));
     }
     // What's on disk is being replaced, not this (possibly stale) process's version; npm has no trustworthy disk version, so it falls back
     let from_version =
@@ -974,7 +991,10 @@ pub async fn run_install_script(
                 && let Some(version) = target
                 && setup_failed_recently(version)
             {
-                tracing::warn!(version, "skipping npm update: the setup step of this version failed recently");
+                tracing::warn!(
+                    version,
+                    "skipping npm update: the setup step of this version failed recently"
+                );
                 Err(anyhow::anyhow!(
                     "not reinstalling fuigo@{version}: its setup step failed recently (run `fuigo update` to retry)"
                 ))
@@ -1684,7 +1704,11 @@ async fn download_verified_from_base(
     let binary_name = format!("fuigo-{}-{}", version, platform);
     let binary_path = download_dir.join(&binary_name);
 
-    fuigo_tty_utils::cli_eprintln!("  Downloading fuigo v{} ({})...", fuigo_tty_utils::untrusted(&version), fuigo_tty_utils::untrusted(&platform));
+    fuigo_tty_utils::cli_eprintln!(
+        "  Downloading fuigo v{} ({})...",
+        fuigo_tty_utils::untrusted(&version),
+        fuigo_tty_utils::untrusted(&platform)
+    );
 
     // The downloaded binary is already +x (see `publish_downloaded_artifact`)
     download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &binary_path, true).await?;
@@ -1758,7 +1782,12 @@ async fn verify_internal_download(
         tracing::debug!("{url} is not a sha256 digest; loopback base, continuing");
         return Ok(());
     }
-    verify_gh_asset(binary_path, binary_name, &format!("{digest}  {binary_name}")).await
+    verify_gh_asset(
+        binary_path,
+        binary_name,
+        &format!("{digest}  {binary_name}"),
+    )
+    .await
 }
 
 /// Local activation phase: swap the managed bin links to the downloaded binary and finish bookkeeping.
@@ -1867,7 +1896,10 @@ async fn write_completion_file_in(
 }
 
 /// Where the symlink `link` points, when that is an existing regular file inside `user_home`.
-async fn link_target_inside_home(link: &std::path::Path, user_home: &std::path::Path) -> Option<std::path::PathBuf> {
+async fn link_target_inside_home(
+    link: &std::path::Path,
+    user_home: &std::path::Path,
+) -> Option<std::path::PathBuf> {
     if user_home.as_os_str().is_empty() {
         return None;
     }
@@ -1887,7 +1919,9 @@ async fn link_target_inside_home(link: &std::path::Path, user_home: &std::path::
 /// warning is simply repeated.
 async fn warn_completion_symlink_once(dest: &std::path::Path, warned_marker: &std::path::Path) {
     let line = dest.display().to_string();
-    let known = tokio::fs::read_to_string(warned_marker).await.unwrap_or_default();
+    let known = tokio::fs::read_to_string(warned_marker)
+        .await
+        .unwrap_or_default();
     if known.lines().any(|l| l == line) {
         return;
     }
@@ -2482,7 +2516,9 @@ async fn download_verified_gh_asset(tag: &str, asset: &str, dest: &std::path::Pa
         gh_release_download(tag, asset, &tmp).await?;
         gh_release_download(tag, GH_RELEASE_SUMS_ASSET, &sums)
             .await
-            .with_context(|| format!("could not fetch {GH_RELEASE_SUMS_ASSET} of {tag} to verify {asset}"))?;
+            .with_context(|| {
+                format!("could not fetch {GH_RELEASE_SUMS_ASSET} of {tag} to verify {asset}")
+            })?;
         let listed = tokio::fs::read_to_string(&sums).await?;
         verify_gh_asset(&tmp, asset, &listed).await?;
         publish_downloaded_artifact(&tmp, dest).await
@@ -2508,13 +2544,17 @@ fn gh_sums_entry(sums: &str, asset: &str) -> Option<String> {
 /// release's `SHA256SUMS` entry. The bytes are flushed to disk first, so the rename never publishes a file whose
 /// contents are still only in the page cache. Then it is made executable and the mode is checked.
 async fn verify_gh_asset(path: &std::path::Path, asset: &str, sums: &str) -> Result<()> {
-    let expected = gh_sums_entry(sums, asset)
-        .ok_or_else(|| anyhow::anyhow!("{GH_RELEASE_SUMS_ASSET} of this release does not list {asset}"))?;
+    let expected = gh_sums_entry(sums, asset).ok_or_else(|| {
+        anyhow::anyhow!("{GH_RELEASE_SUMS_ASSET} of this release does not list {asset}")
+    })?;
     let file = path.to_path_buf();
     let (len, actual) = tokio::task::spawn_blocking(move || -> std::io::Result<(u64, String)> {
         use sha2::{Digest, Sha256};
         use std::io::Read;
-        let mut handle = std::fs::OpenOptions::new().read(true).write(true).open(&file)?;
+        let mut handle = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file)?;
         handle.sync_all()?;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0u8; 64 * 1024];
@@ -2643,7 +2683,10 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 /// The file sits in a fresh owner-only directory (`PrivateNpmCache`, dropped with the guard) and is created with
 /// `create_new` and mode 0600 at open, so a planted file or symlink is never followed and the token is never readable
 /// by another user (audit S8-F3).
-struct TempNpmrc(std::path::PathBuf, #[allow(dead_code)] crate::version::PrivateNpmCache);
+struct TempNpmrc(
+    std::path::PathBuf,
+    #[allow(dead_code)] crate::version::PrivateNpmCache,
+);
 
 impl std::ops::Deref for TempNpmrc {
     type Target = std::path::Path;
@@ -2765,7 +2808,14 @@ pub async fn install_npm_checked_for_test(
     preflight_timeout: Duration,
     install_timeout: Duration,
 ) -> Result<()> {
-    install_npm_checked(target, channel, npm_registry, preflight_timeout, install_timeout).await
+    install_npm_checked(
+        target,
+        channel,
+        npm_registry,
+        preflight_timeout,
+        install_timeout,
+    )
+    .await
 }
 
 /// Wall-clock bound on `npm i -g` (P145). With the registry down npm retried silently for more than 400 s on Windows;
@@ -2820,7 +2870,11 @@ fn npm_install_spec(target: Option<&str>, channel: &str) -> String {
     }
 }
 
-async fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) -> Result<()> {
+async fn install_npm(
+    target: Option<&str>,
+    channel: &str,
+    npm_registry: Option<&str>,
+) -> Result<()> {
     install_npm_with_timeout(target, channel, npm_registry, NPM_INSTALL_TIMEOUT).await
 }
 
@@ -2949,7 +3003,10 @@ fn setup_failed_recently(version: &str) -> bool {
         return false;
     };
     let mut lines = text.lines();
-    let (Some(v), Some(ts)) = (lines.next(), lines.next().and_then(|t| t.trim().parse::<u64>().ok())) else {
+    let (Some(v), Some(ts)) = (
+        lines.next(),
+        lines.next().and_then(|t| t.trim().parse::<u64>().ok()),
+    ) else {
         return false;
     };
     v == version && unix_now().saturating_sub(ts) < NPM_SETUP_BACKOFF.as_secs()
@@ -2992,7 +3049,11 @@ enum AutoUpdateBlock {
     FailedToStart,
 }
 
-fn auto_update_block_for(confined: bool, latched: Option<&str>, target: &str) -> Option<AutoUpdateBlock> {
+fn auto_update_block_for(
+    confined: bool,
+    latched: Option<&str>,
+    target: &str,
+) -> Option<AutoUpdateBlock> {
     if confined {
         Some(AutoUpdateBlock::Confined)
     } else if latched == Some(target) {
@@ -3047,7 +3108,11 @@ fn registry_safe_to_record(registry: &str) -> bool {
 /// is run through `npm explore -g fuigo -- node bin/fuigo-bootstrap.js` instead: npm itself resolves the directory
 /// and starts the child there, so no printed path is parsed. The child reports its version through a file named in
 /// `FUIGO_INSTALL_REPORT` (its own stdout is not npm output, but a file needs no parsing of a terminal stream).
-async fn run_npm_setup(target: Option<&str>, npm_registry: Option<&str>, timeout: Duration) -> Result<String> {
+async fn run_npm_setup(
+    target: Option<&str>,
+    npm_registry: Option<&str>,
+    timeout: Duration,
+) -> Result<String> {
     match npm_root_global().await {
         Ok(root) if root_is_usable(&root) => {
             let pkg_dir = std::path::Path::new(&root).join("fuigo");
@@ -3056,7 +3121,10 @@ async fn run_npm_setup(target: Option<&str>, npm_registry: Option<&str>, timeout
             }
             tracing::warn!(root, "npm root -g has no fuigo package; trying npm explore");
         }
-        Ok(root) => tracing::warn!(root, "npm masked or emptied the global root; trying npm explore"),
+        Ok(root) => tracing::warn!(
+            root,
+            "npm masked or emptied the global root; trying npm explore"
+        ),
         Err(e) => tracing::warn!("npm root -g unusable ({e:#}); trying npm explore"),
     }
     run_npm_setup_via_explore(target, npm_registry, timeout).await
@@ -3066,14 +3134,21 @@ async fn run_npm_setup(target: Option<&str>, npm_registry: Option<&str>, timeout
 async fn npm_root_global() -> Result<String> {
     let mut root_cmd = crate::npm_command::npm_invocation()?.tokio_command();
     root_cmd.args(["root", "-g"]);
-    root_cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    root_cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     fuigo_tools::util::detach_command(&mut root_cmd);
     match crate::npm_command::run_tree_bounded(&mut root_cmd, Duration::from_secs(30)).await? {
         crate::npm_command::Bounded::Done(out) if out.status.success() => {
             Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         }
-        crate::npm_command::Bounded::Done(out) => anyhow::bail!("`npm root -g` failed with {}", out.status),
-        crate::npm_command::Bounded::TimedOut => anyhow::bail!("`npm root -g` did not answer in 30 s"),
+        crate::npm_command::Bounded::Done(out) => {
+            anyhow::bail!("`npm root -g` failed with {}", out.status)
+        }
+        crate::npm_command::Bounded::TimedOut => {
+            anyhow::bail!("`npm root -g` did not answer in 30 s")
+        }
     }
 }
 
@@ -3083,7 +3158,11 @@ fn root_is_usable(root: &str) -> bool {
 }
 
 /// The environment of the setup step, shared by both ways of starting it.
-fn apply_setup_env(cmd: &mut tokio::process::Command, home: &std::path::Path, npm_registry: Option<&str>) {
+fn apply_setup_env(
+    cmd: &mut tokio::process::Command,
+    home: &std::path::Path,
+    npm_registry: Option<&str>,
+) {
     cmd.env("FUIGO_INSTALL_ONLY", "1");
     cmd.env("FUIGO_HOME", home);
     if let Some(registry) = npm_registry
@@ -3100,8 +3179,12 @@ async fn run_npm_setup_at(
     npm_registry: Option<&str>,
     timeout: Duration,
 ) -> Result<String> {
-    let manifest = std::fs::read_to_string(pkg_dir.join("package.json"))
-        .with_context(|| format!("the installed package was not found at {}", pkg_dir.display()))?;
+    let manifest = std::fs::read_to_string(pkg_dir.join("package.json")).with_context(|| {
+        format!(
+            "the installed package was not found at {}",
+            pkg_dir.display()
+        )
+    })?;
     let installed: String = serde_json::from_str::<serde_json::Value>(&manifest)?
         .get("version")
         .and_then(|v| v.as_str())
@@ -3118,7 +3201,11 @@ async fn run_npm_setup_at(
     let mut cmd = tokio::process::Command::new(crate::npm_command::trusted_program("node")?);
     cmd.arg(&script)
         // Never the user's project: the node side looks up the npm registry from this directory.
-        .current_dir(if home.is_dir() { home.clone() } else { std::env::temp_dir() })
+        .current_dir(if home.is_dir() {
+            home.clone()
+        } else {
+            std::env::temp_dir()
+        })
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
@@ -3126,30 +3213,54 @@ async fn run_npm_setup_at(
     fuigo_tools::util::detach_command(&mut cmd);
     match crate::npm_command::run_tree_bounded(&mut cmd, timeout).await? {
         crate::npm_command::Bounded::Done(out) if out.status.success() => {}
-        crate::npm_command::Bounded::Done(out) => anyhow::bail!("`node {}` exited with {}", script.display(), out.status),
+        crate::npm_command::Bounded::Done(out) => {
+            anyhow::bail!("`node {}` exited with {}", script.display(), out.status)
+        }
         crate::npm_command::Bounded::TimedOut => {
-            anyhow::bail!("`node {}` did not finish within {} s", script.display(), timeout.as_secs())
+            anyhow::bail!(
+                "`node {}` did not finish within {} s",
+                script.display(),
+                timeout.as_secs()
+            )
         }
     }
     if !canonical_points_at(&installed) {
-        anyhow::bail!("{} does not point at fuigo-{installed} after the setup step", fuigo_application().display());
+        anyhow::bail!(
+            "{} does not point at fuigo-{installed} after the setup step",
+            fuigo_application().display()
+        );
     }
     Ok(installed)
 }
 
 /// Run the setup step through `npm explore -g fuigo -- node bin/fuigo-bootstrap.js` (see [`run_npm_setup`]).
-async fn run_npm_setup_via_explore(target: Option<&str>, npm_registry: Option<&str>, timeout: Duration) -> Result<String> {
+async fn run_npm_setup_via_explore(
+    target: Option<&str>,
+    npm_registry: Option<&str>,
+    timeout: Duration,
+) -> Result<String> {
     let home = fuigo_home();
     let _ = std::fs::create_dir_all(&home);
     let report = home.join(format!(".npm-setup-report.{}", std::process::id()));
     let _ = std::fs::remove_file(&report);
     let mut cmd = crate::npm_command::npm_invocation()?.tokio_command();
-    cmd.args(["explore", "-g", "fuigo", "--", "node", "bin/fuigo-bootstrap.js"])
-        .current_dir(if home.is_dir() { home.clone() } else { std::env::temp_dir() })
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .env("FUIGO_INSTALL_REPORT", &report);
+    cmd.args([
+        "explore",
+        "-g",
+        "fuigo",
+        "--",
+        "node",
+        "bin/fuigo-bootstrap.js",
+    ])
+    .current_dir(if home.is_dir() {
+        home.clone()
+    } else {
+        std::env::temp_dir()
+    })
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::inherit())
+    .env("FUIGO_INSTALL_REPORT", &report);
     if let Some(want) = target {
         // Refuse before touching ~/.fuigo/bin when npm installed some other version.
         cmd.env("FUIGO_INSTALL_EXPECT_VERSION", want);
@@ -3162,24 +3273,35 @@ async fn run_npm_setup_via_explore(target: Option<&str>, npm_registry: Option<&s
     match ran? {
         crate::npm_command::Bounded::Done(out) if out.status.success() => {}
         crate::npm_command::Bounded::Done(out) => {
-            anyhow::bail!("`npm explore -g fuigo` (setup step) exited with {}", out.status)
+            anyhow::bail!(
+                "`npm explore -g fuigo` (setup step) exited with {}",
+                out.status
+            )
         }
         crate::npm_command::Bounded::TimedOut => {
-            anyhow::bail!("`npm explore -g fuigo` (setup step) did not finish within {} s", timeout.as_secs())
+            anyhow::bail!(
+                "`npm explore -g fuigo` (setup step) did not finish within {} s",
+                timeout.as_secs()
+            )
         }
     }
-    let installed: String = serde_json::from_str::<serde_json::Value>(&reported.context("the setup step wrote no report")?)?
-        .get("version")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .context("the setup report has no version")?;
+    let installed: String = serde_json::from_str::<serde_json::Value>(
+        &reported.context("the setup step wrote no report")?,
+    )?
+    .get("version")
+    .and_then(|v| v.as_str())
+    .map(str::to_string)
+    .context("the setup report has no version")?;
     if let Some(want) = target
         && want != installed
     {
         anyhow::bail!("npm reported success but installed fuigo@{installed}, not fuigo@{want}");
     }
     if !canonical_points_at(&installed) {
-        anyhow::bail!("{} does not point at fuigo-{installed} after the setup step", fuigo_application().display());
+        anyhow::bail!(
+            "{} does not point at fuigo-{installed} after the setup step",
+            fuigo_application().display()
+        );
     }
     Ok(installed)
 }
@@ -3187,7 +3309,9 @@ async fn run_npm_setup_via_explore(target: Option<&str>, npm_registry: Option<&s
 /// Whether `~/.fuigo/bin/fuigo` now runs the versioned binary `fuigo-<version>` next to it.
 fn canonical_points_at(version: &str) -> bool {
     let app = fuigo_application();
-    let Some(dir) = app.parent() else { return false };
+    let Some(dir) = app.parent() else {
+        return false;
+    };
     let name = format!("fuigo-{version}{}", if cfg!(windows) { ".exe" } else { "" });
     if !dir.join(&name).is_file() {
         return false;
@@ -3220,7 +3344,9 @@ fn same_file_content(a: &std::path::Path, b: &std::path::Path) -> bool {
     let mut ba = vec![0u8; 64 * 1024];
     let mut bb = vec![0u8; 64 * 1024];
     loop {
-        let Ok(n) = fa.read(&mut ba) else { return false };
+        let Ok(n) = fa.read(&mut ba) else {
+            return false;
+        };
         if n == 0 {
             return true;
         }
@@ -3310,7 +3436,10 @@ pub async fn run_update(
         {
             tracing::warn!("Failed to persist auto_update=false for pinned install: {e}");
         }
-        fuigo_tty_utils::cli_eprintln!("  ✓ fuigo v{} installed successfully!", fuigo_tty_utils::untrusted(&version));
+        fuigo_tty_utils::cli_eprintln!(
+            "  ✓ fuigo v{} installed successfully!",
+            fuigo_tty_utils::untrusted(&version)
+        );
         fuigo_tty_utils::cli_eprintln!("  Please restart Fuigo.");
         return Ok(Some(version.to_string()));
     }
@@ -3332,7 +3461,10 @@ pub async fn run_update(
             write_version_cache(&latest, stable_ptr.as_deref()).await;
             fuigo_tty_utils::cli_eprintln!(
                 "The latest release ({}) is not an allowed update; \
-                 keeping the current version ({}).", fuigo_tty_utils::untrusted(&latest), fuigo_tty_utils::untrusted(&current_version));
+                 keeping the current version ({}).",
+                fuigo_tty_utils::untrusted(&latest),
+                fuigo_tty_utils::untrusted(&current_version)
+            );
             refresh_deployment_config().await;
             return Ok(None);
         }
@@ -3347,7 +3479,10 @@ pub async fn run_update(
     if install_target != latest_version {
         fuigo_tty_utils::cli_eprintln!(
             "Latest available is {}, but your configured version range \
-             allows {}; installing that instead.", fuigo_tty_utils::untrusted(&latest_version), fuigo_tty_utils::untrusted(&install_target));
+             allows {}; installing that instead.",
+            fuigo_tty_utils::untrusted(&latest_version),
+            fuigo_tty_utils::untrusted(&install_target)
+        );
     }
 
     // What's on disk wins over this process's compiled-in version
@@ -3375,7 +3510,10 @@ pub async fn run_update(
                 } else {
                     let stable_ptr = try_fetch_stable_pointer().await;
                     write_version_cache(&install_target, stable_ptr.as_deref()).await;
-                    fuigo_tty_utils::cli_eprintln!("Already up to date ({}).", fuigo_tty_utils::untrusted(&effective_current));
+                    fuigo_tty_utils::cli_eprintln!(
+                        "Already up to date ({}).",
+                        fuigo_tty_utils::untrusted(&effective_current)
+                    );
                     // Retry if a prior sync failed.
                     refresh_deployment_config().await;
                     // The target is on disk even though this call installed nothing
@@ -3387,7 +3525,11 @@ pub async fn run_update(
                         (semver::Version::parse(&effective_current), semver::Version::parse(&install_target)),
                         (Ok(kept), Ok(target)) if target < kept
                     );
-                    return Ok(Some(if kept_higher { effective_current } else { install_target }));
+                    return Ok(Some(if kept_higher {
+                        effective_current
+                    } else {
+                        install_target
+                    }));
                 }
             }
             None => {
@@ -3429,7 +3571,11 @@ pub async fn run_update(
         );
         &effective_current
     } else {
-        fuigo_tty_utils::cli_eprintln!("Updating Fuigo {} → {}", fuigo_tty_utils::untrusted(&effective_current), fuigo_tty_utils::untrusted(&install_target));
+        fuigo_tty_utils::cli_eprintln!(
+            "Updating Fuigo {} → {}",
+            fuigo_tty_utils::untrusted(&effective_current),
+            fuigo_tty_utils::untrusted(&install_target)
+        );
         &install_target
     };
 
@@ -3440,7 +3586,10 @@ pub async fn run_update(
     let stable_ptr = try_fetch_stable_pointer().await;
     write_version_cache(target_version, stable_ptr.as_deref()).await;
     refresh_deployment_config().await;
-    fuigo_tty_utils::cli_eprintln!("  ✓ fuigo v{} installed successfully!", fuigo_tty_utils::untrusted(&target_version));
+    fuigo_tty_utils::cli_eprintln!(
+        "  ✓ fuigo v{} installed successfully!",
+        fuigo_tty_utils::untrusted(&target_version)
+    );
 
     if !force && std::env::var_os("FUIGO_AUTO_UPDATE").is_none() {
         fuigo_tty_utils::cli_eprintln!("  Please restart Fuigo.");
@@ -3474,7 +3623,10 @@ async fn refresh_deployment_config() {
                 "  Couldn't apply managed configuration. Run `fuigo setup` to retry."
             );
         }
-        Err(e) => fuigo_tty_utils::cli_eprintln!("  Couldn't apply managed configuration. {}", fuigo_tty_utils::untrusted(&e)),
+        Err(e) => fuigo_tty_utils::cli_eprintln!(
+            "  Couldn't apply managed configuration. {}",
+            fuigo_tty_utils::untrusted(&e)
+        ),
     }
 }
 

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use fuigo_config_types::DisplayRefreshSettings;
+use serde::{Deserialize, Serialize};
 
 use fuigo_status_line::StatusLineConfig;
 

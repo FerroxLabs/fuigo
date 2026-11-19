@@ -111,7 +111,10 @@ fn resumed_task(foreground: bool, due_in: Duration) -> ScheduledTask {
 }
 
 /// A resumed session's resources file holding `task`.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 async fn write_resumed_state(dir: &std::path::Path, task: &ScheduledTask) {
     use fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerState;
     use fuigo_tools::types::resources::{Resources, State};

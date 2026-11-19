@@ -451,13 +451,12 @@ async fn woken_child_completion_replaces_the_displaced_record() {
 /// and every completed lookup return not-found for that child forever.
 #[tokio::test]
 async fn wake_rejected_at_the_spawn_limit_restores_the_displaced_completion() {
-    let (mut coordinator, command_tx, admission_tx, _admissions, _wake) =
-        wake_fixture_with_limits(
-            crate::implementations::fuigo_build::task::admission::SubagentLimits {
-                max_concurrent: 1,
-                behavior: crate::implementations::fuigo_build::task::admission::LimitBehavior::Fail,
-            },
-        );
+    let (mut coordinator, command_tx, admission_tx, _admissions, _wake) = wake_fixture_with_limits(
+        crate::implementations::fuigo_build::task::admission::SubagentLimits {
+            max_concurrent: 1,
+            behavior: crate::implementations::fuigo_build::task::admission::LimitBehavior::Fail,
+        },
+    );
     let order = |c: &WakeCoordinator| c.completed_order.iter().cloned().collect::<Vec<String>>();
     // Three completions in age order; the wake targets the MIDDLE one, so a
     // restore at the wrong end is visible.
@@ -510,14 +509,12 @@ async fn wake_rejected_at_the_spawn_limit_restores_the_displaced_completion() {
 /// the sender its text was dropped when the child is still going to run it.
 #[tokio::test]
 async fn wake_queued_at_the_spawn_limit_holds_the_record_and_never_expires() {
-    let (mut coordinator, command_tx, admission_tx, _admissions, _wake) =
-        wake_fixture_with_limits(
-            crate::implementations::fuigo_build::task::admission::SubagentLimits {
-                max_concurrent: 1,
-                behavior:
-                    crate::implementations::fuigo_build::task::admission::LimitBehavior::Queue,
-            },
-        );
+    let (mut coordinator, command_tx, admission_tx, _admissions, _wake) = wake_fixture_with_limits(
+        crate::implementations::fuigo_build::task::admission::SubagentLimits {
+            max_concurrent: 1,
+            behavior: crate::implementations::fuigo_build::task::admission::LimitBehavior::Queue,
+        },
+    );
     insert_child(&mut coordinator, admission_tx.clone(), "child", "parent");
     finish_child(&mut coordinator, "child");
     insert_child(&mut coordinator, admission_tx, "other", "parent");

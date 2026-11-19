@@ -19,7 +19,10 @@ pub async fn connect_with_meta<C>(
     pipes: AgentPipes,
     caps_meta: Option<Value>,
     auth_meta: Value,
-) -> (acp::ClientSideConnection, acp::Result<acp::AuthenticateResponse>)
+) -> (
+    acp::ClientSideConnection,
+    acp::Result<acp::AuthenticateResponse>,
+)
 where
     C: acp::Client + 'static,
 {
@@ -89,7 +92,10 @@ impl Notices {
         if params["update"]["sessionUpdate"] == "config_notice" {
             self.0.borrow_mut().push((
                 params["sessionId"].as_str().unwrap_or_default().to_owned(),
-                params["update"]["message"].as_str().unwrap_or_default().to_owned(),
+                params["update"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
             ));
         }
     }

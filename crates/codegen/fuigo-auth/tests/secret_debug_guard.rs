@@ -187,7 +187,9 @@ fn normalize(src: &str) -> String {
     let b = src.as_bytes();
     let n = b.len();
     let mut out = String::with_capacity(n);
-    let blank = |s: &str, out: &mut String| out.extend(s.chars().map(|c| if c == '\n' { '\n' } else { ' ' }));
+    let blank = |s: &str, out: &mut String| {
+        out.extend(s.chars().map(|c| if c == '\n' { '\n' } else { ' ' }))
+    };
     let mut i = 0;
     while i < n {
         let rest = &src[i..];
@@ -231,7 +233,11 @@ fn normalize(src: &str) -> String {
             let lit_len = if rest[1..].starts_with('\\') {
                 rest[2..].find('\'').map(|k| k + 3)
             } else {
-                rest[1..].chars().next().and_then(|c| rest[1 + c.len_utf8()..].starts_with('\'').then(|| 2 + c.len_utf8()))
+                rest[1..].chars().next().and_then(|c| {
+                    rest[1 + c.len_utf8()..]
+                        .starts_with('\'')
+                        .then(|| 2 + c.len_utf8())
+                })
             };
             if let Some(len) = lit_len {
                 out.push_str("' '");
@@ -296,7 +302,10 @@ fn blank_test_mods(rules: &Rules, mut s: String) -> String {
         if let Some(m) = rules.test_mod.find(&s[after..]) {
             let open = after + m.end() - 1;
             if let Some(close) = close_of(&s, open, b'{', b'}') {
-                let blanked: String = s[k..=close].chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect();
+                let blanked: String = s[k..=close]
+                    .chars()
+                    .map(|c| if c == '\n' { '\n' } else { ' ' })
+                    .collect();
                 s.replace_range(k..=close, &blanked);
             }
         }
@@ -331,16 +340,26 @@ fn split_top(body: &str) -> Vec<String> {
 fn strip_attrs(rules: &Rules, seg: &str) -> String {
     let mut t = seg.trim().to_owned();
     while t.starts_with("#[") {
-        let Some(c) = close_of(&t, 1, b'[', b']') else { break };
+        let Some(c) = close_of(&t, 1, b'[', b']') else {
+            break;
+        };
         t = t[c + 1..].trim().to_owned();
     }
     rules.vis.replace(&t, "").into_owned()
 }
 
-fn field_hits(rules: &Rules, owner: &str, body: &str, authy_owner: bool, hits: &mut Vec<(String, String, String)>) {
+fn field_hits(
+    rules: &Rules,
+    owner: &str,
+    body: &str,
+    authy_owner: bool,
+    hits: &mut Vec<(String, String, String)>,
+) {
     for seg in split_top(body) {
         let t = strip_attrs(rules, &seg);
-        let Some(f) = rules.field.captures(&t) else { continue };
+        let Some(f) = rules.field.captures(&t) else {
+            continue;
+        };
         let field = f[1].to_owned();
         let ty = f[2].split_whitespace().collect::<Vec<_>>().join(" ");
         let named_secret = rules.secret.is_match(&field)
@@ -349,10 +368,14 @@ fn field_hits(rules: &Rules, owner: &str, body: &str, authy_owner: bool, hits: &
             && (!rules.carrier.is_match(&field) || rules.stringy.is_match(&ty));
         // A helper's command line in an auth-ish type (`AuthProviderConfig { command, args }`) carries whatever the
         // user wrote, `--token …` included (Astra r2, P70a).
-        let generic_in_auth_type =
-            authy_owner && matches!(field.as_str(), "key" | "value" | "token" | "command" | "args" | "cmd");
+        let generic_in_auth_type = authy_owner
+            && matches!(
+                field.as_str(),
+                "key" | "value" | "token" | "command" | "args" | "cmd"
+            );
         // The value half of an environment-variable pair (`McpEnvVar`, `EnvVar`, `SandboxEnvironmentVariable`).
-        let env_value = (owner.ends_with("EnvVar") || owner.ends_with("EnvironmentVariable")) && field == "value";
+        let env_value = (owner.ends_with("EnvVar") || owner.ends_with("EnvironmentVariable"))
+            && field == "value";
         let value_map = rules.map_carrier.is_match(&field) && rules.maplike.is_match(&ty);
         let capability_url = rules.capability_url.is_match(&field) && rules.stringy.is_match(&ty);
         if named_secret || generic_in_auth_type || env_value || value_map || capability_url {
@@ -367,7 +390,9 @@ fn scan(rules: &Rules, src: &str) -> Vec<(String, String, String)> {
     let mut hits = Vec::new();
     let mut i = 0;
     while let Some(d) = s[i..].find("#[derive(").map(|d| d + i) {
-        let Some(e) = close_of(&s, d + 1, b'[', b']') else { break };
+        let Some(e) = close_of(&s, d + 1, b'[', b']') else {
+            break;
+        };
         let derive = &s[d..=e];
         i = e + 1;
         if !rules.debug.is_match(derive) {
@@ -385,12 +410,24 @@ fn scan(rules: &Rules, src: &str) -> Vec<(String, String, String)> {
             }
             break;
         }
-        let Some(m) = rules.item.captures(&s[j..]) else { continue };
+        let Some(m) = rules.item.captures(&s[j..]) else {
+            continue;
+        };
         let (kind, name) = (m[3].to_owned(), m[4].to_owned());
         j = skip_generics(&s, j + m[0].len());
         // A `where` clause before a braced body may hold `(` (`F: Fn() -> bool`): the body is then the `{` (or `;`).
-        let delimiters: &[&str] = if s[j..].trim_start().starts_with("where") { &["{", ";"] } else { &["{", ";", "("] };
-        let Some(k) = delimiters.iter().filter_map(|t| s[j..].find(t).map(|k| k + j)).min() else { continue };
+        let delimiters: &[&str] = if s[j..].trim_start().starts_with("where") {
+            &["{", ";"]
+        } else {
+            &["{", ";", "("]
+        };
+        let Some(k) = delimiters
+            .iter()
+            .filter_map(|t| s[j..].find(t).map(|k| k + j))
+            .min()
+        else {
+            continue;
+        };
         if kind == "struct" {
             match s.as_bytes()[k] {
                 b'(' => {
@@ -411,11 +448,17 @@ fn scan(rules: &Rules, src: &str) -> Vec<(String, String, String)> {
             }
             continue;
         }
-        let Some(open) = s[j..].find('{').map(|o| o + j) else { continue };
-        let Some(end) = close_of(&s, open, b'{', b'}') else { continue };
+        let Some(open) = s[j..].find('{').map(|o| o + j) else {
+            continue;
+        };
+        let Some(end) = close_of(&s, open, b'{', b'}') else {
+            continue;
+        };
         for seg in split_top(&s[open + 1..end]) {
             let t = strip_attrs(rules, &seg);
-            let Some(v) = rules.variant.captures(&t) else { continue };
+            let Some(v) = rules.variant.captures(&t) else {
+                continue;
+            };
             let variant = v[1].to_owned();
             let owner = format!("{name}::{variant}");
             match v.get(2).map(|g| g.as_str()) {
@@ -444,21 +487,40 @@ fn scan(rules: &Rules, src: &str) -> Vec<(String, String, String)> {
 
 fn workspace_root() -> PathBuf {
     // `<root>/crates/codegen/fuigo-auth` -> `<root>`, without `canonicalize` (banned by the workspace clippy.toml).
-    Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(3).expect("workspace root").to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("workspace root")
+        .to_path_buf()
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_dir() {
-            let skip = ["target", "node_modules", ".git", "third_party", "tests", "test_support", "testkit", "fuigo-test-support"];
+            let skip = [
+                "target",
+                "node_modules",
+                ".git",
+                "third_party",
+                "tests",
+                "test_support",
+                "testkit",
+                "fuigo-test-support",
+            ];
             if !skip.contains(&name.as_str()) {
                 rust_sources(&path, out);
             }
-        } else if ft.is_file() && name.ends_with(".rs") && !name.ends_with("_tests.rs") && name != "tests.rs" {
+        } else if ft.is_file()
+            && name.ends_with(".rs")
+            && !name.ends_with("_tests.rs")
+            && name != "tests.rs"
+        {
             out.push(path);
         }
     }
@@ -472,12 +534,23 @@ fn no_secret_bearing_type_derives_debug() {
     for top in ["crates", "prod"] {
         rust_sources(&root.join(top), &mut files);
     }
-    assert!(files.len() > 500, "control: the scan must see the workspace, found {} files under {}", files.len(), root.display());
+    assert!(
+        files.len() > 500,
+        "control: the scan must see the workspace, found {} files under {}",
+        files.len(),
+        root.display()
+    );
     let allowed: BTreeSet<&str> = ALLOWED.iter().map(|(k, _)| *k).collect();
     let (mut violations, mut seen) = (Vec::new(), BTreeSet::new());
     for file in &files {
-        let Ok(src) = std::fs::read_to_string(file) else { continue };
-        let rel = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        let Ok(src) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         for (owner, field, ty) in scan(&rules, &src) {
             let key = format!("{rel}::{owner}::{field}");
             if allowed.contains(key.as_str()) {
@@ -494,7 +567,10 @@ fn no_secret_bearing_type_derives_debug() {
         violations.join("\n  ")
     );
     let stale: Vec<&&str> = allowed.iter().filter(|k| !seen.contains(**k)).collect();
-    assert!(stale.is_empty(), "ALLOWED entries that no longer match anything (remove them): {stale:?}");
+    assert!(
+        stale.is_empty(),
+        "ALLOWED entries that no longer match anything (remove them): {stale:?}"
+    );
 }
 
 /// The scanner's own control. It flags: a multi-line derive with attributes, `service_account_key` (whose name
@@ -587,7 +663,10 @@ fn scanner_flags_secret_fields_and_passes_benign_ones() {
         #[derive(Debug)]
         struct TupleBounded<F: Fn() -> bool>(F, u32);
     "##;
-    let hits: BTreeSet<String> = scan(&rules, src).into_iter().map(|(s, f, _)| format!("{s}::{f}")).collect();
+    let hits: BTreeSet<String> = scan(&rules, src)
+        .into_iter()
+        .map(|(s, f, _)| format!("{s}::{f}"))
+        .collect();
     let expected: BTreeSet<String> = [
         "Leaky::api_key",
         "Leaky::extra_headers",

@@ -3,8 +3,8 @@
 //! Turns edit-tool output into line-tagged [`DiffHunk`]s for the pager to render, and back into unified-diff text.
 //! The input is structured `SearchReplaceEditDetail` records, ACP `ToolCall` payloads, or plain before/after text.
 
-use similar::{ChangeTag, TextDiff};
 use fuigo_tools::types::output::SearchReplaceEditDetail;
+use similar::{ChangeTag, TextDiff};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiffLine {
@@ -154,7 +154,9 @@ pub fn build_diff_hunks(details: &[SearchReplaceEditDetail]) -> Vec<DiffHunk> {
 /// The ACP `ToolCallContent::Diff` fallback uses this for pre-execution previews.
 pub fn diff_hunks_from_strings(old_text: &str, new_text: &str, start_line: usize) -> Vec<DiffHunk> {
     // A binary file read as text is a wall of replacement characters and control bytes: say what it is instead
-    let binary = [new_text, old_text].into_iter().find(|text| looks_binary(text));
+    let binary = [new_text, old_text]
+        .into_iter()
+        .find(|text| looks_binary(text));
     if let Some(text) = binary {
         return vec![vec![DiffLine {
             text: format!("(binary file, {} bytes: contents not shown)\n", text.len()),
@@ -189,7 +191,9 @@ pub fn looks_binary(text: &str) -> bool {
         if ch == '\0' {
             return true;
         }
-        if ch == '\u{FFFD}' || (ch.is_control() && !matches!(ch, '\n' | '\r' | '\t' | '\u{1b}' | '\u{c}')) {
+        if ch == '\u{FFFD}'
+            || (ch.is_control() && !matches!(ch, '\n' | '\r' | '\t' | '\u{1b}' | '\u{c}'))
+        {
             odd += 1;
         }
     }
@@ -797,8 +801,16 @@ mod tests {
         for (old, new) in [("", png), (png, "plain text\n")] {
             let hunks = diff_hunks_from_strings(old, new, 1);
             assert_eq!(hunks.len(), 1);
-            assert_eq!(hunks[0].len(), 1, "one placeholder row, not a row per garbage line");
-            assert!(hunks[0][0].text.contains("binary file"), "{:?}", hunks[0][0].text);
+            assert_eq!(
+                hunks[0].len(),
+                1,
+                "one placeholder row, not a row per garbage line"
+            );
+            assert!(
+                hunks[0][0].text.contains("binary file"),
+                "{:?}",
+                hunks[0][0].text
+            );
             assert!(!hunks[0][0].text.contains('\0') && !hunks[0][0].text.contains("PNG"));
         }
         // Ordinary text, tabs and an ANSI escape are not binary
@@ -1044,11 +1056,11 @@ mod tests {
     #[test]
     fn extract_edit_hunks_from_raw_output() {
         use agent_client_protocol as acp;
-        use std::sync::Arc;
         use fuigo_tools::types::output::{
             SearchReplaceEditContextInformation, SearchReplaceEditsApplied, SearchReplaceOutput,
             ToolOutput,
         };
+        use std::sync::Arc;
 
         let edits_applied = SearchReplaceEditsApplied {
             old_string: "let x = 1;".to_string(),
@@ -1145,8 +1157,8 @@ mod tests {
     fn extract_edit_hunks_from_diff_meta_structured() {
         // Strategy 2: structured edit details from Diff.meta (acp_conversion embeds SearchReplaceEditContextInformation)
         use agent_client_protocol as acp;
-        use std::sync::Arc;
         use fuigo_tools::types::output::SearchReplaceEditContextInformation;
+        use std::sync::Arc;
 
         let edits = SearchReplaceEditContextInformation {
             details: vec![SearchReplaceEditDetail {

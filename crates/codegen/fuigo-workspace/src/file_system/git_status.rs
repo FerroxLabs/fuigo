@@ -317,7 +317,10 @@ mod tests {
         let script = write_filter_script(tmp.path(), &marker);
         let cfg_path = tmp.path().join(".git/config");
         let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
-        cfg.push_str(&format!("\n[filter \"Pwn\"]\n\tclean = {}\n", script.display()));
+        cfg.push_str(&format!(
+            "\n[filter \"Pwn\"]\n\tclean = {}\n",
+            script.display()
+        ));
         std::fs::write(&cfg_path, cfg).unwrap();
         dirty_for_clean_filter(tmp.path());
         let _ = std::fs::remove_file(&marker);
@@ -355,12 +358,23 @@ mod tests {
     #[cfg(unix)]
     fn git(dir: &Path, args: &[&str]) {
         let out = fuigo_tty_utils::git_command()
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "protocol.file.allow=always"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "protocol.file.allow=always",
+            ])
             .args(args)
             .current_dir(dir)
             .output()
             .expect("git runs");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// Astra r1 #12: a populated submodule's own content filter runs on the parent's status too,
@@ -376,12 +390,18 @@ mod tests {
         let parent = tmp.path().join("parent");
         std::fs::create_dir_all(&parent).unwrap();
         git(&parent, &["init", "-q"]);
-        git(&parent, &["submodule", "add", "-q", upstream.to_str().unwrap(), "sub"]);
+        git(
+            &parent,
+            &["submodule", "add", "-q", upstream.to_str().unwrap(), "sub"],
+        );
         git(&parent, &["commit", "-qm", "add sub"]);
         let sub = parent.join("sub");
         let marker = tmp.path().join("pwned");
         let script = write_filter_script(tmp.path(), &marker);
-        git(&sub, &["config", "filter.Pwn.clean", script.to_str().unwrap()]);
+        git(
+            &sub,
+            &["config", "filter.Pwn.clean", script.to_str().unwrap()],
+        );
         assert!(
             crate::permission::exec_risk::local_repo_config_has_exec_risk(&parent),
             "a submodule's filter is exec risk for the parent"
@@ -393,13 +413,19 @@ mod tests {
             .current_dir(&parent)
             .output()
             .expect("unpinned status");
-        assert!(marker.exists(), "unpinned parent status must run the submodule filter");
+        assert!(
+            marker.exists(),
+            "unpinned parent status must run the submodule filter"
+        );
         std::fs::remove_file(&marker).unwrap();
         dirty_for_clean_filter_in(&sub);
         git_status_short_pinned(&parent, FsmonitorOverride::Disabled)
             .await
             .expect("pinned status");
-        assert!(!marker.exists(), "pinned parent status must not run the submodule filter");
+        assert!(
+            !marker.exists(),
+            "pinned parent status must not run the submodule filter"
+        );
     }
 
     /// Astra r2 N4: deleting `.gitmodules` does not hide an indexed, populated submodule's filter.
@@ -413,16 +439,25 @@ mod tests {
         let parent = tmp.path().join("parent");
         std::fs::create_dir_all(&parent).unwrap();
         git(&parent, &["init", "-q"]);
-        git(&parent, &["submodule", "add", "-q", upstream.to_str().unwrap(), "sub"]);
+        git(
+            &parent,
+            &["submodule", "add", "-q", upstream.to_str().unwrap(), "sub"],
+        );
         git(&parent, &["commit", "-qm", "add sub"]);
         std::fs::remove_file(parent.join(".gitmodules")).unwrap();
         let sub = parent.join("sub");
         let marker = tmp.path().join("pwned");
         let script = write_filter_script(tmp.path(), &marker);
-        git(&sub, &["config", "filter.Pw.n.clean", script.to_str().unwrap()]);
+        git(
+            &sub,
+            &["config", "filter.Pw.n.clean", script.to_str().unwrap()],
+        );
         std::fs::write(sub.join(".gitattributes"), "data.txt filter=Pw.n\n").unwrap();
         git(&sub, &["add", ".gitattributes"]);
-        git(&sub, &["-c", "filter.Pw.n.clean=", "commit", "-qm", "dotted filter"]);
+        git(
+            &sub,
+            &["-c", "filter.Pw.n.clean=", "commit", "-qm", "dotted filter"],
+        );
         assert!(
             crate::permission::exec_risk::local_repo_config_has_exec_risk(&parent),
             "the submodule filter is exec risk without .gitmodules"
@@ -434,13 +469,19 @@ mod tests {
             .current_dir(&parent)
             .output()
             .expect("unpinned status");
-        assert!(marker.exists(), "unpinned parent status must run the dotted submodule filter");
+        assert!(
+            marker.exists(),
+            "unpinned parent status must run the dotted submodule filter"
+        );
         std::fs::remove_file(&marker).unwrap();
         dirty_for_clean_filter_in(&sub);
         git_status_short_pinned(&parent, FsmonitorOverride::Disabled)
             .await
             .expect("pinned status");
-        assert!(!marker.exists(), "pinned parent status must not run the submodule filter");
+        assert!(
+            !marker.exists(),
+            "pinned parent status must not run the submodule filter"
+        );
     }
 
     /// `dirty_for_clean_filter` for a checkout whose index lives in its git directory.

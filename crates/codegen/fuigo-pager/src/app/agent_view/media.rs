@@ -569,7 +569,12 @@ impl AgentView {
         let (hover_col, hover_row) = self.last_mouse_pos;
         let fits = |col: u16, label: &str| col + UnicodeWidthStr::width(label) as u16 <= rect.width;
         if fits(0, &copy.label) {
-            buf.set_string_safe(rect.x, rect.y, &copy.label, Style::default().fg(theme.gray_dim));
+            buf.set_string_safe(
+                rect.x,
+                rect.y,
+                &copy.label,
+                Style::default().fg(theme.gray_dim),
+            );
         }
         for (button, col) in copy.buttons.iter().zip(copy_row_button_cols(copy)) {
             if !fits(col, &button.label) {
@@ -591,7 +596,9 @@ impl AgentView {
             };
             buf.set_string_safe(bx, rect.y, &button.label, style);
             let idx = self.inline_media_hits.mermaid_sources.len();
-            self.inline_media_hits.mermaid_sources.push(button.text.clone());
+            self.inline_media_hits
+                .mermaid_sources
+                .push(button.text.clone());
             self.inline_media_hits
                 .mermaid_buttons
                 .push((hit, AffordanceKind::CopyText, idx));

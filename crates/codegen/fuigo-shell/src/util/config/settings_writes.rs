@@ -394,7 +394,11 @@ pub async fn set_default_selected_permission(value: String) -> Result<()> {
 /// Canonical values: `ask` (clear / prompt each time), `always_stop`, `always_continue`.
 pub async fn set_cancel_subagents_on_turn_cancel(value: String) -> Result<()> {
     update_config(|cfg| {
-        cfg.ui.cancel_subagents_on_turn_cancel = if value == "ask" { None } else { Some(value.clone()) };
+        cfg.ui.cancel_subagents_on_turn_cancel = if value == "ask" {
+            None
+        } else {
+            Some(value.clone())
+        };
     })
     .await
 }
@@ -402,7 +406,11 @@ pub async fn set_cancel_subagents_on_turn_cancel(value: String) -> Result<()> {
 /// Persist `[ui].screen_mode` (`fullscreen` | `minimal`). Empty clears the key.
 pub async fn set_screen_mode(value: String) -> Result<()> {
     update_config(|cfg| {
-        cfg.ui.screen_mode = if value.is_empty() { None } else { Some(value.clone()) };
+        cfg.ui.screen_mode = if value.is_empty() {
+            None
+        } else {
+            Some(value.clone())
+        };
     })
     .await
 }
@@ -410,7 +418,11 @@ pub async fn set_screen_mode(value: String) -> Result<()> {
 /// Persist `[ui].tool_density` (`compact` | `detailed`). Empty clears the key.
 pub async fn set_tool_density(value: String) -> Result<()> {
     update_config(|cfg| {
-        cfg.ui.tool_density = if value.is_empty() { None } else { Some(value.clone()) };
+        cfg.ui.tool_density = if value.is_empty() {
+            None
+        } else {
+            Some(value.clone())
+        };
     })
     .await
 }

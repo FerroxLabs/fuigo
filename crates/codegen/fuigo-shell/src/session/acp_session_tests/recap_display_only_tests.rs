@@ -1824,15 +1824,25 @@ async fn side_calls_replay_the_last_sent_main_turn_tools() {
             let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
-            let json = |tools: &Vec<ToolSpec>| serde_json::to_string(tools).expect("tools serialize");
+            let json =
+                |tools: &Vec<ToolSpec>| serde_json::to_string(tools).expect("tools serialize");
             let setup = actor.prepare_side_call().await.expect("side-call setup");
 
             let base = actor.turn_base_tool_specs(&actor.prepare_tool_definitions().await);
             assert!(!base.is_empty(), "test env must expose tools");
             let fallback = actor
-                .side_call_request(&setup, Vec::new(), "conv-fallback".into(), "req-fallback".into())
+                .side_call_request(
+                    &setup,
+                    Vec::new(),
+                    "conv-fallback".into(),
+                    "req-fallback".into(),
+                )
                 .await;
-            assert_eq!(json(&fallback.tools), json(&base), "no main turn yet: side calls send what the next turn would");
+            assert_eq!(
+                json(&fallback.tools),
+                json(&base),
+                "no main turn yet: side calls send what the next turn would"
+            );
 
             // Stand-in for a projected list: reordered and with a description the unprojected registry never has
             let mut sent = base.clone();
@@ -1840,13 +1850,30 @@ async fn side_calls_replay_the_last_sent_main_turn_tools() {
             sent[0].description = Some("projected description the main turn actually sent".into());
             *actor.last_sent_tool_specs.borrow_mut() = Some(sent.clone());
             let replay = actor
-                .side_call_request(&setup, Vec::new(), "conv-replay".into(), "req-replay".into())
+                .side_call_request(
+                    &setup,
+                    Vec::new(),
+                    "conv-replay".into(),
+                    "req-replay".into(),
+                )
                 .await;
-            assert_eq!(json(&replay.tools), json(&sent), "turn summary and recap must replay the sent list");
-            assert_eq!(json(&actor.side_call_tool_specs().await), json(&sent), "/btw and compaction share the replayed list");
+            assert_eq!(
+                json(&replay.tools),
+                json(&sent),
+                "turn summary and recap must replay the sent list"
+            );
+            assert_eq!(
+                json(&actor.side_call_tool_specs().await),
+                json(&sent),
+                "/btw and compaction share the replayed list"
+            );
 
             actor.last_sent_tool_specs.replace(None);
-            assert_eq!(json(&actor.side_call_tool_specs().await), json(&base), "a cleared record falls back again");
+            assert_eq!(
+                json(&actor.side_call_tool_specs().await),
+                json(&base),
+                "a cleared record falls back again"
+            );
         })
         .await;
 }

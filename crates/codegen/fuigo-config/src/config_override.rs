@@ -150,7 +150,9 @@ pub fn retain_campaign_allowed(patch: &mut toml::Table) -> Vec<String> {
             if let toml::Value::Table(entry) = entry {
                 entry.retain(|k, v| match k {
                     "name" => v.is_str(),
-                    "context_window" => v.as_integer().is_some_and(|n| CAMPAIGN_CONTEXT_WINDOW_RANGE.contains(&n)),
+                    "context_window" => v
+                        .as_integer()
+                        .is_some_and(|n| CAMPAIGN_CONTEXT_WINDOW_RANGE.contains(&n)),
                     _ => false,
                 });
             }
@@ -170,7 +172,11 @@ pub fn retain_campaign_allowed(patch: &mut toml::Table) -> Vec<String> {
 /// put `models` on the list.
 fn removed_paths(before: &toml::Table, after: &toml::Table, prefix: &str, out: &mut Vec<String>) {
     for (k, v) in before {
-        let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+        let path = if prefix.is_empty() {
+            k.clone()
+        } else {
+            format!("{prefix}.{k}")
+        };
         match (v, after.get(k)) {
             (_, None) => out.push(path),
             (toml::Value::Table(b), Some(toml::Value::Table(a))) => removed_paths(b, a, &path, out),
@@ -208,7 +214,10 @@ pub fn config_routed_model_ids(config: &toml::Value) -> std::collections::HashSe
     };
     let mut ids = std::collections::HashSet::new();
     for (key, entry) in models {
-        let Some(entry) = entry.as_table().filter(|e| MODEL_ROUTE_KEYS.iter().any(|k| e.contains_key(*k))) else {
+        let Some(entry) = entry
+            .as_table()
+            .filter(|e| MODEL_ROUTE_KEYS.iter().any(|k| e.contains_key(*k)))
+        else {
             continue;
         };
         ids.insert(key.clone());
@@ -218,7 +227,11 @@ pub fn config_routed_model_ids(config: &toml::Value) -> std::collections::HashSe
             .into_iter()
             .flatten()
             .filter_map(|variant| variant.get("model_id"));
-        for name in ["id", "model"].iter().filter_map(|k| entry.get(*k)).chain(variant_ids) {
+        for name in ["id", "model"]
+            .iter()
+            .filter_map(|k| entry.get(*k))
+            .chain(variant_ids)
+        {
             if let Some(name) = name.as_str() {
                 ids.insert(name.to_owned());
             }
@@ -240,7 +253,12 @@ pub fn drop_campaign_routed_model_selectors(
     let dropped: Vec<&'static str> = CAMPAIGN_MODEL_SELECTORS
         .iter()
         .copied()
-        .filter(|k| models.get(*k).and_then(toml::Value::as_str).is_some_and(|id| routed.contains(id)))
+        .filter(|k| {
+            models
+                .get(*k)
+                .and_then(toml::Value::as_str)
+                .is_some_and(|id| routed.contains(id))
+        })
         .collect();
     for key in &dropped {
         models.remove(*key);
@@ -371,14 +389,18 @@ pub const CAMPAIGN_MCP_SECRET_FIELDS: &[&str] = &[
 /// in `existing`) keeps `url`, `command`, `args` and its other plain fields; [`CAMPAIGN_MCP_SECRET_FIELDS`] are dropped.
 /// A non-table `mcp_servers` or server entry is dropped. Returns the names the strip dropped or altered, so the caller
 /// can tell the user; it is called before [`strip_campaign_paths`].
-pub fn strip_campaign_mcp_servers(patch: &mut toml::Table, existing: &std::collections::HashSet<String>) -> Vec<String> {
+pub fn strip_campaign_mcp_servers(
+    patch: &mut toml::Table,
+    existing: &std::collections::HashSet<String>,
+) -> Vec<String> {
     let mut touched = Vec::new();
     match patch.get_mut("mcp_servers") {
         None => return touched,
         Some(toml::Value::Table(servers)) => {
             let names: Vec<String> = servers.keys().cloned().collect();
             for name in names {
-                let drop_whole = existing.contains(&name) || !matches!(servers.get(&name), Some(toml::Value::Table(_)));
+                let drop_whole = existing.contains(&name)
+                    || !matches!(servers.get(&name), Some(toml::Value::Table(_)));
                 if drop_whole {
                     servers.remove(&name);
                     touched.push(name);
@@ -447,7 +469,10 @@ pub fn mark_campaign_servers(patch: &mut toml::Table) {
     if let Some(toml::Value::Table(servers)) = patch.get_mut("mcp_servers") {
         for (_, server) in servers.iter_mut() {
             if let toml::Value::Table(entry) = server {
-                entry.insert(CAMPAIGN_SOURCE_MARKER.to_owned(), toml::Value::Boolean(true));
+                entry.insert(
+                    CAMPAIGN_SOURCE_MARKER.to_owned(),
+                    toml::Value::Boolean(true),
+                );
             }
         }
     }
@@ -680,7 +705,10 @@ pub fn strip_subscription_authority(layer: &mut toml::Value, user: &toml::Value)
     // `[model_providers.<id>]` (Grok r2 HIGH): a model inherits its provider's URL and inline
     // `auth`, so a provider is held to the same rule as a model.
     let mut vendor_provider_ids = std::collections::HashSet::new();
-    if let Some(providers) = layer.get_mut("model_providers").and_then(toml::Value::as_table_mut) {
+    if let Some(providers) = layer
+        .get_mut("model_providers")
+        .and_then(toml::Value::as_table_mut)
+    {
         providers.retain(|id, provider| {
             let vendor = names_subscription_vendor(provider);
             if vendor {
@@ -746,7 +774,10 @@ pub fn strip_subscription_authority(layer: &mut toml::Value, user: &toml::Value)
             user_sub.strip_refs(model);
         }
     }
-    if let Some(providers) = layer.get_mut("auth_provider").and_then(toml::Value::as_table_mut) {
+    if let Some(providers) = layer
+        .get_mut("auth_provider")
+        .and_then(toml::Value::as_table_mut)
+    {
         providers.retain(|name, _| !user_sub.auth.contains(name));
         for (_, provider) in providers.iter_mut() {
             if let Some(provider) = provider.as_table_mut() {
@@ -781,7 +812,9 @@ impl UserSubscriptionRoutes {
                     .collect()
             })
             .unwrap_or_default();
-        let model_providers = config.get("model_providers").and_then(toml::Value::as_table);
+        let model_providers = config
+            .get("model_providers")
+            .and_then(toml::Value::as_table);
         for (id, provider) in model_providers.into_iter().flatten() {
             if provider
                 .get("auth")
@@ -880,7 +913,9 @@ pub fn names_subscription_vendor_host(url: &str) -> bool {
     let rest = url.trim();
     let rest = rest.split_once("://").map_or(rest, |(_, rest)| rest);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
     let host = if host_port.starts_with('[') {
         host_port
     } else {
@@ -953,9 +988,15 @@ mod tests {
         let m = &cfg["model"];
         assert_eq!(m["mine"]["model"].as_str(), Some("grok-4.7"));
         assert_eq!(m["mine"]["base_url"].as_str(), Some("https://api.x.ai/v1"));
-        assert!(m["mine"].get("temperature").is_none(), "no field of a vendor-host model is patched");
+        assert!(
+            m["mine"].get("temperature").is_none(),
+            "no field of a vendor-host model is patched"
+        );
         for id in ["remote", "chat"] {
-            assert!(m.get(id).is_none(), "{id}: a patch never creates a vendor-host model");
+            assert!(
+                m.get(id).is_none(),
+                "{id}: a patch never creates a vendor-host model"
+            );
         }
         // Nor can a patch invalidate a vendor-host model's credential or provider fields.
         let mut cfg: toml::Value = toml::from_str(
@@ -967,11 +1008,17 @@ mod tests {
         )
         .unwrap();
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
-        assert_eq!(cfg["model"]["sub"]["auth_provider"].as_str(), Some("native"));
+        assert_eq!(
+            cfg["model"]["sub"]["auth_provider"].as_str(),
+            Some("native")
+        );
         assert!(cfg["model"]["sub"].get("env_key").is_none());
         assert!(cfg["model"].get("enc").is_none());
         assert_eq!(m["flux"]["model"].as_str(), Some("f2"));
-        assert_eq!(m["flux"]["base_url"].as_str(), Some("https://api.fluxrouter.ai/v2"));
+        assert_eq!(
+            m["flux"]["base_url"].as_str(),
+            Some("https://api.fluxrouter.ai/v2")
+        );
         for (url, named) in [
             ("https://api.x.ai/v1", true),
             ("http://api.x.ai:8443", true),
@@ -1079,7 +1126,11 @@ mod tests {
         ] {
             let mut overlay = table(blob);
             retain_overlay_allowed(&mut overlay);
-            let expected = if kept { table("[plugins]\nauto_discover = false\n") } else { toml::Table::new() };
+            let expected = if kept {
+                table("[plugins]\nauto_discover = false\n")
+            } else {
+                toml::Table::new()
+            };
             assert_eq!(overlay, expected, "{blob}");
         }
     }

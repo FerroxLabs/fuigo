@@ -15,8 +15,10 @@ async fn actor_with_events() -> (
     tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>,
 ) {
     let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-    let (actor, events) = create_test_actor_ex(1_000, 200_000, 85, gateway_tx, persistence_tx).await;
+    let (persistence_tx, _persistence_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    let (actor, events) =
+        create_test_actor_ex(1_000, 200_000, 85, gateway_tx, persistence_tx).await;
     (actor, events, gateway_rx)
 }
 
@@ -54,7 +56,9 @@ async fn handle_session_mode_ignores_an_unsupported_id() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (actor, _events, _gw) = actor_with_events().await;
-            actor.handle_session_mode(acp::SessionModeId::new("ask")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("ask"))
+                .await;
             assert_eq!(*actor.current_prompt_mode.lock(), PromptMode::Ask);
             let agent_type = actor.active_agent_type.lock().clone();
             for id in ["evil", "explore", "codex", "PLAN", "browser-use", ""] {
@@ -67,8 +71,12 @@ async fn handle_session_mode_ignores_an_unsupported_id() {
                 );
                 assert_eq!(*actor.active_agent_type.lock(), agent_type, "{id:?}");
             }
-            actor.handle_session_mode(acp::SessionModeId::new("plan")).await;
-            actor.handle_session_mode(acp::SessionModeId::new("evil")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("plan"))
+                .await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("evil"))
+                .await;
             assert_eq!(
                 actor.plan_mode.lock().state(),
                 crate::session::plan_mode::PlanModeState::Pending,
@@ -86,19 +94,38 @@ async fn every_accepted_switch_emits_the_advertised_mode() {
         .run_until(async {
             let (actor, mut events, _gw) = actor_with_events().await;
             let _ = mode_updates(&mut events);
-            actor.handle_session_mode(acp::SessionModeId::new("ask")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("ask"))
+                .await;
             assert_eq!(mode_updates(&mut events), ["ask"]);
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             assert_eq!(mode_updates(&mut events), ["browser_use"]);
             assert_eq!(*actor.current_prompt_mode.lock(), PromptMode::Agent);
-            actor.handle_session_mode(acp::SessionModeId::new("default")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("default"))
+                .await;
             assert_eq!(mode_updates(&mut events), ["default"]);
-            actor.handle_session_mode(acp::SessionModeId::new("plan")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("plan"))
+                .await;
             assert_eq!(mode_updates(&mut events), ["plan"]);
-            actor.handle_session_mode(acp::SessionModeId::new("ask")).await;
-            assert_eq!(mode_updates(&mut events), ["ask"], "plan off: exactly one update");
-            actor.handle_session_mode(acp::SessionModeId::new("evil")).await;
-            assert!(mode_updates(&mut events).is_empty(), "an ignored id reports nothing");
+            actor
+                .handle_session_mode(acp::SessionModeId::new("ask"))
+                .await;
+            assert_eq!(
+                mode_updates(&mut events),
+                ["ask"],
+                "plan off: exactly one update"
+            );
+            actor
+                .handle_session_mode(acp::SessionModeId::new("evil"))
+                .await;
+            assert!(
+                mode_updates(&mut events).is_empty(),
+                "an ignored id reports nothing"
+            );
         })
         .await;
 }
@@ -136,7 +163,9 @@ async fn untrusted_project_agents_never_reach_the_system_prompt_via_set_mode() {
     let _release = fuigo_test_support::EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "0.0.0-sim");
     let _flag = fuigo_test_support::EnvGuard::unset("FUIGO_FOLDER_TRUST");
     let repo = untrusted_repo(&["ask", "default", "evil"]);
-    assert!(!crate::agent::folder_trust::project_scope_allowed(repo.path()));
+    assert!(!crate::agent::folder_trust::project_scope_allowed(
+        repo.path()
+    ));
     let evil_abs = repo
         .path()
         .join(".fuigo")
@@ -147,7 +176,8 @@ async fn untrusted_project_agents_never_reach_the_system_prompt_via_set_mode() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (mut actor, _events, _gw) = actor_with_events().await;
-            actor.tool_context.cwd = fuigo_paths::AbsPathBuf::new(repo.path().to_path_buf()).unwrap();
+            actor.tool_context.cwd =
+                fuigo_paths::AbsPathBuf::new(repo.path().to_path_buf()).unwrap();
             let actor = Arc::new(actor);
             actor
                 .chat_state_handle
@@ -156,7 +186,10 @@ async fn untrusted_project_agents_never_reach_the_system_prompt_via_set_mode() {
             for id in ["ask", "default", evil_abs.as_str()] {
                 actor.handle_session_mode(acp::SessionModeId::new(id)).await;
                 let system = system_text(&actor).await;
-                assert!(!system.contains(MARKER), "set_mode({id:?}) put a repo file in System: {system}");
+                assert!(
+                    !system.contains(MARKER),
+                    "set_mode({id:?}) put a repo file in System: {system}"
+                );
                 assert_eq!(*actor.active_agent_type.lock(), agent_type, "{id:?}");
             }
         })

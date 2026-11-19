@@ -54,7 +54,8 @@ fn spawn(sandbox: &TestSandbox, args: &[&str]) -> std::process::Child {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    #[allow(clippy::disallowed_methods)] // test-owned child, waited on (or killed and reaped) by the caller
+    #[allow(clippy::disallowed_methods)]
+    // test-owned child, waited on (or killed and reaped) by the caller
     cmd.spawn().expect("spawn fuigo-pager")
 }
 
@@ -100,7 +101,9 @@ fn run(sandbox: &TestSandbox, args: &[&str], limit: Duration) -> Out {
         }
         if started.elapsed() > limit {
             kill_group(child);
-            let stderr = rx_err.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
+            let stderr = rx_err
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_default();
             panic!(
                 "`{}` hung: still running after {}s with no result\nstderr:\n{stderr}",
                 args.join(" "),
@@ -191,7 +194,13 @@ fn lose_a_turn(server: &MockInferenceServer, sandbox: &TestSandbox) {
     server.set_chunk_delay(Some(Duration::from_secs(600)));
     let mut guard = GroupGuard(spawn(
         sandbox,
-        &["-p", "first", "--trust", "--output-format", "streaming-json"],
+        &[
+            "-p",
+            "first",
+            "--trust",
+            "--output-format",
+            "streaming-json",
+        ],
     ));
     let child = &mut guard.0;
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -199,25 +208,38 @@ fn lose_a_turn(server: &MockInferenceServer, sandbox: &TestSandbox) {
         if let Some(status) = child.try_wait().expect("try_wait") {
             panic!("the first run ended before its turn was in flight: {status}");
         }
-        assert!(Instant::now() < deadline, "the first run never put its turn in flight");
+        assert!(
+            Instant::now() < deadline,
+            "the first run never put its turn in flight"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     kill_group(child);
     server.set_chunk_delay(None);
-    let events = std::fs::read_to_string(session_dir(sandbox).unwrap().join("events.jsonl")).unwrap();
+    let events =
+        std::fs::read_to_string(session_dir(sandbox).unwrap().join("events.jsonl")).unwrap();
     assert!(
         !events.contains("turn_ended"),
         "the killed run must leave its turn open:\n{events}"
     );
 }
 
-const CONTINUE: [&str; 6] = ["--continue", "-p", "again", "--trust", "--output-format", "json"];
+const CONTINUE: [&str; 6] = [
+    "--continue",
+    "-p",
+    "again",
+    "--trust",
+    "--output-format",
+    "json",
+];
 
 /// The regression: the first `--continue` after the kill must run, not hang, and tell the model.
 /// Mutant discriminated: awaiting the live marker's delivery inside `load_session`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn continue_after_a_killed_turn_runs_and_tells_the_model() {
-    let server = MockInferenceServer::start().await.expect("start the mock inference server");
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start the mock inference server");
     server.preset_allow_access();
     let sandbox = TestSandbox::builder().git().mock_url(server.url()).build();
     let server = std::sync::Arc::new(server);
@@ -231,18 +253,33 @@ async fn continue_after_a_killed_turn_runs_and_tells_the_model() {
         // A second continuation finds the turn already recorded: no second marker, no second reminder.
         let again = s.request_bodies().len();
         let second = run(&sb, &CONTINUE, Duration::from_secs(45));
-        assert_eq!(second.code, Some(0), "second run\nstderr:\n{}", second.stderr);
+        assert_eq!(
+            second.code,
+            Some(0),
+            "second run\nstderr:\n{}",
+            second.stderr
+        );
         assert!(
             reminders_since(&s, again).iter().all(|&n| n <= 1),
             "the history keeps the one reminder, nothing is added: {:?}",
             reminders_since(&s, again)
         );
-        assert_eq!(markers_on_disk(&sb), 1, "still one durable interrupted marker");
+        assert_eq!(
+            markers_on_disk(&sb),
+            1,
+            "still one durable interrupted marker"
+        );
         (out, sb)
     })
     .await
     .unwrap();
-    assert_eq!(out.code, Some(0), "stdout:\n{}\nstderr:\n{}", out.stdout, out.stderr);
+    assert_eq!(
+        out.code,
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        out.stdout,
+        out.stderr
+    );
     let dir = session_dir(&sandbox).unwrap();
     let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
     assert!(
@@ -256,7 +293,9 @@ async fn continue_after_a_killed_turn_runs_and_tells_the_model() {
 /// Mutant discriminated: an unbounded wait in `TurnOwnerLock::acquire`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_live_recoverer_elsewhere_bounds_the_load_then_releases_it() {
-    let server = MockInferenceServer::start().await.expect("start the mock inference server");
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start the mock inference server");
     server.preset_allow_access();
     let sandbox = TestSandbox::builder().git().mock_url(server.url()).build();
     let server = std::sync::Arc::new(server);
@@ -279,7 +318,13 @@ async fn a_live_recoverer_elsewhere_bounds_the_load_then_releases_it() {
 
         let before = s.request_bodies().len();
         let busy = run(&sandbox, &CONTINUE, Duration::from_secs(120));
-        assert_ne!(busy.code, Some(0), "stdout:\n{}\nstderr:\n{}", busy.stdout, busy.stderr);
+        assert_ne!(
+            busy.code,
+            Some(0),
+            "stdout:\n{}\nstderr:\n{}",
+            busy.stdout,
+            busy.stderr
+        );
         assert!(
             busy.stdout.contains(BUSY) || busy.stderr.contains(BUSY),
             "the refusal names the other process\nstdout:\n{}\nstderr:\n{}",
@@ -291,15 +336,32 @@ async fn a_live_recoverer_elsewhere_bounds_the_load_then_releases_it() {
             "the refusal comes after the 60 s bound, not before and not much later: {:?}",
             busy.elapsed
         );
-        assert_eq!(s.request_bodies().len(), before, "no model request while the session is held");
+        assert_eq!(
+            s.request_bodies().len(),
+            before,
+            "no model request while the session is held"
+        );
         let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
-        assert!(!events.contains("turn_ended"), "a held session's turn is not declared lost:\n{events}");
+        assert!(
+            !events.contains("turn_ended"),
+            "a held session's turn is not declared lost:\n{events}"
+        );
 
         drop(lock);
         let out = run(&sandbox, &CONTINUE, Duration::from_secs(45));
-        assert_eq!(out.code, Some(0), "stdout:\n{}\nstderr:\n{}", out.stdout, out.stderr);
+        assert_eq!(
+            out.code,
+            Some(0),
+            "stdout:\n{}\nstderr:\n{}",
+            out.stdout,
+            out.stderr
+        );
         assert_told_once(&s, before);
-        assert_eq!(markers_on_disk(&sandbox), 1, "one durable interrupted marker");
+        assert_eq!(
+            markers_on_disk(&sandbox),
+            1,
+            "one durable interrupted marker"
+        );
     })
     .await
     .unwrap();
@@ -311,11 +373,17 @@ async fn a_live_recoverer_elsewhere_bounds_the_load_then_releases_it() {
 /// Mutant discriminated: awaiting the reconciliation completions under `no_replay`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn continue_with_a_stale_background_task_runs() {
-    let server = MockInferenceServer::start().await.expect("start the mock inference server");
+    let server = MockInferenceServer::start()
+        .await
+        .expect("start the mock inference server");
     server.preset_allow_access();
     let sandbox = TestSandbox::builder().git().mock_url(server.url()).build();
     tokio::task::spawn_blocking(move || {
-        let first = run(&sandbox, &["-p", "first", "--trust", "--output-format", "json"], Duration::from_secs(45));
+        let first = run(
+            &sandbox,
+            &["-p", "first", "--trust", "--output-format", "json"],
+            Duration::from_secs(45),
+        );
         assert_eq!(first.code, Some(0), "first run\nstderr:\n{}", first.stderr);
         let dir = session_dir(&sandbox).unwrap();
         let updates = dir.join("updates.jsonl");
@@ -341,7 +409,13 @@ async fn continue_with_a_stale_background_task_runs() {
         std::fs::write(&updates, log).expect("write updates.jsonl");
 
         let out = run(&sandbox, &CONTINUE, Duration::from_secs(45));
-        assert_eq!(out.code, Some(0), "stdout:\n{}\nstderr:\n{}", out.stdout, out.stderr);
+        assert_eq!(
+            out.code,
+            Some(0),
+            "stdout:\n{}\nstderr:\n{}",
+            out.stdout,
+            out.stderr
+        );
     })
     .await
     .unwrap();

@@ -16,8 +16,7 @@ enum DreamAttempt {
 }
 
 /// What `/dream` shows when there is no session log to consolidate yet (P150).
-pub(super) const DREAM_NO_SESSION_LOGS: &str =
-    "skipped: no session logs to consolidate yet (memory saves a log when a session ends or on /flush)";
+pub(super) const DREAM_NO_SESSION_LOGS: &str = "skipped: no session logs to consolidate yet (memory saves a log when a session ends or on /flush)";
 
 #[derive(Debug)]
 pub(super) struct MemoryFlushSnapshot {
@@ -420,7 +419,9 @@ impl SessionActor {
                     "{log_prefix}: model call failed"
                 );
                 self.memory.record_dream_result(false);
-                return DreamAttempt::Ran("failed: the model call failed; retry remains open".to_owned());
+                return DreamAttempt::Ran(
+                    "failed: the model call failed; retry remains open".to_owned(),
+                );
             }
             Err(_) => {
                 tracing::warn!(
@@ -428,7 +429,9 @@ impl SessionActor {
                     "{log_prefix}: model call timed out (30m)"
                 );
                 self.memory.record_dream_result(false);
-                return DreamAttempt::Ran("failed: the model call timed out; retry remains open".to_owned());
+                return DreamAttempt::Ran(
+                    "failed: the model call timed out; retry remains open".to_owned(),
+                );
             }
         };
 
@@ -462,7 +465,8 @@ impl SessionActor {
                     self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
                         result: result.into(),
                         path: Some(path.display().to_string()),
-                    }).await;
+                    })
+                    .await;
                     return DreamAttempt::Ran(result.to_owned());
                 }
                 self.memory.reindex_and_embed(&path, "dream").await;
@@ -547,7 +551,9 @@ impl SessionActor {
 
     /// Make the dream model call using the session's sampling client.
     async fn run_dream_model_call(&self, user_message: &str) -> Result<String, acp::Error> {
-        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await?;
+        let sampling_client = self
+            .prepare_chat_completion(false, crate::session::acp_session::CallRole::Side)
+            .await?;
         let model = self
             .chat_state_handle
             .get_sampling_config()
@@ -929,7 +935,8 @@ impl SessionActor {
             }
         })?;
         // Indexing re-reads the session's own state; if memory was turned off meanwhile it indexes nothing new
-        self.reindex_and_embed(&path, storage.classify_source(&path)).await;
+        self.reindex_and_embed(&path, storage.classify_source(&path))
+            .await;
         Ok(path.display().to_string())
     }
 
@@ -947,12 +954,15 @@ impl SessionActor {
             ));
         }
 
-        let sampling_client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await.map_err(|e| {
-            format!(
-                "failed to prepare client: {}",
-                crate::sampling::error::acp_error_text(&e)
-            )
-        })?;
+        let sampling_client = self
+            .prepare_chat_completion(false, crate::session::acp_session::CallRole::Side)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to prepare client: {}",
+                    crate::sampling::error::acp_error_text(&e)
+                )
+            })?;
 
         let system = "You are a memory note formatter. Rewrite the user's note into \
             well-structured markdown suitable for a persistent MEMORY.md file. The note should be:\n\
@@ -979,9 +989,16 @@ impl SessionActor {
             .get_sampling_config()
             .await
             .map(|c| c.model);
-        let Some(model) = self.models_manager.with_helper_catalog(|allowlist, models| {
-            crate::agent::models::rewrite_note_wire_model(allowlist, models, session_model.as_deref())
-        }) else {
+        let Some(model) = self
+            .models_manager
+            .with_helper_catalog(|allowlist, models| {
+                crate::agent::models::rewrite_note_wire_model(
+                    allowlist,
+                    models,
+                    session_model.as_deref(),
+                )
+            })
+        else {
             return Err("no model the organization's policy admits".to_owned());
         };
         let request = ConversationRequest {

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::events::EventQueue;
-use crate::format::{format_interjection, format_parent_agent_interjection, format_peer_interjection};
+use crate::format::{
+    format_interjection, format_parent_agent_interjection, format_peer_interjection,
+};
 
 /// Who authored a buffered interjection.
 ///
@@ -149,7 +151,8 @@ mod tests {
     #[test]
     fn drain_formatted_leaves_a_peer_entry_exactly_as_wrapped() {
         let buf: InterjectionBuffer<()> = InterjectionBuffer::new();
-        let wrapped = "note\n<cross-session-message from=\"a\">\nbody\n</cross-session-message>".to_string();
+        let wrapped =
+            "note\n<cross-session-message from=\"a\">\nbody\n</cross-session-message>".to_string();
         buf.push(PendingInterjection {
             text: wrapped.clone(),
             authority: InterjectionAuthority::Peer {
@@ -159,6 +162,9 @@ mod tests {
             ..Default::default()
         });
         let out = drain_formatted(&buf, |t| t.replace("body", "SANITIZED"));
-        assert_eq!(out[0].text, wrapped, "peer text is neither sanitized, truncated nor re-framed");
+        assert_eq!(
+            out[0].text, wrapped,
+            "peer text is neither sanitized, truncated nor re-framed"
+        );
     }
 }

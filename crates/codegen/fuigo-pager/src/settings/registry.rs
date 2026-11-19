@@ -1055,8 +1055,9 @@ mod tests {
                 ("features.subagent_model_inheritance", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
-                        FeatureTiers::default()
-                            .effective(fuigo_shell::agent::config::Feature::SubagentModelInheritance),
+                        FeatureTiers::default().effective(
+                            fuigo_shell::agent::config::Feature::SubagentModelInheritance
+                        ),
                         "features.subagent_model_inheritance default drifts from the feature registry"
                     );
                 }

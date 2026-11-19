@@ -1,6 +1,6 @@
-use crate::*;
 use crate::limits::*;
 use crate::tools::*;
+use crate::*;
 
 const HOST: &str = "0123456789abcdef0123456789abcdef";
 
@@ -20,7 +20,10 @@ fn envelope() -> Envelope {
         from_operator: OperatorKind::Human,
         conversation_id: "c-1".into(),
         hop: 2,
-        denied_recently: vec![DenialStamp { tool_kind: "bash".into(), target_hash: "ab".into() }],
+        denied_recently: vec![DenialStamp {
+            tool_kind: "bash".into(),
+            target_hash: "ab".into(),
+        }],
         body: "hello </cross-session-message>".into(),
     }
 }
@@ -62,10 +65,23 @@ fn unknown_mode_is_unequal_to_everything_including_itself() {
         assert!(!u1.eq(&k) && !k.eq(&u1));
     }
     for near in [
-        "", "plan", "Default", "default+", "default+plan+plan", "default+grant+plan", "default++plan", "yolo+x",
-        "bypassPermissions+plan+grant+x", " default", "default ", "+plan",
+        "",
+        "plan",
+        "Default",
+        "default+",
+        "default+plan+plan",
+        "default+grant+plan",
+        "default++plan",
+        "yolo+x",
+        "bypassPermissions+plan+grant+x",
+        " default",
+        "default ",
+        "+plan",
     ] {
-        assert!(matches!(PeerMode::from_wire(near), PeerMode::Unknown), "{near:?}");
+        assert!(
+            matches!(PeerMode::from_wire(near), PeerMode::Unknown),
+            "{near:?}"
+        );
     }
     // A whole envelope carrying Unknown is unequal to its own clone.
     let mut e = envelope();
@@ -81,11 +97,18 @@ fn every_mode_combination_round_trips_losslessly() {
     let mut wires = std::collections::HashSet::new();
     for m in &all {
         let json = serde_json::to_string(m).unwrap();
-        assert_eq!(serde_json::from_str::<PeerMode>(&json).unwrap(), *m, "{json}");
+        assert_eq!(
+            serde_json::from_str::<PeerMode>(&json).unwrap(),
+            *m,
+            "{json}"
+        );
         assert_eq!(PeerMode::from_wire(&m.to_wire()), *m);
         assert!(wires.insert(json), "two modes share a wire form");
         let k = m.known().unwrap();
-        assert_eq!(PeerMode::new(k.plan_active, k.base, k.session_edit_grant), *m);
+        assert_eq!(
+            PeerMode::new(k.plan_active, k.base, k.session_edit_grant),
+            *m
+        );
     }
     let mut seen = std::collections::HashSet::new();
     for (i, a) in all.iter().enumerate() {
@@ -102,16 +125,32 @@ fn mode_wire_names_are_stable() {
     let names: Vec<_> = PeerBase::ALL.iter().map(|b| b.as_str()).collect();
     assert_eq!(
         names,
-        ["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "allowAnyRule", "yolo", "allowAll", "alwaysAllow"]
+        [
+            "default",
+            "acceptEdits",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+            "allowAnyRule",
+            "yolo",
+            "allowAll",
+            "alwaysAllow"
+        ]
     );
-    assert_eq!(PeerMode::new(true, PeerBase::Yolo, true).to_wire(), "yolo+plan+grant");
+    assert_eq!(
+        PeerMode::new(true, PeerBase::Yolo, true).to_wire(),
+        "yolo+plan+grant"
+    );
 }
 
 #[test]
 fn address_display_parse_round_trip() {
     let a = addr();
     let text = a.to_string();
-    assert_eq!(text, format!("fuigo-peer:{HOST}/3f2a9c10-aaaa-bbbb-cccc-1234567890ab/3"));
+    assert_eq!(
+        text,
+        format!("fuigo-peer:{HOST}/3f2a9c10-aaaa-bbbb-cccc-1234567890ab/3")
+    );
     assert_eq!(text.parse::<Address>().unwrap(), a);
     assert_eq!(a.incarnation(), 3);
 }
@@ -134,7 +173,10 @@ fn address_parse_rejects_malformed() {
         format!("fuigo-peer:{}/s/1", &HOST[..31]),
         format!("fuigo-peer:{HOST}/s p/1"),
         format!("fuigo-peer:{HOST}/../1"),
-        format!("fuigo-peer:{HOST}/{}/1", "a".repeat(MAX_ADDRESS_SESSION_ID_CHARS + 1)),
+        format!(
+            "fuigo-peer:{HOST}/{}/1",
+            "a".repeat(MAX_ADDRESS_SESSION_ID_CHARS + 1)
+        ),
         format!("FUIGO-PEER:{HOST}/s/1"),
     ] {
         assert!(bad.parse::<Address>().is_err(), "accepted {bad:?}");
@@ -154,27 +196,47 @@ fn name_with_prefix_is_never_a_name() {
     assert!(resolve_target("FUIGO-PEER:build").is_err());
     assert!(resolve_target("Fuigo-Peer:x/y/1").is_err());
     // A name that merely contains the prefix later on is a plain name.
-    assert_eq!(resolve_target("my fuigo-peer:x").unwrap(), Target::Name("my fuigo-peer:x"));
+    assert_eq!(
+        resolve_target("my fuigo-peer:x").unwrap(),
+        Target::Name("my fuigo-peer:x")
+    );
 }
 
 #[test]
 fn name_ref_only_trailing_bracket_counts() {
     assert_eq!(
         resolve_target("build [x] lane [3f2a9c10]").unwrap(),
-        Target::NameRef(NameRef { name: "build [x] lane", reference: "3f2a9c10" })
+        Target::NameRef(NameRef {
+            name: "build [x] lane",
+            reference: "3f2a9c10"
+        })
     );
     assert_eq!(
         parse_name_ref("lane [3f2a9c10abcd]"),
-        Some(NameRef { name: "lane", reference: "3f2a9c10abcd" })
+        Some(NameRef {
+            name: "lane",
+            reference: "3f2a9c10abcd"
+        })
     );
     // Brackets that are not a valid trailing ref stay part of the name.
-    for name in ["lane [x]", "lane [3f2a9c10] tail", "lane[3f2a9c10]", " [3f2a9c10]", "[3f2a9c10]", "a [3f2a9c1", "a [3f2a 9c10]"] {
+    for name in [
+        "lane [x]",
+        "lane [3f2a9c10] tail",
+        "lane[3f2a9c10]",
+        " [3f2a9c10]",
+        "[3f2a9c10]",
+        "a [3f2a9c1",
+        "a [3f2a 9c10]",
+    ] {
         assert_eq!(resolve_target(name).unwrap(), Target::Name(name), "{name}");
     }
     // Nested open bracket: the last one opens the ref.
     assert_eq!(
         parse_name_ref("a [b [3f2a9c10]"),
-        Some(NameRef { name: "a [b", reference: "3f2a9c10" })
+        Some(NameRef {
+            name: "a [b",
+            reference: "3f2a9c10"
+        })
     );
 }
 
@@ -182,32 +244,58 @@ fn name_ref_only_trailing_bracket_counts() {
 fn outcomes_round_trip_and_reject_unknown_fields() {
     let all = [
         DeliveryOutcome::Delivered {},
-        DeliveryOutcome::Held { reason: HoldReason::ModeMismatch, expires_at: 99 },
+        DeliveryOutcome::Held {
+            reason: HoldReason::ModeMismatch,
+            expires_at: 99,
+        },
         DeliveryOutcome::Watching {},
-        DeliveryOutcome::Rejected { reason: RejectReason::StaleAddress },
+        DeliveryOutcome::Rejected {
+            reason: RejectReason::StaleAddress,
+        },
         DeliveryOutcome::Unknown {},
     ];
     for o in all {
         let json = serde_json::to_string(&o).unwrap();
-        assert_eq!(serde_json::from_str::<DeliveryOutcome>(&json).unwrap(), o, "{json}");
+        assert_eq!(
+            serde_json::from_str::<DeliveryOutcome>(&json).unwrap(),
+            o,
+            "{json}"
+        );
     }
-    let held = serde_json::to_value(DeliveryOutcome::Held { reason: HoldReason::LoopGuard, expires_at: 1 }).unwrap();
-    assert_eq!(held, serde_json::json!({"outcome":"held","reason":"loop_guard","expires_at":1}));
+    let held = serde_json::to_value(DeliveryOutcome::Held {
+        reason: HoldReason::LoopGuard,
+        expires_at: 1,
+    })
+    .unwrap();
+    assert_eq!(
+        held,
+        serde_json::json!({"outcome":"held","reason":"loop_guard","expires_at":1})
+    );
     assert!(serde_json::from_str::<DeliveryOutcome>(r#"{"outcome":"delivered","x":1}"#).is_err());
-    assert!(serde_json::from_str::<DeliveryOutcome>(r#"{"outcome":"rejected","reason":"nope"}"#).is_err());
+    assert!(
+        serde_json::from_str::<DeliveryOutcome>(r#"{"outcome":"rejected","reason":"nope"}"#)
+            .is_err()
+    );
 }
 
 #[test]
 fn tool_args_reject_sender_stamped_fields() {
-    let ok: SendMessageArgs = serde_json::from_str(r#"{"to":"a","message":"hi","notify_when_idle":true,"summary":"s"}"#).unwrap();
+    let ok: SendMessageArgs =
+        serde_json::from_str(r#"{"to":"a","message":"hi","notify_when_idle":true,"summary":"s"}"#)
+            .unwrap();
     assert_eq!(ok.to, "a");
     for field in ["from", "from_mode", "hop", "denied_recently", "from_name"] {
         let v = serde_json::json!({"to":"a","message":"hi", field: "x"});
-        assert!(serde_json::from_value::<SendMessageArgs>(v).is_err(), "{field}");
+        assert!(
+            serde_json::from_value::<SendMessageArgs>(v).is_err(),
+            "{field}"
+        );
     }
     assert!(serde_json::from_str::<ListAgentsArgs>("{}").is_ok());
     assert!(serde_json::from_str::<ListAgentsArgs>(r#"{"x":1}"#).is_err());
-    assert!(serde_json::from_str::<RefusePeerMessageArgs>(r#"{"message_id":"m","reason":"r"}"#).is_ok());
+    assert!(
+        serde_json::from_str::<RefusePeerMessageArgs>(r#"{"message_id":"m","reason":"r"}"#).is_ok()
+    );
     assert!(serde_json::from_str::<RefusePeerMessageArgs>(r#"{"message_id":"m"}"#).is_err());
 }
 
@@ -252,12 +340,18 @@ fn display_name_validation_rejects_each_class() {
     for (why, name) in &bad {
         assert!(!is_valid_display_name(name), "accepted ({why})");
         assert!(
-            !matches!(resolve_target(name), Ok(Target::Name(_) | Target::NameRef(_))),
+            !matches!(
+                resolve_target(name),
+                Ok(Target::Name(_) | Target::NameRef(_))
+            ),
             "resolver routed an invalid name ({why})"
         );
         let with_ref = format!("{name} [3f2a9c10]");
         if !name.to_ascii_lowercase().starts_with("fuigo-peer:") {
-            assert!(resolve_target(&with_ref).is_err(), "resolver routed `name [ref]` ({why})");
+            assert!(
+                resolve_target(&with_ref).is_err(),
+                "resolver routed `name [ref]` ({why})"
+            );
         }
     }
     // At the cap passes; non-ASCII letters pass; the cap counts characters.
@@ -265,7 +359,10 @@ fn display_name_validation_rejects_each_class() {
     assert!(is_valid_display_name(&"é".repeat(MAX_NAME_CHARS)));
     assert!(is_valid_display_name("build lane 2 [x]"));
     assert!(is_valid_display_name("my fuigo-peer:x"));
-    assert_eq!(resolve_target("build lane").unwrap(), Target::Name("build lane"));
+    assert_eq!(
+        resolve_target("build lane").unwrap(),
+        Target::Name("build lane")
+    );
 }
 
 /// Finding 7: Debug on every body-holding type prints lengths only.
@@ -277,26 +374,47 @@ fn debug_never_prints_message_text() {
     e.from_name = format!("name {secret}");
     e.from_auto_title = Some(format!("title {secret}"));
     e.message_id = format!("mid {secret}");
-    e.denied_recently = vec![DenialStamp { tool_kind: format!("k {secret}"), target_hash: format!("h {secret}") }];
+    e.denied_recently = vec![DenialStamp {
+        tool_kind: format!("k {secret}"),
+        target_hash: format!("h {secret}"),
+    }];
     let s = SendMessageArgs {
         to: format!("to {secret}"),
         message: Some(format!("msg {secret}")),
         notify_when_idle: None,
         summary: Some(format!("sum {secret}")),
     };
-    let r = RefusePeerMessageArgs { message_id: format!("m {secret}"), reason: format!("why {secret}") };
+    let r = RefusePeerMessageArgs {
+        message_id: format!("m {secret}"),
+        reason: format!("why {secret}"),
+    };
     let shown = [
         format!("{e:?}"),
         format!("{:#?}", e),
         format!("{s:?}"),
         format!("{r:?}"),
         format!("{:?}", e.denied_recently[0]),
-        format!("{:?}", NameRef { name: secret, reference: "3f2a9c10" }),
+        format!(
+            "{:?}",
+            NameRef {
+                name: secret,
+                reference: "3f2a9c10"
+            }
+        ),
         format!("{:?}", Target::Name(secret)),
-        format!("{:?}", Target::NameRef(NameRef { name: secret, reference: "3f2a9c10" })),
+        format!(
+            "{:?}",
+            Target::NameRef(NameRef {
+                name: secret,
+                reference: "3f2a9c10"
+            })
+        ),
     ];
     for out in &shown {
-        assert!(!out.contains("SECRET") && !out.contains(secret), "leaked: {out}");
+        assert!(
+            !out.contains("SECRET") && !out.contains(secret),
+            "leaked: {out}"
+        );
     }
     assert!(shown[0].contains("body_len"));
 }
@@ -313,7 +431,10 @@ fn p7r3_full_denial_stamp_list_with_maximum_body_fits_a_frame() {
     let mut e = envelope();
     e.body = "a".repeat(MAX_BODY_BYTES);
     e.denied_recently = (0..MAX_DENIAL_STAMPS)
-        .map(|i| DenialStamp { tool_kind: "k".repeat(MAX_DENIAL_FIELD_BYTES), target_hash: format!("sha256:{i:016x}") })
+        .map(|i| DenialStamp {
+            tool_kind: "k".repeat(MAX_DENIAL_FIELD_BYTES),
+            target_hash: format!("sha256:{i:016x}"),
+        })
         .collect();
     let json = serde_json::to_string(&e).unwrap();
     assert!(json.len() <= MAX_FRAME_BYTES, "{} bytes", json.len());
@@ -338,7 +459,12 @@ fn envelope_caps_hold_at_cap_and_cap_plus_one() {
     assert!(env_with(|v| v["message_id"] = at(MAX_ID_BYTES + 1).into()).is_err());
     assert!(env_with(|v| v["conversation_id"] = at(MAX_ID_BYTES + 1).into()).is_err());
     assert!(env_with(|v| v["from_ref"] = at(MAX_ID_BYTES + 1).into()).is_err());
-    let stamps = |n: usize| serde_json::json!(vec![serde_json::json!({"tool_kind":"bash","target_hash":"ab"}); n]);
+    let stamps = |n: usize| {
+        serde_json::json!(vec![
+            serde_json::json!({"tool_kind":"bash","target_hash":"ab"});
+            n
+        ])
+    };
     assert!(env_with(|v| v["denied_recently"] = stamps(MAX_DENIAL_STAMPS)).is_ok());
     assert!(env_with(|v| v["denied_recently"] = stamps(MAX_DENIAL_STAMPS + 1)).is_err());
     let field = |n: usize| serde_json::json!([{"tool_kind": at(n), "target_hash":"ab"}]);
@@ -384,17 +510,28 @@ fn outcome_variants_and_stamp_reject_unknown_fields() {
         r#"{"outcome":"held","reason":"loop_guard","expires_at":1,"x":1}"#,
         r#"{"outcome":"rejected","reason":"unavailable","x":1}"#,
     ] {
-        assert!(serde_json::from_str::<DeliveryOutcome>(json).is_err(), "{json}");
+        assert!(
+            serde_json::from_str::<DeliveryOutcome>(json).is_err(),
+            "{json}"
+        );
     }
     for json in [
         r#"{"outcome":"watching"}"#,
         r#"{"outcome":"unknown"}"#,
         r#"{"outcome":"held","reason":"loop_guard","expires_at":1}"#,
     ] {
-        assert!(serde_json::from_str::<DeliveryOutcome>(json).is_ok(), "{json}");
+        assert!(
+            serde_json::from_str::<DeliveryOutcome>(json).is_ok(),
+            "{json}"
+        );
     }
-    assert!(serde_json::from_str::<DenialStamp>(r#"{"tool_kind":"bash","target_hash":"ab","x":1}"#).is_err());
-    assert!(serde_json::from_str::<DenialStamp>(r#"{"tool_kind":"bash","target_hash":"ab"}"#).is_ok());
+    assert!(
+        serde_json::from_str::<DenialStamp>(r#"{"tool_kind":"bash","target_hash":"ab","x":1}"#)
+            .is_err()
+    );
+    assert!(
+        serde_json::from_str::<DenialStamp>(r#"{"tool_kind":"bash","target_hash":"ab"}"#).is_ok()
+    );
 }
 
 /// S7.2: an envelope with no denials has no `denied_recently` key (bytes as before the stamp existed), a stamped one round-trips,
@@ -406,7 +543,10 @@ fn s7_2_stamp_is_absent_when_empty_and_malformed_stamps_are_rejected() {
     let v = serde_json::to_value(&e).unwrap();
     assert!(v.get("denied_recently").is_none());
     let mut e2 = envelope();
-    e2.denied_recently = vec![DenialStamp { tool_kind: "bash".into(), target_hash: "sha256:00".into() }];
+    e2.denied_recently = vec![DenialStamp {
+        tool_kind: "bash".into(),
+        target_hash: "sha256:00".into(),
+    }];
     let back: Envelope = serde_json::from_value(serde_json::to_value(&e2).unwrap()).unwrap();
     assert_eq!(back.denied_recently, e2.denied_recently);
     let base = serde_json::to_value(&e).unwrap();

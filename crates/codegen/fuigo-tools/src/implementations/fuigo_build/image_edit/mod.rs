@@ -488,7 +488,10 @@ impl fuigo_tool_runtime::Tool for ImageEditTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,11 +683,21 @@ mod tests {
     /// P174: the local files an `image_edit` call reads, for the permission check.
     #[test]
     fn local_image_paths_lists_every_file_the_tool_reads() {
-        let images: Vec<String> = ["[Image #1]", "data:image/png;base64,AAAA", "file:///tmp/a.png", " rel.png ", "/abs.png", "/abs.png"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(local_image_paths(&images), vec!["/tmp/a.png", "rel.png", "/abs.png"]);
+        let images: Vec<String> = [
+            "[Image #1]",
+            "data:image/png;base64,AAAA",
+            "file:///tmp/a.png",
+            " rel.png ",
+            "/abs.png",
+            "/abs.png",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            local_image_paths(&images),
+            vec!["/tmp/a.png", "rel.png", "/abs.png"]
+        );
     }
 
     // ── resolve_to_data_url ──────────────────────────────────────────

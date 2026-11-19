@@ -149,7 +149,11 @@ pub fn gate_upload_as(
     method: &UploadMethod,
     object_path: &str,
 ) -> anyhow::Result<()> {
-    gate_class(kind, StorageDestinationClass::of_method(method), object_path)
+    gate_class(
+        kind,
+        StorageDestinationClass::of_method(method),
+        object_path,
+    )
 }
 
 /// [`gate_upload`] for a caller that holds the proxy base URL rather than an [`UploadMethod`].
@@ -169,7 +173,10 @@ fn gate_class(
     if class.may_receive_content() {
         return Ok(());
     }
-    tracing::warn!(object_path, "upload withheld: destination is not FluxRouter-operated");
+    tracing::warn!(
+        object_path,
+        "upload withheld: destination is not FluxRouter-operated"
+    );
     announce_once(kind);
     Err(anyhow::Error::new(WithheldFromDestination {
         object_path: object_path.to_owned(),
@@ -238,7 +245,12 @@ pub fn subscribe_notices() -> tokio::sync::watch::Receiver<usize> {
 pub fn notices_from(cursor: usize) -> Vec<String> {
     NOTICES
         .lock()
-        .map(|notices| notices.get(cursor..).map(<[String]>::to_vec).unwrap_or_default())
+        .map(|notices| {
+            notices
+                .get(cursor..)
+                .map(<[String]>::to_vec)
+                .unwrap_or_default()
+        })
         .unwrap_or_default()
 }
 
@@ -248,7 +260,10 @@ pub fn notices_from(cursor: usize) -> Vec<String> {
 /// deduplicate.
 pub fn announce_notice(message: &str) {
     record_notice(message);
-    fuigo_tty_utils::best_effort_stderr::eprint_line(&fuigo_tty_utils::scrub_unsafe_display(message, Some(' ')));
+    fuigo_tty_utils::best_effort_stderr::eprint_line(&fuigo_tty_utils::scrub_unsafe_display(
+        message,
+        Some(' '),
+    ));
 }
 
 /// How many entries of [`NOTICES`] a host has already shown again ([`replay_notices_since_last_replay`]).
@@ -289,9 +304,14 @@ mod tests {
     #[test]
     fn three_classes() {
         use StorageDestinationClass::*;
-        assert_eq!(StorageDestinationClass::of_method(&proxy("https://api.fluxrouter.ai/v1")), FluxRouterProxy);
         assert_eq!(
-            StorageDestinationClass::of_method(&UploadMethod::Direct { service_account_key: None }),
+            StorageDestinationClass::of_method(&proxy("https://api.fluxrouter.ai/v1")),
+            FluxRouterProxy
+        );
+        assert_eq!(
+            StorageDestinationClass::of_method(&UploadMethod::Direct {
+                service_account_key: None
+            }),
             OperatorBucket
         );
         assert_eq!(
@@ -315,14 +335,26 @@ mod tests {
             "not a url",
             "",
         ] {
-            assert_eq!(StorageDestinationClass::of_method(&proxy(other)), ThirdPartyProxy, "{other}");
+            assert_eq!(
+                StorageDestinationClass::of_method(&proxy(other)),
+                ThirdPartyProxy,
+                "{other}"
+            );
         }
     }
 
     #[test]
     fn gate_withholds_only_class_three() {
         assert!(gate_upload(&proxy("https://api.fluxrouter.ai/v1"), "a").is_ok());
-        assert!(gate_upload(&UploadMethod::Direct { service_account_key: None }, "a").is_ok());
+        assert!(
+            gate_upload(
+                &UploadMethod::Direct {
+                    service_account_key: None
+                },
+                "a"
+            )
+            .is_ok()
+        );
         let err = gate_upload(&proxy("https://third.example/v1"), "a/b.tar.gz").unwrap_err();
         assert!(is_withheld(&err));
         assert!(is_withheld(&err.context("while uploading")));
@@ -336,10 +368,18 @@ mod tests {
         let once = Once::new();
         let printed = std::cell::RefCell::new(Vec::new());
         for _ in 0..3 {
-            announce_through(&once, "p71-private-notice", |line| printed.borrow_mut().push(line.to_owned()));
+            announce_through(&once, "p71-private-notice", |line| {
+                printed.borrow_mut().push(line.to_owned())
+            });
         }
         assert_eq!(*printed.borrow(), vec!["p71-private-notice".to_owned()]);
-        assert_eq!(withheld_notices().iter().filter(|n| n.as_str() == "p71-private-notice").count(), 1);
+        assert_eq!(
+            withheld_notices()
+                .iter()
+                .filter(|n| n.as_str() == "p71-private-notice")
+                .count(),
+            1
+        );
     }
 
     /// The only caller of the replay in this test binary. A notice printed before a replay is handed over
@@ -350,10 +390,20 @@ mod tests {
         announce_through(&once, "p71-replayed-notice", |_| {});
         let mut first = Vec::new();
         replay_notices_since_last_replay(|line| first.push(line.to_owned()));
-        assert_eq!(first.iter().filter(|n| n.as_str() == "p71-replayed-notice").count(), 1, "{first:?}");
+        assert_eq!(
+            first
+                .iter()
+                .filter(|n| n.as_str() == "p71-replayed-notice")
+                .count(),
+            1,
+            "{first:?}"
+        );
         let mut second = Vec::new();
         replay_notices_since_last_replay(|line| second.push(line.to_owned()));
-        assert!(!second.iter().any(|n| n == "p71-replayed-notice"), "{second:?}");
+        assert!(
+            !second.iter().any(|n| n == "p71-replayed-notice"),
+            "{second:?}"
+        );
     }
 
     /// P142: recording a notice wakes a subscriber, which finds it from its own cursor (independent of the replay).
@@ -364,25 +414,54 @@ mod tests {
         announce_notice("p142-subscribed-notice");
         assert!(rx.has_changed().unwrap(), "the subscriber is woken");
         rx.borrow_and_update();
-        assert!(notices_from(before).iter().any(|n| n == "p142-subscribed-notice"));
+        assert!(
+            notices_from(before)
+                .iter()
+                .any(|n| n == "p142-subscribed-notice")
+        );
         assert!(notices_from(usize::MAX).is_empty());
         let once = Once::new();
         announce_through(&once, "p142-subscribed-withheld", |_| {});
-        assert!(rx.has_changed().unwrap(), "a withheld-upload notice wakes it too");
+        assert!(
+            rx.has_changed().unwrap(),
+            "a withheld-upload notice wakes it too"
+        );
     }
 
     #[test]
     fn each_notice_is_printed_once_per_process_and_is_path_accurate() {
         for _ in 0..3 {
             let _ = gate_upload(&proxy("https://third.example/v1"), "x");
-            let _ = gate_upload_as(WithheldKind::FeedbackArchive, &proxy("https://third.example/v1"), "y");
+            let _ = gate_upload_as(
+                WithheldKind::FeedbackArchive,
+                &proxy("https://third.example/v1"),
+                "y",
+            );
         }
         let notices = withheld_notices();
-        assert_eq!(notices.iter().filter(|n| n.as_str() == WITHHELD_NOTICE).count(), 1);
-        assert_eq!(notices.iter().filter(|n| n.as_str() == FEEDBACK_WITHHELD_NOTICE).count(), 1);
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|n| n.as_str() == WITHHELD_NOTICE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|n| n.as_str() == FEEDBACK_WITHHELD_NOTICE)
+                .count(),
+            1
+        );
         assert!(WITHHELD_NOTICE.contains("NOT uploaded"));
-        assert!(WITHHELD_NOTICE.contains("review comments"), "the notice must cover review-comment records");
-        assert!(WITHHELD_NOTICE.contains("trace_upload_bucket") && WITHHELD_NOTICE.contains("Direct GCS or S3"));
+        assert!(
+            WITHHELD_NOTICE.contains("review comments"),
+            "the notice must cover review-comment records"
+        );
+        assert!(
+            WITHHELD_NOTICE.contains("trace_upload_bucket")
+                && WITHHELD_NOTICE.contains("Direct GCS or S3")
+        );
         // The feedback archive has no bucket alternative, so its notice must not promise one.
         assert!(FEEDBACK_WITHHELD_NOTICE.contains("NOT uploaded"));
         assert!(!FEEDBACK_WITHHELD_NOTICE.to_lowercase().contains("bucket"));

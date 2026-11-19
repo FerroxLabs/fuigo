@@ -169,7 +169,11 @@ mod imp {
         if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFDIR {
             return Err(io::Error::other("not a folder"));
         }
-        Ok(PinnedDir { path, handle, follows_path })
+        Ok(PinnedDir {
+            path,
+            handle,
+            follows_path,
+        })
     }
 
     pub(super) fn open_root(path: &Path) -> io::Result<PinnedDir> {
@@ -184,12 +188,17 @@ mod imp {
     }
 
     pub(super) fn open_child(dir: &PinnedDir, name: &OsStr) -> io::Result<PinnedDir> {
-        let fd = openat(dir.handle.as_fd(), name, DIR_FLAGS, Mode::empty()).map_err(io::Error::from)?;
+        let fd =
+            openat(dir.handle.as_fd(), name, DIR_FLAGS, Mode::empty()).map_err(io::Error::from)?;
         pinned(dir.path.join(name), fd, false)
     }
 
     pub(super) fn still_at_path(dir: &PinnedDir) -> bool {
-        let at_path = if dir.follows_path { std::fs::metadata(&dir.path) } else { std::fs::symlink_metadata(&dir.path) };
+        let at_path = if dir.follows_path {
+            std::fs::metadata(&dir.path)
+        } else {
+            std::fs::symlink_metadata(&dir.path)
+        };
         let Ok(at_path) = at_path else {
             return false;
         };
@@ -201,7 +210,8 @@ mod imp {
 
     pub(super) fn entry_names(dir: &PinnedDir) -> io::Result<Vec<OsString>> {
         // A second descriptor for the listing, so the pinned one is never consumed or repositioned
-        let fd = openat(dir.handle.as_fd(), ".", DIR_FLAGS, Mode::empty()).map_err(io::Error::from)?;
+        let fd =
+            openat(dir.handle.as_fd(), ".", DIR_FLAGS, Mode::empty()).map_err(io::Error::from)?;
         let mut listing = nix::dir::Dir::from_fd(fd).map_err(io::Error::from)?;
         let mut names = Vec::new();
         for entry in listing.iter() {
@@ -223,7 +233,10 @@ mod imp {
         #[allow(clippy::unnecessary_cast)]
         let (secs, nanos) = (stat.st_mtime as i64, stat.st_mtime_nsec as i64);
         let modified = if secs >= 0 {
-            SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs.unsigned_abs(), u32::try_from(nanos).unwrap_or(0)))
+            SystemTime::UNIX_EPOCH.checked_add(Duration::new(
+                secs.unsigned_abs(),
+                u32::try_from(nanos).unwrap_or(0),
+            ))
         } else {
             SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(secs.unsigned_abs()))
         };
@@ -231,7 +244,8 @@ mod imp {
     }
 
     pub(super) fn child_info(dir: &PinnedDir, name: &OsStr) -> io::Result<EntryInfo> {
-        let stat = fstatat(dir.handle.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+        let stat = fstatat(dir.handle.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW)
+            .map_err(io::Error::from)?;
         Ok(info_of(&stat))
     }
 
@@ -255,20 +269,30 @@ mod imp {
     /// Linux `renameat2(RENAME_NOREPLACE)`, macOS `renameatx_np(RENAME_EXCL)`. Where the filesystem or system has no
     /// such rename, `to` is looked up first and the plain rename runs only when nothing is there (a narrow window,
     /// stated in the receipt).
-    pub(super) fn rename_child_noreplace(dir: &PinnedDir, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    pub(super) fn rename_child_noreplace(
+        dir: &PinnedDir,
+        from: &OsStr,
+        to: &OsStr,
+    ) -> io::Result<()> {
         noreplace(dir, from, to, true)
     }
 
     /// The same call without the look-then-plain-rename fallback: `Unsupported` where the call is missing.
-    pub(super) fn rename_child_noreplace_strict(dir: &PinnedDir, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    pub(super) fn rename_child_noreplace_strict(
+        dir: &PinnedDir,
+        from: &OsStr,
+        to: &OsStr,
+    ) -> io::Result<()> {
         noreplace(dir, from, to, false)
     }
 
     /// The raw call: `Ok` when renamed, else the OS error (or `Other` for an unusable name).
     fn raw_noreplace(dir: &PinnedDir, from: &OsStr, to: &OsStr) -> io::Result<()> {
         use std::os::fd::AsRawFd as _;
-        let (Ok(from_c), Ok(to_c)) = (std::ffi::CString::new(from.as_bytes()), std::ffi::CString::new(to.as_bytes()))
-        else {
+        let (Ok(from_c), Ok(to_c)) = (
+            std::ffi::CString::new(from.as_bytes()),
+            std::ffi::CString::new(to.as_bytes()),
+        ) else {
             return Err(io::Error::other("a name with a NUL byte"));
         };
         let fd = dir.handle.as_raw_fd();
@@ -276,12 +300,21 @@ mod imp {
         #[allow(clippy::unnecessary_cast)]
         // SAFETY: renameat2(2) relative to a live directory descriptor, on two NUL-terminated names.
         let rc = unsafe {
-            libc::syscall(libc::SYS_renameat2, fd, from_c.as_ptr(), fd, to_c.as_ptr(), libc::RENAME_NOREPLACE)
+            libc::syscall(
+                libc::SYS_renameat2,
+                fd,
+                from_c.as_ptr(),
+                fd,
+                to_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
         } as i64;
         #[cfg(target_vendor = "apple")]
         #[allow(clippy::unnecessary_cast)]
         // SAFETY: renameatx_np(2) relative to a live directory descriptor, on two NUL-terminated names.
-        let rc = unsafe { libc::renameatx_np(fd, from_c.as_ptr(), fd, to_c.as_ptr(), libc::RENAME_EXCL) } as i64;
+        let rc = unsafe {
+            libc::renameatx_np(fd, from_c.as_ptr(), fd, to_c.as_ptr(), libc::RENAME_EXCL)
+        } as i64;
         #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
         let rc: i64 = {
             let _ = (fd, &from_c, &to_c);
@@ -293,7 +326,12 @@ mod imp {
         Err(io::Error::last_os_error())
     }
 
-    fn noreplace(dir: &PinnedDir, from: &OsStr, to: &OsStr, plain_fallback: bool) -> io::Result<()> {
+    fn noreplace(
+        dir: &PinnedDir,
+        from: &OsStr,
+        to: &OsStr,
+        plain_fallback: bool,
+    ) -> io::Result<()> {
         #[cfg(test)]
         let raw = if FORCE_EINVAL_ONCE.with(|flag| flag.replace(false)) {
             Err(io::Error::from_raw_os_error(libc::EINVAL))
@@ -309,14 +347,20 @@ mod imp {
             return Err(error);
         }
         let unsupported = cfg!(not(any(target_os = "linux", target_vendor = "apple")))
-            || matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP));
+            || matches!(
+                error.raw_os_error(),
+                Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP)
+            );
         if !unsupported {
             return Err(error);
         }
         if !plain_fallback {
             #[cfg(test)]
             run_gap_hook();
-            return Err(io::Error::new(io::ErrorKind::Unsupported, format!("no no-replace rename here: {error}")));
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("no no-replace rename here: {error}"),
+            ));
         }
         match child_info(dir, to) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -346,7 +390,9 @@ mod imp {
             return remove_child_file(dir, name);
         }
         if depth >= REMOVE_TREE_MAX_DEPTH {
-            return Err(io::Error::other(format!("folders nested deeper than {REMOVE_TREE_MAX_DEPTH}")));
+            return Err(io::Error::other(format!(
+                "folders nested deeper than {REMOVE_TREE_MAX_DEPTH}"
+            )));
         }
         // A folder swapped for a link after the look above is refused here (`O_NOFOLLOW`), never entered
         let child = open_child(dir, name)?;
@@ -361,7 +407,11 @@ mod imp {
         let opened = openat(
             dir.handle.as_fd(),
             name,
-            OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+            OFlag::O_RDWR
+                | OFlag::O_CREAT
+                | OFlag::O_NOFOLLOW
+                | OFlag::O_NONBLOCK
+                | OFlag::O_CLOEXEC,
             Mode::from_bits_truncate(0o600),
         );
         let path = dir.path.join(name);
@@ -419,7 +469,12 @@ mod imp {
     // kernel32 is linked by std.
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn SetFileInformationByHandle(file: *mut std::ffi::c_void, class: i32, info: *const std::ffi::c_void, size: u32) -> i32;
+        fn SetFileInformationByHandle(
+            file: *mut std::ffi::c_void,
+            class: i32,
+            info: *const std::ffi::c_void,
+            size: u32,
+        ) -> i32;
         fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
     }
 
@@ -433,7 +488,11 @@ mod imp {
     /// checked handle is the one kept.
     fn open_dir_handle(os_path: &Path, follow: bool) -> io::Result<std::fs::File> {
         use std::os::windows::fs::OpenOptionsExt as _;
-        let reparse = if follow { 0 } else { FILE_FLAG_OPEN_REPARSE_POINT };
+        let reparse = if follow {
+            0
+        } else {
+            FILE_FLAG_OPEN_REPARSE_POINT
+        };
         // FILE_SHARE_WRITE: the sweep renames a session inside a pinned folder, and a rename opens its target folder
         // for adding an entry, which a pin without write sharing would refuse
         let handle = std::fs::OpenOptions::new()
@@ -452,7 +511,12 @@ mod imp {
         // The root's own path may be a link; everything below goes through its resolved path, which has none
         let os_path = dunce::canonicalize(path)?;
         let handle = open_dir_handle(&os_path, true)?;
-        Ok(PinnedDir { path: path.to_path_buf(), handle, follows_path: true, os_path })
+        Ok(PinnedDir {
+            path: path.to_path_buf(),
+            handle,
+            follows_path: true,
+            os_path,
+        })
     }
 
     /// The child is checked from its own handle to sit directly in `dir` (final paths, as P154's
@@ -462,18 +526,31 @@ mod imp {
         let os_path = dir.os_path.join(name);
         let handle = open_dir_handle(&os_path, false)?;
         ensure_direct_child(dir, &handle, name)?;
-        Ok(PinnedDir { path: dir.path.join(name), handle, follows_path: false, os_path })
+        Ok(PinnedDir {
+            path: dir.path.join(name),
+            handle,
+            follows_path: false,
+            os_path,
+        })
     }
 
     pub(super) fn still_at_path(dir: &PinnedDir) -> bool {
         // The held handle keeps `os_path` in place; `path` must still lead to a real folder
-        let at_path = if dir.follows_path { std::fs::metadata(&dir.path) } else { std::fs::symlink_metadata(&dir.path) };
-        at_path.is_ok_and(|metadata| metadata.is_dir() && (dir.follows_path || !is_reparse_point(&metadata)))
-            && std::fs::symlink_metadata(&dir.os_path).is_ok_and(|metadata| metadata.is_dir() && !is_reparse_point(&metadata))
+        let at_path = if dir.follows_path {
+            std::fs::metadata(&dir.path)
+        } else {
+            std::fs::symlink_metadata(&dir.path)
+        };
+        at_path.is_ok_and(|metadata| {
+            metadata.is_dir() && (dir.follows_path || !is_reparse_point(&metadata))
+        }) && std::fs::symlink_metadata(&dir.os_path)
+            .is_ok_and(|metadata| metadata.is_dir() && !is_reparse_point(&metadata))
     }
 
     pub(super) fn entry_names(dir: &PinnedDir) -> io::Result<Vec<OsString>> {
-        std::fs::read_dir(&dir.os_path)?.map(|entry| entry.map(|entry| entry.file_name())).collect()
+        std::fs::read_dir(&dir.os_path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect()
     }
 
     pub(super) fn child_info(dir: &PinnedDir, name: &OsStr) -> io::Result<EntryInfo> {
@@ -487,21 +564,39 @@ mod imp {
         } else {
             EntryKind::Other
         };
-        Ok(EntryInfo { kind, modified: metadata.modified().ok() })
+        Ok(EntryInfo {
+            kind,
+            modified: metadata.modified().ok(),
+        })
     }
 
     pub(super) fn rename_child(dir: &PinnedDir, from: &OsStr, to: &OsStr) -> io::Result<()> {
         std::fs::rename(dir.os_path.join(from), dir.os_path.join(to))
     }
 
-    pub(super) fn rename_child_noreplace_strict(dir: &PinnedDir, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    pub(super) fn rename_child_noreplace_strict(
+        dir: &PinnedDir,
+        from: &OsStr,
+        to: &OsStr,
+    ) -> io::Result<()> {
         rename_child_noreplace(dir, from, to)
     }
 
     /// `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`: fails when anything is at `to`.
-    pub(super) fn rename_child_noreplace(dir: &PinnedDir, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    pub(super) fn rename_child_noreplace(
+        dir: &PinnedDir,
+        from: &OsStr,
+        to: &OsStr,
+    ) -> io::Result<()> {
         use std::os::windows::ffi::OsStrExt as _;
-        let wide = |name: &OsStr| -> Vec<u16> { dir.os_path.join(name).as_os_str().encode_wide().chain(Some(0)).collect() };
+        let wide = |name: &OsStr| -> Vec<u16> {
+            dir.os_path
+                .join(name)
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect()
+        };
         let (from_w, to_w) = (wide(from), wide(to));
         // SAFETY: two NUL-terminated UTF-16 paths that live across the call; flags 0 never replace.
         if unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), 0) } == 0 {
@@ -552,21 +647,38 @@ mod imp {
             | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
         // SAFETY: a live handle opened with DELETE access; FILE_DISPOSITION_INFO_EX is one ULONG (u32).
         let done = unsafe {
-            SetFileInformationByHandle(entry.as_raw_handle(), FILE_DISPOSITION_INFO_EX, std::ptr::from_ref(&flags).cast(), 4)
+            SetFileInformationByHandle(
+                entry.as_raw_handle(),
+                FILE_DISPOSITION_INFO_EX,
+                std::ptr::from_ref(&flags).cast(),
+                4,
+            )
         };
         if done != 0 {
             return Ok(());
         }
         let error = io::Error::last_os_error();
-        if !matches!(error.raw_os_error(), Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION)) {
+        if !matches!(
+            error.raw_os_error(),
+            Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION)
+        ) {
             return Err(error);
         }
         let delete: u8 = 1;
         // SAFETY: as above; FILE_DISPOSITION_INFO is one BOOLEAN (u8).
         let done = unsafe {
-            SetFileInformationByHandle(entry.as_raw_handle(), FILE_DISPOSITION_INFO, std::ptr::from_ref(&delete).cast(), 1)
+            SetFileInformationByHandle(
+                entry.as_raw_handle(),
+                FILE_DISPOSITION_INFO,
+                std::ptr::from_ref(&delete).cast(),
+                1,
+            )
         };
-        if done == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        if done == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     /// `entry` (an open handle) is `name` directly inside the pinned `dir`, by the final paths of both handles.
@@ -577,7 +689,9 @@ mod imp {
         if is_direct_child_windows(&parent, &here, name) {
             Ok(())
         } else {
-            Err(io::Error::other("not directly in the pinned folder (a folder on its path was replaced)"))
+            Err(io::Error::other(
+                "not directly in the pinned folder (a folder on its path was replaced)",
+            ))
         }
     }
 
@@ -594,7 +708,9 @@ mod imp {
             return delete_entry(dir, name, false);
         }
         if depth >= REMOVE_TREE_MAX_DEPTH {
-            return Err(io::Error::other(format!("folders nested deeper than {REMOVE_TREE_MAX_DEPTH}")));
+            return Err(io::Error::other(format!(
+                "folders nested deeper than {REMOVE_TREE_MAX_DEPTH}"
+            )));
         }
         let child = open_child(dir, name)?;
         for entry in entry_names(&child)? {
@@ -613,14 +729,20 @@ mod imp {
         let path = dir.os_path.join(name);
         let (file, created) = match open_lock_handle(&path, false) {
             Ok(file) => (file, false),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => match open_lock_handle(&path, true) {
-                Ok(file) => (file, true),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (open_lock_handle(&path, false).ok()?, false),
-                Err(_) => return None,
-            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match open_lock_handle(&path, true) {
+                    Ok(file) => (file, true),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        (open_lock_handle(&path, false).ok()?, false)
+                    }
+                    Err(_) => return None,
+                }
+            }
             Err(_) => return None,
         };
-        let regular = file.metadata().is_ok_and(|metadata| metadata.is_file() && !is_reparse_point(&metadata));
+        let regular = file
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && !is_reparse_point(&metadata));
         if !regular || ensure_direct_child(dir, &file, name).is_err() {
             if created {
                 let _ = mark_for_deletion(&file);
@@ -646,7 +768,10 @@ mod imp {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "persistence_sweep_pin_tests.rs"]
 mod tests;

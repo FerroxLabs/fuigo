@@ -50,10 +50,14 @@ async fn first_run_picker_then_flux_key_lands_at_the_prompt_on_the_default_model
         harness.screen_contents()
     );
     let screen = harness.screen_contents();
-    let flux = screen.find("Flux Router: one key, every model (recommended)").expect("flux row");
+    let flux = screen
+        .find("Flux Router: one key, every model (recommended)")
+        .expect("flux row");
     let chatgpt = screen.find("ChatGPT subscription").expect("chatgpt row");
     let grok = screen.find("Grok subscription").expect("grok row");
-    let keys = screen.find("Provider API key...").expect("provider key row");
+    let keys = screen
+        .find("Provider API key...")
+        .expect("provider key row");
     assert!(flux < chatgpt && chatgpt < grok && grok < keys, "{screen}");
     assert!(!screen.to_lowercase().contains("enterprise"), "{screen}");
     assert!(!screen.contains("OAuth2 issuer"), "{screen}");

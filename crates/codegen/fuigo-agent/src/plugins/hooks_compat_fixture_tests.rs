@@ -25,14 +25,20 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hooks_compat").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/hooks_compat")
+        .join(name)
 }
 
 /// A stub `node` that records its arguments, one invocation per line.
 fn stub_node(bin: &Path, log: &Path) {
     std::fs::create_dir_all(bin).unwrap();
     let node = bin.join("node");
-    std::fs::write(&node, format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display())).unwrap();
+    std::fs::write(
+        &node,
+        format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+    )
+    .unwrap();
     std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
@@ -47,12 +53,20 @@ fn envelope() -> HookEventEnvelope {
         client_identifier: None,
         prompt_id: None,
         permission_mode: None,
-        payload: HookPayload::SessionStart { source: "new".into(), model_id: None, agent_type: None },
+        payload: HookPayload::SessionStart {
+            source: "new".into(),
+            model_id: None,
+            agent_type: None,
+        },
     }
 }
 
 /// Parse the fixture plugin rooted at `root` and run every hook it declares, returning (hook name, outcome) pairs.
-fn run_plugin_hooks(name: &str, root: &Path, extra_env: &[(&str, String)]) -> Vec<(String, String)> {
+fn run_plugin_hooks(
+    name: &str,
+    root: &Path,
+    extra_env: &[(&str, String)],
+) -> Vec<(String, String)> {
     let (specs, warnings) = parse_plugin_hooks_contained(
         &root.join("hooks/hooks.json"),
         &fuigo_dirs::contained::PinnedRoot::pin(root).unwrap(),
@@ -60,15 +74,32 @@ fn run_plugin_hooks(name: &str, root: &Path, extra_env: &[(&str, String)]) -> Ve
         &root.display().to_string(),
         &root.join("data").display().to_string(),
     );
-    assert!(!specs.is_empty(), "fixture {name} yielded no hooks: {warnings:?}");
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    assert!(
+        !specs.is_empty(),
+        "fixture {name} yielded no hooks: {warnings:?}"
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let mut outcomes = Vec::new();
     for mut spec in specs {
         for (k, v) in extra_env {
             spec.extra_env.insert((*k).into(), v.clone());
         }
-        let ctx = RunContext { session_id: "fixture-session", workspace_root: "/tmp", process_scope: None };
-        let result = rt.block_on(run_command_hook(&spec, &envelope(), &ctx, GateKind::Observe)).0;
+        let ctx = RunContext {
+            session_id: "fixture-session",
+            workspace_root: "/tmp",
+            process_scope: None,
+        };
+        let result = rt
+            .block_on(run_command_hook(
+                &spec,
+                &envelope(),
+                &ctx,
+                GateKind::Observe,
+            ))
+            .0;
         let verdict = match &result {
             HookRunnerResult::Failed(e) => format!("FAILED: {e}"),
             _ => "ok".to_string(),
@@ -79,7 +110,11 @@ fn run_plugin_hooks(name: &str, root: &Path, extra_env: &[(&str, String)]) -> Ve
 }
 
 fn invocations(log: &Path) -> Vec<String> {
-    std::fs::read_to_string(log).unwrap_or_default().lines().map(str::to_string).collect()
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 #[test]
@@ -118,7 +153,9 @@ fn claude_mem_13_28_0_hooks_json_runs_instead_of_refusing_its_own_shell_variable
     let calls = invocations(&log);
     let runner = format!("{}/scripts/bun-runner.js", root.display());
     assert!(
-        calls.iter().any(|c| c.starts_with(&runner) && c.contains("worker-service.cjs")),
+        calls
+            .iter()
+            .any(|c| c.starts_with(&runner) && c.contains("worker-service.cjs")),
         "expected the bun-runner invocation under the plugin root, got {calls:?}"
     );
     assert!(
@@ -141,7 +178,10 @@ fn stripe_0_10_3_hooks_json_runs_node_from_path_with_the_expanded_script() {
     }
     let calls = invocations(&log);
     let session_start = format!("{}/scripts/lifecycle/sessionStart.mjs", root.display());
-    assert!(calls.contains(&session_start), "expected {session_start} in {calls:?}");
+    assert!(
+        calls.contains(&session_start),
+        "expected {session_start} in {calls:?}"
+    );
 }
 
 #[allow(dead_code)]

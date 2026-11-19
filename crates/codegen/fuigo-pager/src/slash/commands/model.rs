@@ -267,9 +267,13 @@ mod tests {
 
     // ---- one list that chooses for you ----
 
-    fn routed(id: &str, name: &str, routes: &[(&str, &str, &str, bool)], alt_of: Option<&str>, connect: Option<&str>)
-        -> (acp::ModelId, acp::ModelInfo)
-    {
+    fn routed(
+        id: &str,
+        name: &str,
+        routes: &[(&str, &str, &str, bool)],
+        alt_of: Option<&str>,
+        connect: Option<&str>,
+    ) -> (acp::ModelId, acp::ModelInfo) {
         let mut meta = serde_json::Map::new();
         if alt_of.is_none() {
             meta.insert(
@@ -294,7 +298,10 @@ mod tests {
             meta.insert("connect".into(), serde_json::json!(c));
         }
         let id = acp::ModelId::new(std::sync::Arc::from(id));
-        (id.clone(), acp::ModelInfo::new(id, name.to_string()).meta(Some(meta)))
+        (
+            id.clone(),
+            acp::ModelInfo::new(id, name.to_string()).meta(Some(meta)),
+        )
     }
 
     fn state(entries: Vec<(acp::ModelId, acp::ModelInfo)>, current: &str) -> ModelState {
@@ -309,15 +316,38 @@ mod tests {
     fn three_way() -> ModelState {
         let routes = [
             ("grok-4.7", "flux", "via Flux Router", true),
-            ("xai/grok-4.7", "grok", "included in your Grok subscription", true),
+            (
+                "xai/grok-4.7",
+                "grok",
+                "included in your Grok subscription",
+                true,
+            ),
             ("k/grok-4.7", "xai", "your xAI key", true),
         ];
         state(
             vec![
                 routed("grok-4.7", "Grok 4.7", &routes, None, None),
-                routed("xai/grok-4.7", "grok-4.7 (Grok subscription)", &[], Some("grok-4.7"), None),
-                routed("k/grok-4.7", "grok-4.7 (xAI key)", &[], Some("grok-4.7"), None),
-                routed("flux-only", "Flux Only", &[("flux-only", "flux", "via Flux Router", false)], None, Some("needs a Flux Router key (fluxrouter.ai)")),
+                routed(
+                    "xai/grok-4.7",
+                    "grok-4.7 (Grok subscription)",
+                    &[],
+                    Some("grok-4.7"),
+                    None,
+                ),
+                routed(
+                    "k/grok-4.7",
+                    "grok-4.7 (xAI key)",
+                    &[],
+                    Some("grok-4.7"),
+                    None,
+                ),
+                routed(
+                    "flux-only",
+                    "Flux Only",
+                    &[("flux-only", "flux", "via Flux Router", false)],
+                    None,
+                    Some("needs a Flux Router key (fluxrouter.ai)"),
+                ),
             ],
             "grok-4.7",
         )
@@ -326,10 +356,22 @@ mod tests {
     #[test]
     fn a_model_reachable_three_ways_is_one_row_naming_the_route_fuigo_will_use() {
         let items = build_model_items(&three_way());
-        let grok: Vec<&ArgItem> = items.iter().filter(|i| i.match_text.contains("rok")).collect();
-        assert_eq!(grok.len(), 1, "one row, not three: {:?}", items.iter().map(|i| &i.display).collect::<Vec<_>>());
+        let grok: Vec<&ArgItem> = items
+            .iter()
+            .filter(|i| i.match_text.contains("rok"))
+            .collect();
+        assert_eq!(
+            grok.len(),
+            1,
+            "one row, not three: {:?}",
+            items.iter().map(|i| &i.display).collect::<Vec<_>>()
+        );
         assert_eq!(grok[0].display, "Grok 4.7 \u{b7} via Flux Router (current)");
-        assert!(grok[0].description.contains("also via grok, xai"), "{}", grok[0].description);
+        assert!(
+            grok[0].description.contains("also via grok, xai"),
+            "{}",
+            grok[0].description
+        );
     }
 
     /// Every row names its route: a single-route key model carries its own badge, and once the list
@@ -342,15 +384,27 @@ mod tests {
             serde_json::json!({ "label": "OpenAI key from OPENAI_API_KEY", "badge": "your OpenAI key", "kind": "Key" }),
         );
         let key_id = acp::ModelId::new(std::sync::Arc::from("openai-key/gpt-5"));
-        let key_row = (key_id.clone(), acp::ModelInfo::new(key_id, "gpt-5".to_string()).meta(Some(meta)));
+        let key_row = (
+            key_id.clone(),
+            acp::ModelInfo::new(key_id, "gpt-5".to_string()).meta(Some(meta)),
+        );
         let plain_id = acp::ModelId::new(std::sync::Arc::from("flux-model"));
-        let plain = (plain_id.clone(), acp::ModelInfo::new(plain_id, "Flux Model".to_string()));
+        let plain = (
+            plain_id.clone(),
+            acp::ModelInfo::new(plain_id, "Flux Model".to_string()),
+        );
         let items = build_model_items(&state(vec![plain.clone(), key_row], "flux-model"));
-        assert_eq!(items[0].display, "Flux Model \u{b7} via Flux Router (current)");
+        assert_eq!(
+            items[0].display,
+            "Flux Model \u{b7} via Flux Router (current)"
+        );
         assert_eq!(items[1].display, "gpt-5 \u{b7} your OpenAI key");
         // A list of Flux models only names the route too (it used to be left bare).
         let only = build_model_items(&state(vec![plain], "flux-model"));
-        assert_eq!(only[0].display, "Flux Model \u{b7} via Flux Router (current)");
+        assert_eq!(
+            only[0].display,
+            "Flux Model \u{b7} via Flux Router (current)"
+        );
     }
 
     /// 125 Flux models from `FUIGO_API_KEY` showed as bare ids with no route text. Every row says "via Flux
@@ -366,7 +420,11 @@ mod tests {
         let items = build_model_items(&state(rows, "model-0"));
         assert_eq!(items.len(), 125);
         for item in &items {
-            assert!(item.display.contains("\u{b7} via Flux Router"), "no badge on {:?}", item.display);
+            assert!(
+                item.display.contains("\u{b7} via Flux Router"),
+                "no badge on {:?}",
+                item.display
+            );
         }
     }
 
@@ -392,7 +450,10 @@ mod tests {
                 .collect();
             assert!(!welcome.is_empty());
             assert_eq!(welcome, listed, "welcome and /model disagree");
-            assert!(welcome.iter().all(|row| !row.ends_with("\u{b7} ")), "an empty badge: {welcome:?}");
+            assert!(
+                welcome.iter().all(|row| !row.ends_with("\u{b7} ")),
+                "an empty badge: {welcome:?}"
+            );
         }
     }
 
@@ -400,8 +461,15 @@ mod tests {
     fn a_model_no_route_reaches_says_what_to_connect() {
         let items = build_model_items(&three_way());
         let flux_only = items.iter().find(|i| i.match_text == "Flux Only").unwrap();
-        assert_eq!(flux_only.description, "connect: needs a Flux Router key (fluxrouter.ai)");
-        assert!(flux_only.display.ends_with("connect"), "{}", flux_only.display);
+        assert_eq!(
+            flux_only.description,
+            "connect: needs a Flux Router key (fluxrouter.ai)"
+        );
+        assert!(
+            flux_only.display.ends_with("connect"),
+            "{}",
+            flux_only.display
+        );
     }
 
     #[test]
@@ -410,7 +478,10 @@ mod tests {
         // The dropdown ranks rows against the whole typed text (`Grok 4.7 via `), so match_text is the
         // full `<model> via <route>`; the bare route word matched nothing there.
         let words: Vec<&str> = items.iter().map(|i| i.match_text.as_str()).collect();
-        assert_eq!(words, ["Grok 4.7 via flux", "Grok 4.7 via grok", "Grok 4.7 via xai"]);
+        assert_eq!(
+            words,
+            ["Grok 4.7 via flux", "Grok 4.7 via grok", "Grok 4.7 via xai"]
+        );
         assert_eq!(items[1].insert_text, "Grok 4.7 via grok");
         assert_eq!(items[1].display, "included in your Grok subscription");
         assert_eq!(items[1].description, "reason for grok");
@@ -424,12 +495,17 @@ mod tests {
         let models = three_way();
         let result = run_with(&models, "Grok 4.7 via grok");
         match result {
-            CommandResult::Action(Action::SetDefaultModel(id)) => assert_eq!(id.0.as_ref(), "xai/grok-4.7"),
+            CommandResult::Action(Action::SetDefaultModel(id)) => {
+                assert_eq!(id.0.as_ref(), "xai/grok-4.7")
+            }
             other => panic!("expected SetDefaultModel, got {other:?}"),
         }
         match run_with(&models, "Grok 4.7 via nope") {
             CommandResult::Error(e) => {
-                assert!(e.contains("no `nope` route") && e.contains("flux, grok, xai"), "{e}")
+                assert!(
+                    e.contains("no `nope` route") && e.contains("flux, grok, xai"),
+                    "{e}"
+                )
             }
             other => panic!("expected an error, got {other:?}"),
         }

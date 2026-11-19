@@ -30,12 +30,10 @@ pub(crate) fn resolve_boundary(
     if name.denies_workspace_write(config) {
         let root = canonical_path(workspace);
         let sessions = canonical_path(&crate::paths::sessions_root());
-        if sessions.starts_with(&root) {
-            if crate::startup_warnings::first("nested-sessions".into()) {
-                fuigo_tty_utils::cli_eprintln!(
-                    "WARNING: Fuigo sessions resolves inside the read-only launch folder; session persistence may fail. Keep FUIGO_HOME outside the launch folder."
-                );
-            }
+        if sessions.starts_with(&root) && crate::startup_warnings::first("nested-sessions".into()) {
+            fuigo_tty_utils::cli_eprintln!(
+                "WARNING: Fuigo sessions resolves inside the read-only launch folder; session persistence may fail. Keep FUIGO_HOME outside the launch folder."
+            );
         }
         // Resolve missing relative entries against the launch folder, not the caller's
         // current directory, before any grant materialization can create them.
@@ -67,6 +65,10 @@ type AppliedBoundary = ();
 /// Landlock is additive: temp/parent grants cannot express a read-only subtree.
 /// Seatbelt's specific deny actions and Linux's final bwrap mount supply that boundary.
 #[cfg(all(feature = "enforce", unix))]
+#[allow(
+    clippy::unit_arg,
+    reason = "AppliedBoundary is () outside tests, so the shared tail returns a unit value"
+)]
 pub(crate) fn apply_seatbelt_boundary(
     name: &ProfileName,
     workspace: &Path,

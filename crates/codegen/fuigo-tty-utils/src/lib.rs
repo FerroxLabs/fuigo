@@ -66,9 +66,11 @@ pub use clap_error::render_clap_error;
 
 mod display_char;
 pub use display_char::{
-    escape_unsafe_display, is_unsafe_display_char, is_unsafe_title_char, replace_unsafe_display,
-    bracketed, cap_display_middle, capped, curly_quoted, delimited, display_width, quoted, Delim, UNTRUSTED_MAX_COLUMNS, scrub_log_record, scrub_model_text, scrub_terminal_text, scrub_unsafe_display, single_quoted, untrusted, untrusted_stdout_data, Untrusted, UntrustedStdoutData,
-    scrub_unsafe_title, scrub_unsafe_title_with, strip_loose_tags,
+    Delim, UNTRUSTED_MAX_COLUMNS, Untrusted, UntrustedStdoutData, bracketed, cap_display_middle,
+    capped, curly_quoted, delimited, display_width, escape_unsafe_display, is_unsafe_display_char,
+    is_unsafe_title_char, quoted, replace_unsafe_display, scrub_log_record, scrub_model_text,
+    scrub_terminal_text, scrub_unsafe_display, scrub_unsafe_title, scrub_unsafe_title_with,
+    single_quoted, strip_loose_tags, untrusted, untrusted_stdout_data,
 };
 
 mod process_scope;
@@ -84,15 +86,16 @@ pub use parent_death_windows::PARENT_DEATH_EXIT_CODE;
 /// How long a shell gets to forward a hangup to its jobs before it is killed.
 pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
-pub mod runtime;
 pub mod best_effort_stderr;
 pub mod best_effort_stdout;
 pub mod repo_exec;
+pub mod runtime;
 pub use repo_exec::{
-    RepoExecJudge, RepoUntrusted, WorktreeCreation, begin_worktree_creation, direnv_command_in, git_command_at_in,
-    git_command_for_worktree, git_command_global, git_command_in, git_command_locking_for_worktree,
-    git_command_locking_in, git_command_locking_user_invoked, git_command_user_invoked, install_repo_exec_judge,
-    jj_command_in, repo_exec_allowed, repo_exec_judge_installed, worktree_creation_source,
+    RepoExecJudge, RepoUntrusted, WorktreeCreation, begin_worktree_creation, direnv_command_in,
+    git_command_at_in, git_command_for_worktree, git_command_global, git_command_in,
+    git_command_locking_for_worktree, git_command_locking_in, git_command_locking_user_invoked,
+    git_command_user_invoked, install_repo_exec_judge, jj_command_in, repo_exec_allowed,
+    repo_exec_judge_installed, worktree_creation_source,
 };
 
 /// Win32 `CreateProcess` creation-flag values, spelled out so a spawn policy can
@@ -1206,9 +1209,13 @@ pub(crate) fn git_command_locking_unjudged() -> std::process::Command {
 /// The git at `program` (an absolute path the caller vetted) instead of `GIT_BIN_PATH` or `git` on `PATH`.
 pub(crate) fn git_command_at_unjudged(program: &std::path::Path) -> std::process::Command {
     // The same hermetic exec path as `git_command_base` when `program` is the `GIT_BIN_PATH` git.
-    let hermetic = std::env::var_os("GIT_BIN_PATH").is_some_and(|bin| std::path::Path::new(&bin) == program)
+    let hermetic = std::env::var_os("GIT_BIN_PATH")
+        .is_some_and(|bin| std::path::Path::new(&bin) == program)
         && program.file_name().is_some_and(|name| name == "git");
-    let exec_path = program.parent().filter(|_| hermetic).map(std::path::Path::to_path_buf);
+    let exec_path = program
+        .parent()
+        .filter(|_| hermetic)
+        .map(std::path::Path::to_path_buf);
     let mut cmd = git_command_from(program.as_os_str(), exec_path);
     cmd.arg("--no-optional-locks");
     cmd
@@ -1476,7 +1483,10 @@ mod lossy_env_tests {
         ]);
         assert_eq!(map.len(), 3);
         assert_eq!(map["GOOD"], "v\u{fffd}");
-        assert!(map.keys().any(|k| k.starts_with("BAD_") && k.contains('\u{fffd}')));
+        assert!(
+            map.keys()
+                .any(|k| k.starts_with("BAD_") && k.contains('\u{fffd}'))
+        );
         assert!(is_wsl_from_inputs(&map, None));
     }
 }
@@ -1607,7 +1617,11 @@ mod tests {
         let mut cmd = std::process::Command::new("true");
         detach_std_command(&mut cmd);
         detach_std_command(&mut cmd);
-        assert!(cmd.status().expect("a twice-detached command starts").success());
+        assert!(
+            cmd.status()
+                .expect("a twice-detached command starts")
+                .success()
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -2163,7 +2177,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn null_fd_outlives_its_path() {
-        let path = std::env::temp_dir().join(format!("fuigo-tty-utils-null-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("fuigo-tty-utils-null-{}", std::process::id()));
         std::fs::write(&path, b"").expect("create stand-in null");
         let fd = open_null_fd(&path).expect("open stand-in null");
         std::fs::remove_file(&path).expect("unlink stand-in null");
@@ -3062,19 +3077,39 @@ mod p120_tests {
         fuigo_secrets::child_env::register_credential_env_names([REGISTERED]);
         let dir = probe::scratch_dir("p120-tty-git");
         let out = dir.join("hook-env.txt");
-        for (label, command) in [("locking", git_command_locking as fn() -> std::process::Command), ("readers", git_command)] {
+        for (label, command) in [
+            (
+                "locking",
+                git_command_locking as fn() -> std::process::Command,
+            ),
+            ("readers", git_command),
+        ] {
             let _ = std::fs::remove_file(&out);
             let run = |args: &[&str]| {
                 let mut cmd = command();
                 cmd.current_dir(&dir).args(args);
                 let output = cmd.output().unwrap();
-                assert!(output.status.success(), "{label}: git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+                assert!(
+                    output.status.success(),
+                    "{label}: git {args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             };
             if !dir.join(".git").exists() {
                 run(&["init", "-q"]);
             }
             probe::write_env_dump_script(&dir.join(".git/hooks/pre-commit"), &out);
-            run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "x"]);
+            run(&[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "x",
+            ]);
             let dump = std::fs::read_to_string(&out).expect("the pre-commit hook ran");
             probe::assert_clean(&dump, &[]);
             probe::assert_kept(&dump, REGISTERED);

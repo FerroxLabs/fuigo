@@ -506,11 +506,22 @@ fn ids_of(found: &[&Summary]) -> Vec<String> {
 #[test]
 fn titles_match_whatever_separates_the_words() {
     let s = [summary("a", Some("Fix login bug"), false)];
-    for arg in ["fix-login-bug", "fix_login_bug", "Fix.login/bug", "  FIX   login   bug "] {
+    for arg in [
+        "fix-login-bug",
+        "fix_login_bug",
+        "Fix.login/bug",
+        "  FIX   login   bug ",
+    ] {
         assert_eq!(id_of(select_by_title(arg, &s).unwrap()), "a", "{arg:?}");
     }
-    assert!(select_by_title("fix login", &s).unwrap().is_none(), "a prefix is not the title");
-    assert!(select_by_title("fixlogin bug", &s).unwrap().is_none(), "separators do not vanish");
+    assert!(
+        select_by_title("fix login", &s).unwrap().is_none(),
+        "a prefix is not the title"
+    );
+    assert!(
+        select_by_title("fixlogin bug", &s).unwrap().is_none(),
+        "separators do not vanish"
+    );
 }
 
 #[test]
@@ -530,8 +541,14 @@ fn ambiguity_lists_matches_newest_first_with_when_they_were_updated() {
         summary_at("mid-one", "Dup", "2026-02-02T08:15:00Z"),
     ];
     let msg = select_by_title("dup", &s).unwrap_err().to_string();
-    let at = |needle: &str| msg.find(needle).unwrap_or_else(|| panic!("{needle} missing: {msg}"));
-    assert!(at("new-one") < at("mid-one") && at("mid-one") < at("old-one"), "{msg}");
+    let at = |needle: &str| {
+        msg.find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing: {msg}"))
+    };
+    assert!(
+        at("new-one") < at("mid-one") && at("mid-one") < at("old-one"),
+        "{msg}"
+    );
     assert!(msg.contains("2026-03-05 12:30"), "{msg}");
     assert!(msg.contains("2026-01-01 10:00"), "{msg}");
 }
@@ -552,7 +569,10 @@ fn resume_candidates_match_every_word_in_any_order() {
         summary("b", Some("Refactor billing"), false),
     ];
     assert_eq!(ids_of(&resume_candidates("bug LOGIN", &s)), ["a"]);
-    assert!(resume_candidates("login billing", &s).is_empty(), "every word must be present");
+    assert!(
+        resume_candidates("login billing", &s).is_empty(),
+        "every word must be present"
+    );
     assert!(resume_candidates("   ", &s).is_empty());
 }
 
@@ -563,7 +583,10 @@ fn resume_candidates_list_newest_first() {
         summary_at("new", "Fix billing again", "2026-04-01T00:00:00Z"),
         summary_at("mid", "billing: fix", "2026-02-01T00:00:00Z"),
     ];
-    assert_eq!(ids_of(&resume_candidates("fix billing", &s)), ["new", "mid", "old"]);
+    assert_eq!(
+        ids_of(&resume_candidates("fix billing", &s)),
+        ["new", "mid", "old"]
+    );
 }
 
 #[test]
@@ -584,8 +607,15 @@ fn similar_titles_share_a_word_best_match_first_then_newest() {
         summary_at("none", "Unrelated work", "2026-04-01T00:00:00Z"),
     ];
     let found = similar_titles("billing export csv", &s, 5);
-    assert_eq!(ids_of(&found), ["two-words", "one-word-new", "one-word-old"]);
-    assert_eq!(similar_titles("billing export csv", &s, 2).len(), 2, "capped at the limit");
+    assert_eq!(
+        ids_of(&found),
+        ["two-words", "one-word-new", "one-word-old"]
+    );
+    assert_eq!(
+        similar_titles("billing export csv", &s, 2).len(),
+        2,
+        "capped at the limit"
+    );
     assert!(similar_titles("zzz", &s, 5).is_empty());
 }
 
@@ -630,8 +660,14 @@ async fn resume_title_miss_is_reported_locally_without_remote_restore() {
         .unwrap_err()
         .to_string();
     assert!(msg.contains("no session id or title matched"), "{msg}");
-    assert!(msg.contains("no such title"), "the miss names the title: {msg}");
-    assert!(msg.contains("fuigo sessions search"), "the miss points at local search: {msg}");
+    assert!(
+        msg.contains("no such title"),
+        "the miss names the title: {msg}"
+    );
+    assert!(
+        msg.contains("fuigo sessions search"),
+        "the miss points at local search: {msg}"
+    );
     for remote_word in ["sign in", "sign-in", "log in", "login", "remote", "network"] {
         assert!(
             !msg.to_lowercase().contains(remote_word),

@@ -289,7 +289,10 @@ fn classifier_preserves_acp_error_data() {
         panic!("expected Deterministic for 400");
     };
     assert_eq!(err.data.as_ref().unwrap()["error_kind"], "compaction");
-    assert_eq!(err.data.as_ref().unwrap()["upstream"], serde_json::json!({"http_status":400,"type":"provider_error","state":"hold"}));
+    assert_eq!(
+        err.data.as_ref().unwrap()["upstream"],
+        serde_json::json!({"http_status":400,"type":"provider_error","state":"hold"})
+    );
     let data = err
         .data
         .as_ref()
@@ -312,7 +315,10 @@ fn classifier_preserves_acp_error_data() {
         panic!("expected Transient for 500");
     };
     assert_eq!(err.data.as_ref().unwrap()["error_kind"], "compaction");
-    assert_eq!(err.data.as_ref().unwrap()["upstream"], serde_json::json!({"http_status":500,"type":"provider_error","state":"hold"}));
+    assert_eq!(
+        err.data.as_ref().unwrap()["upstream"],
+        serde_json::json!({"http_status":500,"type":"provider_error","state":"hold"})
+    );
     let data = err
         .data
         .as_ref()
@@ -535,18 +541,27 @@ fn r1_compaction_obeys_stored_boundary_stop_before_retry_or_ladder() {
     for flux in [false, true] {
         for (status, message) in [(503, "busy"), (413, "payload too large")] {
             let mut error = api_error(StatusCode::from_u16(status).unwrap(), message);
-            if let SamplingError::Api { upstream_details, .. } = &mut error {
+            if let SamplingError::Api {
+                upstream_details, ..
+            } = &mut error
+            {
                 *upstream_details = fuigo_sampling_types::error::UpstreamError {
                     flux_routed: flux, ..Default::default()
                 }.with_body(status, br#"{"error":{"message":"busy","provider_specific_fields":{"message":"API key has been revoked"}}}"#);
             }
             let failure = classify_sampling_error(error);
             if flux {
-                assert!(is_det(&failure), "Flux STOP must not retry or enter the size ladder");
+                assert!(
+                    is_det(&failure),
+                    "Flux STOP must not retry or enter the size ladder"
+                );
             } else if status == 413 {
                 assert!(is_overflow(&failure), "non-Flux keeps the parent's ladder");
             } else {
-                assert!(matches!(failure, CompactFailure::Transient(_)), "non-Flux keeps the parent's retry");
+                assert!(
+                    matches!(failure, CompactFailure::Transient(_)),
+                    "non-Flux keeps the parent's retry"
+                );
             }
         }
     }

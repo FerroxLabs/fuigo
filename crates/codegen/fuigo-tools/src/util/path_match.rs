@@ -213,8 +213,18 @@ pub fn physical_alias_pattern_string(prefix: &str, rest: &str) -> Option<String>
 
 /// [`physical_alias_pattern_string`] bounded by `limit`: the resolution runs on its own thread and the caller waits at
 /// most `limit`. `None` on timeout (the resolving thread is left to finish on its own), exactly as when there is no alias.
-pub fn physical_alias_pattern_string_bounded(prefix: &str, rest: &str, limit: std::time::Duration) -> Option<String> {
-    bounded_alias(prefix, rest, limit, &ALIAS_STUCK, physical_alias_pattern_string)
+pub fn physical_alias_pattern_string_bounded(
+    prefix: &str,
+    rest: &str,
+    limit: std::time::Duration,
+) -> Option<String> {
+    bounded_alias(
+        prefix,
+        rest,
+        limit,
+        &ALIAS_STUCK,
+        physical_alias_pattern_string,
+    )
 }
 
 /// How a bounded alias resolution ended. `Unresolved` is the one a caller must not mistake for `NoAlias`: the
@@ -228,8 +238,18 @@ pub enum AliasResolution {
 }
 
 /// [`physical_alias_pattern_string_bounded`] that says "unknown" instead of folding it into "no alias".
-pub fn physical_alias_resolution_bounded(prefix: &str, rest: &str, limit: std::time::Duration) -> AliasResolution {
-    bounded_alias_resolution(prefix, rest, limit, &ALIAS_STUCK, physical_alias_pattern_string)
+pub fn physical_alias_resolution_bounded(
+    prefix: &str,
+    rest: &str,
+    limit: std::time::Duration,
+) -> AliasResolution {
+    bounded_alias_resolution(
+        prefix,
+        rest,
+        limit,
+        &ALIAS_STUCK,
+        physical_alias_pattern_string,
+    )
 }
 
 /// How many resolver threads were given up on (timed out) and have not returned yet. While it is non-zero (a hung
@@ -242,12 +262,19 @@ const DONE: u8 = 1;
 const ABANDONED: u8 = 2;
 
 /// Marks one resolver call finished when the thread ends, however it ends; releases its stuck count if abandoned.
-struct Finish(std::sync::Arc<std::sync::atomic::AtomicU8>, &'static std::sync::atomic::AtomicUsize);
+struct Finish(
+    std::sync::Arc<std::sync::atomic::AtomicU8>,
+    &'static std::sync::atomic::AtomicUsize,
+);
 
 impl Drop for Finish {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
-        if self.0.compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        if self
+            .0
+            .compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             self.1.fetch_sub(1, Ordering::SeqCst);
         }
     }
@@ -282,12 +309,14 @@ fn bounded_alias_resolution(
     let (prefix, rest) = (prefix.to_owned(), rest.to_owned());
     let state = std::sync::Arc::new(AtomicU8::new(RUNNING));
     let finish = Finish(state.clone(), stuck);
-    let spawned = std::thread::Builder::new().name("alias-resolve".into()).spawn(move || {
-        let out = resolve(&prefix, &rest);
-        // Marked finished before the caller is woken, so a normal call leaves nothing behind.
-        drop(finish);
-        let _ = tx.send(out);
-    });
+    let spawned = std::thread::Builder::new()
+        .name("alias-resolve".into())
+        .spawn(move || {
+            let out = resolve(&prefix, &rest);
+            // Marked finished before the caller is woken, so a normal call leaves nothing behind.
+            drop(finish);
+            let _ = tx.send(out);
+        });
     if spawned.is_err() {
         return AliasResolution::Unresolved;
     }
@@ -297,7 +326,10 @@ fn bounded_alias_resolution(
     // Timed out (or the thread died): count first, then claim; if the thread finishes in between, it releases the
     // count itself, and if it had already finished the claim fails and the count is returned here.
     stuck.fetch_add(1, Ordering::SeqCst);
-    if state.compare_exchange(RUNNING, ABANDONED, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if state
+        .compare_exchange(RUNNING, ABANDONED, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         stuck.fetch_sub(1, Ordering::SeqCst);
     }
     AliasResolution::Unresolved
@@ -314,13 +346,20 @@ pub fn path_glob_options() -> glob::MatchOptions {
 
 /// Whether a path rule's compiled pattern matches `path` in any of the spellings the policy offers for it.
 /// This is the policy's own test for `Read`/`Edit`/`Grep` rules.
-pub fn path_pattern_matches(path: &str, pattern: &glob::Pattern, base: Option<&RuleBase<'_>>) -> bool {
+pub fn path_pattern_matches(
+    path: &str,
+    pattern: &glob::Pattern,
+    base: Option<&RuleBase<'_>>,
+) -> bool {
     path_match_forms(path, base)
         .iter()
         .any(|text| pattern.matches_with(text, path_glob_options()))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod bounded_alias_tests {
     use std::time::{Duration, Instant};
@@ -347,12 +386,22 @@ mod bounded_alias_tests {
     fn a_slow_resolver_yields_none_within_about_the_limit() {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let start = Instant::now();
-        let out = bounded_alias("/x", "/**", Duration::from_millis(100), &TEST_STUCK, |_, _| {
-            std::thread::sleep(Duration::from_secs(2));
-            Some("/never".to_owned())
-        });
+        let out = bounded_alias(
+            "/x",
+            "/**",
+            Duration::from_millis(100),
+            &TEST_STUCK,
+            |_, _| {
+                std::thread::sleep(Duration::from_secs(2));
+                Some("/never".to_owned())
+            },
+        );
         assert_eq!(out, None);
-        assert!(start.elapsed() < Duration::from_millis(1500), "waited {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "waited {:?}",
+            start.elapsed()
+        );
         wait_idle();
     }
 
@@ -366,8 +415,15 @@ mod bounded_alias_tests {
         std::fs::create_dir_all(root.join("real")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
         let prefix = format!("{}/link", root.display());
-        let out = physical_alias_pattern_string_bounded(&prefix, "/secrets/**", Duration::from_secs(5));
-        assert_eq!(out, Some(format!("{}/real/secrets/**", glob::Pattern::escape(&root.display().to_string()))));
+        let out =
+            physical_alias_pattern_string_bounded(&prefix, "/secrets/**", Duration::from_secs(5));
+        assert_eq!(
+            out,
+            Some(format!(
+                "{}/real/secrets/**",
+                glob::Pattern::escape(&root.display().to_string())
+            ))
+        );
     }
 
     #[test]
@@ -378,24 +434,47 @@ mod bounded_alias_tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let r = runs.clone();
         let start = Instant::now();
-        let out = bounded_alias("/x", "/**", Duration::from_millis(100), &TEST_STUCK, move |_, _| {
-            r.fetch_add(1, Ordering::SeqCst);
-            let _ = release_rx.recv();
-            Some("/late".to_owned())
-        });
+        let out = bounded_alias(
+            "/x",
+            "/**",
+            Duration::from_millis(100),
+            &TEST_STUCK,
+            move |_, _| {
+                r.fetch_add(1, Ordering::SeqCst);
+                let _ = release_rx.recv();
+                Some("/late".to_owned())
+            },
+        );
         assert_eq!(out, None);
-        assert!(start.elapsed() >= Duration::from_millis(90), "first call returned early");
+        assert!(
+            start.elapsed() >= Duration::from_millis(90),
+            "first call returned early"
+        );
         for n in 2..=3 {
             let r = runs.clone();
             let start = Instant::now();
-            let out = bounded_alias("/y", "/**", Duration::from_millis(100), &TEST_STUCK, move |_, _| {
-                r.fetch_add(1, Ordering::SeqCst);
-                Some("/fast".to_owned())
-            });
+            let out = bounded_alias(
+                "/y",
+                "/**",
+                Duration::from_millis(100),
+                &TEST_STUCK,
+                move |_, _| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                    Some("/fast".to_owned())
+                },
+            );
             assert_eq!(out, None, "call {n} while stuck");
-            assert!(start.elapsed() < Duration::from_millis(50), "call {n} waited {:?}", start.elapsed());
+            assert!(
+                start.elapsed() < Duration::from_millis(50),
+                "call {n} waited {:?}",
+                start.elapsed()
+            );
         }
-        assert_eq!(runs.load(Ordering::SeqCst), 1, "a second resolver ran while the first was stuck");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "a second resolver ran while the first was stuck"
+        );
         let _ = release_tx.send(());
         wait_idle();
     }
@@ -404,18 +483,48 @@ mod bounded_alias_tests {
     fn running_out_of_time_is_unresolved_not_no_alias() {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         wait_idle();
-        let slow = bounded_alias_resolution("/x", "/**", Duration::from_millis(50), &TEST_STUCK, |_, _| {
-            std::thread::sleep(Duration::from_millis(400));
-            Some("/late".to_owned())
-        });
-        assert_eq!(slow, AliasResolution::Unresolved, "a resolver that missed its limit is unknown");
+        let slow = bounded_alias_resolution(
+            "/x",
+            "/**",
+            Duration::from_millis(50),
+            &TEST_STUCK,
+            |_, _| {
+                std::thread::sleep(Duration::from_millis(400));
+                Some("/late".to_owned())
+            },
+        );
+        assert_eq!(
+            slow,
+            AliasResolution::Unresolved,
+            "a resolver that missed its limit is unknown"
+        );
         // While it is still parked a second call is unknown too, not "no alias".
-        let parked = bounded_alias_resolution("/y", "/**", Duration::from_millis(50), &TEST_STUCK, |_, _| None);
-        assert_eq!(parked, AliasResolution::Unresolved, "behind a parked resolver");
+        let parked = bounded_alias_resolution(
+            "/y",
+            "/**",
+            Duration::from_millis(50),
+            &TEST_STUCK,
+            |_, _| None,
+        );
+        assert_eq!(
+            parked,
+            AliasResolution::Unresolved,
+            "behind a parked resolver"
+        );
         wait_idle();
-        let none = bounded_alias_resolution("/y", "/**", Duration::from_secs(30), &TEST_STUCK, |_, _| None);
-        assert_eq!(none, AliasResolution::NoAlias, "a resolver that answered nothing is a known no");
-        let alias = bounded_alias_resolution("/y", "/**", Duration::from_secs(30), &TEST_STUCK, |_, _| Some("/a".to_owned()));
+        let none =
+            bounded_alias_resolution("/y", "/**", Duration::from_secs(30), &TEST_STUCK, |_, _| {
+                None
+            });
+        assert_eq!(
+            none,
+            AliasResolution::NoAlias,
+            "a resolver that answered nothing is a known no"
+        );
+        let alias =
+            bounded_alias_resolution("/y", "/**", Duration::from_secs(30), &TEST_STUCK, |_, _| {
+                Some("/a".to_owned())
+            });
         assert_eq!(alias, AliasResolution::Alias("/a".to_owned()));
     }
 
@@ -423,14 +532,26 @@ mod bounded_alias_tests {
     fn a_recovered_mount_is_used_again() {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let out = bounded_alias("/x", "/**", Duration::from_millis(50), &TEST_STUCK, move |_, _| {
-            let _ = release_rx.recv();
-            None
-        });
+        let out = bounded_alias(
+            "/x",
+            "/**",
+            Duration::from_millis(50),
+            &TEST_STUCK,
+            move |_, _| {
+                let _ = release_rx.recv();
+                None
+            },
+        );
         assert_eq!(out, None);
         let _ = release_tx.send(());
         wait_idle();
-        let out = bounded_alias("/y", "/**", Duration::from_millis(500), &TEST_STUCK, |_, _| Some("/alias".to_owned()));
+        let out = bounded_alias(
+            "/y",
+            "/**",
+            Duration::from_millis(500),
+            &TEST_STUCK,
+            |_, _| Some("/alias".to_owned()),
+        );
         assert_eq!(out, Some("/alias".to_owned()));
     }
 }

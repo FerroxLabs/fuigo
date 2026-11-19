@@ -15,20 +15,57 @@ mod admission_tests {
     struct ConfiguredMemory;
     #[async_trait::async_trait]
     impl fuigo_tools::types::memory_backend::MemoryBackend for ConfiguredMemory {
-        async fn search(&self, _: &str, maximum: usize, minimum: f64) -> Result<Vec<fuigo_tools::types::memory_backend::MemorySearchResult>, Box<dyn std::error::Error + Send + Sync>> {
+        async fn search(
+            &self,
+            _: &str,
+            maximum: usize,
+            minimum: f64,
+        ) -> Result<
+            Vec<fuigo_tools::types::memory_backend::MemorySearchResult>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
             assert_eq!(maximum, 7);
             assert_eq!(minimum, 0.73);
             Ok(vec![])
         }
-        fn get(&self, _: &str, _: Option<usize>, _: Option<usize>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> { unreachable!() }
-        fn total_chunks(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> { Ok(0) }
-        fn default_search_max_results(&self) -> usize { 7 }
-        fn default_search_min_score(&self) -> f64 { 0.73 }
+        fn get(
+            &self,
+            _: &str,
+            _: Option<usize>,
+            _: Option<usize>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            unreachable!()
+        }
+        fn total_chunks(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(0)
+        }
+        fn default_search_max_results(&self) -> usize {
+            7
+        }
+        fn default_search_min_score(&self) -> f64 {
+            0.73
+        }
     }
     #[tokio::test]
     async fn compaction_recall_honors_normal_admission() {
-        let context = CompactionStateContext::build(&[fuigo_sampling_types::ConversationItem::user("project context")], CompactionInputs::default()).await;
-        let _ = to_system_reminder(&context, &[], &[], Some(&ConfiguredMemory), None, None, None, None).await;
+        let context = CompactionStateContext::build(
+            &[fuigo_sampling_types::ConversationItem::user(
+                "project context",
+            )],
+            CompactionInputs::default(),
+        )
+        .await;
+        let _ = to_system_reminder(
+            &context,
+            &[],
+            &[],
+            Some(&ConfiguredMemory),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
     }
 }
 
@@ -106,7 +143,11 @@ pub async fn to_system_reminder(
     if let Some(memory) = memory_backend {
         let query = ctx.last_user_query.as_deref().unwrap_or("project context");
         if let Ok(results) = memory
-            .search(query, memory.default_search_max_results(), memory.default_search_min_score())
+            .search(
+                query,
+                memory.default_search_max_results(),
+                memory.default_search_min_score(),
+            )
             .await
         {
             tracing::debug!(

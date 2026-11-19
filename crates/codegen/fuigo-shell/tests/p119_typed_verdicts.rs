@@ -39,7 +39,10 @@ fn an_error_reply_carries_the_verdicts_read_before_the_credential_was_replaced()
     }));
     let data = scrub_acp_error(err).data.expect("data kept");
     assert!(
-        !data["message"].as_str().unwrap().contains(MARKER_CREDENTIAL),
+        !data["message"]
+            .as_str()
+            .unwrap()
+            .contains(MARKER_CREDENTIAL),
         "{data}"
     );
     assert_eq!(data["verdicts"]["creditLimit"], true, "{data}");
@@ -57,7 +60,10 @@ fn a_disk_full_reply_carries_its_verdict_although_the_text_was_scrubbed() {
         "error_kind": "session_storage",
     }));
     let data = scrub_acp_error(err).data.expect("data kept");
-    assert!(!data["message"].as_str().unwrap().contains("No space left"), "{data}");
+    assert!(
+        !data["message"].as_str().unwrap().contains("No space left"),
+        "{data}"
+    );
     assert_eq!(data["verdicts"]["diskFull"], true, "{data}");
 }
 

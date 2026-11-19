@@ -446,10 +446,12 @@ impl ExecutionBudgetDenial {
                 self.output_token_limit.unwrap_or_default()
             ),
             ExecutionBudgetRule::TokenUsageUnknown => {
-                "Execution token usage is unknown, so the token budget refused the request".to_string()
+                "Execution token usage is unknown, so the token budget refused the request"
+                    .to_string()
             }
             ExecutionBudgetRule::ModelCallLimit => {
-                "Execution model-call limit reached: no model call is left for this request".to_string()
+                "Execution model-call limit reached: no model call is left for this request"
+                    .to_string()
             }
             ExecutionBudgetRule::RuntimeLimit => {
                 "Execution runtime limit reached: the run's time is up".to_string()
@@ -488,7 +490,9 @@ impl ExecutionBudgetDenial {
     /// as `None` here so the caller can fall back to the generic budget wording rather than guess.
     pub fn from_acp_error(err: &acp::Error) -> Option<Self> {
         let data = err.data.as_ref()?;
-        if data.get("code").and_then(serde_json::Value::as_str) != Some(EXECUTION_BUDGET_DENIED_CODE) {
+        if data.get("code").and_then(serde_json::Value::as_str)
+            != Some(EXECUTION_BUDGET_DENIED_CODE)
+        {
             return None;
         }
         let rule = ExecutionBudgetRule::from_id(data.get("rule")?.as_str()?)?;
@@ -691,17 +695,29 @@ mod tests {
             assert_eq!(data["total_token_limit"], 100, "{wire}");
             assert_eq!(data["output_tokens_used"], 41, "{wire}");
             assert!(
-                data["message"].as_str().is_some_and(|m| m.contains(rule.id())),
+                data["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains(rule.id())),
                 "the human line names the rule: {wire}"
             );
             assert_eq!(ExecutionBudgetRule::from_id(rule.id()), Some(rule));
             let back: acp::Error = serde_json::from_value(wire.clone()).expect("deserialize");
             assert!(ExecutionBudgetDenial::is_budget_denial(&back));
-            assert_eq!(ExecutionBudgetDenial::from_acp_error(&back), Some(denial), "{wire}");
+            assert_eq!(
+                ExecutionBudgetDenial::from_acp_error(&back),
+                Some(denial),
+                "{wire}"
+            );
         }
-        let ids: std::collections::BTreeSet<_> =
-            ExecutionBudgetRule::ALL.iter().map(|rule| rule.id()).collect();
-        assert_eq!(ids.len(), ExecutionBudgetRule::ALL.len(), "rule ids are distinct");
+        let ids: std::collections::BTreeSet<_> = ExecutionBudgetRule::ALL
+            .iter()
+            .map(|rule| rule.id())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            ExecutionBudgetRule::ALL.len(),
+            "rule ids are distinct"
+        );
     }
 
     /// Nothing else is mistaken for a denial: not the kind it shares, not another `code`.

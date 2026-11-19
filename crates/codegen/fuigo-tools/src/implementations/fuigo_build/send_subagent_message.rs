@@ -37,7 +37,9 @@ impl From<SendSubagentMessageDelivery> for ActiveAgentMessageOperation {
 
 /// The one place an omitted `delivery` becomes an operation: `queue`, the
 /// class every send carried before the field existed.
-pub fn resolve_delivery(delivery: Option<SendSubagentMessageDelivery>) -> ActiveAgentMessageOperation {
+pub fn resolve_delivery(
+    delivery: Option<SendSubagentMessageDelivery>,
+) -> ActiveAgentMessageOperation {
     match delivery {
         Some(delivery) => ActiveAgentMessageOperation::from(delivery),
         None => ActiveAgentMessageOperation::Queue,

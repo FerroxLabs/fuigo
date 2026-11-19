@@ -1,5 +1,6 @@
 //! Whole-process enforcement, including a workspace beneath the writable temp grant.
 #![cfg(all(unix, feature = "enforce"))]
+#![allow(clippy::print_stdout, clippy::print_stderr)] // the child-process test protocol is this harness's own stdout/stderr
 use std::{fs, path::PathBuf, process::Command};
 
 const CHILD: &str = "FUIGO_WORKSPACE_WRITE_E2E";

@@ -62,7 +62,10 @@ impl PermissionResolution {
     /// ([`fuigo_tools::sandbox_launch::ApprovedWithoutGrant`]): `true` when some part of the call was approved without a
     /// grant, so the runner judges the environment it runs under. A resolution that does not say counts as `true`.
     pub fn approved_without_grant(&self) -> bool {
-        self.event.as_ref().and_then(|event| event.approved_without_grant).unwrap_or(true)
+        self.event
+            .as_ref()
+            .and_then(|event| event.approved_without_grant)
+            .unwrap_or(true)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -269,14 +272,23 @@ pub struct PermissionRequest {
     /// command and arguments or the URL's origin), so a remembered "always allow" grant can notice that a different
     /// definition now carries the granted name. `None` when the caller does not know it (no check).
     pub mcp_definition: Option<String>,
+    /// The same fingerprint computed the way 1.0.45 did. A grant recorded by that release holds this value, so a
+    /// mismatch with `mcp_definition` that matches this one is an upgrade, not a changed definition: it is re-recorded
+    /// silently. `None` when `mcp_definition` is.
+    pub mcp_definition_legacy: Option<String>,
 }
 /// u35 g11 (Astra r10 High): the working directory a bash tool input names (OpenCode bash `workdir`), resolved as the
 /// tool resolves it (absolute, or under `session_cwd`); `None` when the tool runs in the session directory.
-pub fn bash_exec_cwd_for(input: &fuigo_tools::types::ToolInput, session_cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+pub fn bash_exec_cwd_for(
+    input: &fuigo_tools::types::ToolInput,
+    session_cwd: &std::path::Path,
+) -> Option<std::path::PathBuf> {
     match input {
-        fuigo_tools::types::ToolInput::Bash(bash) => {
-            bash.workdir.as_deref().filter(|dir| !dir.is_empty()).map(|dir| session_cwd.join(dir))
-        }
+        fuigo_tools::types::ToolInput::Bash(bash) => bash
+            .workdir
+            .as_deref()
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| session_cwd.join(dir)),
         _ => None,
     }
 }
@@ -297,6 +309,7 @@ impl PermissionRequest {
             parent_run_dir: None,
             shell_run_dir: None,
             mcp_definition: None,
+            mcp_definition_legacy: None,
         }
     }
 }
@@ -314,7 +327,9 @@ pub enum EditTargets {
 /// The per-file targets of a tool input that writes several files (`apply_patch`); `None` for single-target tools.
 pub fn edit_targets_for(input: &fuigo_tools::types::ToolInput) -> Option<EditTargets> {
     match input {
-        fuigo_tools::types::ToolInput::ApplyPatch(patch) => Some(apply_patch_edit_targets(&patch.patch)),
+        fuigo_tools::types::ToolInput::ApplyPatch(patch) => {
+            Some(apply_patch_edit_targets(&patch.patch))
+        }
         _ => None,
     }
 }
@@ -358,7 +373,9 @@ pub fn read_targets_for(input: &fuigo_tools::types::ToolInput) -> Option<ReadTar
             ReadResolution::Literal,
         ),
         ToolInput::ImageToVideo(i) => (
-            process_cwd_absolute(fuigo_build::video_gen::local_image_paths(std::iter::once(&i.image))),
+            process_cwd_absolute(fuigo_build::video_gen::local_image_paths(std::iter::once(
+                &i.image,
+            ))),
             ReadResolution::Literal,
         ),
         ToolInput::ReferenceToVideo(i) => (
@@ -400,9 +417,9 @@ pub fn describe_edit_targets(paths: &[String]) -> String {
 /// The access the hub's `apply_patch` permission prompt shows: an `Edit` naming every target of the patch in `args`
 /// (a bare string or the `patch` / `raw` / `input` envelope), or the placeholder when it does not parse.
 pub(crate) fn apply_patch_hub_access(args: &serde_json::Value) -> AccessKind {
-    let targets = serde_json::from_value::<fuigo_tools::implementations::codex::apply_patch::ApplyPatchInput>(
-        args.clone(),
-    )
+    let targets = serde_json::from_value::<
+        fuigo_tools::implementations::codex::apply_patch::ApplyPatchInput,
+    >(args.clone())
     .ok()
     .map(|input| apply_patch_edit_targets(&input.patch));
     match targets {
@@ -852,12 +869,24 @@ pub enum ToolFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequirementSource {
     Unknown,
-    Requirements { path: std::path::PathBuf },
-    SystemRequirements { path: std::path::PathBuf },
-    ManagedSettings { path: std::path::PathBuf },
-    ManagedConfig { path: std::path::PathBuf },
-    Config { path: std::path::PathBuf },
-    Settings { path: std::path::PathBuf },
+    Requirements {
+        path: std::path::PathBuf,
+    },
+    SystemRequirements {
+        path: std::path::PathBuf,
+    },
+    ManagedSettings {
+        path: std::path::PathBuf,
+    },
+    ManagedConfig {
+        path: std::path::PathBuf,
+    },
+    Config {
+        path: std::path::PathBuf,
+    },
+    Settings {
+        path: std::path::PathBuf,
+    },
     /// A launch policy file (`FUIGO_POLICY_PATH`, or a session's `_meta` policy file).
     LaunchPolicy {
         path: std::path::PathBuf,
@@ -901,7 +930,9 @@ pub(crate) mod tests {
         let input = fuigo_tools::types::ToolInput::ApplyPatch(ApplyPatchInput {
             patch: "*** Begin Patch\n*** Add File: .git/hooks/pre-commit\n+x\n*** Update File: a.rs\n*** Move to: b.rs\n@@\n-a\n+b\n*** End Patch".to_owned(),
         });
-        assert!(matches!(AccessKind::from(&input), AccessKind::Edit(p) if p == APPLY_PATCH_PLACEHOLDER));
+        assert!(
+            matches!(AccessKind::from(&input), AccessKind::Edit(p) if p == APPLY_PATCH_PLACEHOLDER)
+        );
         assert_eq!(
             edit_targets_for(&input),
             Some(EditTargets::Paths(vec![
@@ -913,9 +944,13 @@ pub(crate) mod tests {
         let bad = fuigo_tools::types::ToolInput::ApplyPatch(ApplyPatchInput {
             patch: "rm -rf /".to_owned(),
         });
-        assert!(matches!(edit_targets_for(&bad), Some(EditTargets::Unparseable(_))));
+        assert!(matches!(
+            edit_targets_for(&bad),
+            Some(EditTargets::Unparseable(_))
+        ));
         let write = fuigo_tools::types::ToolInput::Write(
-            serde_json::from_value(serde_json::json!({"file_path": "a.rs", "content": "x"})).unwrap(),
+            serde_json::from_value(serde_json::json!({"file_path": "a.rs", "content": "x"}))
+                .unwrap(),
         );
         assert_eq!(edit_targets_for(&write), None);
     }
@@ -939,7 +974,10 @@ pub(crate) mod tests {
             "apply_patch",
             &serde_json::json!({"patch": "junk"}),
         );
-        assert!(matches!(&junk, Some(AccessKind::Edit(p)) if p == APPLY_PATCH_PLACEHOLDER), "{junk:?}");
+        assert!(
+            matches!(&junk, Some(AccessKind::Edit(p)) if p == APPLY_PATCH_PLACEHOLDER),
+            "{junk:?}"
+        );
     }
     #[test]
     fn hook_ask_header_keeps_the_action_and_names_the_hook() {
@@ -1278,9 +1316,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn write_scoped_and_dynamic_inputs_map_to_edit_not_read() {
+        use fuigo_tool_types::TaskToolInput;
         use fuigo_tools::implementations::opencode::edit::EditInput;
         use fuigo_tools::types::ToolInput;
-        use fuigo_tool_types::TaskToolInput;
         let edit = ToolInput::from(EditInput {
             file_path: "/tmp/denied.txt".into(),
             old_string: "ORIGINAL".into(),
@@ -1473,7 +1511,10 @@ pub(crate) mod tests {
         ] {
             let access = AccessKind::from(&ToolInput::Dynamic(read_only.clone()));
             assert!(
-                matches!(access, AccessKind::Read(_) | AccessKind::Session | AccessKind::Grep { .. }),
+                matches!(
+                    access,
+                    AccessKind::Read(_) | AccessKind::Session | AccessKind::Grep { .. }
+                ),
                 "read-only opencode shape {read_only} must stay a read, got {access:?}"
             );
         }
@@ -1551,7 +1592,11 @@ mod peer_mode_wire_tests {
         for base in EffectivePermissionMode::ALL {
             for plan_active in [false, true] {
                 for session_edit_grant in [false, true] {
-                    let r = EffectivePeerMode { plan_active, base, session_edit_grant };
+                    let r = EffectivePeerMode {
+                        plan_active,
+                        base,
+                        session_edit_grant,
+                    };
                     let wire = fuigo_peer::PeerMode::from(r);
                     let json = serde_json::to_string(&wire).unwrap();
                     let back: fuigo_peer::PeerMode = serde_json::from_str(&json).unwrap();
@@ -1562,10 +1607,19 @@ mod peer_mode_wire_tests {
             }
         }
         assert_eq!(n, 36);
-        assert_eq!(EffectivePeerMode::try_from(fuigo_peer::PeerMode::Unknown), Err(()));
+        assert_eq!(
+            EffectivePeerMode::try_from(fuigo_peer::PeerMode::Unknown),
+            Err(())
+        );
         for b in fuigo_peer::PeerBase::ALL {
-            assert_eq!(fuigo_peer::PeerBase::from(EffectivePermissionMode::from(b)), b);
+            assert_eq!(
+                fuigo_peer::PeerBase::from(EffectivePermissionMode::from(b)),
+                b
+            );
         }
-        assert_eq!(fuigo_peer::PeerBase::ALL.len(), EffectivePermissionMode::ALL.len());
+        assert_eq!(
+            fuigo_peer::PeerBase::ALL.len(),
+            EffectivePermissionMode::ALL.len()
+        );
     }
 }

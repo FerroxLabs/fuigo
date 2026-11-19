@@ -115,7 +115,12 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
         #[allow(clippy::disallowed_methods)]
         // The child is killed via its process group on timeout; an unreapable (D-state) child is abandoned to the runtime's orphan reaper
         let mut child = cmd.spawn().map_err(|e| {
-            fuigo_tools::util::spawn::ShellSpawnFailure::for_command("local_terminal", cmd.as_std(), &e).log();
+            fuigo_tools::util::spawn::ShellSpawnFailure::for_command(
+                "local_terminal",
+                cmd.as_std(),
+                &e,
+            )
+            .log();
             TerminalError::Other(format!("Failed to start shell: {e}"))
         })?;
 
@@ -200,14 +205,17 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::DEFAULT_OUTPUT_BYTE_LIMIT;
     use crate::runner::TerminalRunRequest;
-    use std::collections::HashMap;
     use fuigo_paths::AbsPathBuf;
+    use std::collections::HashMap;
 
     fn make_request(command: &str) -> TerminalRunRequest {
         TerminalRunRequest {
@@ -229,9 +237,13 @@ mod tests {
         let capture = fuigo_tools::util::spawn::capture::CaptureEvents::default();
         let _guard = tracing::subscriber::set_default(capture.clone());
         let mut request = make_request("true");
-        let missing_cwd = std::env::temp_dir().join("u35-winenv-r2-missing-cwd").join("gone");
+        let missing_cwd = std::env::temp_dir()
+            .join("u35-winenv-r2-missing-cwd")
+            .join("gone");
         request.cwd = AbsPathBuf::new(missing_cwd).unwrap();
-        request.env.insert("U35_CANARY".into(), "u35-canary-env-value".into());
+        request
+            .env
+            .insert("U35_CANARY".into(), "u35-canary-env-value".into());
         assert!(LocalTerminalRunner.run(request).await.is_err());
         let logged = capture.text();
         let line = logged
@@ -241,7 +253,10 @@ mod tests {
         assert!(line.starts_with("WARN:"), "{line}");
         assert!(line.contains("os_error=Some("), "{line}");
         assert!(line.contains("path_set="), "{line}");
-        assert!(!logged.contains("u35-canary"), "an environment value was logged: {logged}");
+        assert!(
+            !logged.contains("u35-canary"),
+            "an environment value was logged: {logged}"
+        );
     }
 
     /// Verify that `detach_from_tty` prevents child processes from opening `/dev/tty`.
@@ -283,7 +298,8 @@ mod tests {
         }
         for explicit in [false, true] {
             let check = crate::p113_probe::check(explicit);
-            let mut request = make_request(&format!("{check} && /bin/sh -c '{check}' && printf ok"));
+            let mut request =
+                make_request(&format!("{check} && /bin/sh -c '{check}' && printf ok"));
             if explicit {
                 request
                     .env

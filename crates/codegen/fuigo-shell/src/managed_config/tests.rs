@@ -145,10 +145,22 @@ fn gate_blocks_only_managed_principal_with_compromised_policy() {
 fn compromised_refusal_names_one_fixed_reason_sentence() {
     use fuigo_config::ManagedPolicyCompromise as C;
     for (reason, sentence) in [
-        (C::SignatureInvalid, "Reason: signed managed policy is invalid."),
-        (C::SignatureMissing, "Reason: managed policy signature is missing."),
-        (C::PolicyFileMissing, "Reason: managed policy file is missing."),
-        (C::DeploymentKeyChanged, "Reason: managed deployment key changed."),
+        (
+            C::SignatureInvalid,
+            "Reason: signed managed policy is invalid.",
+        ),
+        (
+            C::SignatureMissing,
+            "Reason: managed policy signature is missing.",
+        ),
+        (
+            C::PolicyFileMissing,
+            "Reason: managed policy file is missing.",
+        ),
+        (
+            C::DeploymentKeyChanged,
+            "Reason: managed deployment key changed.",
+        ),
     ] {
         let text = ManagedPolicyRefusal::Compromised(reason).to_string();
         assert!(text.starts_with("Managed policy is required for this account"));
@@ -469,8 +481,13 @@ fn an_older_revision_verified_before_a_newer_apply_is_skipped_under_the_lock() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     // The other process already applied revision 6 for this team.
-    let marker = serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "highest_revision": 6u64 });
-    std::fs::write(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE), marker.to_string()).unwrap();
+    let marker =
+        serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "highest_revision": 6u64 });
+    std::fs::write(
+        home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE),
+        marker.to_string(),
+    )
+    .unwrap();
     let body = ManagedConfigResponse {
         managed_config: Some("[cli]\ntheme = \"dark\"\n".into()),
         requirements: Some("[features]\nweb_fetch = false\n".into()),
@@ -507,10 +524,18 @@ fn an_older_revision_verified_before_a_newer_apply_is_skipped_under_the_lock() {
         None,
     )
     .unwrap();
-    assert!(matches!(outcome, super::response::ApplyOutcome::Skipped), "the late older revision must be skipped");
-    assert!(!home.join("managed_config.toml").exists(), "no policy file may change");
     assert!(
-        !home.join(fuigo_config::signed_policy::SIGNATURE_SIDECAR_FILE).exists(),
+        matches!(outcome, super::response::ApplyOutcome::Skipped),
+        "the late older revision must be skipped"
+    );
+    assert!(
+        !home.join("managed_config.toml").exists(),
+        "no policy file may change"
+    );
+    assert!(
+        !home
+            .join(fuigo_config::signed_policy::SIGNATURE_SIDECAR_FILE)
+            .exists(),
         "the newer sidecar must stay in place"
     );
 }
@@ -545,11 +570,21 @@ fn apply_under_lock_keeps_an_old_marker_floor_across_an_identity_switch() {
     // Deployment A's policy (revision 20) is on disk, with the pre-upgrade marker that has one floor for the team.
     fuigo_config::signed_policy::write_sidecar(home, &envelope(&payload("dep-A", 20))).unwrap();
     let marker = serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "fail_closed": true, "highest_revision": 20u64 });
-    std::fs::write(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE), marker.to_string()).unwrap();
+    std::fs::write(
+        home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE),
+        marker.to_string(),
+    )
+    .unwrap();
 
     let b1 = payload("dep-B", 1);
-    let body = ManagedConfigResponse { managed_config: b1.managed_config.clone(), ..Default::default() };
-    let verified = super::response::VerifiedEnvelope { sidecar: envelope(&b1), payload: b1 };
+    let body = ManagedConfigResponse {
+        managed_config: b1.managed_config.clone(),
+        ..Default::default()
+    };
+    let verified = super::response::VerifiedEnvelope {
+        sidecar: envelope(&b1),
+        payload: b1,
+    };
     let outcome = apply_under_lock(
         home,
         &body,
@@ -560,12 +595,92 @@ fn apply_under_lock_keeps_an_old_marker_floor_across_an_identity_switch() {
         None,
     )
     .unwrap();
-    assert!(matches!(outcome, super::response::ApplyOutcome::Applied { .. }), "B1 applies");
+    assert!(
+        matches!(outcome, super::response::ApplyOutcome::Applied { .. }),
+        "B1 applies"
+    );
     let err = fuigo_config::signed_policy::check_revision_floor_at(home, &payload("dep-A", 19))
         .expect_err("deployment A's revision 19 is below the floor the first apply wrote down");
     assert!(
-        matches!(err, fuigo_config::signed_policy::SigError::RolledBack { got: 19, highest: 20 }),
+        matches!(
+            err,
+            fuigo_config::signed_policy::SigError::RolledBack {
+                got: 19,
+                highest: 20
+            }
+        ),
         "A19 after A20 then B1: {err:?}"
+    );
+}
+
+/// Delta review D3-04: when the old marker's floor cannot be written down, the apply stops with the policy on disk
+/// untouched, so deployment A's sidecar (and with it A's floor) is not replaced by B's.
+#[test]
+fn apply_under_lock_refuses_to_replace_the_policy_when_the_floor_cannot_be_persisted() {
+    use fuigo_config::signed_policy::{SignatureEnvelope, SignedPayload};
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let payload = |deployment: &str, revision: u64| SignedPayload {
+        typ: fuigo_config::signed_policy::MANAGED_POLICY_TYP.into(),
+        version: 1,
+        deployment_id: Some(deployment.into()),
+        team_id: Some("team-007".into()),
+        managed_config: Some("[cli]\ntheme = \"dark\"\n".into()),
+        requirements: None,
+        fail_closed: false,
+        expires_at: 4_000_000_000,
+        nonce: String::new(),
+        revision,
+        key_id: "v1".into(),
+    };
+    let envelope = |payload: &SignedPayload| SignatureEnvelope {
+        signed_payload: serde_json::to_string(payload).unwrap(),
+        signature: "c2ln".into(),
+        key_id: "v1".into(),
+    };
+    fuigo_config::signed_policy::write_sidecar(home, &envelope(&payload("dep-A", 20))).unwrap();
+    let marker = serde_json::json!({ "synced_at": 1u64, "principal": "team-007", "fail_closed": true, "highest_revision": 20u64 });
+    std::fs::write(
+        home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE),
+        marker.to_string(),
+    )
+    .unwrap();
+    let sidecar_before =
+        std::fs::read(home.join(fuigo_config::signed_policy::SIGNATURE_SIDECAR_FILE)).unwrap();
+
+    let b1 = payload("dep-B", 1);
+    let body = ManagedConfigResponse {
+        managed_config: b1.managed_config.clone(),
+        ..Default::default()
+    };
+    let verified = super::response::VerifiedEnvelope {
+        sidecar: envelope(&b1),
+        payload: b1,
+    };
+    let result = {
+        // Only the marker's own write fails: the policy files could still be written, so a stop here is the floor's doing.
+        let _fault = fuigo_config::fs_atomic::stage_fault::fail_writes_under(
+            &home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE),
+        );
+        apply_under_lock(
+            home,
+            &body,
+            Some(verified),
+            super::response::ManagedConfigSource::TeamOauth,
+            Some("team-007"),
+            None,
+            None,
+        )
+    };
+    assert!(result.is_err(), "the apply must fail");
+    assert_eq!(
+        std::fs::read(home.join(fuigo_config::signed_policy::SIGNATURE_SIDECAR_FILE)).unwrap(),
+        sidecar_before,
+        "deployment A's sidecar must stay"
+    );
+    assert!(
+        !home.join("managed_config.toml").exists(),
+        "no policy file may change"
     );
 }
 
@@ -670,30 +785,55 @@ fn a_policy_file_fuigo_did_not_sync_is_moved_aside_not_deleted() {
 
     remove_managed_config_files(home);
 
-    for (name, content) in [("requirements.toml", "# mine p147\n"), ("managed_config.toml", "# my managed p147\n")] {
+    for (name, content) in [
+        ("requirements.toml", "# mine p147\n"),
+        ("managed_config.toml", "# my managed p147\n"),
+    ] {
         assert!(!home.join(name).exists(), "{name} must stop applying");
         let found = backups(home, name);
-        assert_eq!(found.len(), 1, "{name}: exactly one backup expected: {found:?}");
-        assert_eq!(std::fs::read_to_string(home.join(&found[0])).unwrap(), content, "{name}: backup content");
+        assert_eq!(
+            found.len(),
+            1,
+            "{name}: exactly one backup expected: {found:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(&found[0])).unwrap(),
+            content,
+            "{name}: backup content"
+        );
     }
 
     // Control: Fuigo's own synced copy (marker present) is removed without a backup.
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     std::fs::write(home.join("requirements.toml"), "[features]\n").unwrap();
-    std::fs::write(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE), r#"{"had_requirements":true}"#).unwrap();
+    std::fs::write(
+        home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE),
+        r#"{"had_requirements":true}"#,
+    )
+    .unwrap();
     remove_managed_config_files(home);
     assert!(!home.join("requirements.toml").exists());
-    assert!(backups(home, "requirements.toml").is_empty(), "a synced copy is Fuigo's and gets no backup");
+    assert!(
+        backups(home, "requirements.toml").is_empty(),
+        "a synced copy is Fuigo's and gets no backup"
+    );
 
     // Astra r2: a marker whose sync did not serve the file, or a corrupt one, is no record of writing it.
-    for marker in [r#"{"had_managed_config":true,"had_requirements":false}"#, "not json"] {
+    for marker in [
+        r#"{"had_managed_config":true,"had_requirements":false}"#,
+        "not json",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
         std::fs::write(home.join("requirements.toml"), "# hand-made later p147\n").unwrap();
         std::fs::write(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE), marker).unwrap();
         remove_managed_config_files(home);
-        assert_eq!(backups(home, "requirements.toml").len(), 1, "marker {marker}: the hand-made file was not backed up");
+        assert_eq!(
+            backups(home, "requirements.toml").len(),
+            1,
+            "marker {marker}: the hand-made file was not backed up"
+        );
     }
 }
 
@@ -711,11 +851,18 @@ fn the_first_sync_moves_a_users_own_file_aside_before_writing() {
         ..Default::default()
     };
     assert!(apply_managed_config(home, &body).unwrap());
-    assert_eq!(std::fs::read_to_string(home.join("managed_config.toml")).unwrap(), "[cli]\ntheme = \"dark\"\n");
+    assert_eq!(
+        std::fs::read_to_string(home.join("managed_config.toml")).unwrap(),
+        "[cli]\ntheme = \"dark\"\n"
+    );
     let kept: Vec<_> = std::fs::read_dir(home)
         .unwrap()
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("managed_config.toml.user-"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("managed_config.toml.user-")
+        })
         .map(|e| std::fs::read_to_string(e.path()).unwrap())
         .collect();
     assert_eq!(kept, vec!["# hand-written p147\n".to_owned()]);
@@ -730,13 +877,24 @@ fn a_squatting_marker_is_no_record_and_a_withdrawal_still_counts_as_a_change() {
     let home = dir.path();
     std::fs::create_dir(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE)).unwrap();
     std::fs::write(home.join("requirements.toml"), "# mine p147 squat\n").unwrap();
-    let withdrawn = ManagedConfigResponse { deployment_id: None, team_id: None, ..Default::default() };
-    assert!(apply_managed_config(home, &withdrawn).unwrap(), "removing the active file is a change");
+    let withdrawn = ManagedConfigResponse {
+        deployment_id: None,
+        team_id: None,
+        ..Default::default()
+    };
+    assert!(
+        apply_managed_config(home, &withdrawn).unwrap(),
+        "removing the active file is a change"
+    );
     assert!(!home.join("requirements.toml").exists());
     let backups: Vec<_> = std::fs::read_dir(home)
         .unwrap()
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("requirements.toml.user-"))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("requirements.toml.user-")
+        })
         .map(|e| std::fs::read_to_string(e.path()).unwrap())
         .collect();
     assert_eq!(backups, vec!["# mine p147 squat\n".to_owned()]);
@@ -770,7 +928,10 @@ fn p167_clear_orphan_keeps_policy_when_the_login_lives_at_a_custom_auth_path() {
     let store: std::collections::BTreeMap<String, crate::auth::FuigoAuth> =
         [("fuigo.com".to_owned(), team)].into_iter().collect();
     std::fs::write(&auth_path, serde_json::to_string(&store).unwrap()).unwrap();
-    assert!(!home.path().join("auth.json").exists(), "no login at the default path");
+    assert!(
+        !home.path().join("auth.json").exists(),
+        "no login at the default path"
+    );
 
     // Fuigo's own synced copies (marker present): an orphan clear would delete them without a backup.
     let policy = "[features]\n# org policy p167\n";
@@ -787,13 +948,18 @@ fn p167_clear_orphan_keeps_policy_when_the_login_lives_at_a_custom_auth_path() {
         "the team login at FUIGO_AUTH_PATH is signed in"
     );
     assert_eq!(active_team_id_any_expiry().as_deref(), Some("team-p167"));
-    assert!(read_active_team_auth().is_some(), "the active team auth is read from FUIGO_AUTH_PATH");
+    assert!(
+        read_active_team_auth().is_some(),
+        "the active team auth is read from FUIGO_AUTH_PATH"
+    );
 
     clear_orphan();
 
     for name in ["managed_config.toml", "requirements.toml"] {
         assert_eq!(
-            std::fs::read_to_string(home.path().join(name)).ok().as_deref(),
+            std::fs::read_to_string(home.path().join(name))
+                .ok()
+                .as_deref(),
             Some(policy),
             "{name} must survive startup when the login lives at a custom auth path"
         );
@@ -803,7 +969,7 @@ fn p167_clear_orphan_keeps_policy_when_the_login_lives_at_a_custom_auth_path() {
 #[cfg(unix)]
 mod lock_modes {
     use super::*;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn mode(p: &std::path::Path) -> u32 {
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777

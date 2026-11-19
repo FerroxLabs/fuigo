@@ -62,7 +62,9 @@ fn project_agents_trusted(cwd: &Path) -> bool {
     if project_agent_dirs(Some(cwd)).0.is_empty() {
         return false;
     }
-    PROJECT_AGENT_TRUST.get().is_some_and(|trusted| trusted(cwd))
+    PROJECT_AGENT_TRUST
+        .get()
+        .is_some_and(|trusted| trusted(cwd))
 }
 
 /// Whether `name` is a single plain agent name that can be joined onto an agents directory.
@@ -568,7 +570,10 @@ fn by_name_in_cwd_with_plugins_and_home(
     }
 
     if plugins.is_none() && qualified.is_some() {
-        tracing::debug!(agent_name = name, "qualified plugin agent name with no plugin registry");
+        tracing::debug!(
+            agent_name = name,
+            "qualified plugin agent name with no plugin registry"
+        );
     }
     // Try plugin agents
     if let Some(registry) = plugins {
@@ -734,14 +739,19 @@ fn load_project_definitions(
 /// First project agent named `name` along the cwd-to-git-root walk from [`project_agent_dirs`], highest-priority dir first.
 /// Nothing unless the folder is trusted, and never for a built-in name: not by stem (checked before any file is opened)
 /// and not by the parsed frontmatter `name`.
-fn load_project_definition_by_name(name: &str, cwd: &Path, trusted: bool) -> Option<AgentDefinition> {
+fn load_project_definition_by_name(
+    name: &str,
+    cwd: &Path,
+    trusted: bool,
+) -> Option<AgentDefinition> {
     if !trusted || is_builtin(name) {
         return None;
     }
     for agents_dir in project_agent_dirs(Some(cwd)).0 {
         let agent_file = agent_file(&agents_dir, name)?;
         // The project folder is pinned once; the admission check and the read both compare against it.
-        let Ok(project_root) = fuigo_dirs::contained::PinnedRoot::pin(project_root_of_agents_dir(&agents_dir))
+        let Ok(project_root) =
+            fuigo_dirs::contained::PinnedRoot::pin(project_root_of_agents_dir(&agents_dir))
         else {
             continue;
         };
@@ -1127,9 +1137,14 @@ mod tests {
             "Bundled only",
         );
 
-        let def =
-            by_name_in_cwd_with_home("bundled-only", &cwd, Some(&home), Some(&home.join(".fuigo")), true)
-                .unwrap();
+        let def = by_name_in_cwd_with_home(
+            "bundled-only",
+            &cwd,
+            Some(&home),
+            Some(&home.join(".fuigo")),
+            true,
+        )
+        .unwrap();
         assert_eq!(def.scope, AgentScope::Bundled);
         assert_eq!(def.description, "Bundled only");
     }
@@ -1148,9 +1163,14 @@ mod tests {
         write_agent_file(&user_dir, "reviewer.md", "reviewer", "User reviewer");
         write_agent_file(&bundled_dir, "reviewer.md", "reviewer", "Bundled reviewer");
 
-        let def =
-            by_name_in_cwd_with_home("reviewer", &cwd, Some(&home), Some(&home.join(".fuigo")), true)
-                .unwrap();
+        let def = by_name_in_cwd_with_home(
+            "reviewer",
+            &cwd,
+            Some(&home),
+            Some(&home.join(".fuigo")),
+            true,
+        )
+        .unwrap();
         assert_eq!(def.scope, AgentScope::User);
         assert_eq!(def.description, "User reviewer");
     }
@@ -1166,8 +1186,14 @@ mod tests {
 
         write_agent_file(&bundled_dir, "explore.md", "explore", "Bundled explore");
 
-        let def = by_name_in_cwd_with_home("explore", &cwd, Some(&home), Some(&home.join(".fuigo")), true)
-            .unwrap();
+        let def = by_name_in_cwd_with_home(
+            "explore",
+            &cwd,
+            Some(&home),
+            Some(&home.join(".fuigo")),
+            true,
+        )
+        .unwrap();
         assert_eq!(def.scope, AgentScope::BuiltIn);
         assert_ne!(def.description, "Bundled explore");
     }
@@ -1185,9 +1211,14 @@ mod tests {
         write_agent_file(&project_dir, "reviewer.md", "reviewer", "Project reviewer");
         write_agent_file(&bundled_dir, "reviewer.md", "reviewer", "Bundled reviewer");
 
-        let def =
-            by_name_in_cwd_with_home("reviewer", &cwd, Some(&home), Some(&home.join(".fuigo")), true)
-                .unwrap();
+        let def = by_name_in_cwd_with_home(
+            "reviewer",
+            &cwd,
+            Some(&home),
+            Some(&home.join(".fuigo")),
+            true,
+        )
+        .unwrap();
         assert_eq!(def.scope, AgentScope::Project);
         assert_eq!(def.description, "Project reviewer");
     }
@@ -1826,7 +1857,12 @@ mod tests {
     #[test]
     fn u35_project_agents_load_only_when_trusted() {
         let l = U35Layout::new();
-        write_agent_file(&l.project_agents(), "reviewer.md", "reviewer", "Project reviewer");
+        write_agent_file(
+            &l.project_agents(),
+            "reviewer.md",
+            "reviewer",
+            "Project reviewer",
+        );
 
         assert!(
             l.by_name("reviewer", false).is_none(),
@@ -1838,7 +1874,9 @@ mod tests {
         );
         assert!(!l.subagents(false).iter().any(|e| e.name == "reviewer"));
 
-        let def = l.by_name("reviewer", true).expect("trusted: the project agent loads");
+        let def = l
+            .by_name("reviewer", true)
+            .expect("trusted: the project agent loads");
         assert_eq!(def.scope, AgentScope::Project);
         assert_eq!(def.description, "Project reviewer");
         assert!(l.discover(true).iter().any(|d| d.name == "reviewer"));
@@ -1847,9 +1885,16 @@ mod tests {
     #[test]
     fn u35_untrusted_project_falls_through_to_user() {
         let l = U35Layout::new();
-        write_agent_file(&l.project_agents(), "reviewer.md", "reviewer", "Project reviewer");
+        write_agent_file(
+            &l.project_agents(),
+            "reviewer.md",
+            "reviewer",
+            "Project reviewer",
+        );
         write_agent_file(&l.user_agents(), "reviewer.md", "reviewer", "User reviewer");
-        let def = l.by_name("reviewer", false).expect("user agent still resolves");
+        let def = l
+            .by_name("reviewer", false)
+            .expect("user agent still resolves");
         assert_eq!(def.scope, AgentScope::User);
         assert_eq!(def.description, "User reviewer");
     }
@@ -1887,14 +1932,24 @@ mod tests {
         // `<cwd>/evil.md`: reached from the project dir by `../../evil`.
         fs::write(l.cwd.join("evil.md"), marker).unwrap();
         let abs = l.root.join("evil").to_string_lossy().into_owned();
-        let names = [abs.as_str(), "../../../evil", "../../evil", "./evil", "..", ""];
+        let names = [
+            abs.as_str(),
+            "../../../evil",
+            "../../evil",
+            "./evil",
+            "..",
+            "",
+        ];
         for name in names {
             assert!(
                 by_name_with_home(name, Some(&l.home), Some(&l.fuigo_home)).is_none(),
                 "by_name_with_home({name:?})"
             );
             for trusted in [false, true] {
-                assert!(l.by_name(name, trusted).is_none(), "by_name_in_cwd_with_home({name:?}, {trusted})");
+                assert!(
+                    l.by_name(name, trusted).is_none(),
+                    "by_name_in_cwd_with_home({name:?}, {trusted})"
+                );
                 assert!(
                     by_name_in_cwd_with_plugins_and_home(
                         name,
@@ -1935,9 +1990,18 @@ mod tests {
                 true,
             )
         };
-        assert!(lookup("plug:../evil").is_none(), "agent half escapes the plugin dir");
-        assert!(lookup("../plug:evil").is_none(), "plugin half is not a plain name");
-        assert!(lookup("plug:good").is_some(), "a plain qualified name still resolves");
+        assert!(
+            lookup("plug:../evil").is_none(),
+            "agent half escapes the plugin dir"
+        );
+        assert!(
+            lookup("../plug:evil").is_none(),
+            "plugin half is not a plain name"
+        );
+        assert!(
+            lookup("plug:good").is_some(),
+            "a plain qualified name still resolves"
+        );
     }
 
     #[test]
@@ -1971,7 +2035,10 @@ mod tests {
             .into_iter()
             .find(|e| e.name == "explore")
             .expect("explore row");
-        assert_eq!(explore.source, SubagentSource::Builtin(BuiltinAgentName::Explore));
+        assert_eq!(
+            explore.source,
+            SubagentSource::Builtin(BuiltinAgentName::Explore)
+        );
         assert_eq!(explore.shadows_builtin, None);
     }
 
@@ -1989,17 +2056,29 @@ mod tests {
         )
         .unwrap();
         write_agent_file(&l.user_agents(), "codex.md", "codex", "User codex");
-        assert_eq!(l.by_name("explore", false).unwrap().scope, AgentScope::BuiltIn);
+        assert_eq!(
+            l.by_name("explore", false).unwrap().scope,
+            AgentScope::BuiltIn
+        );
         assert!(l.by_name("notes", false).is_none());
-        assert_eq!(l.by_name("codex", false).unwrap().scope, AgentScope::BuiltIn);
+        assert_eq!(
+            l.by_name("codex", false).unwrap().scope,
+            AgentScope::BuiltIn
+        );
         let names: Vec<String> = l.discover(false).into_iter().map(|d| d.name).collect();
-        assert!(names.is_empty(), "no built-in-named user file is listed: {names:?}");
+        assert!(
+            names.is_empty(),
+            "no built-in-named user file is listed: {names:?}"
+        );
         let explore = l
             .subagents(false)
             .into_iter()
             .find(|e| e.name == "explore")
             .expect("explore row");
-        assert_eq!(explore.source, SubagentSource::Builtin(BuiltinAgentName::Explore));
+        assert_eq!(
+            explore.source,
+            SubagentSource::Builtin(BuiltinAgentName::Explore)
+        );
         assert!(!l.subagents(false).iter().any(|e| e.name == "codex"));
     }
 
@@ -2017,13 +2096,25 @@ mod tests {
         let claude = l.home.join(".claude").join("agents");
         fs::create_dir_all(&claude).unwrap();
         write_agent_file(&claude, "notes.md", "notes", "Claude notes");
-        let called = l.by_name("notes", false).expect("the next user dir's notes is callable");
+        let called = l
+            .by_name("notes", false)
+            .expect("the next user dir's notes is callable");
         assert_eq!(called.description, "Claude notes");
-        let listed: Vec<AgentDefinition> =
-            l.discover(false).into_iter().filter(|d| d.name == "notes").collect();
+        let listed: Vec<AgentDefinition> = l
+            .discover(false)
+            .into_iter()
+            .filter(|d| d.name == "notes")
+            .collect();
         assert_eq!(listed.len(), 1, "one notes row");
-        assert_eq!(listed[0].description, "Claude notes", "the listed notes is the callable one");
-        assert!(l.subagents(false).iter().any(|e| e.name == "notes" && e.description == "Claude notes"));
+        assert_eq!(
+            listed[0].description, "Claude notes",
+            "the listed notes is the callable one"
+        );
+        assert!(
+            l.subagents(false)
+                .iter()
+                .any(|e| e.name == "notes" && e.description == "Claude notes")
+        );
     }
 
     #[test]
@@ -2031,7 +2122,10 @@ mod tests {
         let l = U35Layout::new();
         write_agent_file(&l.user_agents(), "default.md", "default", "User default");
         write_agent_file(&l.user_agents(), "ask.md", "ask", "User ask");
-        assert_eq!(l.by_name("default", false).unwrap().description, "User default");
+        assert_eq!(
+            l.by_name("default", false).unwrap().description,
+            "User default"
+        );
         assert_eq!(l.by_name("ask", false).unwrap().description, "User ask");
     }
 
@@ -2058,7 +2152,11 @@ mod tests {
         for scope in [PluginScope::Project, PluginScope::User] {
             let untrusted =
                 make_plugin_registry_with_trust("plug", scope, vec![agents.clone()], false);
-            assert!(untrusted.get("plug").is_some_and(|p| p.enabled && !p.trusted));
+            assert!(
+                untrusted
+                    .get("plug")
+                    .is_some_and(|p| p.enabled && !p.trusted)
+            );
             for name in ["plug:reviewer", "reviewer"] {
                 let def = by_name_in_cwd_with_plugins_and_home(
                     name,
@@ -2068,7 +2166,10 @@ mod tests {
                     Some(&l.fuigo_home),
                     true,
                 );
-                assert!(def.is_none(), "{scope:?} untrusted plugin agent {name:?} must not resolve: {def:?}");
+                assert!(
+                    def.is_none(),
+                    "{scope:?} untrusted plugin agent {name:?} must not resolve: {def:?}"
+                );
             }
             let listed = all_subagents_with_plugins_and_home(
                 &l.cwd,
@@ -2096,7 +2197,8 @@ mod tests {
             ));
         }
         // Trusted: the same agent is callable by both names, with its own prompt.
-        let trusted = make_plugin_registry_with_trust("plug", PluginScope::User, vec![agents], true);
+        let trusted =
+            make_plugin_registry_with_trust("plug", PluginScope::User, vec![agents], true);
         for name in ["plug:reviewer", "reviewer"] {
             let def = by_name_in_cwd_with_plugins_and_home(
                 name,
@@ -2125,7 +2227,8 @@ mod tests {
         fs::create_dir_all(&bad).unwrap();
         hostile_plugin_agent(&bad);
         let good_reg = make_plugin_registry_with_trust("good", PluginScope::User, vec![good], true);
-        let bad_reg = make_plugin_registry_with_trust("bad", PluginScope::Project, vec![bad], false);
+        let bad_reg =
+            make_plugin_registry_with_trust("bad", PluginScope::Project, vec![bad], false);
         let mut discovered: Vec<_> = Vec::new();
         for reg in [&good_reg, &bad_reg] {
             for p in reg.list() {
@@ -2203,11 +2306,21 @@ mod tests {
                 None,
                 false,
             );
-            assert!(def.is_none(), "{name} resolved to a file outside the plugin");
+            assert!(
+                def.is_none(),
+                "{name} resolved to a file outside the plugin"
+            );
         }
         assert!(
-            by_name_in_cwd_with_plugins_and_home("plug:inner", tmp.path(), Some(&registry), None, None, false)
-                .is_some()
+            by_name_in_cwd_with_plugins_and_home(
+                "plug:inner",
+                tmp.path(),
+                Some(&registry),
+                None,
+                None,
+                false
+            )
+            .is_some()
         );
     }
 
@@ -2231,8 +2344,12 @@ mod tests {
             .map(|d| d.name)
             .collect();
         assert_eq!(names, ["good"]);
-        assert!(by_name_in_cwd_with_plugins_and_home("leak", &repo, None, None, None, true).is_none());
-        assert!(by_name_in_cwd_with_plugins_and_home("good", &repo, None, None, None, true).is_some());
+        assert!(
+            by_name_in_cwd_with_plugins_and_home("leak", &repo, None, None, None, true).is_none()
+        );
+        assert!(
+            by_name_in_cwd_with_plugins_and_home("good", &repo, None, None, None, true).is_some()
+        );
     }
 
     /// m4: an agent file is read only from inside its root, checked on the opened file; an in-root link reads; user
@@ -2247,14 +2364,25 @@ mod tests {
         std::fs::create_dir_all(&agents).unwrap();
         std::fs::create_dir_all(base.join("outside")).unwrap();
         let secret = base.join("outside").join("secret.md");
-        std::fs::write(&secret, "---\nname: leak\ndescription: d\n---\nTOP SECRET\n").unwrap();
-        std::fs::write(repo.join("real.md"), "---\nname: good\ndescription: d\n---\nown\n").unwrap();
+        std::fs::write(
+            &secret,
+            "---\nname: leak\ndescription: d\n---\nTOP SECRET\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("real.md"),
+            "---\nname: good\ndescription: d\n---\nown\n",
+        )
+        .unwrap();
         std::os::unix::fs::symlink(&secret, agents.join("leak.md")).unwrap();
         std::os::unix::fs::symlink(repo.join("real.md"), agents.join("good.md")).unwrap();
 
         let pinned = fuigo_dirs::contained::PinnedRoot::pin(&repo).unwrap();
         assert!(AgentDefinition::from_file_in(agents.join("leak.md"), Some(&pinned)).is_err());
-        assert!(AgentDefinition::from_file_frontmatter_only_in(agents.join("leak.md"), Some(&pinned)).is_err());
+        assert!(
+            AgentDefinition::from_file_frontmatter_only_in(agents.join("leak.md"), Some(&pinned))
+                .is_err()
+        );
         let good = AgentDefinition::from_file_in(agents.join("good.md"), Some(&pinned)).unwrap();
         assert_eq!(good.name, "good");
         let user = AgentDefinition::from_file_in(agents.join("leak.md"), None).unwrap();

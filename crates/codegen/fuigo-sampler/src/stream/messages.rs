@@ -27,7 +27,9 @@ pub(crate) fn messages_event_has_meaningful_content(event: &MessageStreamEvent) 
         // arrives: counting it would let a provider streaming an unmodelled block refresh the
         // content clock forever while producing nothing the user can see. Tolerating an unknown
         // variant must never buy a stalled turn an unlimited extension.
-        MessageStreamEvent::ContentBlockStart { content_block, .. } => content_block.known().is_some(),
+        MessageStreamEvent::ContentBlockStart { content_block, .. } => {
+            content_block.known().is_some()
+        }
         MessageStreamEvent::ContentBlockDelta { delta, .. } => delta.known().is_some(),
         MessageStreamEvent::MessageStart { .. }
         | MessageStreamEvent::MessageDelta { .. }

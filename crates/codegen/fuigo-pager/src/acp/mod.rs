@@ -602,7 +602,8 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
     });
     meta[fuigo_status_line::STATUS_LINE_CAPABILITY] = flags.status_line.into();
     meta[fuigo_shell::session::USER_MESSAGE_ECHO_CAPABILITY] = true.into();
-    meta[crate::app::folder_trust_reload::CAPABILITY] = crate::app::folder_trust_reload::capability_value();
+    meta[crate::app::folder_trust_reload::CAPABILITY] =
+        crate::app::folder_trust_reload::capability_value();
     meta
 }
 
@@ -1195,16 +1196,26 @@ mod tests {
 
     #[test]
     fn cli_tool_flags_reach_the_agent_config() {
-        let mut cfg = AgentConfig::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
-        assert!(cfg.cli_agent_overrides.tools.is_none() && cfg.cli_agent_overrides.disallowed_tools.is_none());
+        let mut cfg =
+            AgentConfig::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+        assert!(
+            cfg.cli_agent_overrides.tools.is_none()
+                && cfg.cli_agent_overrides.disallowed_tools.is_none()
+        );
         let flags = ConnectFlags {
             cli_tools: Some(vec!["read_file".into(), "grep".into()]),
             cli_disallowed_tools: Some(vec!["run_terminal_command".into()]),
             ..Default::default()
         };
         apply_cli_tool_overrides(&mut cfg, &flags);
-        assert_eq!(cfg.cli_agent_overrides.tools, Some(vec!["read_file".to_string(), "grep".to_string()]));
-        assert_eq!(cfg.cli_agent_overrides.disallowed_tools, Some(vec!["run_terminal_command".to_string()]));
+        assert_eq!(
+            cfg.cli_agent_overrides.tools,
+            Some(vec!["read_file".to_string(), "grep".to_string()])
+        );
+        assert_eq!(
+            cfg.cli_agent_overrides.disallowed_tools,
+            Some(vec!["run_terminal_command".to_string()])
+        );
     }
 
     #[test]
@@ -1215,7 +1226,10 @@ mod tests {
             ..Default::default()
         };
         let detected = unsupported_leader_flags(&flags);
-        assert!(detected.contains(&"--tools") && detected.contains(&"--disallowed-tools"), "{detected:?}");
+        assert!(
+            detected.contains(&"--tools") && detected.contains(&"--disallowed-tools"),
+            "{detected:?}"
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! New aliases must be denied even when source and destination share a filesystem.
 #![cfg(all(target_os = "linux", feature = "enforce"))]
+#![allow(clippy::print_stdout, clippy::print_stderr)] // the child-process test protocol is this harness's own stdout/stderr
 
 use std::{fs, os::unix::fs::MetadataExt, path::Path, process::Command};
 

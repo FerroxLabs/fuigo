@@ -371,7 +371,11 @@ mod admin_source_tests_p183r10 {
     #[test]
     fn broken_admin_source_pins_worktree_hints_to_never_p183r10() {
         let user: TomlValue = toml::from_str("[hints]\nfork_worktree_mode = \"always\"\n").unwrap();
-        for make in [seam::broken_file, seam::undecodable_mdm, seam::mdm_with_bad_overrides] {
+        for make in [
+            seam::broken_file,
+            seam::undecodable_mdm,
+            seam::mdm_with_bad_overrides,
+        ] {
             let _seam = make();
             let r = resolve_hints(None, None, Some(&user), None);
             assert_eq!(r.fork_worktree_mode, WorktreeHintMode::Never);

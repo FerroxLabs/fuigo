@@ -223,14 +223,19 @@ fn recap_request_transport_failure_with_turns_uses_generic_toast() {
 fn fullscreen_btw_response_after_esc_does_not_reopen_the_panel() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let _ = dispatch(Action::SendPrompt("/btw side question".to_owned()), &mut app);
+    let _ = dispatch(
+        Action::SendPrompt("/btw side question".to_owned()),
+        &mut app,
+    );
     assert!(matches!(
         app.agents[&id].btw_state,
         Some(crate::views::btw_overlay::BtwOverlayState::Loading { .. })
     ));
     app.agents.get_mut(&id).unwrap().active_pane = crate::app::agent_view::AgentPane::Prompt;
 
-    let request_id = app.agents[&id].btw_request_id.expect("fullscreen /btw has an id");
+    let request_id = app.agents[&id]
+        .btw_request_id
+        .expect("fullscreen /btw has an id");
 
     let _ = app.handle_input(&esc());
     assert!(app.agents[&id].btw_state.is_none());
@@ -257,10 +262,19 @@ fn fullscreen_btw_esc_while_loading_sends_the_shell_cancel() {
     let id = AgentId(0);
     let session_id = app.agents[&id].session.session_id.clone().expect("session");
     let effects = dispatch(
-        Action::SendBtw { question: "side question".into(), images: Vec::new() },
+        Action::SendBtw {
+            question: "side question".into(),
+            images: Vec::new(),
+        },
         &mut app,
     );
-    let [Effect::SendBtw { request_id: Some(request_id), .. }] = effects.as_slice() else {
+    let [
+        Effect::SendBtw {
+            request_id: Some(request_id),
+            ..
+        },
+    ] = effects.as_slice()
+    else {
         panic!("expected one correlated /btw send, got {effects:?}");
     };
     let request_id = *request_id;
@@ -285,7 +299,10 @@ fn fullscreen_btw_esc_after_answer_sends_no_cancel() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let _ = dispatch(
-        Action::SendBtw { question: "side question".into(), images: Vec::new() },
+        Action::SendBtw {
+            question: "side question".into(),
+            images: Vec::new(),
+        },
         &mut app,
     );
     let request_id = app.agents[&id].btw_request_id;
@@ -312,21 +329,44 @@ fn fullscreen_late_first_btw_answer_never_lands_in_the_second_panel() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     let send = |app: &mut AppView, q: &str| {
-        dispatch(Action::SendBtw { question: q.into(), images: Vec::new() }, app)
+        dispatch(
+            Action::SendBtw {
+                question: q.into(),
+                images: Vec::new(),
+            },
+            app,
+        )
     };
     let first_effects = send(&mut app, "first question");
-    let [Effect::SendBtw { request_id: Some(first), .. }] = first_effects.as_slice() else {
+    let [
+        Effect::SendBtw {
+            request_id: Some(first),
+            ..
+        },
+    ] = first_effects.as_slice()
+    else {
         panic!("expected one /btw send, got {first_effects:?}");
     };
     let first = *first;
     let second_effects = send(&mut app, "second question");
-    let [Effect::CancelBtw { request_id: cancelled, .. }, Effect::SendBtw { request_id: Some(second), .. }] =
-        second_effects.as_slice()
+    let [
+        Effect::CancelBtw {
+            request_id: cancelled,
+            ..
+        },
+        Effect::SendBtw {
+            request_id: Some(second),
+            ..
+        },
+    ] = second_effects.as_slice()
     else {
         panic!("expected cancel of the first then send of the second, got {second_effects:?}");
     };
     let second = *second;
-    assert_eq!(*cancelled, first, "the superseded request is cancelled on the shell");
+    assert_eq!(
+        *cancelled, first,
+        "the superseded request is cancelled on the shell"
+    );
     assert_ne!(first, second, "every /btw request has its own id");
 
     dispatch(
@@ -2512,7 +2552,10 @@ fn btw_over_the_image_cap_tells_the_user() {
         },
         &mut app,
     );
-    assert!(matches!(effects.as_slice(), [Effect::SendBtw { .. }]), "{effects:?}");
+    assert!(
+        matches!(effects.as_slice(), [Effect::SendBtw { .. }]),
+        "{effects:?}"
+    );
     let toast = app.agents[&id].toast.as_ref().map(|(m, _)| m.clone());
     assert_eq!(
         toast.as_deref(),
@@ -2555,7 +2598,9 @@ fn btw_without_a_session_says_its_images_were_dropped() {
     assert!(effects.is_empty());
     let toast = app.agents[&id].toast.as_ref().map(|(m, _)| m.clone());
     assert!(
-        toast.as_deref().is_some_and(|t| t.contains("attached image(s) were not sent")),
+        toast
+            .as_deref()
+            .is_some_and(|t| t.contains("attached image(s) were not sent")),
         "{toast:?}"
     );
 }
@@ -2579,7 +2624,10 @@ fn ctrl_y_on_question_card_does_not_close_and_yanks_in_input_mode() {
     // Navigation focus: closing is off the table
     agent.question_view.as_mut().unwrap().focus = QuestionFocus::Navigation;
     agent.handle_question_key_for_test(&ctrl('y'));
-    assert!(agent.question_view.is_some(), "Ctrl+Y must not close the card");
+    assert!(
+        agent.question_view.is_some(),
+        "Ctrl+Y must not close the card"
+    );
     // Input focus: kill then yank restores the text
     agent.question_view.as_mut().unwrap().focus = QuestionFocus::InputMode;
     agent.prompt.set_text("cut me");
@@ -2587,6 +2635,13 @@ fn ctrl_y_on_question_card_does_not_close_and_yanks_in_input_mode() {
     agent.handle_question_key_for_test(&ctrl('k'));
     assert_eq!(agent.prompt.text(), "");
     agent.handle_question_key_for_test(&ctrl('y'));
-    assert!(agent.question_view.is_some(), "Ctrl+Y must not close the card");
-    assert_eq!(agent.prompt.text(), "cut me", "Ctrl+Y pastes the cut text back");
+    assert!(
+        agent.question_view.is_some(),
+        "Ctrl+Y must not close the card"
+    );
+    assert_eq!(
+        agent.prompt.text(),
+        "cut me",
+        "Ctrl+Y pastes the cut text back"
+    );
 }

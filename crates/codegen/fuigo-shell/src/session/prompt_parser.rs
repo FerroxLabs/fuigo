@@ -214,11 +214,7 @@ Below are some potentially helpful/relevant pieces of information for figuring o
 ///
 /// This only maps the typed text to a path.
 /// Reading it still happens only for a human-typed prompt (`file_expansion_allowed`), exactly as for an absolute `@/path` today.
-fn resolve_reference_path(
-    raw: &str,
-    working_directory: &Path,
-    home: Option<&Path>,
-) -> PathBuf {
+fn resolve_reference_path(raw: &str, working_directory: &Path, home: Option<&Path>) -> PathBuf {
     let raw = match raw.strip_prefix('!') {
         Some(rest) if !rest.is_empty() && !working_directory.join(raw).exists() => rest,
         _ => raw,
@@ -385,7 +381,10 @@ fn render_open_files(paths: &[String]) -> String {
     s.push_str("</open_files>");
     s
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,17 +421,32 @@ mod tests {
             resolve_reference_path("~/notes/a.md", cwd, Some(home)),
             PathBuf::from("/home/me/notes/a.md")
         );
-        assert_eq!(resolve_reference_path("~", cwd, Some(home)), PathBuf::from("/home/me"));
+        assert_eq!(
+            resolve_reference_path("~", cwd, Some(home)),
+            PathBuf::from("/home/me")
+        );
         // No home: the token stays workspace-relative, as before
         assert_eq!(
             resolve_reference_path("~/a.md", cwd, None),
             PathBuf::from("/work/proj/~/a.md")
         );
         // Everything else is unchanged
-        assert_eq!(resolve_reference_path("src/a.rs", cwd, Some(home)), PathBuf::from("/work/proj/src/a.rs"));
-        assert_eq!(resolve_reference_path("/etc/hosts", cwd, Some(home)), PathBuf::from("/etc/hosts"));
-        assert_eq!(resolve_reference_path("../x", cwd, Some(home)), PathBuf::from("/work/proj/../x"));
-        assert_eq!(resolve_reference_path("~user/x", cwd, Some(home)), PathBuf::from("/work/proj/~user/x"));
+        assert_eq!(
+            resolve_reference_path("src/a.rs", cwd, Some(home)),
+            PathBuf::from("/work/proj/src/a.rs")
+        );
+        assert_eq!(
+            resolve_reference_path("/etc/hosts", cwd, Some(home)),
+            PathBuf::from("/etc/hosts")
+        );
+        assert_eq!(
+            resolve_reference_path("../x", cwd, Some(home)),
+            PathBuf::from("/work/proj/../x")
+        );
+        assert_eq!(
+            resolve_reference_path("~user/x", cwd, Some(home)),
+            PathBuf::from("/work/proj/~user/x")
+        );
     }
 
     #[test]
@@ -441,7 +455,10 @@ mod tests {
         let cwd = dir.path();
         std::fs::write(cwd.join(".env"), "K=1").unwrap();
         assert_eq!(resolve_reference_path("!.env", cwd, None), cwd.join(".env"));
-        assert_eq!(resolve_reference_path("!~/x", cwd, Some(Path::new("/h"))), PathBuf::from("/h/x"));
+        assert_eq!(
+            resolve_reference_path("!~/x", cwd, Some(Path::new("/h"))),
+            PathBuf::from("/h/x")
+        );
         // A file genuinely named with the bang wins
         std::fs::write(cwd.join("!odd"), "x").unwrap();
         assert_eq!(resolve_reference_path("!odd", cwd, None), cwd.join("!odd"));
@@ -455,8 +472,14 @@ mod tests {
         let token = format!("{}/n.txt:2", home.path().display());
         let file = FileReference::parse(&token).unwrap();
         assert_eq!((file.start_line, file.end_line), (Some(2), Some(2)));
-        let rendered = render_file_reference(file, false).await.expect("file renders");
-        assert!(rendered.contains("2→two") && !rendered.contains("1→one") && !rendered.contains("3→three"));
+        let rendered = render_file_reference(file, false)
+            .await
+            .expect("file renders");
+        assert!(
+            rendered.contains("2→two")
+                && !rendered.contains("1→one")
+                && !rendered.contains("3→three")
+        );
     }
 
     #[test]
@@ -596,14 +619,19 @@ mod tests {
         .unwrap();
         let assembled = parsed.assemble();
         assert!(!assembled.contains("RUNTIME_FILE_MARKER"), "{assembled}");
-        assert!(!assembled.contains("<file_contents") && !assembled.contains("<attached_files>"), "{assembled}");
+        assert!(
+            !assembled.contains("<file_contents") && !assembled.contains("<attached_files>"),
+            "{assembled}"
+        );
     }
     /// A human-typed prompt still expands `@file` (the one authority on the allow-list).
     #[tokio::test]
     async fn test_human_prompt_still_expands_file_references() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("status.log"), "HUMAN_FILE_MARKER").unwrap();
-        let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new("inspect @status.log"))];
+        let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            "inspect @status.log",
+        ))];
         let info = crate::session::info::Info {
             id: agent_client_protocol::SessionId::new("test"),
             cwd: dir.path().display().to_string(),
@@ -739,10 +767,15 @@ mod tests {
         // Adding a variant to `InputAuthority` compiles without touching `file_expansion_allowed`, and the
         // `matches!` there names only the one allowed authority, so the new variant is excluded by construction.
         // This pins the allowed set at exactly one (a human-typed prompt).
-        let allowed = [HumanIntent, ModelAuthoredUntrusted, RuntimeControl, PeerUntrusted]
-            .into_iter()
-            .filter(|a| file_expansion_allowed(*a))
-            .count();
+        let allowed = [
+            HumanIntent,
+            ModelAuthoredUntrusted,
+            RuntimeControl,
+            PeerUntrusted,
+        ]
+        .into_iter()
+        .filter(|a| file_expansion_allowed(*a))
+        .count();
         assert_eq!(allowed, 1);
     }
     #[tokio::test]
@@ -752,7 +785,10 @@ mod tests {
         std::fs::write(dir.path().join("linked.txt"), "LINK_SECRET_MARKER").unwrap();
         let blocks = vec![
             acp::ContentBlock::Text(acp::TextContent::new("look @secret.txt and @/etc/passwd")),
-            acp::ContentBlock::ResourceLink(acp::ResourceLink::new("linked.txt", "file://linked.txt")),
+            acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+                "linked.txt",
+                "file://linked.txt",
+            )),
         ];
         let info = crate::session::info::Info {
             id: agent_client_protocol::SessionId::new("test"),
@@ -771,8 +807,17 @@ mod tests {
         .unwrap();
         let assembled = parsed.assemble();
         assert!(parsed.query.contains("@secret.txt") && parsed.query.contains("@/etc/passwd"));
-        for forbidden in ["TEXT_SECRET_MARKER", "LINK_SECRET_MARKER", "root:", "<attached_files>", "<file_contents"] {
-            assert!(!assembled.contains(forbidden), "unexpected {forbidden}: {assembled}");
+        for forbidden in [
+            "TEXT_SECRET_MARKER",
+            "LINK_SECRET_MARKER",
+            "root:",
+            "<attached_files>",
+            "<file_contents",
+        ] {
+            assert!(
+                !assembled.contains(forbidden),
+                "unexpected {forbidden}: {assembled}"
+            );
         }
     }
     /// Round 2, item 5: a peer-authority prompt cannot carry an embedded resource or an image into the turn.
@@ -782,10 +827,9 @@ mod tests {
         let blocks = vec![
             acp::ContentBlock::Text(acp::TextContent::new("hello")),
             acp::ContentBlock::Resource(acp::EmbeddedResource::new(
-                acp::EmbeddedResourceResource::TextResourceContents(acp::TextResourceContents::new(
-                    "RESOURCE_SECRET_MARKER",
-                    "file:///x.txt",
-                )),
+                acp::EmbeddedResourceResource::TextResourceContents(
+                    acp::TextResourceContents::new("RESOURCE_SECRET_MARKER", "file:///x.txt"),
+                ),
             )),
             acp::ContentBlock::Image(acp::ImageContent::new("aGVsbG8=", "image/png")),
         ];
@@ -794,13 +838,32 @@ mod tests {
             cwd: dir.path().display().to_string(),
         };
         let run = |authority| {
-            parse_prompt_with_skills(&blocks, dir.path().to_path_buf(), &info, authority, true, false, String::new())
+            parse_prompt_with_skills(
+                &blocks,
+                dir.path().to_path_buf(),
+                &info,
+                authority,
+                true,
+                false,
+                String::new(),
+            )
         };
-        let peer = run(super::super::InputAuthority::PeerUntrusted).await.unwrap();
-        assert!(!peer.assemble().contains("RESOURCE_SECRET_MARKER"), "{}", peer.assemble());
+        let peer = run(super::super::InputAuthority::PeerUntrusted)
+            .await
+            .unwrap();
+        assert!(
+            !peer.assemble().contains("RESOURCE_SECRET_MARKER"),
+            "{}",
+            peer.assemble()
+        );
         assert!(peer.images.is_empty(), "no image reaches a peer turn");
-        let human = run(super::super::InputAuthority::HumanIntent).await.unwrap();
-        assert!(human.assemble().contains("RESOURCE_SECRET_MARKER"), "unchanged for the user");
+        let human = run(super::super::InputAuthority::HumanIntent)
+            .await
+            .unwrap();
+        assert!(
+            human.assemble().contains("RESOURCE_SECRET_MARKER"),
+            "unchanged for the user"
+        );
         assert_eq!(human.images.len(), 1);
     }
 }

@@ -838,21 +838,33 @@ fn p150_auth_lock_file_is_owner_only() {
     let lock_path = path.with_file_name(LOCK_FILE_NAME);
 
     drop(try_lock_auth_file_nonblocking(&path).expect("uncontended non-blocking acquire"));
-    assert_eq!(mode(&lock_path), 0o600, "non-blocking acquire must create it owner-only");
+    assert_eq!(
+        mode(&lock_path),
+        0o600,
+        "non-blocking acquire must create it owner-only"
+    );
 
     std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o644)).unwrap();
     match lock_auth_file_blocking(&path, StdDuration::from_secs(5)) {
         LockAcquire::Acquired(lock) => drop(lock),
         _ => panic!("uncontended blocking acquire"),
     }
-    assert_eq!(mode(&lock_path), 0o600, "a looser auth.json.lock is tightened");
+    assert_eq!(
+        mode(&lock_path),
+        0o600,
+        "a looser auth.json.lock is tightened"
+    );
 
     std::fs::remove_file(&lock_path).unwrap();
     match lock_auth_file_blocking(&path, StdDuration::from_secs(5)) {
         LockAcquire::Acquired(lock) => drop(lock),
         _ => panic!("uncontended blocking acquire"),
     }
-    assert_eq!(mode(&lock_path), 0o600, "blocking acquire must create it owner-only");
+    assert_eq!(
+        mode(&lock_path),
+        0o600,
+        "blocking acquire must create it owner-only"
+    );
 }
 
 #[test]

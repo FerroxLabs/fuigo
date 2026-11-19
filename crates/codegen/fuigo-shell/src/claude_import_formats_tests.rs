@@ -67,13 +67,17 @@ impl World {
 }
 
 fn read_toml(path: &Path) -> TomlValue {
-    toml::from_str(&std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
-        .unwrap()
+    toml::from_str(
+        &std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+    )
+    .unwrap()
 }
 
 fn read_json(path: &Path) -> serde_json::Value {
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
-        .unwrap()
+    serde_json::from_str(
+        &std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+    )
+    .unwrap()
 }
 
 fn strings(v: &TomlValue) -> Vec<String> {
@@ -144,7 +148,12 @@ fn path_entries(items: &[ImportableItem]) -> Vec<(PathKind, String)> {
 fn assert_owner_only(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode & 0o077, 0, "{} is {mode:o}: imported settings may carry credentials", path.display());
+    assert_eq!(
+        mode & 0o077,
+        0,
+        "{} is {mode:o}: imported settings may carry credentials",
+        path.display()
+    );
 }
 
 #[cfg(not(unix))]
@@ -170,8 +179,16 @@ fn format_settings_permissions() {
         r#"{"permissions":{"allow":["Edit(docs/**)"],"deny":["NotARealTool(x)"]}}"#,
     );
     let plan = w.scan();
-    assert_eq!(permissions(&plan.global_items), 6, "user-tier rules land in the global scope");
-    assert_eq!(permissions(&plan.project_items), 1, "an unparseable rule is skipped, the rest kept");
+    assert_eq!(
+        permissions(&plan.global_items),
+        6,
+        "user-tier rules land in the global scope"
+    );
+    assert_eq!(
+        permissions(&plan.project_items),
+        1,
+        "an unparseable rule is skipped, the rest kept"
+    );
     assert_eq!(plan.total_items(), 7);
 
     let result = w.apply(&plan);
@@ -182,8 +199,14 @@ fn format_settings_permissions() {
         ["Bash(npm run build)", "Read(src/*.rs)", "Bash(git status)"]
     );
     assert_eq!(strings(&global["permission"]["deny"]), ["Bash(rm -rf *)"]);
-    assert_eq!(strings(&global["permission"]["ask"]), ["WebFetch(domain:example.com)", "Edit"]);
-    assert_eq!(strings(&w.project_config()["permission"]["allow"]), ["Edit(docs/**)"]);
+    assert_eq!(
+        strings(&global["permission"]["ask"]),
+        ["WebFetch(domain:example.com)", "Edit"]
+    );
+    assert_eq!(
+        strings(&w.project_config()["permission"]["allow"]),
+        ["Edit(docs/**)"]
+    );
     assert_owner_only(&w.fuigo_home.join("config.toml"));
     assert_owner_only(&w.proj.join(".fuigo/config.toml"));
 }
@@ -196,21 +219,39 @@ fn format_settings_env() {
         return;
     }
     let w = World::new();
-    w.write(&w.home.join(".claude/settings.json"), r#"{"env":{"G_KEY":"g-value-1"}}"#);
-    w.write(&w.home.join(".claude/settings.local.json"), r#"{"env":{"L_KEY":"local-value"}}"#);
-    w.write(&w.proj.join(".claude/settings.json"), r#"{"env":{"P_KEY":"proj-value"}}"#);
+    w.write(
+        &w.home.join(".claude/settings.json"),
+        r#"{"env":{"G_KEY":"g-value-1"}}"#,
+    );
+    w.write(
+        &w.home.join(".claude/settings.local.json"),
+        r#"{"env":{"L_KEY":"local-value"}}"#,
+    );
+    w.write(
+        &w.proj.join(".claude/settings.json"),
+        r#"{"env":{"P_KEY":"proj-value"}}"#,
+    );
     let plan = w.scan();
     assert_eq!(
         env_vars(&plan.global_items),
-        [("G_KEY".into(), "g-value-1".into()), ("L_KEY".into(), "local-value".into())]
+        [
+            ("G_KEY".into(), "g-value-1".into()),
+            ("L_KEY".into(), "local-value".into())
+        ]
     );
-    assert_eq!(env_vars(&plan.project_items), [("P_KEY".into(), "proj-value".into())]);
+    assert_eq!(
+        env_vars(&plan.project_items),
+        [("P_KEY".into(), "proj-value".into())]
+    );
 
     // The human-facing summary shows the length, never the value.
     let summary = plan.summary(&w.proj);
     assert!(summary.contains("G_KEY = <redacted, 9 chars>"), "{summary}");
     for secret in ["g-value-1", "local-value", "proj-value"] {
-        assert!(!summary.contains(secret), "summary leaked {secret}: {summary}");
+        assert!(
+            !summary.contains(secret),
+            "summary leaked {secret}: {summary}"
+        );
     }
 
     let result = w.apply(&plan);
@@ -218,7 +259,10 @@ fn format_settings_env() {
     let global = w.global_config();
     assert_eq!(global["env"]["G_KEY"].as_str(), Some("g-value-1"));
     assert_eq!(global["env"]["L_KEY"].as_str(), Some("local-value"));
-    assert_eq!(w.project_config()["env"]["P_KEY"].as_str(), Some("proj-value"));
+    assert_eq!(
+        w.project_config()["env"]["P_KEY"].as_str(),
+        Some("proj-value")
+    );
 
     // Additive only: a value already in config.toml is never overwritten.
     w.write(
@@ -246,7 +290,10 @@ fn format_settings_env_order_is_stable() {
         .map(|k| format!("\"{k}\":\"v\""))
         .collect::<Vec<_>>()
         .join(",");
-    w.write(&w.home.join(".claude/settings.json"), &format!("{{\"env\":{{{body}}}}}"));
+    w.write(
+        &w.home.join(".claude/settings.json"),
+        &format!("{{\"env\":{{{body}}}}}"),
+    );
     let plan = w.scan();
     let order: Vec<String> = plan
         .global_items
@@ -280,7 +327,12 @@ fn format_settings_hooks() {
     let plan = w.scan();
     assert_eq!(
         hooks(&plan.global_items),
-        [("PreToolUse".into(), Some("Bash".into()), "echo global-hook".into(), Some(5))],
+        [(
+            "PreToolUse".into(),
+            Some("Bash".into()),
+            "echo global-hook".into(),
+            Some(5)
+        )],
         "the http handler is not imported"
     );
     assert_eq!(
@@ -288,7 +340,10 @@ fn format_settings_hooks() {
         [("Stop".into(), None, "echo proj-stop".into(), None)]
     );
     let summary = plan.summary(&w.proj);
-    assert!(summary.contains("PreToolUse [Bash] echo global-hook (timeout: 5s)"), "{summary}");
+    assert!(
+        summary.contains("PreToolUse [Bash] echo global-hook (timeout: 5s)"),
+        "{summary}"
+    );
 
     let result = w.apply(&plan);
     assert_eq!((result.global_count, result.project_count), (1, 1));
@@ -299,7 +354,10 @@ fn format_settings_hooks() {
     assert_eq!(group["hooks"][0]["command"], "echo global-hook");
     assert_eq!(group["hooks"][0]["timeout"], 5);
     let p = read_json(&w.proj.join(".fuigo/hooks/imported-from-claude.json"));
-    assert_eq!(p["hooks"]["Stop"][0]["hooks"][0]["command"], "echo proj-stop");
+    assert_eq!(
+        p["hooks"]["Stop"][0]["hooks"][0]["command"],
+        "echo proj-stop"
+    );
     assert!(p["hooks"]["Stop"][0].get("matcher").is_none());
 
     // Re-importing adds nothing, and a changed timeout is refreshed in place.
@@ -340,7 +398,10 @@ fn format_claude_json_mcp_servers() {
     let result = w.apply(&plan);
     assert_eq!((result.global_count, result.project_count), (1, 1));
     let global = w.global_config();
-    assert_eq!(global["mcp_servers"]["user-srv"]["command"].as_str(), Some("npx"));
+    assert_eq!(
+        global["mcp_servers"]["user-srv"]["command"].as_str(),
+        Some("npx")
+    );
     assert!(global["mcp_servers"].get("proj-local-srv").is_none());
     let project = w.project_config();
     assert_eq!(
@@ -370,8 +431,14 @@ fn format_mcp_json_servers() {
     let result = w.apply(&plan);
     assert_eq!((result.global_count, result.project_count), (0, 1));
     let project = w.project_config();
-    assert_eq!(project["mcp_servers"]["repo-srv"]["command"].as_str(), Some("node"));
-    assert_eq!(project["mcp_servers"]["repo-srv"]["args"][0].as_str(), Some("srv.js"));
+    assert_eq!(
+        project["mcp_servers"]["repo-srv"]["command"].as_str(),
+        Some("node")
+    );
+    assert_eq!(
+        project["mcp_servers"]["repo-srv"]["args"][0].as_str(),
+        Some("srv.js")
+    );
     assert_owner_only(&w.proj.join(".fuigo/config.toml"));
 
     // Additive only: a server already configured under that name is kept as it is.
@@ -380,7 +447,10 @@ fn format_mcp_json_servers() {
         "[mcp_servers.repo-srv]\ncommand = \"mine\"\n",
     );
     assert_eq!(w.apply(&plan).total(), 0);
-    assert_eq!(w.project_config()["mcp_servers"]["repo-srv"]["command"].as_str(), Some("mine"));
+    assert_eq!(
+        w.project_config()["mcp_servers"]["repo-srv"]["command"].as_str(),
+        Some("mine")
+    );
 }
 
 // ---- ~/.claude/{skills,rules} and <repo>/.claude/{skills,rules} directories ----
@@ -417,8 +487,14 @@ fn format_claude_skill_and_rule_dirs() {
         [s(w.home.join(".claude/skills"))]
     );
     let project = w.project_config();
-    assert_eq!(strings(&project["paths"]["extra_skill_dirs"]), [s(w.proj.join(".claude/skills"))]);
-    assert_eq!(strings(&project["paths"]["extra_rule_dirs"]), [s(w.proj.join(".claude/rules"))]);
+    assert_eq!(
+        strings(&project["paths"]["extra_skill_dirs"]),
+        [s(w.proj.join(".claude/skills"))]
+    );
+    assert_eq!(
+        strings(&project["paths"]["extra_rule_dirs"]),
+        [s(w.proj.join(".claude/rules"))]
+    );
 }
 
 // ---- the opt-in marker, and a config.toml that is not valid TOML ----
@@ -434,10 +510,17 @@ fn format_import_marker_and_refusal_to_clobber() {
     reset_marker_cache_for_test();
     assert!(!is_claude_import_marked_at(&config));
     mark_claude_imported().unwrap();
-    assert!(is_claude_import_marked(), "the in-process cache reflects the marker at once");
+    assert!(
+        is_claude_import_marked(),
+        "the in-process cache reflects the marker at once"
+    );
     let parsed = read_toml(&config);
     assert_eq!(parsed["claude_compat"]["imported"].as_bool(), Some(true));
-    assert_eq!(parsed["ui"]["theme"].as_str(), Some("dark"), "other sections survive");
+    assert_eq!(
+        parsed["ui"]["theme"].as_str(),
+        Some("dark"),
+        "other sections survive"
+    );
     assert_owner_only(&config);
     reset_marker_cache_for_test();
 

@@ -125,7 +125,10 @@ fn persisted_remote_gate_path() -> std::path::PathBuf {
 /// Best-effort and atomic: the value goes to a unique temporary sibling that is renamed over the
 /// gate, so a concurrent startup never reads a truncated file and a failed write keeps the
 /// previous value.
-#[allow(clippy::disallowed_methods, reason = "config/campaign/crash-handler flag files under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "config/campaign/crash-handler flag files under FUIGO_HOME; not inside a session folder"
+)]
 fn persist_remote_gate(path: &std::path::Path, value: bool) {
     let Some(dir) = path.parent() else {
         return;
@@ -178,7 +181,10 @@ pub fn load_crash_handler_enabled_sync() -> bool {
     .value
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod crash_handler_gate_tests {
     use super::*;
@@ -423,7 +429,11 @@ mod admin_source_tests_p183r10 {
     /// A broken admin file or MDM payload with no validated copy turns crash reporting off at the highest tier.
     #[test]
     fn broken_admin_source_turns_the_crash_handler_off_p183r10() {
-        for make in [seam::broken_file, seam::undecodable_mdm, seam::mdm_with_bad_overrides] {
+        for make in [
+            seam::broken_file,
+            seam::undecodable_mdm,
+            seam::mdm_with_bad_overrides,
+        ] {
             let _seam = make();
             assert_eq!(crash_handler_requirements_tier(None), Some(false));
         }

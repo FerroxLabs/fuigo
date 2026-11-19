@@ -55,9 +55,9 @@ pub const COMPACT_SYSTEM_PROMPT: &str = "You are an AI coding agent. You operate
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use fuigo_tools::types::template_renderer::TemplateRenderer;
     use fuigo_tools::types::tool::ToolKind;
+    use std::collections::HashMap;
 
     /// Verify the pre-generated encrypted file matches the current template sources.
     /// If this fails, run: `python3 scripts/encrypt_templates.py`
@@ -529,10 +529,18 @@ mod tests {
             .expect("example call must be an object")
             .keys()
             .collect();
-        assert_eq!(keys, ["patch"], "apply_patch takes exactly one argument, `patch`");
+        assert_eq!(
+            keys,
+            ["patch"],
+            "apply_patch takes exactly one argument, `patch`"
+        );
         let input: ApplyPatchInput =
             serde_json::from_value(value).expect("example must deserialize as ApplyPatchInput");
-        assert!(input.patch.starts_with("*** Begin Patch\n*** Update File: "));
+        assert!(
+            input
+                .patch
+                .starts_with("*** Begin Patch\n*** Update File: ")
+        );
         parse_patch(&input.patch).expect("example patch must parse");
     }
 
@@ -547,7 +555,9 @@ mod tests {
             "the dedicated file-tool rule must stay"
         );
         assert!(prompt.contains("Read whole files rather than slices unless a file is very large"));
-        assert!(prompt.contains("when `read_file` accepts several paths, read related files together in one call"));
+        assert!(prompt.contains(
+            "when `read_file` accepts several paths, read related files together in one call"
+        ));
         assert!(prompt.contains("Do not re-read a file that has not changed since you read it"));
         // default_renderer() has no task tool, so the subagent line needs a renderer that ships one
         let with_task = render_base(&codex_renderer(), &default_placeholders());
@@ -563,7 +573,10 @@ mod tests {
         let tools: HashMap<ToolKind, String> = [(ToolKind::Read, "read_file".to_string())].into();
         let r = TemplateRenderer::new(tools, HashMap::new());
         let prompt = render_base(&r, &default_placeholders());
-        assert!(!prompt.contains("subagent"), "no subagent guidance without a task tool");
+        assert!(
+            !prompt.contains("subagent"),
+            "no subagent guidance without a task tool"
+        );
         assert!(prompt.contains("Read whole files rather than slices unless a file is very large"));
     }
 
@@ -598,31 +611,54 @@ mod tests {
             CODEX_TEMPLATE_RAW_CEILING_BYTES
         );
         let prompt = render_apply_patch(&codex_renderer(), &default_placeholders());
-        assert!(!prompt.contains("${{") && !prompt.contains("${%"), "no unresolved template tokens");
+        assert!(
+            !prompt.contains("${{") && !prompt.contains("${%"),
+            "no unresolved template tokens"
+        );
         // Batching guidance names the tools the harness ships
         assert!(prompt.contains("## Exploration and tool use"));
         assert!(prompt.contains("Parallelize independent tool calls in one response whenever you can, especially file reads and searches"));
-        assert!(prompt.contains("when `read_file` accepts several paths, read related files in one call"));
+        assert!(
+            prompt
+                .contains("when `read_file` accepts several paths, read related files in one call")
+        );
         assert!(prompt.contains("Do not re-read a file you already have unless you changed it or it was trimmed from context"));
         assert!(prompt.contains("one search with regex alternation and context beats many single-pattern searches (`grep_files` for content, `list_dir` to orient in a directory once)"));
-        assert!(prompt.contains("Prefer the file tools above over `cat`/`sed`/`rg` in `run_terminal_command`"));
+        assert!(prompt.contains(
+            "Prefer the file tools above over `cat`/`sed`/`rg` in `run_terminal_command`"
+        ));
         assert!(prompt.contains("Wait for a command's result rather than polling for it"));
-        assert!(prompt.contains("prefer using `rg` or `rg --files`"), "shell rg advice stays");
+        assert!(
+            prompt.contains("prefer using `rg` or `rg --files`"),
+            "shell rg advice stays"
+        );
         // Subagents only for broad work, and wait for them
         assert!(prompt.contains("## Subagents"));
         assert!(prompt.contains("For tasks scoped to a handful of files, explore directly — do not spawn a `spawn_subagent` subagent"));
-        assert!(prompt.contains("wait for its result rather than duplicating the investigation yourself"));
+        assert!(
+            prompt
+                .contains("wait for its result rather than duplicating the investigation yourself")
+        );
         // Plan tool: milestones, not every step
         assert!(prompt.contains("It is for multi-step work the user watches"));
         assert!(prompt.contains("Do not update the plan for every small step"));
-        assert!(prompt.contains("If no plan tool is available, skip written planning and start the work"));
+        assert!(
+            prompt
+                .contains("If no plan tool is available, skip written planning and start the work")
+        );
         // Preamble optional; progress updates only for long work
-        assert!(prompt.contains("A brief one-line preamble is welcome when it helps the user follow along"));
+        assert!(
+            prompt.contains(
+                "A brief one-line preamble is welcome when it helps the user follow along"
+            )
+        );
         assert!(prompt.contains("Do not add commentary to routine reads and searches"));
         assert!(!prompt.contains("When making tool calls, include a brief preamble message"));
         assert!(prompt.contains("Only for especially longer tasks"));
         // Stale Codex-CLI text is gone
-        assert!(prompt.contains("When running non-interactively, proactively run the relevant tests and lints yourself"));
+        assert!(prompt.contains(
+            "When running non-interactively, proactively run the relevant tests and lints yourself"
+        ));
         for stale in [
             "**never**",
             "on-failure",
@@ -632,10 +668,15 @@ mod tests {
             "included with the developer message",
             "Sandbox and approvals",
         ] {
-            assert!(!prompt.contains(stale), "stale Codex-CLI text still present: {stale}");
+            assert!(
+                !prompt.contains(stale),
+                "stale Codex-CLI text still present: {stale}"
+            );
         }
         // Kept from the earlier fix
-        assert!(prompt.contains("Do not waste tokens by re-reading files after calling `apply_patch` on them"));
+        assert!(prompt.contains(
+            "Do not waste tokens by re-reading files after calling `apply_patch` on them"
+        ));
         assert!(prompt.contains("Emit function calls to read and search the workspace, run terminal commands, and apply patches"));
     }
 
@@ -654,7 +695,9 @@ mod tests {
         assert!(!prompt.contains("## Subagents"));
         assert!(!prompt.contains("subagent"));
         assert!(!prompt.contains("grep_files") && !prompt.contains("list_dir"));
-        assert!(prompt.contains("one search with regex alternation and context beats many single-pattern searches."));
+        assert!(prompt.contains(
+            "one search with regex alternation and context beats many single-pattern searches."
+        ));
     }
 
     /// The subagent prompt carries a context-gathering budget and whole-file/multi-file read guidance.
@@ -669,7 +712,9 @@ mod tests {
         let r = TemplateRenderer::new(HashMap::new(), HashMap::new());
         let bare = render_subagent(&r, &default_placeholders());
         assert!(!bare.contains("${{") && !bare.contains("${%"));
-        assert!(bare.contains("start broad with one wide search, then read the relevant files in one batch"));
+        assert!(bare.contains(
+            "start broad with one wide search, then read the relevant files in one batch"
+        ));
         assert!(bare.contains("Read whole files rather than offset/limit slices. Never re-read"));
     }
 

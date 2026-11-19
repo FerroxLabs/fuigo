@@ -69,9 +69,10 @@ fn create_windows_owner_only_dir(path: &Path) -> io::Result<()> {
         EXPLICIT_ACCESS_W, SET_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows::Win32::Security::{
-        ACL, CONTAINER_INHERIT_ACE, GetTokenInformation, InitializeSecurityDescriptor, OBJECT_INHERIT_ACE,
-        PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
-        SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        ACL, CONTAINER_INHERIT_ACE, GetTokenInformation, InitializeSecurityDescriptor,
+        OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+        SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
     };
     use windows::Win32::Storage::FileSystem::CreateDirectoryW;
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -86,10 +87,18 @@ fn create_windows_owner_only_dir(path: &Path) -> io::Result<()> {
         let mut len = 0u32;
         let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
         let mut token_user_buffer = vec![0u8; len as usize];
-        let got = GetTokenInformation(token, TokenUser, Some(token_user_buffer.as_mut_ptr() as *mut _), len, &mut len);
+        let got = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(token_user_buffer.as_mut_ptr() as *mut _),
+            len,
+            &mut len,
+        );
         let _ = CloseHandle(token);
         got.map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
-        let user_sid = (*(token_user_buffer.as_ptr() as *const TOKEN_USER)).User.Sid;
+        let user_sid = (*(token_user_buffer.as_ptr() as *const TOKEN_USER))
+            .User
+            .Sid;
 
         let access = EXPLICIT_ACCESS_W {
             grfAccessPermissions: 0x10000000, // GENERIC_ALL
@@ -97,7 +106,8 @@ fn create_windows_owner_only_dir(path: &Path) -> io::Result<()> {
             grfInheritance: OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
             Trustee: TRUSTEE_W {
                 pMultipleTrustee: std::ptr::null_mut(),
-                MultipleTrusteeOperation: windows::Win32::Security::Authorization::NO_MULTIPLE_TRUSTEE,
+                MultipleTrusteeOperation:
+                    windows::Win32::Security::Authorization::NO_MULTIPLE_TRUSTEE,
                 TrusteeForm: TRUSTEE_IS_SID,
                 TrusteeType: TRUSTEE_IS_USER,
                 ptstrName: windows::core::PWSTR(user_sid.0 as *mut u16),
@@ -113,14 +123,20 @@ fn create_windows_owner_only_dir(path: &Path) -> io::Result<()> {
             let psd = PSECURITY_DESCRIPTOR(&mut sd as *mut SECURITY_DESCRIPTOR as *mut _);
             InitializeSecurityDescriptor(psd, 1).map_err(io::Error::other)?; // SECURITY_DESCRIPTOR_REVISION
             SetSecurityDescriptorDacl(psd, true, Some(acl), false).map_err(io::Error::other)?;
-            SetSecurityDescriptorControl(psd, SE_DACL_PROTECTED, SE_DACL_PROTECTED).map_err(io::Error::other)?;
+            SetSecurityDescriptorControl(psd, SE_DACL_PROTECTED, SE_DACL_PROTECTED)
+                .map_err(io::Error::other)?;
             let sa = SECURITY_ATTRIBUTES {
                 nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: psd.0,
                 bInheritHandle: false.into(),
             };
-            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-            CreateDirectoryW(PCWSTR::from_raw(wide.as_ptr()), Some(&sa)).map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
+            let wide: Vec<u16> = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            CreateDirectoryW(PCWSTR::from_raw(wide.as_ptr()), Some(&sa))
+                .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
         })();
         let _ = LocalFree(Some(HLOCAL(acl as *mut _)));
         result
@@ -233,7 +249,10 @@ mod tests {
         std::fs::write(&path, b"x").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         restrict_to_owner(&path).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -250,8 +269,14 @@ mod tests {
         let dir = tempfile_dir();
         let made = dir.join("cache");
         create_owner_only_dir(&made).unwrap();
-        assert_eq!(std::fs::metadata(&made).unwrap().permissions().mode() & 0o777, 0o700);
-        assert_eq!(create_owner_only_dir(&made).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::metadata(&made).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            create_owner_only_dir(&made).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -259,7 +284,8 @@ mod tests {
     fn tempfile_dir() -> std::path::PathBuf {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("fuigo-secrets-p145-{}-{seq}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fuigo-secrets-p145-{}-{seq}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         dir
     }

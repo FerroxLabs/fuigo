@@ -5,8 +5,8 @@
 //! every refusal test shows the same setup connecting once the opt-in is present). Each test runs alone in a fresh
 //! process.
 use super::p93_relay_opt_in_tests::{
-    SERVICE_ORIGIN, assert_connects, assert_nothing_reached, fluxrouter_relay, relay_config, service_relay,
-    spawn_counting_relay, user_opt_in, write_user_config,
+    SERVICE_ORIGIN, assert_connects, assert_nothing_reached, fluxrouter_relay, relay_config,
+    service_relay, spawn_counting_relay, user_opt_in, write_user_config,
 };
 use super::*;
 use crate::agent::relay_opt_in::{RELAY_REFUSED_METHOD, TRUSTED_RELAY_ORIGINS_ENV};
@@ -25,7 +25,7 @@ fn child(test: &str) -> Option<(SessionFront, EnvGuard)> {
 
 /// What the TUI's session sync does for `relay`: build the sync and push one notification through it.
 fn start_sync(relay: (String, String)) -> Box<dyn std::any::Any> {
-    Box::new( crate::relay::RelaySync::new(
+    Box::new(crate::relay::RelaySync::new(
         "p125-session".to_owned(),
         relay_config(relay),
         crate::relay::AgentType::Tui,
@@ -153,8 +153,14 @@ fn the_leaders_refusal_is_published_for_its_clients_until_the_relay_is_opted_in(
                     write_user_config(&user_opt_in(&[SERVICE_ORIGIN]));
                     demand_tx.send_replace(true);
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    assert!(board.current().is_none(), "on_demand={on_demand}: the refusal outlived the opt-in");
-                    assert!(slot.borrow().is_some(), "on_demand={on_demand}: the opted-in relay was not started");
+                    assert!(
+                        board.current().is_none(),
+                        "on_demand={on_demand}: the refusal outlived the opt-in"
+                    );
+                    assert!(
+                        slot.borrow().is_some(),
+                        "on_demand={on_demand}: the opted-in relay was not started"
+                    );
                     assert_connects(&seen, "after the opt-in").await;
                     let _ = std::fs::remove_file(
                         fuigo_config::user_fuigo_home().unwrap().join("config.toml"),
@@ -215,8 +221,12 @@ async fn spawn_recording_relay() -> (std::net::SocketAddr, Arc<std::sync::Mutex<
                     return;
                 };
                 let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#;
-                let _ = ws.send(tokio_tungstenite::tungstenite::Message::text(init)).await;
-                while let Ok(Some(Ok(msg))) = tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                let _ = ws
+                    .send(tokio_tungstenite::tungstenite::Message::text(init))
+                    .await;
+                while let Ok(Some(Ok(msg))) =
+                    tokio::time::timeout(Duration::from_secs(30), ws.next()).await
+                {
                     if let Ok(text) = msg.into_text() {
                         sink.lock().unwrap().push(text.to_string());
                     }
@@ -248,21 +258,33 @@ fn relay_sync_to_an_opted_in_relay_delivers_the_session() {
         .expect("an opted-in relay is synced to");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !sync.is_connected() {
-            assert!(tokio::time::Instant::now() < deadline, "the sync never completed the handshake");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the sync never completed the handshake"
+            );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         sync.queue(agent_client_protocol::SessionNotification::new(
             agent_client_protocol::SessionId::new("p125-delivery"),
-            agent_client_protocol::SessionUpdate::AgentMessageChunk(agent_client_protocol::ContentChunk::new(
-                agent_client_protocol::ContentBlock::Text(agent_client_protocol::TextContent::new(
-                    "p125-transcript-marker".to_string(),
-                )),
-            )),
+            agent_client_protocol::SessionUpdate::AgentMessageChunk(
+                agent_client_protocol::ContentChunk::new(
+                    agent_client_protocol::ContentBlock::Text(
+                        agent_client_protocol::TextContent::new(
+                            "p125-transcript-marker".to_string(),
+                        ),
+                    ),
+                ),
+            ),
         ));
         sync.flush();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if frames.lock().unwrap().iter().any(|f| f.contains("p125-transcript-marker")) {
+            if frames
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|f| f.contains("p125-transcript-marker"))
+            {
                 break;
             }
             assert!(

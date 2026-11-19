@@ -17,8 +17,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use wait_timeout::ChildExt;
 use fuigo_tty_utils::{ProcessGroup, git_command_in, git_command_locking_in, global_process_scope};
+use wait_timeout::ChildExt;
 
 /// Shared wall-clock budget for head and base targeted fetches.
 pub(crate) const RESTORE_FETCH_BUDGET: Duration = Duration::from_secs(60);

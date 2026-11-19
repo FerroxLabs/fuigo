@@ -22,8 +22,8 @@ use crate::handle::ChatStateHandle;
 use crate::persistence::ChatPersistence;
 use crate::types::{PruningConfig, TurnCapture};
 
-use state::ChatState;
 use fuigo_sampling_types::{ConversationItem, SamplingConfig};
+use state::ChatState;
 
 /// The actor that owns all chat state.
 /// Runs in a dedicated tokio task and processes commands sequentially.
@@ -117,41 +117,54 @@ impl ChatStateActor {
 
     /// Dispatch a command to the appropriate mutation or query handler.
     async fn handle_command(&mut self, cmd: ChatStateCommand) {
-        if matches!(&cmd,
+        if matches!(
+            &cmd,
             ChatStateCommand::PushUserMessage { .. }
-            | ChatStateCommand::PushUserMessagesBatch { .. }
-            | ChatStateCommand::PushUserMessageAndAck { .. }
-            | ChatStateCommand::PushStateMarkerAndAck { .. }
-            | ChatStateCommand::AppendWorkingDirectorySwitchAndAck { .. }
-            | ChatStateCommand::PushUserMessageWithRepairReason { .. }
-            | ChatStateCommand::PushAssistantResponse { .. }
-            | ChatStateCommand::PushToolResult { .. }
-            | ChatStateCommand::PushModelOutput { .. }
-            | ChatStateCommand::PushUnreportedModelOutput { .. }
-            | ChatStateCommand::IncrementPromptIndex
-            | ChatStateCommand::UpdateSamplingConfig { .. }
-            | ChatStateCommand::UpdateCredentials { .. }
-            | ChatStateCommand::RecordAgentEditedPath { .. }
-            | ChatStateCommand::ReplaceConversation { .. }
-            | ChatStateCommand::ReplaceConversationPersisted { .. }
-            | ChatStateCommand::RepairHistory { .. }
-            | ChatStateCommand::StripConversationImages { .. }
-            | ChatStateCommand::ReplaceSystemHead { .. }
-            | ChatStateCommand::RestoreSnapshot(_)
-            | ChatStateCommand::TruncateToPromptIndex { .. }
-            | ChatStateCommand::RepairDanglingAfterHarnessHalt { .. }
-            | ChatStateCommand::PopStrandedContinueReminder
-            | ChatStateCommand::BuildConversationRequest { .. }
+                | ChatStateCommand::PushUserMessagesBatch { .. }
+                | ChatStateCommand::PushUserMessageAndAck { .. }
+                | ChatStateCommand::PushStateMarkerAndAck { .. }
+                | ChatStateCommand::AppendWorkingDirectorySwitchAndAck { .. }
+                | ChatStateCommand::PushUserMessageWithRepairReason { .. }
+                | ChatStateCommand::PushAssistantResponse { .. }
+                | ChatStateCommand::PushToolResult { .. }
+                | ChatStateCommand::PushModelOutput { .. }
+                | ChatStateCommand::PushUnreportedModelOutput { .. }
+                | ChatStateCommand::IncrementPromptIndex
+                | ChatStateCommand::UpdateSamplingConfig { .. }
+                | ChatStateCommand::UpdateCredentials { .. }
+                | ChatStateCommand::RecordAgentEditedPath { .. }
+                | ChatStateCommand::ReplaceConversation { .. }
+                | ChatStateCommand::ReplaceConversationPersisted { .. }
+                | ChatStateCommand::RepairHistory { .. }
+                | ChatStateCommand::StripConversationImages { .. }
+                | ChatStateCommand::ReplaceSystemHead { .. }
+                | ChatStateCommand::RestoreSnapshot(_)
+                | ChatStateCommand::TruncateToPromptIndex { .. }
+                | ChatStateCommand::RepairDanglingAfterHarnessHalt { .. }
+                | ChatStateCommand::PopStrandedContinueReminder
+                | ChatStateCommand::BuildConversationRequest { .. }
         ) {
             self.compaction_epoch = self.compaction_epoch.wrapping_add(1);
         }
         match cmd {
             ChatStateCommand::GetCompactionSnapshot { reply } => {
-                let _ = reply.send((self.compaction_epoch, self.state.prompt_index, self.state.conversation.clone()));
+                let _ = reply.send((
+                    self.compaction_epoch,
+                    self.state.prompt_index,
+                    self.state.conversation.clone(),
+                ));
             }
-            ChatStateCommand::CommitCompaction { epoch, items, cancel, commit, reply } => {
+            ChatStateCommand::CommitCompaction {
+                epoch,
+                items,
+                cancel,
+                commit,
+                reply,
+            } => {
                 let result = if epoch != self.compaction_epoch || cancel.is_cancelled() {
-                    Err(std::io::Error::other("stale or cancelled compaction candidate"))
+                    Err(std::io::Error::other(
+                        "stale or cancelled compaction candidate",
+                    ))
                 } else {
                     // Hold serialization through disk acknowledgement. Commands
                     // arriving during I/O apply afterwards to the new projection.
@@ -168,7 +181,9 @@ impl ChatStateActor {
                             self.compaction_epoch = self.compaction_epoch.wrapping_add(1);
                             Err(error)
                         }
-                        Err(crate::commands::CompactionCommitError::NotCommitted(error)) => Err(error),
+                        Err(crate::commands::CompactionCommitError::NotCommitted(error)) => {
+                            Err(error)
+                        }
                     }
                 };
                 let _ = reply.send(result);

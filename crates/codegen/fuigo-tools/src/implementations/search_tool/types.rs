@@ -36,10 +36,14 @@ mod tests {
     use super::*;
     #[test]
     fn native_discovery_scope_is_explicit_and_old_input_stays_mcp() {
-        let old: SearchToolInput=serde_json::from_str(r#"{"query":"images"}"#).unwrap();
-        assert_eq!(old.scope,SearchScope::Mcp);
-        let native: SearchToolInput=serde_json::from_str(r#"{"query":"images","scope":"native"}"#).unwrap();
-        assert_eq!(native.scope,SearchScope::Native);
-        assert!(serde_json::from_str::<SearchToolInput>(r#"{"query":"images","scope":"all-powerful"}"#).is_err());
+        let old: SearchToolInput = serde_json::from_str(r#"{"query":"images"}"#).unwrap();
+        assert_eq!(old.scope, SearchScope::Mcp);
+        let native: SearchToolInput =
+            serde_json::from_str(r#"{"query":"images","scope":"native"}"#).unwrap();
+        assert_eq!(native.scope, SearchScope::Native);
+        assert!(
+            serde_json::from_str::<SearchToolInput>(r#"{"query":"images","scope":"all-powerful"}"#)
+                .is_err()
+        );
     }
 }

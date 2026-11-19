@@ -25,7 +25,11 @@ pub struct AgentConfigFile {
 /// When all compat cells are on it equals the legacy `AGENT_FILENAMES` list exactly.
 /// `contain`: for a project root, the folder every file must resolve inside; a file linking outside it is skipped here
 /// (and its read is held to the folder again, see [`read_agent_file`]).
-fn find_agent_files(dir: &Path, filenames: &[&str], contain: Option<&fuigo_dirs::contained::PinnedRoot>) -> Vec<PathBuf> {
+fn find_agent_files(
+    dir: &Path,
+    filenames: &[&str],
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> Vec<PathBuf> {
     filenames
         .iter()
         .filter_map(|name| {
@@ -53,7 +57,10 @@ fn admitted(path: &Path, contain: Option<&fuigo_dirs::contained::PinnedRoot>) ->
 
 /// Read an instruction or rules file: held to `contain` (project scope) on the opened file, so a link swapped in after
 /// discovery is refused at the read; user scope follows links.
-fn read_agent_file(path: &Path, contain: Option<&fuigo_dirs::contained::PinnedRoot>) -> Option<String> {
+fn read_agent_file(
+    path: &Path,
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> Option<String> {
     match fuigo_dirs::contained::read_scoped(path, contain) {
         Ok(content) => Some(content),
         Err(e) => {
@@ -67,7 +74,11 @@ fn read_agent_file(path: &Path, contain: Option<&fuigo_dirs::contained::PinnedRo
 
 /// Find `*.md` files in `.fuigo/rules/`, `.claude/rules/`, and `.cursor/rules/`, sorted alphabetically.
 /// `rules_subdirs` is the (compat-gated) list, precomputed once by the caller so the walk doesn't re-allocate it per directory.
-fn find_rules_files(dir: &Path, rules_subdirs: &[&str], contain: Option<&fuigo_dirs::contained::PinnedRoot>) -> Vec<PathBuf> {
+fn find_rules_files(
+    dir: &Path,
+    rules_subdirs: &[&str],
+    contain: Option<&fuigo_dirs::contained::PinnedRoot>,
+) -> Vec<PathBuf> {
     let mut results = Vec::new();
     for rules_subdir in rules_subdirs {
         let rules_dir = dir.join(rules_subdir);
@@ -295,7 +306,8 @@ async fn read_agents_config_with_roots(
     // outside one. The workspace-user dir is the user's own and follows links.
     // Pinned once here; a folder that cannot be resolved is used as given, which fails closed.
     let project_root = git_root.clone().unwrap_or_else(|| cwd.clone());
-    let project_root = fuigo_dirs::contained::PinnedRoot::pin(&project_root).unwrap_or_else(|_| fuigo_dirs::contained::PinnedRoot::from_canonical(project_root));
+    let project_root = fuigo_dirs::contained::PinnedRoot::pin(&project_root)
+        .unwrap_or_else(|_| fuigo_dirs::contained::PinnedRoot::from_canonical(project_root));
     let mut project_roots = Vec::new();
     for dir in project_sources.instruction_dirs() {
         let in_chain = project_sources.chain.dirs.iter().any(|d| d == dir);
@@ -892,7 +904,11 @@ mod tests {
         fs::write(nested.join("rules/home.md"), "nested-home-rule").unwrap();
         fs::write(repo.join("AGENTS.md"), "repo-named").unwrap();
         fs::write(nested.join("AGENTS.md"), "nested-named").unwrap();
-        fs::write(nested.join(".fuigo/rules/project.md"), "nested-project-rule").unwrap();
+        fs::write(
+            nested.join(".fuigo/rules/project.md"),
+            "nested-project-rule",
+        )
+        .unwrap();
 
         let configs = read_agents_config_with_roots(
             nested.to_str().unwrap(),
@@ -1288,7 +1304,13 @@ mod tests {
             std::fs::write(&secret, "TOP SECRET").unwrap();
             let fuigo_home = base.join("fuigo-home");
             std::fs::create_dir_all(&fuigo_home).unwrap();
-            Fixture { _tmp: tmp, base, repo, fuigo_home, secret }
+            Fixture {
+                _tmp: tmp,
+                base,
+                repo,
+                fuigo_home,
+                secret,
+            }
         }
 
         async fn load(f: &Fixture) -> Vec<AgentConfigFile> {
@@ -1313,7 +1335,10 @@ mod tests {
             symlink(&f.secret, f.repo.join("AGENTS.md")).unwrap();
             symlink(&f.secret, f.repo.join("CLAUDE.md")).unwrap();
             let configs = load(&f).await;
-            assert!(!leaked(&configs), "outside file reached the prompt: {configs:?}");
+            assert!(
+                !leaked(&configs),
+                "outside file reached the prompt: {configs:?}"
+            );
         }
 
         #[tokio::test]
@@ -1325,7 +1350,10 @@ mod tests {
             symlink(&f.secret, rules.join("leak.md")).unwrap();
             let configs = load(&f).await;
             assert!(!leaked(&configs), "outside rules file reached the prompt");
-            assert!(configs.iter().any(|c| c.content.contains("own rule")), "own rule missing");
+            assert!(
+                configs.iter().any(|c| c.content.contains("own rule")),
+                "own rule missing"
+            );
         }
 
         #[tokio::test]
@@ -1334,7 +1362,10 @@ mod tests {
             std::fs::create_dir_all(f.repo.join(".claude")).unwrap();
             symlink(f.base.join("outside"), f.repo.join(".claude").join("rules")).unwrap();
             let configs = load(&f).await;
-            assert!(!leaked(&configs), "rules dir linked outside the project was walked");
+            assert!(
+                !leaked(&configs),
+                "rules dir linked outside the project was walked"
+            );
         }
 
         #[tokio::test]
@@ -1354,7 +1385,10 @@ mod tests {
                 true,
             )
             .await;
-            assert!(configs.iter().any(|c| c.content.contains("shared rules")), "{configs:?}");
+            assert!(
+                configs.iter().any(|c| c.content.contains("shared rules")),
+                "{configs:?}"
+            );
         }
 
         #[tokio::test]
@@ -1362,7 +1396,10 @@ mod tests {
             let f = fixture();
             symlink(&f.secret, f.fuigo_home.join("AGENTS.md")).unwrap();
             let configs = load(&f).await;
-            assert!(leaked(&configs), "the user's own linked AGENTS.md must still load");
+            assert!(
+                leaked(&configs),
+                "the user's own linked AGENTS.md must still load"
+            );
         }
     }
 }

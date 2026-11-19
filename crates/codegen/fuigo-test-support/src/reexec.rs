@@ -71,7 +71,11 @@ pub fn run_self_in_child(payload: &str, env: &[EnvEdit<'_>]) {
 }
 
 /// [`run_self_in_child`] with an explicit deadline and an `Err` instead of a panic.
-pub fn try_run_self_in_child(payload: &str, env: &[EnvEdit<'_>], deadline: Duration) -> Result<(), String> {
+pub fn try_run_self_in_child(
+    payload: &str,
+    env: &[EnvEdit<'_>],
+    deadline: Duration,
+) -> Result<(), String> {
     let name = std::thread::current()
         .name()
         .filter(|n| *n != "main")
@@ -81,7 +85,9 @@ pub fn try_run_self_in_child(payload: &str, env: &[EnvEdit<'_>], deadline: Durat
     if let (Ok(raw), Some(ppid)) = (std::env::var(MARKER), parent_pid())
         && raw.split('|').next() == Some(ppid.to_string().as_str())
     {
-        panic!("{name}: re-exec child did not recognise itself (marker {raw:?}); refusing to recurse");
+        panic!(
+            "{name}: re-exec child did not recognise itself (marker {raw:?}); refusing to recurse"
+        );
     }
     let mut cmd = Command::new(std::env::current_exe().expect("test executable"));
     cmd.args(["--exact", &name, "--test-threads=1"])
@@ -178,7 +184,10 @@ mod tests {
     #[test]
     fn marker_must_name_this_process_parent_and_test() {
         let t = Some("a::b");
-        assert_eq!(payload_for("42|a::b|remote", Some(42), t).as_deref(), Some("remote"));
+        assert_eq!(
+            payload_for("42|a::b|remote", Some(42), t).as_deref(),
+            Some("remote")
+        );
         assert_eq!(payload_for("42|a::b|", Some(42), t).as_deref(), Some(""));
         // A marker inherited from an outer shell: other pid, other test, or malformed.
         assert_eq!(payload_for("41|a::b|remote", Some(42), t), None);
@@ -203,7 +212,14 @@ mod tests {
         run_self_in_child("local", &none);
         run_self_in_child("remote", &[("SSH_TTY", Some("/dev/pts/3"))]);
         // An empty value is not a session.
-        run_self_in_child("local", &[("SSH_CONNECTION", Some("")), ("SSH_TTY", None), ("SSH_CLIENT", None)]);
+        run_self_in_child(
+            "local",
+            &[
+                ("SSH_CONNECTION", Some("")),
+                ("SSH_TTY", None),
+                ("SSH_CLIENT", None),
+            ],
+        );
     }
 
     /// A child that never finishes is killed at the deadline and the failure names the test.
@@ -216,10 +232,18 @@ mod tests {
             return;
         }
         let start = Instant::now();
-        let err = try_run_self_in_child("hang", &[], Duration::from_secs(2)).expect_err("a hanging child must fail");
-        assert!(start.elapsed() < Duration::from_secs(60), "deadline not enforced: {:?}", start.elapsed());
+        let err = try_run_self_in_child("hang", &[], Duration::from_secs(2))
+            .expect_err("a hanging child must fail");
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "deadline not enforced: {:?}",
+            start.elapsed()
+        );
         assert!(err.contains("timed out"), "{err}");
-        assert!(err.contains("reexec::tests::hanging_child_is_killed_at_the_deadline"), "{err}");
+        assert!(
+            err.contains("reexec::tests::hanging_child_is_killed_at_the_deadline"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -1211,7 +1211,10 @@ pub(super) fn handle_session_notification_with_origin(
                 // Marked as made up here, so a missing route stays unnamed (an older agent said nothing) instead of
                 // reading as the unmarked Flux Router route a catalogued model has.
                 let mut meta = serde_json::Map::new();
-                meta.insert(crate::acp::model_state::OUTSIDE_CATALOG_META_KEY.to_owned(), serde_json::json!(true));
+                meta.insert(
+                    crate::acp::model_state::OUTSIDE_CATALOG_META_KEY.to_owned(),
+                    serde_json::json!(true),
+                );
                 if let Some(route) = route.as_deref() {
                     meta.insert(
                         fuigo_shell::agent::config::ROUTE_META_KEY.to_owned(),
@@ -1219,7 +1222,11 @@ pub(super) fn handle_session_notification_with_origin(
                     );
                 }
                 info = info.meta(Some(meta));
-                agent.session.models.available.insert(new_model_id.clone(), info);
+                agent
+                    .session
+                    .models
+                    .available
+                    .insert(new_model_id.clone(), info);
             }
             let effort = reasoning_effort
                 .as_deref()

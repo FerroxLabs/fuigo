@@ -11,7 +11,9 @@ use common::{
     FakeBinGuard, can_exec_shell_scripts, make_update_config, reset_home, set_test_version,
     test_home,
 };
-use fuigo_update::auto_update::{auto_update_block_notice_for_test, auto_update_target, ensure_latest_on_disk};
+use fuigo_update::auto_update::{
+    auto_update_block_notice_for_test, auto_update_target, ensure_latest_on_disk,
+};
 
 fn confine() {
     fuigo_sandbox::set_configured_profile("workspace");

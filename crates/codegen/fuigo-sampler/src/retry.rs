@@ -150,7 +150,9 @@ pub fn classify_error(
     if err.is_auth_error() {
         return RetryDecision::EmitToSession(clone_error(err));
     }
-    if err.is_terminal_refusal() { return RetryDecision::Fatal(clone_error(err)); }
+    if err.is_terminal_refusal() {
+        return RetryDecision::Fatal(clone_error(err));
+    }
     if err.is_encrypted_content_error() {
         return RetryDecision::EmitToSession(clone_error(err));
     }
@@ -412,7 +414,7 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             code,
             upstream,
         } => SamplingError::StreamError {
- upstream: upstream.clone(),
+            upstream: upstream.clone(),
             error_type: error_type.clone(),
             message: message.clone(),
             code: code.clone(),
@@ -438,8 +440,8 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::StatusCode;
     use fuigo_sampling_types::ApiErrorCode;
+    use reqwest::StatusCode;
 
     fn api_err(status: StatusCode, message: &str) -> SamplingError {
         SamplingError::Api {
@@ -631,7 +633,7 @@ mod tests {
     #[test]
     fn classify_image_stream_error_strips_instead_of_blind_retry() {
         let err = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "Base64 string of provided image cannot be decoded.".into(),
             code: Some(ApiErrorCode::InvalidImage),
@@ -642,7 +644,7 @@ mod tests {
         ));
 
         let unrelated = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "overloaded_error".into(),
             message: "The server is overloaded.".into(),
             code: None,
@@ -925,7 +927,7 @@ mod tests {
     #[test]
     fn classify_stream_error_is_retryable() {
         let err = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "transient".into(),
             message: "x".into(),
             code: None,
@@ -943,7 +945,9 @@ mod tests {
         let err = SamplingError::IdleTimeout { elapsed_secs: 300 };
         match classify_error(&err, 0, 15, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::RetryWithClientRebuild { .. } => {}
-            other => panic!("expected the first stall to be resent on a rebuilt client, got {other:?}"),
+            other => {
+                panic!("expected the first stall to be resent on a rebuilt client, got {other:?}")
+            }
         }
         match classify_error(&err, 1, 15, RATE_LIMIT_RETRY_THRESHOLD) {
             RetryDecision::Fatal(SamplingError::IdleTimeout { elapsed_secs: 300 }) => {}
@@ -1004,7 +1008,7 @@ mod tests {
     #[test]
     fn clone_error_preserves_stream_error_code() {
         let cloned = clone_error(&SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "invalid_request_error".into(),
             message: "bad image".into(),
             code: Some(ApiErrorCode::InvalidImage),
@@ -1114,7 +1118,7 @@ mod tests {
         ));
 
         let stream = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "BAD_REQUEST".into(),
             message: "Input length (300000 tokens) exceeds the maximum allowed length \
                       (200000 tokens)"
@@ -1128,7 +1132,7 @@ mod tests {
 
         // Token-tier code with an opaque message: fatal, no strip.
         let coded = SamplingError::StreamError {
- upstream: Default::default(),
+            upstream: Default::default(),
             error_type: "BAD_REQUEST".into(),
             message: "request rejected".into(),
             code: Some(fuigo_sampling_types::ApiErrorCode::parse(
@@ -1146,7 +1150,7 @@ mod tests {
         // Byte-size codes get the 413 remedy: strip images and retry once; the caller upgrades to Fatal when nothing is left to strip
         for code in ["413", "payload_too_large", "request_too_large"] {
             let coded = SamplingError::StreamError {
- upstream: Default::default(),
+                upstream: Default::default(),
                 error_type: "BAD_REQUEST".into(),
                 message: "request rejected".into(),
                 code: Some(fuigo_sampling_types::ApiErrorCode::parse(code)),

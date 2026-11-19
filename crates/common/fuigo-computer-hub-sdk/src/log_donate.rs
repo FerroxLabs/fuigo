@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwapOption;
 use base64::Engine as _;
 use fastrace::collector::SpanContext;
+use fuigo_tool_protocol::{MAX_DONATION_BYTES, MAX_LOG_RECORDS_PER_DONATION};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
@@ -25,7 +26,6 @@ use tracing::Level;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
-use fuigo_tool_protocol::{MAX_DONATION_BYTES, MAX_LOG_RECORDS_PER_DONATION};
 
 use crate::donate_pump::{
     PENDING_FLUSHES, PumpMsg, drain_via, make_resource, now_unix_nanos, run_pump, string_kv,

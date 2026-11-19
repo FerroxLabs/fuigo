@@ -16,8 +16,8 @@
 mod acp_harness;
 
 use acp_harness::{
-    AutoApproveClient, RPC_TIMEOUT, close_and_release, connect_client, ext_method, new_session, prompt_turn,
-    run_agent_test, spawn_agent_local_with_config,
+    AutoApproveClient, RPC_TIMEOUT, close_and_release, connect_client, ext_method, new_session,
+    prompt_turn, run_agent_test, spawn_agent_local_with_config,
 };
 use agent_client_protocol::{self as acp, Agent as _};
 use fuigo_shell::session::info::Info;
@@ -38,9 +38,13 @@ fn agent_config() -> fuigo_shell::agent::config::Config {
 }
 
 async fn connect(label: &str) -> acp::ClientSideConnection {
-    connect_client(AutoApproveClient, label, spawn_agent_local_with_config(agent_config()))
-        .await
-        .0
+    connect_client(
+        AutoApproveClient,
+        label,
+        spawn_agent_local_with_config(agent_config()),
+    )
+    .await
+    .0
 }
 
 /// One streamed assistant message that says `text` and then calls `read_file` on `path` as `call_id`.
@@ -102,12 +106,19 @@ async fn tool_turn(
         mock.expect_response(
             format!("{label}-call"),
             foreground(),
-            text_then_read_file(&format!("Reading {label}. "), &format!("call-{label}"), file),
+            text_then_read_file(
+                &format!("Reading {label}. "),
+                &format!("call-{label}"),
+                file,
+            ),
         ),
         mock.expect_response(
             format!("{label}-answer"),
             foreground(),
-            ScriptedResponse::sse(chat_completion_script_exact(&format!("Read {label}."), MODEL)),
+            ScriptedResponse::sse(chat_completion_script_exact(
+                &format!("Read {label}."),
+                MODEL,
+            )),
         ),
     ];
     prompt_turn(conn, session, &format!("Please read {label}.")).await;
@@ -169,7 +180,10 @@ async fn load(
 ) -> Result<(), String> {
     tokio::time::timeout(
         RPC_TIMEOUT,
-        conn.load_session(acp::LoadSessionRequest::new(session.clone(), cwd.to_path_buf())),
+        conn.load_session(acp::LoadSessionRequest::new(
+            session.clone(),
+            cwd.to_path_buf(),
+        )),
     )
     .await
     .map_err(|_| "session/load timed out".to_string())?
@@ -229,8 +243,20 @@ fn roles(messages: &Value) -> String {
         .flatten()
         .map(|m| {
             let content = m["content"].as_str().unwrap_or_default();
-            let end = content.char_indices().nth(60).map_or(content.len(), |(i, _)| i);
-            format!("[{}{} {:?}]", m["role"].as_str().unwrap_or("?"), if m["tool_calls"].is_array() { "+tools" } else { "" }, &content[..end])
+            let end = content
+                .char_indices()
+                .nth(60)
+                .map_or(content.len(), |(i, _)| i);
+            format!(
+                "[{}{} {:?}]",
+                m["role"].as_str().unwrap_or("?"),
+                if m["tool_calls"].is_array() {
+                    "+tools"
+                } else {
+                    ""
+                },
+                &content[..end]
+            )
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -252,22 +278,32 @@ fn first_difference(expected: &Value, actual: &Value) -> Option<String> {
         "{} expected vs {} resumed messages; first difference at [{at}]\n  expected: {}\n  resumed:  {}\n  expected tool ids: {:?}\n  resumed tool ids:  {:?}",
         e.len(),
         a.len(),
-        e.get(at).map(Value::to_string).unwrap_or_else(|| "<none>".into()),
-        a.get(at).map(Value::to_string).unwrap_or_else(|| "<none>".into()),
+        e.get(at)
+            .map(Value::to_string)
+            .unwrap_or_else(|| "<none>".into()),
+        a.get(at)
+            .map(Value::to_string)
+            .unwrap_or_else(|| "<none>".into()),
         tool_ids(expected),
         tool_ids(actual),
     ))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[test]
 fn a_resumed_session_sends_the_model_the_history_it_had() {
     run_agent_test(|cwd, mock| async move {
         let files: Vec<PathBuf> = (0..3)
             .map(|i| {
                 let path = cwd.join(format!("file-{i}.txt"));
-                std::fs::write(&path, format!("contents of file {i}: {}\n", "observation; ".repeat(40)))
-                    .expect("fixture file");
+                std::fs::write(
+                    &path,
+                    format!("contents of file {i}: {}\n", "observation; ".repeat(40)),
+                )
+                .expect("fixture file");
                 path
             })
             .collect();
@@ -282,15 +318,24 @@ fn a_resumed_session_sends_the_model_the_history_it_had() {
             run_script(&a, &mock, &live, &files, compactions).await;
             let twin = new_session(&a, &cwd).await;
             run_script(&a, &mock, &twin, &files, compactions).await;
-            expected.push(without_session_id(&next_turn_messages(&a, &mock, &live).await, &live));
+            expected.push(without_session_id(
+                &next_turn_messages(&a, &mock, &live).await,
+                &live,
+            ));
             resumed.push(twin);
         }
         let names = ["never compacted", "compacted once", "compacted twice"];
         // Fixture check: each live request carries its script's last tool call (made after any compaction) and its result.
         for (round, (name, messages)) in names.iter().zip(&expected).enumerate() {
             let ids = tool_ids(messages);
-            for id in [format!("call:call-file-{round}"), format!("result:call-file-{round}")] {
-                assert!(ids.contains(&id), "fixture ({name}): live request lacks {id}: {ids:?}");
+            for id in [
+                format!("call:call-file-{round}"),
+                format!("result:call-file-{round}"),
+            ] {
+                assert!(
+                    ids.contains(&id),
+                    "fixture ({name}): live request lacks {id}: {ids:?}"
+                );
             }
         }
         // Compacted once, then: forked; checkpoint file deleted; checkpoint file truncated; already resumed by 1.0.17;
@@ -304,36 +349,67 @@ fn a_resumed_session_sends_the_model_the_history_it_had() {
         // Compacted twice, then forked at its first prompt (before both compactions).
         let point_fork_source = new_session(&a, &cwd).await;
         run_script(&a, &mock, &point_fork_source, &files, 2).await;
-        let built: Vec<&acp::SessionId> = resumed.iter().chain(&once_twins).chain([&point_fork_source]).collect();
+        let built: Vec<&acp::SessionId> = resumed
+            .iter()
+            .chain(&once_twins)
+            .chain([&point_fork_source])
+            .collect();
         close_and_release(&a, &built).await;
         drop(a);
-        let [fork_source, missing_checkpoint, corrupt_checkpoint, resumed_by_1017, chat_missing] =
-            <[acp::SessionId; 5]>::try_from(once_twins).expect("five twins");
+        let [
+            fork_source,
+            missing_checkpoint,
+            corrupt_checkpoint,
+            resumed_by_1017,
+            chat_missing,
+        ] = <[acp::SessionId; 5]>::try_from(once_twins).expect("five twins");
 
         // Every session loaded below is byte-for-byte what 1.0.17 writes: same files, and the checkpoint's prefix under
         // 1.0.17's key (this version writes `resolved_prefix_len`; 1.0.10-1.0.19 wrote `inherited_prefix_len`).
         let loaded: Vec<&acp::SessionId> = resumed
             .iter()
-            .chain([&fork_source, &missing_checkpoint, &corrupt_checkpoint, &resumed_by_1017, &chat_missing, &point_fork_source])
+            .chain([
+                &fork_source,
+                &missing_checkpoint,
+                &corrupt_checkpoint,
+                &resumed_by_1017,
+                &chat_missing,
+                &point_fork_source,
+            ])
             .collect();
         for session in loaded {
             for path in checkpoint_files(session, &cwd) {
                 let mut file: Value =
-                    serde_json::from_slice(&std::fs::read(&path).expect("read checkpoint")).expect("checkpoint json");
+                    serde_json::from_slice(&std::fs::read(&path).expect("read checkpoint"))
+                        .expect("checkpoint json");
                 let object = file.as_object_mut().expect("checkpoint object");
                 // (A pre-P88 build already writes the old key; the test runs there too, to show the defect.)
                 if let Some(prefix) = object.remove("resolved_prefix_len") {
                     object.insert("inherited_prefix_len".into(), prefix);
                 }
-                assert!(object.contains_key("inherited_prefix_len"), "fixture: checkpoint carries its prefix: {}", path.display());
-                std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).expect("write checkpoint");
+                assert!(
+                    object.contains_key("inherited_prefix_len"),
+                    "fixture: checkpoint carries its prefix: {}",
+                    path.display()
+                );
+                std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap())
+                    .expect("write checkpoint");
             }
         }
-        std::fs::remove_file(session_dir(&chat_missing, &cwd).join("chat_history.jsonl")).expect("remove chat history");
+        std::fs::remove_file(session_dir(&chat_missing, &cwd).join("chat_history.jsonl"))
+            .expect("remove chat history");
 
         // L-1 fixtures: the session's only checkpoint file is gone, or cut short mid-write.
-        assert_eq!(checkpoint_files(&missing_checkpoint, &cwd).len(), 1, "fixture: one compaction, one checkpoint");
-        assert_eq!(checkpoint_files(&corrupt_checkpoint, &cwd).len(), 1, "fixture: one compaction, one checkpoint");
+        assert_eq!(
+            checkpoint_files(&missing_checkpoint, &cwd).len(),
+            1,
+            "fixture: one compaction, one checkpoint"
+        );
+        assert_eq!(
+            checkpoint_files(&corrupt_checkpoint, &cwd).len(),
+            1,
+            "fixture: one compaction, one checkpoint"
+        );
         for path in checkpoint_files(&missing_checkpoint, &cwd) {
             std::fs::remove_file(path).expect("remove checkpoint");
         }
@@ -382,13 +458,24 @@ fn a_resumed_session_sends_the_model_the_history_it_had() {
         )
         .await;
         let fork = acp::SessionId::new(
-            fork["newSessionId"].as_str().expect("fork returns its session id").to_string(),
+            fork["newSessionId"]
+                .as_str()
+                .expect("fork returns its session id")
+                .to_string(),
         );
         // A fork copies its source's chat history verbatim, so its summary names the source's transcript directory.
         for (name, twin, named) in [
             ("compacted once, then forked", &fork, &fork_source),
-            ("compacted once, checkpoint file missing", &missing_checkpoint, &missing_checkpoint),
-            ("compacted once, checkpoint file truncated", &corrupt_checkpoint, &corrupt_checkpoint),
+            (
+                "compacted once, checkpoint file missing",
+                &missing_checkpoint,
+                &missing_checkpoint,
+            ),
+            (
+                "compacted once, checkpoint file truncated",
+                &corrupt_checkpoint,
+                &corrupt_checkpoint,
+            ),
         ] {
             match load(&b, twin, &cwd).await {
                 Ok(()) => {
@@ -405,13 +492,22 @@ fn a_resumed_session_sends_the_model_the_history_it_had() {
         // the compaction summary and the post-compaction tool call and result must all be there.
         match load(&b, &chat_missing, &cwd).await {
             Ok(()) => {
-                let got = without_session_id(&next_turn_messages(&b, &mock, &chat_missing).await, &chat_missing);
+                let got = without_session_id(
+                    &next_turn_messages(&b, &mock, &chat_missing).await,
+                    &chat_missing,
+                );
                 if let Some(diff) = first_difference(&expected[1], &got) {
                     eprintln!("chat_history.jsonl lost (informational, not asserted): {diff}");
                 }
                 let summary = expected[1]
                     .as_array()
-                    .and_then(|m| m.iter().find(|m| m["content"].as_str().is_some_and(|c| c.starts_with(SUMMARY_PREAMBLE))))
+                    .and_then(|m| {
+                        m.iter().find(|m| {
+                            m["content"]
+                                .as_str()
+                                .is_some_and(|c| c.starts_with(SUMMARY_PREAMBLE))
+                        })
+                    })
                     .expect("fixture: the live compacted request carries the summary")
                     .clone();
                 if !got.as_array().is_some_and(|m| m.contains(&summary)) {
@@ -440,7 +536,10 @@ fn a_resumed_session_sends_the_model_the_history_it_had() {
         )
         .await;
         let point_fork = acp::SessionId::new(
-            point_fork["newSessionId"].as_str().expect("fork returns its session id").to_string(),
+            point_fork["newSessionId"]
+                .as_str()
+                .expect("fork returns its session id")
+                .to_string(),
         );
         match load(&b, &point_fork, &cwd).await {
             Ok(()) => {

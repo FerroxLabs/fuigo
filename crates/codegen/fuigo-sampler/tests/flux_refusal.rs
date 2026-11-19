@@ -553,7 +553,11 @@ async fn p5_sse_all_backends_preserve_upstream_through_actor() {
 
 #[tokio::test]
 async fn h4_sse_terminal_text_stops_all_backends_at_raw_boundary() {
-    for backend in [ApiBackend::ChatCompletions, ApiBackend::Responses, ApiBackend::Messages] {
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ] {
         for payload in [
             json!({"error":{"message":"API key has been revoked"}}),
             json!({"error":{"message":"busy","provider_specific_fields":{"message":"API key has been revoked"}}}),
@@ -562,20 +566,30 @@ async fn h4_sse_terminal_text_stops_all_backends_at_raw_boundary() {
             json!({"type":"response.error","message":"busy","provider_specific_fields":{"message":"API key has been revoked"}}),
         ] {
             let server = MockInferenceServer::start().await.unwrap();
-            server.enqueue_response(path(&backend), ScriptedResponse::sse(vec![fuigo_test_support::SseEvent::data(payload.to_string())]));
+            server.enqueue_response(
+                path(&backend),
+                ScriptedResponse::sse(vec![fuigo_test_support::SseEvent::data(
+                    payload.to_string(),
+                )]),
+            );
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let sampler = SamplerActor::spawn(config(&server, backend.clone()), RetryPolicy::default(), tx);
+            let sampler =
+                SamplerActor::spawn(config(&server, backend.clone()), RetryPolicy::default(), tx);
             sampler.submit(RequestId::from("raw-sse"), request());
             let info = tokio::time::timeout(Duration::from_secs(5), async {
                 while let Some(event) = rx.recv().await {
                     match event {
                         SamplingEvent::Failed { error, .. } => return error,
-                        SamplingEvent::Retrying { .. } => panic!("Flux terminal SSE must not retry"),
+                        SamplingEvent::Retrying { .. } => {
+                            panic!("Flux terminal SSE must not retry")
+                        }
                         _ => (),
                     }
                 }
                 panic!("missing failure")
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             assert!(info.upstream().flux_routed);
             assert!(info.upstream().classify(&info.message).is_terminal());
             assert_eq!(server.request_count(), 1);
@@ -585,13 +599,18 @@ async fn h4_sse_terminal_text_stops_all_backends_at_raw_boundary() {
 
 #[tokio::test]
 async fn h5_http_nested_terminal_text_stops_all_six_handlers() {
-    for backend in [ApiBackend::ChatCompletions, ApiBackend::Responses, ApiBackend::Messages] {
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ] {
         for streaming in [false, true] {
             let e = error(&json!({"status":503,"body":{"error":{"message":"busy","provider_specific_fields":{"message":"API key has been revoked"}}}}), backend.clone(), streaming).await;
             assert!(e.is_terminal_refusal());
             assert!(!e.is_retryable());
             let info = SamplingErrorInfo::from(&e);
-            let replay: SamplingErrorInfo = serde_json::from_value(serde_json::to_value(info).unwrap()).unwrap();
+            let replay: SamplingErrorInfo =
+                serde_json::from_value(serde_json::to_value(info).unwrap()).unwrap();
             assert!(replay.upstream().classify("busy").is_terminal());
         }
     }
@@ -599,22 +618,41 @@ async fn h5_http_nested_terminal_text_stops_all_six_handlers() {
 
 #[tokio::test]
 async fn r1_every_http_constructor_and_mirror_retains_boundary_decision() {
-    for backend in [ApiBackend::ChatCompletions, ApiBackend::Responses, ApiBackend::Messages] {
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ] {
         for streaming in [false, true] {
             for status in [401, 503] {
                 let error = error(&json!({"status":status,"body":{"error":{"message":"busy","provider_specific_fields":{"message":"API key has been revoked"}}}}), backend.clone(), streaming).await;
                 error.assert_boundary_classified();
                 let cloned = match fuigo_sampler::retry::classify_error(&error, 0, 3, 3) {
-                    fuigo_sampler::retry::RetryDecision::Fatal(error) | fuigo_sampler::retry::RetryDecision::EmitToSession(error) => error,
+                    fuigo_sampler::retry::RetryDecision::Fatal(error)
+                    | fuigo_sampler::retry::RetryDecision::EmitToSession(error) => error,
                     _ => panic!("terminal error cannot retry"),
                 };
-                assert_eq!(cloned.upstream().classification(), error.upstream().classification());
+                assert_eq!(
+                    cloned.upstream().classification(),
+                    error.upstream().classification()
+                );
                 let info = SamplingErrorInfo::from(&cloned);
                 let saved = serde_json::to_value(&info).unwrap();
-                assert_eq!(saved["upstream_details"]["classification"]["reason"], "keyRevoked");
+                assert_eq!(
+                    saved["upstream_details"]["classification"]["reason"],
+                    "keyRevoked"
+                );
                 let restored: SamplingErrorInfo = serde_json::from_value(saved).unwrap();
-                assert_eq!(restored.upstream().classification(), info.upstream().classification());
-                assert!(serde_json::to_value(restored.upstream()).unwrap().get("classification").is_none());
+                assert_eq!(
+                    restored.upstream().classification(),
+                    info.upstream().classification()
+                );
+                assert!(
+                    serde_json::to_value(restored.upstream())
+                        .unwrap()
+                        .get("classification")
+                        .is_none()
+                );
             }
         }
     }
@@ -624,8 +662,14 @@ async fn r1_every_http_constructor_and_mirror_retains_boundary_decision() {
 fn r1_route_identity_comes_from_request_not_response() {
     // A response URL must not become the authority for request provenance.
     // Guard all boundary handlers, including subscription, against reintroducing it.
-    for source in [include_str!("../src/client.rs"), include_str!("../src/subscription.rs")] {
-        assert!(!source.contains("is_flux_routed(response.url()"), "capture the request route before transport dispatch");
+    for source in [
+        include_str!("../src/client.rs"),
+        include_str!("../src/subscription.rs"),
+    ] {
+        assert!(
+            !source.contains("is_flux_routed(response.url()"),
+            "capture the request route before transport dispatch"
+        );
     }
 }
 
@@ -633,45 +677,95 @@ fn r1_route_identity_comes_from_request_not_response() {
 async fn r1_flux_refusal_status_survives_a_truncated_http_body() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     for flux in [false, true] {
-        for backend in [ApiBackend::ChatCompletions, ApiBackend::Responses, ApiBackend::Messages] {
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
             for streaming in [false, true] {
-              for status in [401, 503] {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let base = format!("http://{}/v1", listener.local_addr().unwrap());
-                let server = tokio::spawn(async move {
-                    let (mut socket, _) = listener.accept().await.unwrap();
-                    let mut head = Vec::new();
-                    while !head.ends_with(b"\r\n\r\n") { head.push(socket.read_u8().await.unwrap()); }
-                    let length: usize = String::from_utf8(head).unwrap().lines()
-                        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
-                    socket.read_exact(&mut vec![0; length]).await.unwrap();
-                    let final_header = if status == 503 { "X-Flux-Hold-Reason: key_revoked\r\n" } else { "" };
-                    let response = format!("HTTP/1.1 {status} Refused\r\n{final_header}Content-Length: 100\r\nConnection: close\r\n\r\n{{");
-                    socket.write_all(response.as_bytes()).await.unwrap();
-                });
-                let client = SamplingClient::new(SamplerConfig {
-                    base_url: base.clone(), flux_base_url: flux.then_some(base),
-                    api_backend: backend.clone(), model: "test".into(), ..Default::default()
-                }).unwrap();
-                let error = match (backend.clone(), streaming) {
-                    (ApiBackend::ChatCompletions, true) => client.conversation_stream(request()).await.err().unwrap(),
-                    (ApiBackend::Responses, true) => client.conversation_stream_responses(request()).await.err().unwrap(),
-                    (ApiBackend::Messages, true) => client.conversation_stream_messages(request()).await.err().unwrap(),
-                    (ApiBackend::ChatCompletions, false) => client.conversation(request()).await.err().unwrap(),
-                    (ApiBackend::Responses, false) => client.conversation_responses(request()).await.err().unwrap(),
-                    (ApiBackend::Messages, false) => client.conversation_messages(request()).await.err().unwrap(),
-                };
-                server.await.unwrap();
-                if flux {
-                    assert!(error.is_terminal_refusal(), "a refused HTTP status must survive a failed body read: {error}");
-                    error.assert_boundary_classified();
-                    assert_eq!(error.upstream().http_status, Some(status));
-                } else if streaming && status == 401 {
-                    assert!(matches!(error, SamplingError::Auth { .. }), "the parent's streaming 401 handler already preserves auth status: {error}");
-                } else {
-                    assert!(matches!(error, SamplingError::Http(_)), "non-Flux keeps the parent's body-read error: {error}");
+                for status in [401, 503] {
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+                    let server = tokio::spawn(async move {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        let mut head = Vec::new();
+                        while !head.ends_with(b"\r\n\r\n") {
+                            head.push(socket.read_u8().await.unwrap());
+                        }
+                        let length: usize = String::from_utf8(head)
+                            .unwrap()
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap_or(0);
+                        socket.read_exact(&mut vec![0; length]).await.unwrap();
+                        let final_header = if status == 503 {
+                            "X-Flux-Hold-Reason: key_revoked\r\n"
+                        } else {
+                            ""
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {status} Refused\r\n{final_header}Content-Length: 100\r\nConnection: close\r\n\r\n{{"
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                    });
+                    let client = SamplingClient::new(SamplerConfig {
+                        base_url: base.clone(),
+                        flux_base_url: flux.then_some(base),
+                        api_backend: backend.clone(),
+                        model: "test".into(),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                    let error = match (backend.clone(), streaming) {
+                        (ApiBackend::ChatCompletions, true) => {
+                            client.conversation_stream(request()).await.err().unwrap()
+                        }
+                        (ApiBackend::Responses, true) => client
+                            .conversation_stream_responses(request())
+                            .await
+                            .err()
+                            .unwrap(),
+                        (ApiBackend::Messages, true) => client
+                            .conversation_stream_messages(request())
+                            .await
+                            .err()
+                            .unwrap(),
+                        (ApiBackend::ChatCompletions, false) => {
+                            client.conversation(request()).await.err().unwrap()
+                        }
+                        (ApiBackend::Responses, false) => client
+                            .conversation_responses(request())
+                            .await
+                            .err()
+                            .unwrap(),
+                        (ApiBackend::Messages, false) => {
+                            client.conversation_messages(request()).await.err().unwrap()
+                        }
+                    };
+                    server.await.unwrap();
+                    if flux {
+                        assert!(
+                            error.is_terminal_refusal(),
+                            "a refused HTTP status must survive a failed body read: {error}"
+                        );
+                        error.assert_boundary_classified();
+                        assert_eq!(error.upstream().http_status, Some(status));
+                    } else if streaming && status == 401 {
+                        assert!(
+                            matches!(error, SamplingError::Auth { .. }),
+                            "the parent's streaming 401 handler already preserves auth status: {error}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(error, SamplingError::Http(_)),
+                            "non-Flux keeps the parent's body-read error: {error}"
+                        );
+                    }
                 }
-              }
             }
         }
     }

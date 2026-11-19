@@ -1,10 +1,13 @@
 //! P166 round 8B (Grok r7, git and metadata findings). Rows are `(command, blocked)`: `blocked` means the protected
 //! floor must fire, `false` means it must stay silent.
 
-use super::{PermissionState, bash_protected_write_target, evaluate_bash};
 use super::ClassifierSecurityFinding;
+use super::{PermissionState, bash_protected_write_target, evaluate_bash};
 
-fn floor_in(cwd: &std::path::Path, cmd: &str) -> Option<crate::permission::shell_access::ProtectedEditReason> {
+fn floor_in(
+    cwd: &std::path::Path,
+    cmd: &str,
+) -> Option<crate::permission::shell_access::ProtectedEditReason> {
     let state = PermissionState::default();
     let evaluation = evaluate_bash(cmd, &state, true);
     bash_protected_write_target(&evaluation, cwd, None)
@@ -27,7 +30,11 @@ fn check(rows: &[(&str, bool)]) {
             wrong.push(format!("{cmd}: expected blocked={blocked}, got {got:?}"));
         }
     }
-    assert!(wrong.is_empty(), "protected floor mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "protected floor mismatches:\n{}",
+        wrong.join("\n")
+    );
 }
 
 fn file_write(cmd: &str) -> bool {
@@ -52,7 +59,10 @@ fn p166_r8b_b1_hooks_path_spellings() {
         ("git -c include.path=/tmp/evil.cfg commit", true),
         ("git -cinclude.path=/tmp/evil.cfg commit", true),
         ("git -c includeIf.gitdir:/x.path=/tmp/evil.cfg commit", true),
-        ("git -c user.name=x -ccore.hooksPath=/tmp/evil commit -m y", true),
+        (
+            "git -c user.name=x -ccore.hooksPath=/tmp/evil commit -m y",
+            true,
+        ),
         ("git -c user.name=x commit -m y", false),
         ("git -cuser.name=x commit -m y", false),
         ("git -c color.ui=never log", false),
@@ -165,7 +175,10 @@ fn p166_r8b_b4_git_dash_c_branch_operand() {
 #[test]
 fn p166_r8b_b5_shell_alias() {
     check(&[
-        ("git config alias.x '!sh -c \"cp e .git/hooks/pre-commit\"'", true),
+        (
+            "git config alias.x '!sh -c \"cp e .git/hooks/pre-commit\"'",
+            true,
+        ),
         ("git config --global alias.x '!cp e .mcp.json'", true),
         ("git config alias.co checkout", false),
         ("git config alias.lg '!git log --oneline'", false),
@@ -173,22 +186,36 @@ fn p166_r8b_b5_shell_alias() {
         ("git config --get core.hooksPath", false),
     ]);
     let state = PermissionState::default();
-    for cmd in ["git config alias.x '!echo hi'", "git config --global alias.lg '!git log'"] {
+    for cmd in [
+        "git config alias.x '!echo hi'",
+        "git config --global alias.lg '!git log'",
+    ] {
         assert!(
-            evaluate_bash(cmd, &state, true).assessment.contains(ClassifierSecurityFinding::ExecOrAmbientGit),
+            evaluate_bash(cmd, &state, true)
+                .assessment
+                .contains(ClassifierSecurityFinding::ExecOrAmbientGit),
             "{cmd}: expected exec risk"
         );
     }
-    for cmd in ["git config alias.co checkout", "git config --get alias.x", "git status"] {
+    for cmd in [
+        "git config alias.co checkout",
+        "git config --get alias.x",
+        "git status",
+    ] {
         assert!(
-            !evaluate_bash(cmd, &state, true).assessment.contains(ClassifierSecurityFinding::ExecOrAmbientGit),
+            !evaluate_bash(cmd, &state, true)
+                .assessment
+                .contains(ClassifierSecurityFinding::ExecOrAmbientGit),
             "{cmd}: expected no exec risk"
         );
     }
     // An unknown verb (possibly an alias) is neither a read-only query nor routine.
     for cmd in ["git x", "git deploy --now", "git -C ../o x"] {
         let words: Vec<String> = cmd.split(' ').map(str::to_owned).collect();
-        assert!(!crate::permission::exec_risk::git_words_are_read_only_query(&words), "{cmd}");
+        assert!(
+            !crate::permission::exec_risk::git_words_are_read_only_query(&words),
+            "{cmd}"
+        );
     }
 }
 

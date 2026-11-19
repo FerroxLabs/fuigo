@@ -21,13 +21,21 @@ const DELETED: &[&str] = &[
 /// preview servers (nothing to do with session parking), and `fuigo-computer-hub-core` has its own
 /// `tool_registry` test (a different registry, pinned by `fuigo-extra-ca`).
 const ALLOWED: &[(&str, &str)] = &[
-    ("crates/codegen/fuigo-workspace-daemon/src/preview_supervisor.rs", "PR_SET_CHILD_SUBREAPER"),
+    (
+        "crates/codegen/fuigo-workspace-daemon/src/preview_supervisor.rs",
+        "PR_SET_CHILD_SUBREAPER",
+    ),
     ("crates/common/fuigo-computer-hub-core", "tool_registry"),
-    ("crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs", "tool_registry"),
+    (
+        "crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs",
+        "tool_registry",
+    ),
 ];
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name();
@@ -50,22 +58,42 @@ fn no_process_attribution_symbol_remains() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut files = Vec::new();
     walk(&root, &mut files);
-    assert!(files.len() > 500, "the walk found only {} files: wrong root {}", files.len(), root.display());
-    let this = Path::new(file!()).file_name().expect("file name").to_owned();
+    assert!(
+        files.len() > 500,
+        "the walk found only {} files: wrong root {}",
+        files.len(),
+        root.display()
+    );
+    let this = Path::new(file!())
+        .file_name()
+        .expect("file name")
+        .to_owned();
     let mut found = Vec::new();
     for file in &files {
         if file.file_name() == Some(this.as_os_str()) {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(file) else { continue };
-        let rel = file.strip_prefix(&root).unwrap_or(file).to_string_lossy().replace('\\', "/");
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
         for symbol in DELETED {
             if text.contains(symbol)
-                && !ALLOWED.iter().any(|(path, allowed)| rel.starts_with(path) && allowed == symbol)
+                && !ALLOWED
+                    .iter()
+                    .any(|(path, allowed)| rel.starts_with(path) && allowed == symbol)
             {
                 found.push(format!("{rel}: {symbol}"));
             }
         }
     }
-    assert!(found.is_empty(), "deleted process-attribution symbols are back:\n{}", found.join("\n"));
+    assert!(
+        found.is_empty(),
+        "deleted process-attribution symbols are back:\n{}",
+        found.join("\n")
+    );
 }

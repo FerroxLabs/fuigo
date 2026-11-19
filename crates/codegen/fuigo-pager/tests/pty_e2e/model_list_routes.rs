@@ -22,7 +22,10 @@ async fn model_list_shows_route_badges_and_right_arrow_opens_the_alternate_route
         format!(r#"{{"fetched_at":{now},"ids":["test-model","gpt-5"]}}"#),
     )
     .expect("seed the cached OpenAI model list");
-    let ops = [EnvOp::set("OPENAI_API_KEY", "sk-pty-fake-openai-key-0123456789")];
+    let ops = [EnvOp::set(
+        "OPENAI_API_KEY",
+        "sk-pty-fake-openai-key-0123456789",
+    )];
     let mut harness = PtyHarness::spawn_with_content_env_ops_in_dir(
         &binary,
         DEFAULT_ROWS,
@@ -44,8 +47,14 @@ async fn model_list_shows_route_badges_and_right_arrow_opens_the_alternate_route
     let list = harness.screen_contents();
     eprintln!("--- /model list (pty) ---\n{list}\n-------------------------");
     assert!(list.contains("via Flux Router"), "{list}");
-    assert!(list.contains("gpt-5") && list.contains("your OpenAI key"), "{list}");
-    assert!(!list.contains("sk-pty-fake-openai-key"), "the key must never be painted: {list}");
+    assert!(
+        list.contains("gpt-5") && list.contains("your OpenAI key"),
+        "{list}"
+    );
+    assert!(
+        !list.contains("sk-pty-fake-openai-key"),
+        "the key must never be painted: {list}"
+    );
 
     // Right-arrow on the first row (test-model: Flux Router and the OpenAI key) opens its routes.
     harness.inject_keys(b"\x1b[C").expect("Right-arrow");

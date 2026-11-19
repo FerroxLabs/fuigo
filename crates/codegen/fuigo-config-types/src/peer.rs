@@ -39,6 +39,9 @@ mod tests {
         let c: PeerConfig = toml::from_str("inbound = \"refuse\"").unwrap();
         assert_eq!(c.inbound, PeerInboundPolicy::Refuse);
         assert!(toml::from_str::<PeerConfig>("inbound = \"Always\"").is_err());
-        assert_eq!(toml::from_str::<PeerConfig>("").unwrap(), PeerConfig::default());
+        assert_eq!(
+            toml::from_str::<PeerConfig>("").unwrap(),
+            PeerConfig::default()
+        );
     }
 }

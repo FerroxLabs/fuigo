@@ -1069,7 +1069,10 @@ impl ToolRegistryBuilder {
     /// Finalize with an explicit `TruncationConfig` so that per-tool
     /// `max_output_bytes` overrides are reflected in tool descriptions.
     /// `workspace_viewer_ctx` is `None` outside a workspace bind.
-    #[allow(clippy::disallowed_methods, reason = "ResourcesPersistence::new_at only when ctx.session_writer is None and state_path is set: the workspace tree or a headless state folder, not a session folder (design F5 5.4.2)")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "ResourcesPersistence::new_at only when ctx.session_writer is None and state_path is set: the workspace tree or a headless state folder, not a session folder (design F5 5.4.2)"
+    )]
     pub fn finalize_with_trunc_config(
         mut self,
         config: ToolServerConfig,
@@ -1694,7 +1697,9 @@ impl FinalizedToolset {
             // dispatched by name shape alone, whatever its client name looks like.
             let entry = tools
                 .iter()
-                .find(|t| t.client_name == tool_name && t.namespace == ToolNamespace::MCP.to_string())
+                .find(|t| {
+                    t.client_name == tool_name && t.namespace == ToolNamespace::MCP.to_string()
+                })
                 .ok_or_else(|| Self::tool_not_found_error(tool_name))?;
             (
                 entry.registry_id.clone(),
@@ -1845,7 +1850,9 @@ impl FinalizedToolset {
             None,
             None,
             None,
-            Some(crate::sandbox_launch::ApprovedWithoutGrant(approved_without_grant)),
+            Some(crate::sandbox_launch::ApprovedWithoutGrant(
+                approved_without_grant,
+            )),
         );
         while let Some(item) = stream.next().await {
             match item {
@@ -1874,7 +1881,9 @@ impl FinalizedToolset {
             None,
             None,
             Some(crate::types::resources::CallDenyReadGlobs(deny_read_globs)),
-            Some(crate::sandbox_launch::ApprovedWithoutGrant(approved_without_grant)),
+            Some(crate::sandbox_launch::ApprovedWithoutGrant(
+                approved_without_grant,
+            )),
         )
     }
     fn call_streaming_inner(
@@ -2474,7 +2483,10 @@ fn requirement_error_from_param_error(
     }
     out
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2553,7 +2565,9 @@ mod tests {
                     apply_params: Box::new(|_, _| {}),
                     register_params: Box::new(|_| {}),
                     parse_input: Box::new(|_| {
-                        Err(fuigo_tool_runtime::ToolError::invalid_arguments("audit only"))
+                        Err(fuigo_tool_runtime::ToolError::invalid_arguments(
+                            "audit only",
+                        ))
                     }),
                     register_in_local: Box::new(|_| {}),
                 },
@@ -2583,35 +2597,42 @@ mod tests {
     /// The declaration names the canonical field; the client-facing name follows a session rename.
     #[tokio::test]
     async fn lock_path_param_follows_a_params_name_override() {
-        let config = |overrides: Option<std::collections::HashMap<String, String>>| ToolServerConfig {
-            tools: vec![
-                ToolConfig {
-                    id: "FuigoBuild:read_file".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    behavior_version: None,
-                    kind: None,
-                },
-                ToolConfig {
-                    id: "FuigoBuild:search_replace".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: overrides,
-                    description_override: None,
-                    behavior_version: None,
-                    kind: None,
-                },
-            ],
-            behavior_preset: None,
-        };
+        let config =
+            |overrides: Option<std::collections::HashMap<String, String>>| ToolServerConfig {
+                tools: vec![
+                    ToolConfig {
+                        id: "FuigoBuild:read_file".to_string(),
+                        params: None,
+                        name_override: None,
+                        params_name_overrides: None,
+                        description_override: None,
+                        behavior_version: None,
+                        kind: None,
+                    },
+                    ToolConfig {
+                        id: "FuigoBuild:search_replace".to_string(),
+                        params: None,
+                        name_override: None,
+                        params_name_overrides: overrides,
+                        description_override: None,
+                        behavior_version: None,
+                        kind: None,
+                    },
+                ],
+                behavior_preset: None,
+            };
         let tmp = TempDir::new().unwrap();
         let plain = ToolRegistryBuilder::new()
             .finalize(config(None), test_session_context(&tmp))
             .expect("finalize should succeed");
-        assert_eq!(Some("file_path"), plain.lock_path_canonical_param("search_replace"));
-        assert_eq!(Some("file_path".to_owned()), plain.lock_path_client_param("search_replace"));
+        assert_eq!(
+            Some("file_path"),
+            plain.lock_path_canonical_param("search_replace")
+        );
+        assert_eq!(
+            Some("file_path".to_owned()),
+            plain.lock_path_client_param("search_replace")
+        );
         assert_eq!(None, plain.lock_path_client_param("no_such_tool"));
         let renamed = ToolRegistryBuilder::new()
             .finalize(
@@ -2622,10 +2643,17 @@ mod tests {
                 test_session_context(&tmp),
             )
             .expect("finalize should succeed");
-        assert_eq!(Some("file_path"), renamed.lock_path_canonical_param("search_replace"));
-        assert_eq!(Some("target".to_owned()), renamed.lock_path_client_param("search_replace"));
+        assert_eq!(
+            Some("file_path"),
+            renamed.lock_path_canonical_param("search_replace")
+        );
+        assert_eq!(
+            Some("target".to_owned()),
+            renamed.lock_path_client_param("search_replace")
+        );
         // A client sends `target`; remapping gives the canonical field the declaration names.
-        let canonical = renamed.remap_params("search_replace", serde_json::json!({"target": "a.rs"}));
+        let canonical =
+            renamed.remap_params("search_replace", serde_json::json!({"target": "a.rs"}));
         assert_eq!(serde_json::json!({"file_path": "a.rs"}), canonical);
     }
     /// Build a `SessionContext` for tests using a temp dir and real local
@@ -2654,7 +2682,8 @@ mod tests {
             video_gen_config:
                 crate::implementations::fuigo_build::video_gen::VideoGenConfig::default(),
             app_builder_deployer_config:
-                crate::implementations::fuigo_build::app_builder::AppBuilderDeployerConfig::default(),
+                crate::implementations::fuigo_build::app_builder::AppBuilderDeployerConfig::default(
+                ),
             api_key_provider: None,
             auth_provider: None,
             attribution_callback: None,
@@ -3159,10 +3188,11 @@ mod tests {
                 .expect("run_terminal_cmd definition not found")
                 .clone();
             let desc = bash.function.description.clone().unwrap_or_default();
-            let field_desc = bash.function.parameters["properties"]["block_until_ms"]["description"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
+            let field_desc =
+                bash.function.parameters["properties"]["block_until_ms"]["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
             (desc, field_desc)
         };
         let ids = [
@@ -3236,7 +3266,10 @@ mod tests {
                 text: "other tool".to_owned(),
             },
         )]);
-        assert_eq!(read_file_description(unrelated).as_deref(), Some(stock.as_str()));
+        assert_eq!(
+            read_file_description(unrelated).as_deref(),
+            Some(stock.as_str())
+        );
         assert!(!stock.is_empty());
     }
     #[tokio::test]
@@ -3282,14 +3315,21 @@ mod tests {
         let guidance = HashMap::from([
             (
                 "grep".to_owned(),
-                ToolGuidance { mode: GuidanceMode::Replace, text: "GREP-GUIDE".to_owned() },
+                ToolGuidance {
+                    mode: GuidanceMode::Replace,
+                    text: "GREP-GUIDE".to_owned(),
+                },
             ),
             (
                 "read_file".to_owned(),
-                ToolGuidance { mode: GuidanceMode::Replace, text: "READ-GUIDE".to_owned() },
+                ToolGuidance {
+                    mode: GuidanceMode::Replace,
+                    text: "READ-GUIDE".to_owned(),
+                },
             ),
         ]);
-        let defs = finalized_definitions(vec![ToolConfig::from_id("FuigoBuild:read_file")], guidance);
+        let defs =
+            finalized_definitions(vec![ToolConfig::from_id("FuigoBuild:read_file")], guidance);
         let names: Vec<&str> = defs.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["read_file"], "{defs:?}");
         assert_eq!(defs[0].1.as_deref(), Some("READ-GUIDE"));
@@ -3303,13 +3343,19 @@ mod tests {
         read.description_override = Some("OVERRIDE-TEXT".to_owned());
         let append = HashMap::from([(
             "read_file".to_owned(),
-            ToolGuidance { mode: GuidanceMode::Append, text: "GUIDE".to_owned() },
+            ToolGuidance {
+                mode: GuidanceMode::Append,
+                text: "GUIDE".to_owned(),
+            },
         )]);
         let defs = finalized_definitions(vec![read.clone()], append);
         assert_eq!(defs[0].1.as_deref(), Some("OVERRIDE-TEXT\n\nGUIDE"));
         let replace = HashMap::from([(
             "read_file".to_owned(),
-            ToolGuidance { mode: GuidanceMode::Replace, text: "GUIDE".to_owned() },
+            ToolGuidance {
+                mode: GuidanceMode::Replace,
+                text: "GUIDE".to_owned(),
+            },
         )]);
         let defs = finalized_definitions(vec![read.clone()], replace);
         assert_eq!(defs[0].1.as_deref(), Some("GUIDE"));
@@ -3831,7 +3877,10 @@ mod tests {
                 None,
             )
             .await;
-        assert!(result.is_err(), "a native tool must not run through use_tool: {result:?}");
+        assert!(
+            result.is_err(),
+            "a native tool must not run through use_tool: {result:?}"
+        );
     }
     #[tokio::test]
     async fn call_sets_effective_tool_name_for_use_tool_dispatch() {
@@ -3933,13 +3982,19 @@ mod tests {
             .filter(|d| d.function.name == "read_file")
             .collect();
         assert_eq!(surviving.len(), 1, "exactly one read_file is advertised");
-        assert_eq!(surviving[0].function.description, builtin.function.description);
+        assert_eq!(
+            surviving[0].function.description,
+            builtin.function.description
+        );
         assert_ne!(
             surviving[0].function.description.as_deref(),
             Some("an MCP server's own read_file"),
             "the MCP description must not reach the model"
         );
-        assert_eq!(surviving[0].function.parameters, builtin.function.parameters);
+        assert_eq!(
+            surviving[0].function.parameters,
+            builtin.function.parameters
+        );
         assert_eq!(
             toolset.tool_kind_map().get("read_file").copied(),
             Some(builtin_kind),
@@ -4023,9 +4078,11 @@ mod tests {
             _input: serde_json::Value,
         ) -> fuigo_tool_runtime::ToolStream<String> {
             Box::pin(futures::stream::iter(vec![
-                fuigo_tool_runtime::ToolStreamItem::Progress(fuigo_tool_runtime::ToolProgress::Text {
-                    text: "progress-1".into(),
-                }),
+                fuigo_tool_runtime::ToolStreamItem::Progress(
+                    fuigo_tool_runtime::ToolProgress::Text {
+                        text: "progress-1".into(),
+                    },
+                ),
                 fuigo_tool_runtime::ToolStreamItem::Terminal(Ok("terminal-value".to_string())),
             ]))
         }
@@ -5665,13 +5722,30 @@ mod tests {
                     Some(crate::sandbox_launch::ApprovedWithoutGrant(!granted)),
                 )
                 .expect("prepare_dispatch succeeds");
-            let flag = parts.ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>();
-            assert_eq!(crate::sandbox_launch::ApprovedWithoutGrant::of(flag.as_deref()), !granted);
+            let flag = parts
+                .ctx
+                .extensions
+                .get::<crate::sandbox_launch::ApprovedWithoutGrant>();
+            assert_eq!(
+                crate::sandbox_launch::ApprovedWithoutGrant::of(flag.as_deref()),
+                !granted
+            );
         }
         let parts = toolset
-            .prepare_dispatch("read_file", serde_json::json!({"target_file": "noop"}), "c", None, None, None, None)
+            .prepare_dispatch(
+                "read_file",
+                serde_json::json!({"target_file": "noop"}),
+                "c",
+                None,
+                None,
+                None,
+                None,
+            )
             .expect("prepare_dispatch succeeds");
-        let flag = parts.ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>();
+        let flag = parts
+            .ctx
+            .extensions
+            .get::<crate::sandbox_launch::ApprovedWithoutGrant>();
         assert!(flag.is_none() && crate::sandbox_launch::ApprovedWithoutGrant::of(flag.as_deref()));
     }
     /// u35 g10 (Fable r9 Medium): the flag a call is dispatched with reaches the shell runner through each bash
@@ -5682,7 +5756,8 @@ mod tests {
         crate::sandbox_launch::install_env_judge(crate::sandbox_launch::u35_test_child_judge);
         let tmp = TempDir::new().unwrap();
         let mut background = ToolConfig::from_id("FuigoBuild:run_terminal_cmd".to_string());
-        background.params = Some(serde_json::from_value(serde_json::json!({"enabled_background": true})).unwrap());
+        background.params =
+            Some(serde_json::from_value(serde_json::json!({"enabled_background": true})).unwrap());
         let config = ToolServerConfig {
             tools: vec![
                 background,
@@ -5692,27 +5767,48 @@ mod tests {
             ],
             behavior_preset: None,
         };
-        let toolset = Arc::new(ToolRegistryBuilder::new().finalize(config, test_session_context(&tmp)).unwrap());
+        let toolset = Arc::new(
+            ToolRegistryBuilder::new()
+                .finalize(config, test_session_context(&tmp))
+                .unwrap(),
+        );
         let calls = [
-            ("run_terminal_cmd", serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35"})),
+            (
+                "run_terminal_cmd",
+                serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35"}),
+            ),
             (
                 "run_terminal_cmd",
                 serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35", "block_until_ms": 0}),
             ),
-            ("bash", serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35"})),
+            (
+                "bash",
+                serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35"}),
+            ),
         ];
         for (at, (tool, args)) in calls.iter().enumerate() {
             let text = |result: Result<ToolRunResult, fuigo_tool_runtime::ToolError>| match result {
                 Ok(result) => format!("{:?}", result.output),
                 Err(error) => error.to_string(),
             };
-            let granted = text(toolset.call_approved(tool, args.clone(), &format!("u35-g10-{at}-granted"), false).await);
+            let granted = text(
+                toolset
+                    .call_approved(tool, args.clone(), &format!("u35-g10-{at}-granted"), false)
+                    .await,
+            );
             assert!(
                 !granted.contains("approval") && !granted.contains("missing field"),
                 "{tool} #{at}: a granted call is never refused: {granted}"
             );
-            assert!(at == 1 || granted.contains("u35-g10-steer ran"), "{tool} #{at}: {granted}");
-            let judged = text(toolset.call_approved(tool, args.clone(), &format!("u35-g10-{at}-judged"), true).await);
+            assert!(
+                at == 1 || granted.contains("u35-g10-steer ran"),
+                "{tool} #{at}: {granted}"
+            );
+            let judged = text(
+                toolset
+                    .call_approved(tool, args.clone(), &format!("u35-g10-{at}-judged"), true)
+                    .await,
+            );
             assert!(
                 judged.contains("U35_G10_STEER") && judged.contains("approval"),
                 "{tool} #{at}: a call approved without a grant is judged: {judged}"
@@ -5729,16 +5825,35 @@ mod tests {
             tools: vec![ToolConfig::from_id("FuigoBuild:monitor".to_string())],
             behavior_preset: None,
         };
-        let toolset = Arc::new(ToolRegistryBuilder::new().finalize(config, test_session_context(&tmp)).unwrap());
-        let args = serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35 watch"});
+        let toolset = Arc::new(
+            ToolRegistryBuilder::new()
+                .finalize(config, test_session_context(&tmp))
+                .unwrap(),
+        );
+        let args =
+            serde_json::json!({"command": "echo u35-g10-steer ran", "description": "u35 watch"});
         let text = |result: Result<ToolRunResult, fuigo_tool_runtime::ToolError>| match result {
             Ok(result) => format!("{:?}", result.output),
             Err(error) => error.to_string(),
         };
-        let granted = text(toolset.call_approved("monitor", args.clone(), "u35-g11-monitor-granted", false).await);
-        assert!(!granted.contains("approval") && !granted.contains("missing field"), "{granted}");
-        let judged = text(toolset.call_approved("monitor", args, "u35-g11-monitor-judged", true).await);
-        assert!(judged.contains("U35_G10_STEER") && judged.contains("approval"), "judged: {judged}");
+        let granted = text(
+            toolset
+                .call_approved("monitor", args.clone(), "u35-g11-monitor-granted", false)
+                .await,
+        );
+        assert!(
+            !granted.contains("approval") && !granted.contains("missing field"),
+            "{granted}"
+        );
+        let judged = text(
+            toolset
+                .call_approved("monitor", args, "u35-g11-monitor-judged", true)
+                .await,
+        );
+        assert!(
+            judged.contains("U35_G10_STEER") && judged.contains("approval"),
+            "judged: {judged}"
+        );
     }
     /// P173: per-call Read-deny globs ride on the call's context and never touch the shared resources, so one call
     /// cannot replace another's excludes.

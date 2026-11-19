@@ -546,7 +546,8 @@ pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> Prep
     for (i, &line) in filtered.iter().enumerate() {
         // A replay from the start leaves out the repair note (the user saw it when it was made); one that resumes after a
         // cursor carries events the client has not seen, the note included.
-        if (mark_replay && line_is_dropped_on_full_replay(line)) || line_is_dropped_on_replay(line) {
+        if (mark_replay && line_is_dropped_on_full_replay(line)) || line_is_dropped_on_replay(line)
+        {
             continue;
         }
         total_live += 1;

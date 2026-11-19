@@ -50,12 +50,22 @@ impl Harness {
     }
 
     async fn with_hook_workspace() -> Self {
-        Self::build(false, Some(tempfile::TempDir::new().expect("hook cwd")), None).await
+        Self::build(
+            false,
+            Some(tempfile::TempDir::new().expect("hook cwd")),
+            None,
+        )
+        .await
     }
 
     /// A hook workspace plus a session process scope, as a resident session has.
     async fn with_hook_workspace_and_scope(scope: fuigo_tools::util::ProcessScope) -> Self {
-        Self::build(false, Some(tempfile::TempDir::new().expect("hook cwd")), Some(scope)).await
+        Self::build(
+            false,
+            Some(tempfile::TempDir::new().expect("hook cwd")),
+            Some(scope),
+        )
+        .await
     }
 
     async fn build(
@@ -1159,11 +1169,19 @@ async fn f13_end_session(
     script: &str,
     timeout_ms: u64,
     close: bool,
-) -> (Harness, tokio::sync::mpsc::UnboundedSender<SessionCommand>, std::time::Instant) {
+) -> (
+    Harness,
+    tokio::sync::mpsc::UnboundedSender<SessionCommand>,
+    std::time::Instant,
+) {
     let scope = fuigo_tools::util::ProcessScope::new();
     let mut h = Harness::with_hook_workspace_and_scope(scope.clone()).await;
     *h.actor.hook_registry.borrow_mut() = Some(Arc::new(
-        super::client_hooks_tests::file_registry_with_timeout(HookEventName::SessionEnd, script, timeout_ms),
+        super::client_hooks_tests::file_registry_with_timeout(
+            HookEventName::SessionEnd,
+            script,
+            timeout_ms,
+        ),
     ));
     let (cmd_tx, _fired) = h.spawn_loop().await;
     if close {
@@ -1171,7 +1189,9 @@ async fn f13_end_session(
     }
     let sent = std::time::Instant::now();
     cmd_tx
-        .send(SessionCommand::Shutdown(crate::session::ShutdownKind::CancelRunningTurn))
+        .send(SessionCommand::Shutdown(
+            crate::session::ShutdownKind::CancelRunningTurn,
+        ))
         .unwrap();
     (h, cmd_tx, sent)
 }
@@ -1211,8 +1231,12 @@ async fn f13_close_does_not_wait_on_a_running_session_end_hook() {
     run(async {
         let out = tempfile::TempDir::new().unwrap();
         let marker = out.path().join("session-end-done");
-        let (_h, cmd_tx, sent) =
-            f13_end_session(&format!("sleep 4; echo done > '{}'", marker.display()), 20_000, true).await;
+        let (_h, cmd_tx, sent) = f13_end_session(
+            &format!("sleep 4; echo done > '{}'", marker.display()),
+            20_000,
+            true,
+        )
+        .await;
         let returned = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !cmd_tx.is_closed() {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1225,7 +1249,10 @@ async fn f13_close_does_not_wait_on_a_running_session_end_hook() {
             elapsed < std::time::Duration::from_secs(3),
             "the actor returned {elapsed:?} after Shutdown: it waited on the SessionEnd hook"
         );
-        assert!(!marker.exists(), "the hook cannot have finished before the actor returned");
+        assert!(
+            !marker.exists(),
+            "the hook cannot have finished before the actor returned"
+        );
         assert!(
             f13_wait_for(&marker, std::time::Duration::from_secs(10)).await,
             "the SessionEnd hook did not finish after the actor returned"
@@ -1268,8 +1295,12 @@ async fn f13_process_exit_flush_still_runs_the_session_end_hook_inline() {
     run(async {
         let out = tempfile::TempDir::new().unwrap();
         let marker = out.path().join("session-end-inline");
-        let (_h, cmd_tx, _sent) =
-            f13_end_session(&format!("sleep 1; echo ran > '{}'", marker.display()), 5000, false).await;
+        let (_h, cmd_tx, _sent) = f13_end_session(
+            &format!("sleep 1; echo ran > '{}'", marker.display()),
+            5000,
+            false,
+        )
+        .await;
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !cmd_tx.is_closed() {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1277,7 +1308,10 @@ async fn f13_process_exit_flush_still_runs_the_session_end_hook_inline() {
         })
         .await
         .expect("the actor never returned");
-        assert!(marker.exists(), "the flushed session returned before its SessionEnd hook finished");
+        assert!(
+            marker.exists(),
+            "the flushed session returned before its SessionEnd hook finished"
+        );
     })
     .await;
 }

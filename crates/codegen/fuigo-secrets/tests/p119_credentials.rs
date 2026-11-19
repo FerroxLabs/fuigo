@@ -19,7 +19,8 @@ fn base64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let n = chunk.iter().fold(0u32, |acc, b| (acc << 8) | u32::from(*b)) << (8 * (3 - chunk.len()));
+        let n =
+            chunk.iter().fold(0u32, |acc, b| (acc << 8) | u32::from(*b)) << (8 * (3 - chunk.len()));
         for i in 0..4 {
             if i <= chunk.len() {
                 out.push(A[((n >> (18 - 6 * i)) & 63) as usize] as char);
@@ -90,7 +91,10 @@ fn a_rewrite_that_straddles_the_start_of_a_cut_credential_is_still_hidden() {
     let capped = "upstream said: inference-api-p119abcdefgh\u{2026}";
     record_transformed(capped, rewrite);
     let shown = rewrite(capped);
-    assert_eq!(shown, "upstream said: inference backend-p119abcdefgh\u{2026}");
+    assert_eq!(
+        shown,
+        "upstream said: inference backend-p119abcdefgh\u{2026}"
+    );
     let out = scrub(&shown);
     assert!(!out.contains("p119abcdefgh"), "{out}");
 }
@@ -104,7 +108,10 @@ fn a_rewrite_that_straddles_the_end_of_a_credential_is_still_hidden() {
     let text = "upstream rejected key p119abcdefgh-inference-api";
     record_transformed(text, rewrite);
     let shown = rewrite(text);
-    assert_eq!(shown, "upstream rejected key p119abcdefgh-inference backend");
+    assert_eq!(
+        shown,
+        "upstream rejected key p119abcdefgh-inference backend"
+    );
     let out = scrub(&shown);
     assert!(!out.contains("p119abcdefgh"), "{out}");
 }

@@ -28,16 +28,17 @@ mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
 
-    static DEFAULT_BUNDLE_STATE: crate::app::bundle::BundleState = crate::app::bundle::BundleState {
-        has_cache: false,
-        version: String::new(),
-        personas: Vec::new(),
-        roles: Vec::new(),
-        agents: Vec::new(),
-        skills: Vec::new(),
-        persona_details: Vec::new(),
-        role_details: Vec::new(),
-    };
+    static DEFAULT_BUNDLE_STATE: crate::app::bundle::BundleState =
+        crate::app::bundle::BundleState {
+            has_cache: false,
+            version: String::new(),
+            personas: Vec::new(),
+            roles: Vec::new(),
+            agents: Vec::new(),
+            skills: Vec::new(),
+            persona_details: Vec::new(),
+            role_details: Vec::new(),
+        };
 
     fn run(args: &str) -> CommandResult {
         let models = ModelState::default();
@@ -55,8 +56,14 @@ mod tests {
 
     #[test]
     fn bare_resume_opens_the_picker() {
-        assert!(matches!(run(""), CommandResult::Action(Action::ShowSessionPicker)));
-        assert!(matches!(run("   "), CommandResult::Action(Action::ShowSessionPicker)));
+        assert!(matches!(
+            run(""),
+            CommandResult::Action(Action::ShowSessionPicker)
+        ));
+        assert!(matches!(
+            run("   "),
+            CommandResult::Action(Action::ShowSessionPicker)
+        ));
     }
 
     #[test]

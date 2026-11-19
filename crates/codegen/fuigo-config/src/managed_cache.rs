@@ -109,7 +109,10 @@ pub(crate) fn accepted_revision_floor(home: &Path, identity: Option<&str>) -> u6
     read_managed_config_cache(home)
         .and_then(|cache| {
             let key = identity_key(identity);
-            revision_floors_of(&cache).get(&key).copied().or_else(|| old_floor_of_served_policy(&cache, home, &key))
+            revision_floors_of(&cache)
+                .get(&key)
+                .copied()
+                .or_else(|| old_floor_of_served_policy(&cache, home, &key))
         })
         .unwrap_or(0)
 }
@@ -133,8 +136,12 @@ fn revision_floors_of(cache: &ManagedConfigCache) -> std::collections::BTreeMap<
 /// `team_id`, else no identity (`""`). Read, not written: the first apply after the upgrade records that identity's
 /// own floor. (A deploy-key marker records the payload's deployment id itself, so its spelling cannot differ.)
 fn old_floor_of_served_policy(cache: &ManagedConfigCache, home: &Path, key: &str) -> Option<u64> {
-    let old_team_marker = cache.revision_floors.is_empty() && cache.highest_revision > 0 && cache.key_fingerprint.is_none();
-    let served = old_team_marker.then(|| crate::signed_policy::on_disk_sidecar_identity(home)).flatten()?;
+    let old_team_marker = cache.revision_floors.is_empty()
+        && cache.highest_revision > 0
+        && cache.key_fingerprint.is_none();
+    let served = old_team_marker
+        .then(|| crate::signed_policy::on_disk_sidecar_identity(home))
+        .flatten()?;
     (identity_key(served.as_deref()) == key).then_some(cache.highest_revision)
 }
 
@@ -143,12 +150,17 @@ fn old_floor_of_served_policy(cache: &ManagedConfigCache, home: &Path, key: &str
 /// an apply replaces or evicts that policy's sidecar. Read from the sidecar alone, that floor lasted only as long as
 /// the sidecar: a first apply that switched identity dropped it, and the old identity's older revisions passed again.
 /// The caller holds the apply lock. A marker that already records per-identity floors is left as it is.
-pub fn persist_legacy_revision_floor_at(home: &Path) {
+///
+/// # Errors
+///
+/// The marker could not be written (delta review D3-04). The caller must then leave the policy on disk as it is:
+/// replacing the sidecar without the floor written down would reopen the rollback this function closes.
+pub fn persist_legacy_revision_floor_at(home: &Path) -> std::io::Result<()> {
     let Some(mut cache) = read_managed_config_cache(home) else {
-        return;
+        return Ok(());
     };
     if !cache.revision_floors.is_empty() || cache.highest_revision == 0 {
-        return;
+        return Ok(());
     }
     let mut floors = revision_floors_of(&cache);
     if cache.key_fingerprint.is_none()
@@ -158,10 +170,8 @@ pub fn persist_legacy_revision_floor_at(home: &Path) {
         *floor = (*floor).max(cache.highest_revision);
     }
     cache.revision_floors = floors;
-    match serde_json::to_string(&cache) {
-        Ok(json) => write_marker_atomically(home, &json),
-        Err(e) => tracing::warn!("failed to serialize managed config cache: {e}"),
-    }
+    let json = serde_json::to_string(&cache).map_err(std::io::Error::other)?;
+    crate::fs_atomic::write_atomically(&home.join(MANAGED_CONFIG_CACHE_FILE), &json, None)
 }
 
 /// [`mark_managed_config_synced`] for an explicit `home` (apply-lock holder: same dir as lock).
@@ -183,7 +193,9 @@ pub fn mark_managed_config_synced_at(home: &Path, marker: SyncMarker<'_>) {
         .unwrap_or_default();
     let served_identity = match crate::signed_policy::on_disk_signed_revision(home) {
         Some((identity, revision)) => {
-            let floor = revision_floors.entry(identity_key(identity.as_deref())).or_default();
+            let floor = revision_floors
+                .entry(identity_key(identity.as_deref()))
+                .or_default();
             *floor = (*floor).max(revision);
             identity_key(identity.as_deref())
         }
@@ -534,7 +546,9 @@ pub fn managed_policy_compromised_for(identity: &ServingIdentity) -> bool {
 }
 
 /// Same decision as [`managed_policy_compromised_for`], with the fixed reason category the refusal names.
-pub fn managed_policy_compromise_for(identity: &ServingIdentity) -> Option<ManagedPolicyCompromise> {
+pub fn managed_policy_compromise_for(
+    identity: &ServingIdentity,
+) -> Option<ManagedPolicyCompromise> {
     user_fuigo_home().and_then(|home| managed_policy_compromised_for_at(&home, identity))
 }
 

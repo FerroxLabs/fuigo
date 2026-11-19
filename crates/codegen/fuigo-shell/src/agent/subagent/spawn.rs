@@ -12,7 +12,6 @@
 //! Stage timings are recorded in `subagent_spawn::SubagentSpawnPhase`.
 use super::ShellCompletionData;
 use crate::agent::mvp_agent::{LocalRef, MvpAgent};
-use futures::future::LocalBoxFuture;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::SessionCommand;
 use agent_client_protocol as acp;
@@ -21,6 +20,7 @@ pub(crate) use fuigo_tools::implementations::fuigo_build::task::coordinator::{
     self, ChildCompletion, ChildRunOutput, StartedChild,
 };
 use fuigo_tools::implementations::fuigo_build::task::types::{SubagentRequest, SubagentResult};
+use futures::future::LocalBoxFuture;
 use tokio::sync::mpsc;
 /// Floor keeps the pool responsive when `available_parallelism` is tiny.
 const MIN_WORKER_THREADS: usize = 2;
@@ -95,9 +95,18 @@ impl<'a> coordinator::ChildRunner for ShellChildRunner<'a> {
     fn run(&self, run: coordinator::ChildRunRequest<Self::Control>) -> Self::RunFuture {
         // Freeze ownership before queue/runtime awaits. A late queued child may
         // not borrow a new prompt's grant from the same parent session.
-        let execution_parent = run.request.parent_prompt_id.as_deref().and_then(|prompt_id|
-            crate::session::execution_state::Execution::for_prompt(&run.request.parent_session_id, prompt_id));
-        let execution_required = fuigo_sampler::execution_budget::process_budget().map_or(true, |budget| budget.is_some());
+        let execution_parent = run
+            .request
+            .parent_prompt_id
+            .as_deref()
+            .and_then(|prompt_id| {
+                crate::session::execution_state::Execution::for_prompt(
+                    &run.request.parent_session_id,
+                    prompt_id,
+                )
+            });
+        let execution_required = fuigo_sampler::execution_budget::process_budget()
+            .map_or(true, |budget| budget.is_some());
         let agent_ref = self.agent_ref.clone();
         Box::pin(async move {
             let this = agent_ref.get();

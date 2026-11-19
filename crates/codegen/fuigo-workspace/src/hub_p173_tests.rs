@@ -122,7 +122,8 @@ impl Fixture {
         .expect("handler");
         let mut ctx = ToolCallContext::new(ToolCallId::new_v7());
         ctx.insert(SessionContext(session.to_owned()));
-        let mut stream = fuigo_computer_hub_sdk::ToolServerHandler::handle_call(&handler, ctx, args).await;
+        let mut stream =
+            fuigo_computer_hub_sdk::ToolServerHandler::handle_call(&handler, ctx, args).await;
         let mut terminal = None;
         while let Some(item) = stream.next().await {
             if let ToolStreamItem::Terminal(t) = item {
@@ -291,7 +292,10 @@ async fn hub_read_only_tool_runs_under_default_rules() {
             serde_json::json!({"target_file": target.to_string_lossy()}),
         )
         .await;
-    assert!(result.is_ok(), "read under default rules must run: {result:?}");
+    assert!(
+        result.is_ok(),
+        "read under default rules must run: {result:?}"
+    );
 }
 
 // ---- Astra r1: session MCP tools and search results answer to the policy too. ----
@@ -335,9 +339,12 @@ async fn call_mcp(fx: &Fixture) -> Result<TypedToolOutput, fuigo_tool_runtime::T
     );
     let mut ctx = ToolCallContext::new(ToolCallId::new_v7());
     ctx.insert(SessionContext("main".to_owned()));
-    let mut stream =
-        fuigo_computer_hub_sdk::ToolServerHandler::handle_call(&gated, ctx, serde_json::json!({"title": "x"}))
-            .await;
+    let mut stream = fuigo_computer_hub_sdk::ToolServerHandler::handle_call(
+        &gated,
+        ctx,
+        serde_json::json!({"title": "x"}),
+    )
+    .await;
     let mut terminal = None;
     while let Some(item) = stream.next().await {
         if let ToolStreamItem::Terminal(t) = item {
@@ -381,7 +388,10 @@ async fn hub_grep_skips_files_a_read_rule_denies() {
         .await;
     let out = result.expect("grep under a permitted root runs");
     let text = format!("{:?} {:?}", out.value, out.model_output);
-    assert!(text.contains("open.txt"), "the permitted match is found: {text}");
+    assert!(
+        text.contains("open.txt"),
+        "the permitted match is found: {text}"
+    );
     assert!(
         !text.contains("token.txt"),
         "a Read-denied file must not appear in hub grep results: {text}"
@@ -426,7 +436,10 @@ async fn hub_read_under_a_renamed_tool_and_parameter_still_meets_the_read_rule()
             serde_json::json!({"location": open.to_string_lossy()}),
         )
         .await;
-    assert!(allowed.is_ok(), "the renamed tool works for a permitted path: {allowed:?}");
+    assert!(
+        allowed.is_ok(),
+        "the renamed tool works for a permitted path: {allowed:?}"
+    );
     let denied = fx
         .call_in(
             "renamed",
@@ -499,7 +512,11 @@ async fn hub_renamed_codex_read_file_batch_entries_meet_the_read_rule() {
 #[tokio::test]
 async fn hub_renamed_apply_patch_still_meets_the_protected_floor() {
     let fx = Fixture::new("", &[]);
-    bind_session(&fx, "patch", &[("Codex:apply_patch", "patcher", &[("patch", "delta")])]);
+    bind_session(
+        &fx,
+        "patch",
+        &[("Codex:apply_patch", "patcher", &[("patch", "delta")])],
+    );
     let hook = fx.cwd().join(".git").join("hooks").join("pre-commit");
     let patch = format!(
         "*** Begin Patch\n*** Add File: {}\n+#!/bin/sh\n*** End Patch\n",
@@ -517,7 +534,11 @@ async fn hub_renamed_apply_patch_still_meets_the_protected_floor() {
 #[tokio::test]
 async fn hub_typed_tool_accesses_come_from_its_parsed_input_only() {
     let fx = Fixture::new("", &[]);
-    bind_session(&fx, "typed", &[("OpenCode:write", "write", &[("file_path", "location")])]);
+    bind_session(
+        &fx,
+        "typed",
+        &[("OpenCode:write", "write", &[("file_path", "location")])],
+    );
     let handler = SessionRoutedToolHandler::new(
         "write".to_owned(),
         ToolDescription::new("write", String::new()),
@@ -575,7 +596,10 @@ async fn hub_grep_under_an_absolute_read_deny_does_not_read_the_file() {
     std::fs::create_dir_all(cwd.join(".fuigo")).unwrap();
     std::fs::write(
         cwd.join(".fuigo").join("config.toml"),
-        format!("[permission]\ndeny = [\"Read({}/secrets/**)\"]\n", cwd.display()),
+        format!(
+            "[permission]\ndeny = [\"Read({}/secrets/**)\"]\n",
+            cwd.display()
+        ),
     )
     .unwrap();
     std::fs::create_dir_all(cwd.join("secrets")).unwrap();
@@ -651,7 +675,10 @@ async fn hub_opencode_bash_is_judged_in_its_workdir() {
         )
         .await;
     assert_refused(&result, "touch of a git hook through workdir");
-    assert!(!hooks.join("pre-commit").exists(), "the hook must not be created");
+    assert!(
+        !hooks.join("pre-commit").exists(),
+        "the hook must not be created"
+    );
 }
 
 /// A `workdir` is judged in addition to the session cwd: a bash tool that ignores the argument runs in the session cwd,
@@ -663,7 +690,10 @@ async fn hub_bash_workdir_does_not_replace_the_session_cwd_in_the_check() {
     std::fs::create_dir_all(cwd.join(".fuigo")).unwrap();
     std::fs::write(
         cwd.join(".fuigo").join("config.toml"),
-        format!("[permission]\ndeny = [\"Edit({}/notes.txt)\"]\n", cwd.display()),
+        format!(
+            "[permission]\ndeny = [\"Edit({}/notes.txt)\"]\n",
+            cwd.display()
+        ),
     )
     .unwrap();
     std::fs::create_dir_all(cwd.join("sub")).unwrap();
@@ -676,7 +706,10 @@ async fn hub_bash_workdir_does_not_replace_the_session_cwd_in_the_check() {
             }),
         )
         .await;
-    assert_refused(&result, "redirect into a denied file, judged elsewhere via workdir");
+    assert_refused(
+        &result,
+        "redirect into a denied file, judged elsewhere via workdir",
+    );
     assert_eq!(fx.runs(), 0);
 }
 
@@ -720,9 +753,17 @@ async fn hub_grep_tilde_path_under_an_absolute_read_deny_is_refused() {
     let fx = Fixture::new("", &[]);
     write_config(
         &fx,
-        &format!("[permission]\ndeny = [\"Read({}/**)\"]\n", secrets.display()),
+        &format!(
+            "[permission]\ndeny = [\"Read({}/**)\"]\n",
+            secrets.display()
+        ),
     );
-    let name = outside.path().file_name().unwrap().to_string_lossy().into_owned();
+    let name = outside
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let result = fx
         .call(
             "grep",
@@ -740,7 +781,10 @@ async fn hub_grep_path_missing_its_leading_slash_under_an_absolute_read_deny_is_
     let cwd = fx.cwd();
     write_config(
         &fx,
-        &format!("[permission]\ndeny = [\"Read({}/secrets/**)\"]\n", cwd.display()),
+        &format!(
+            "[permission]\ndeny = [\"Read({}/secrets/**)\"]\n",
+            cwd.display()
+        ),
     );
     std::fs::create_dir_all(cwd.join("secrets")).unwrap();
     std::fs::write(cwd.join("secrets").join("token.txt"), "needle-p173\n").unwrap();
@@ -751,7 +795,10 @@ async fn hub_grep_path_missing_its_leading_slash_under_an_absolute_read_deny_is_
             serde_json::json!({"pattern": "needle-p173", "path": no_slash}),
         )
         .await;
-    assert_refused(&result, "search root missing its leading slash over an absolute Read deny");
+    assert_refused(
+        &result,
+        "search root missing its leading slash over an absolute Read deny",
+    );
 }
 
 /// Grok #2: OpenCode `glob` lists files with ripgrep; a `**/` Read deny must keep the file out of its listing.
@@ -777,7 +824,11 @@ async fn hub_opencode_glob_under_a_starstar_read_deny_does_not_list_the_file() {
 #[tokio::test]
 async fn hub_renamed_opencode_bash_workdir_is_judged() {
     let fx = Fixture::new("", &[]);
-    bind_session(&fx, "ocwd", &[("OpenCode:bash", "bash", &[("workdir", "dir")])]);
+    bind_session(
+        &fx,
+        "ocwd",
+        &[("OpenCode:bash", "bash", &[("workdir", "dir")])],
+    );
     let hooks = fx.cwd().join(".git").join("hooks");
     std::fs::create_dir_all(&hooks).unwrap();
     let result = fx
@@ -792,7 +843,10 @@ async fn hub_renamed_opencode_bash_workdir_is_judged() {
         )
         .await;
     assert_refused(&result, "touch of a git hook through a renamed workdir");
-    assert!(!hooks.join("pre-commit").exists(), "the hook must not be created");
+    assert!(
+        !hooks.join("pre-commit").exists(),
+        "the hook must not be created"
+    );
 }
 
 /// Grok #3: a renamed OpenCode grep `path` is judged at the path the tool searches.
@@ -805,9 +859,16 @@ async fn hub_renamed_opencode_grep_path_under_an_absolute_read_deny_is_refused()
     let fx = Fixture::new("", &[]);
     write_config(
         &fx,
-        &format!("[permission]\ndeny = [\"Read({}/**)\"]\n", secrets.display()),
+        &format!(
+            "[permission]\ndeny = [\"Read({}/**)\"]\n",
+            secrets.display()
+        ),
     );
-    bind_session(&fx, "ocgrep", &[("OpenCode:grep", "grep", &[("path", "dir")])]);
+    bind_session(
+        &fx,
+        "ocgrep",
+        &[("OpenCode:grep", "grep", &[("path", "dir")])],
+    );
     let result = fx
         .call_in(
             "ocgrep",
@@ -815,7 +876,10 @@ async fn hub_renamed_opencode_grep_path_under_an_absolute_read_deny_is_refused()
             serde_json::json!({"pattern": "needle-p173", "dir": outside.path().to_string_lossy()}),
         )
         .await;
-    assert_refused(&result, "renamed OpenCode grep path over an absolute Read deny");
+    assert_refused(
+        &result,
+        "renamed OpenCode grep path over an absolute Read deny",
+    );
 }
 
 /// Grok #4: a Grep ask rule over a file below the search root needs approval (refused without a hub prompt).
@@ -841,7 +905,10 @@ async fn hub_grep_absolute_deny_refuses_the_search() {
     let cwd = fx.cwd();
     write_config(
         &fx,
-        &format!("[permission]\ndeny = [\"Grep({}/secrets/**)\"]\n", cwd.display()),
+        &format!(
+            "[permission]\ndeny = [\"Grep({}/secrets/**)\"]\n",
+            cwd.display()
+        ),
     );
     std::fs::create_dir_all(cwd.join("secrets")).unwrap();
     std::fs::write(cwd.join("secrets").join("token.txt"), "needle-p173\n").unwrap();
@@ -864,7 +931,10 @@ async fn hub_opencode_grep_under_another_name_is_judged_as_a_search() {
     let fx = Fixture::new("", &[]);
     write_config(
         &fx,
-        &format!("[permission]\ndeny = [\"Read({}/**)\"]\n", secrets.display()),
+        &format!(
+            "[permission]\ndeny = [\"Read({}/**)\"]\n",
+            secrets.display()
+        ),
     );
     bind_session(&fx, "ocsearch", &[("OpenCode:grep", "search_text", &[])]);
     let result = fx
@@ -882,17 +952,31 @@ async fn hub_opencode_grep_under_another_name_is_judged_as_a_search() {
 #[tokio::test]
 async fn hub_apply_patch_touching_a_denied_path_is_refused() {
     let fx = Fixture::new("[permission]\ndeny = [\"Edit(secrets/**)\"]\n", &[]);
-    bind_session(&fx, "patch-deny", &[("Codex:apply_patch", "apply_patch", &[])]);
+    bind_session(
+        &fx,
+        "patch-deny",
+        &[("Codex:apply_patch", "apply_patch", &[])],
+    );
     let cwd = fx.cwd();
     std::fs::create_dir_all(cwd.join("secrets")).unwrap();
     std::fs::write(cwd.join("secrets/x"), "k=1\n").unwrap();
     let patch = "*** Begin Patch\n*** Add File: src/ok.rs\n+ok\n*** Update File: secrets/x\n@@\n-k=1\n+k=2\n*** End Patch\n";
     let result = fx
-        .call_in("patch-deny", "apply_patch", serde_json::json!({"patch": patch}))
+        .call_in(
+            "patch-deny",
+            "apply_patch",
+            serde_json::json!({"patch": patch}),
+        )
         .await;
     assert_refused(&result, "patch updating a denied file");
-    assert!(!cwd.join("src/ok.rs").exists(), "the refused patch must write nothing");
-    assert_eq!(std::fs::read_to_string(cwd.join("secrets/x")).unwrap(), "k=1\n");
+    assert!(
+        !cwd.join("src/ok.rs").exists(),
+        "the refused patch must write nothing"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("secrets/x")).unwrap(),
+        "k=1\n"
+    );
 }
 
 /// P173 on P184: a hub patch target is judged in every spelling of the file the tool writes, as a local one is. A
@@ -902,16 +986,30 @@ async fn hub_apply_patch_touching_a_denied_path_is_refused() {
 #[cfg(unix)]
 async fn hub_apply_patch_target_is_judged_where_the_tool_writes_it() {
     let fx = Fixture::new("[permission]\ndeny = [\"Edit(secrets/**)\"]\n", &[]);
-    bind_session(&fx, "patch-link", &[("Codex:apply_patch", "apply_patch", &[])]);
+    bind_session(
+        &fx,
+        "patch-link",
+        &[("Codex:apply_patch", "apply_patch", &[])],
+    );
     let cwd = fx.cwd();
     std::fs::create_dir_all(cwd.join("secrets")).unwrap();
     std::os::unix::fs::symlink(cwd.join("secrets"), cwd.join("safe\\alias")).unwrap();
     let patch = "*** Begin Patch\n*** Add File: safe\\alias/key\n+x\n*** End Patch\n";
     let result = fx
-        .call_in("patch-link", "apply_patch", serde_json::json!({"patch": patch}))
+        .call_in(
+            "patch-link",
+            "apply_patch",
+            serde_json::json!({"patch": patch}),
+        )
         .await;
-    assert_refused(&result, "patch writing a denied file through a backslash-named symlink");
-    assert!(!cwd.join("secrets/key").exists(), "the refused patch must not write the denied file");
+    assert_refused(
+        &result,
+        "patch writing a denied file through a backslash-named symlink",
+    );
+    assert!(
+        !cwd.join("secrets/key").exists(),
+        "the refused patch must not write the denied file"
+    );
 }
 
 /// P173 on P184: a hub patch that does not parse is refused by the policy (no `Edit("apply_patch")` sentinel is
@@ -919,9 +1017,17 @@ async fn hub_apply_patch_target_is_judged_where_the_tool_writes_it() {
 #[tokio::test]
 async fn hub_unparseable_apply_patch_is_refused() {
     let fx = Fixture::new("", &[]);
-    bind_session(&fx, "patch-junk", &[("Codex:apply_patch", "apply_patch", &[])]);
+    bind_session(
+        &fx,
+        "patch-junk",
+        &[("Codex:apply_patch", "apply_patch", &[])],
+    );
     let result = fx
-        .call_in("patch-junk", "apply_patch", serde_json::json!({"patch": "not a patch"}))
+        .call_in(
+            "patch-junk",
+            "apply_patch",
+            serde_json::json!({"patch": "not a patch"}),
+        )
         .await;
     assert_refused(&result, "unparseable patch");
 }

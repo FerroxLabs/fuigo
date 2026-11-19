@@ -331,10 +331,12 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
         )
         .await
         {
-            return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(format!(
-                "Error: {} is ignored by .gitignore and cannot be edited.",
-                input.file_path
-            )));
+            return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(
+                format!(
+                    "Error: {} is ignored by .gitignore and cannot be edited.",
+                    input.file_path
+                ),
+            ));
         }
         // Error-preserving variant: the Err arm drives new-file creation.
         let path = match crate::util::fs::try_canonicalize(&joined_path).await {
@@ -342,7 +344,8 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
             Err(_) => {
                 // Try unicode-confusable resolution before giving up.
                 // Used in search_replace.
-                let resolved = crate::util::try_resolve_unicode_filename_for_edit(&joined_path).await;
+                let resolved =
+                    crate::util::try_resolve_unicode_filename_for_edit(&joined_path).await;
                 if let Some(m) = resolved {
                     m.resolved_path
                 } else {
@@ -394,14 +397,21 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
         };
 
         // Read current file content.
-        let file_bytes = match crate::implementations::fuigo_build::read_file::read_tool_source(fs.as_ref(), &path).await {
+        let file_bytes = match crate::implementations::fuigo_build::read_file::read_tool_source(
+            fs.as_ref(),
+            &path,
+        )
+        .await
+        {
             Ok(b) => b,
             Err(e) => {
-                if let Some(msg) = crate::implementations::fuigo_build::read_file::source_too_large_message(
-                    &e,
-                    &input.file_path,
-                    "edit",
-                ) {
+                if let Some(msg) =
+                    crate::implementations::fuigo_build::read_file::source_too_large_message(
+                        &e,
+                        &input.file_path,
+                        "edit",
+                    )
+                {
                     return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(msg));
                 }
                 let display_path = display_dcwd.join(&input.file_path);
@@ -427,11 +437,13 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
         let old_content = match String::from_utf8(file_bytes) {
             Ok(text) => text,
             Err(_) => {
-                return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(format!(
-                    "Error: {} is not valid UTF-8, so edit cannot change it without corrupting the other bytes. \
+                return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(
+                    format!(
+                        "Error: {} is not valid UTF-8, so edit cannot change it without corrupting the other bytes. \
                      Edit it with a shell command (sed, patch) instead.",
-                    input.file_path
-                )));
+                        input.file_path
+                    ),
+                ));
             }
         };
 
@@ -471,7 +483,10 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,7 +546,9 @@ mod tests {
     fn anchors_for(content: &str) -> Vec<String> {
         use crate::implementations::fuigo_build_hashline::anchor::split_lines;
         use crate::implementations::fuigo_build_hashline::edit::apply::anchor_suffix;
-        use crate::implementations::fuigo_build_hashline::scheme::{AnchorScheme, ChunkFingerprint};
+        use crate::implementations::fuigo_build_hashline::scheme::{
+            AnchorScheme, ChunkFingerprint,
+        };
         let scheme = ChunkFingerprint::with_params(3, 8);
         let lines = split_lines(content);
         scheme
@@ -687,7 +704,8 @@ mod tests {
 
     // -- Diff detail tests (multi-edit compactness) -------------------------
 
-    fn test_scheme() -> Box<dyn crate::implementations::fuigo_build_hashline::scheme::AnchorScheme> {
+    fn test_scheme() -> Box<dyn crate::implementations::fuigo_build_hashline::scheme::AnchorScheme>
+    {
         crate::implementations::fuigo_build_hashline::config::HashlineSchemeParams::default()
             .build_scheme()
             .unwrap()
@@ -1196,7 +1214,10 @@ mod tests {
         let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
         builder.add_line(None, "secret/").unwrap();
         let mut resources = test_resources(repo.path());
-        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        resources.insert(crate::types::resources::GitignoreFilter::new(
+            builder.build().unwrap(),
+            canonical,
+        ));
         let input = HashlineEditInput {
             file_path: "secret/key.txt".to_string(),
             edits: vec![HashlineOp::InsertAfter {
@@ -1204,14 +1225,23 @@ mod tests {
                 content: "more".to_owned(),
             }],
         };
-        let result = fuigo_tool_runtime::Tool::run(&HashlineEditTool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
+        let result = fuigo_tool_runtime::Tool::run(
+            &HashlineEditTool,
+            test_ctx(resources.into_shared()),
+            input,
+        )
+        .await
+        .unwrap();
         match result {
-            SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("ignored by .gitignore"), "{msg}")
+            }
             other => panic!("expected the gitignore refusal, got {other:?}"),
         }
-        assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOP SECRET\n");
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("key.txt")).unwrap(),
+            "TOP SECRET\n"
+        );
     }
 
     #[tokio::test]
@@ -1233,7 +1263,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(result, SearchReplaceOutput::InvalidInput(_)), "{result:?}");
+        assert!(
+            matches!(result, SearchReplaceOutput::InvalidInput(_)),
+            "{result:?}"
+        );
         assert_eq!(std::fs::read(tmp.path().join("l.txt")).unwrap(), original);
     }
 }

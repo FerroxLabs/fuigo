@@ -7,8 +7,16 @@ use crate::permission::auto_mode::ClassifierVerdict;
 use crate::permission::rules::parse_permission_rule;
 use crate::permission::types::{PermissionConfig, PromptPolicy, RuleAction};
 
-const CMDS: [&str; 8] =
-    ["ls", "git status", "true", "cargo test", "cd sub && yarn ls", "bash -c 'x'", "bash -c 'echo cd'", "sleep 1; ls"];
+const CMDS: [&str; 8] = [
+    "ls",
+    "git status",
+    "true",
+    "cargo test",
+    "cd sub && yarn ls",
+    "bash -c 'x'",
+    "bash -c 'echo cd'",
+    "sleep 1; ls",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -72,9 +80,20 @@ async fn row(mode: Mode, grant: Grant) -> (String, usize) {
     let (_tmp, cwd) = repo();
     let mut state = PermissionState::default();
     match grant {
-        Grant::Exact => state.allowed_bash_commands.extend(CMDS.iter().map(|c| (*c).to_owned())),
+        Grant::Exact => state
+            .allowed_bash_commands
+            .extend(CMDS.iter().map(|c| (*c).to_owned())),
         Grant::FullPrefix => state.allowed_bash_commands.extend(
-            ["ls", "git status", "true", "cargo test", "yarn ls", "bash -c", "sleep"].map(str::to_owned),
+            [
+                "ls",
+                "git status",
+                "true",
+                "cargo test",
+                "yarn ls",
+                "bash -c",
+                "sleep",
+            ]
+            .map(str::to_owned),
         ),
         Grant::PartialPrefix => {
             state.allowed_bash_commands.insert("sleep".to_owned());
@@ -84,14 +103,27 @@ async fn row(mode: Mode, grant: Grant) -> (String, usize) {
     }
     persist_state(&cwd, &state, None).await;
     let config = match grant {
-        Grant::UserRule => Some(PermissionConfig::new(CMDS.iter().map(|c| rule(&format!("Bash({c})"))).collect())),
+        Grant::UserRule => Some(PermissionConfig::new(
+            CMDS.iter().map(|c| rule(&format!("Bash({c})"))).collect(),
+        )),
         Grant::CatchAll => Some(PermissionConfig::new(vec![rule("Bash")])),
-        Grant::PromptAllow => Some(PermissionConfig { prompt_policy: PromptPolicy::Allow, ..PermissionConfig::new(vec![]) }),
-        Grant::PromptDeny => Some(PermissionConfig { prompt_policy: PromptPolicy::Deny, ..PermissionConfig::new(vec![]) }),
+        Grant::PromptAllow => Some(PermissionConfig {
+            prompt_policy: PromptPolicy::Allow,
+            ..PermissionConfig::new(vec![])
+        }),
+        Grant::PromptDeny => Some(PermissionConfig {
+            prompt_policy: PromptPolicy::Deny,
+            ..PermissionConfig::new(vec![])
+        }),
         _ => None,
     };
-    let (mgr, _events) =
-        manager_with_recording_client_remember(&cwd, config, SelectingClient::new(true), ClientType::Generic, true);
+    let (mgr, _events) = manager_with_recording_client_remember(
+        &cwd,
+        config,
+        SelectingClient::new(true),
+        ClientType::Generic,
+        true,
+    );
     if grant == Grant::Yolo {
         mgr.set_yolo_mode(true);
     }
@@ -99,7 +131,11 @@ async fn row(mode: Mode, grant: Grant) -> (String, usize) {
         Mode::Ask => None,
         Mode::AutoAllow | Mode::AutoBlock => {
             mgr.set_auto_mode(true);
-            let verdict = if mode == Mode::AutoAllow { ClassifierVerdict::Allow } else { ClassifierVerdict::Block };
+            let verdict = if mode == Mode::AutoAllow {
+                ClassifierVerdict::Allow
+            } else {
+                ClassifierVerdict::Block
+            };
             let (clf, seen) = capturing_classifier(verdict);
             mgr.set_classifier(Some(clf));
             Some(seen)
@@ -109,7 +145,10 @@ async fn row(mode: Mode, grant: Grant) -> (String, usize) {
     for cmd in CMDS {
         let resolution = tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            mgr.request(PermissionRequest::new(AccessKind::Bash(cmd.to_owned()), tool_call())),
+            mgr.request(PermissionRequest::new(
+                AccessKind::Bash(cmd.to_owned()),
+                tool_call(),
+            )),
         )
         .await
         .expect("permission request must resolve");
@@ -147,15 +186,26 @@ async fn t1_route_matrix_trusted_rows_match_r14_and_untrusted_rows_need_a_grant(
                     trusted_table.push(table_line(mode, grant, &trusted));
                     untrusted_table.push(table_line(mode, grant, &untrusted));
                     if matches!(grant, Grant::None | Grant::PartialPrefix) {
-                        assert_eq!(classifier_calls, 0, "{mode:?}/{grant:?}: the classifier is never asked");
+                        assert_eq!(
+                            classifier_calls, 0,
+                            "{mode:?}/{grant:?}: the classifier is never asked"
+                        );
                     }
                 }
             }
             let trusted = trusted_table.join("\n");
             let untrusted = untrusted_table.join("\n");
             println!("T1 trusted table:\n{trusted}\nT1 untrusted table:\n{untrusted}");
-            assert_eq!(trusted.trim(), TRUSTED_GOLDEN.trim(), "trusted rows must equal the r14 golden table");
-            assert_eq!(untrusted.trim(), UNTRUSTED_EXPECTED.trim(), "untrusted rows");
+            assert_eq!(
+                trusted.trim(),
+                TRUSTED_GOLDEN.trim(),
+                "trusted rows must equal the r14 golden table"
+            );
+            assert_eq!(
+                untrusted.trim(),
+                UNTRUSTED_EXPECTED.trim(),
+                "untrusted rows"
+            );
         })
         .await;
 }
@@ -174,9 +224,19 @@ async fn t1_trusted_prefix_grant_with_include_if_config_runs_as_r14() {
             let mut state = PermissionState::default();
             state.allowed_bash_commands.insert("git status".to_owned());
             persist_state(&cwd, &state, None).await;
-            let (mgr, _events) =
-                manager_with_recording_client_remember(&cwd, None, SelectingClient::new(true), ClientType::Generic, true);
-            let resolution = mgr.request(PermissionRequest::new(AccessKind::Bash("git status".into()), tool_call())).await;
+            let (mgr, _events) = manager_with_recording_client_remember(
+                &cwd,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            );
+            let resolution = mgr
+                .request(PermissionRequest::new(
+                    AccessKind::Bash("git status".into()),
+                    tool_call(),
+                ))
+                .await;
             assert_eq!(outcome(&resolution), 'R', "{:?}", resolution.event);
             // D3: a word naming git in a command that is not git (g14's hidden-git veto) no longer stops the model's
             // allow in a trusted folder.
@@ -184,7 +244,12 @@ async fn t1_trusted_prefix_grant_with_include_if_config_runs_as_r14() {
             let (clf, _seen) = capturing_classifier(ClassifierVerdict::Allow);
             mgr.set_classifier(Some(clf));
             for cmd in ["which git", "type git", "echo git"] {
-                let resolution = mgr.request(PermissionRequest::new(AccessKind::Bash(cmd.into()), tool_call())).await;
+                let resolution = mgr
+                    .request(PermissionRequest::new(
+                        AccessKind::Bash(cmd.into()),
+                        tool_call(),
+                    ))
+                    .await;
                 assert_eq!(outcome(&resolution), 'R', "{cmd}: {:?}", resolution.event);
             }
         })
@@ -196,11 +261,26 @@ async fn t1_trusted_prefix_grant_with_include_if_config_runs_as_r14() {
 #[test]
 fn t4_final_check_refuses_only_ungranted_allows_outside_trusted_folders() {
     let refused = |d: Option<Decision>| matches!(d, Some(Decision::Reject(m)) if m.contains("untrusted folder"));
-    assert!(refused(final_shell_check(true, &Decision::Allow, Some(true))), "an injected SAFE_COMMAND allow");
-    assert!(refused(final_shell_check(true, &Decision::Allow, None)), "an allow that does not say how");
-    assert!(final_shell_check(true, &Decision::Allow, Some(false)).is_none(), "a grant runs");
-    assert!(final_shell_check(false, &Decision::Allow, Some(true)).is_none(), "a trusted folder");
-    assert!(final_shell_check(true, &Decision::Ask, Some(true)).is_none(), "only an allow is checked");
+    assert!(
+        refused(final_shell_check(true, &Decision::Allow, Some(true))),
+        "an injected SAFE_COMMAND allow"
+    );
+    assert!(
+        refused(final_shell_check(true, &Decision::Allow, None)),
+        "an allow that does not say how"
+    );
+    assert!(
+        final_shell_check(true, &Decision::Allow, Some(false)).is_none(),
+        "a grant runs"
+    );
+    assert!(
+        final_shell_check(false, &Decision::Allow, Some(true)).is_none(),
+        "a trusted folder"
+    );
+    assert!(
+        final_shell_check(true, &Decision::Ask, Some(true)).is_none(),
+        "only an allow is checked"
+    );
 }
 
 /// u35 t1 T5 (narrowed in u35 t3): the directories a command is judged in are the ones it starts in: trusted R,
@@ -213,12 +293,22 @@ async fn t5_the_folders_a_command_starts_in_count() {
             let (_r_tmp, r) = repo();
             let (_u_tmp, u) = repo();
             let _trust = TestFolderTrust::only(&[r.as_path()]);
-            let mgr = manager_with_recording_client_remember(&r, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            let mgr = manager_with_recording_client_remember(
+                &r,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
             // The tool's own working directory (OpenCode `workdir`) is a folder the command starts in.
             let mut request = PermissionRequest::new(AccessKind::Bash("ls".into()), tool_call());
             request.exec_cwd = Some(u.as_path().to_path_buf());
             assert_eq!(outcome(&mgr.request(request).await), 'P', "workdir=U");
-            assert!(!runner_trust_judge("ls", &[r.as_path(), u.as_path()]), "the runner judges its workdir too");
+            assert!(
+                !runner_trust_judge("ls", &[r.as_path(), u.as_path()]),
+                "the runner judges its workdir too"
+            );
         })
         .await;
 }
@@ -235,7 +325,14 @@ async fn t3_a_literal_dir_change_from_a_trusted_start_folder_is_judged_by_the_st
             #[cfg(unix)]
             std::os::unix::fs::symlink(u.as_path(), r.as_path().join("l")).unwrap();
             let _trust = TestFolderTrust::only(&[r.as_path()]);
-            let mgr = manager_with_recording_client_remember(&r, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            let mgr = manager_with_recording_client_remember(
+                &r,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
             let u_str = u.as_path().display().to_string();
             let mut cmds = vec![
                 format!("cd {u_str} && ls"),
@@ -254,14 +351,40 @@ async fn t3_a_literal_dir_change_from_a_trusted_start_folder_is_judged_by_the_st
                 cmds.push("cd l/.. && ls".to_owned());
             }
             for cmd in &cmds {
-                let resolution = mgr.request(PermissionRequest::new(AccessKind::Bash(cmd.clone()), tool_call())).await;
+                let resolution = mgr
+                    .request(PermissionRequest::new(
+                        AccessKind::Bash(cmd.clone()),
+                        tool_call(),
+                    ))
+                    .await;
                 let trusted_r14 = {
                     let _all = TestFolderTrust::set(crate::folder_trust::CommandTrust::Trusted);
-                    let m = manager_with_recording_client_remember(&r, None, SelectingClient::new(true), ClientType::Generic, true).0;
-                    outcome(&m.request(PermissionRequest::new(AccessKind::Bash(cmd.clone()), tool_call())).await)
+                    let m = manager_with_recording_client_remember(
+                        &r,
+                        None,
+                        SelectingClient::new(true),
+                        ClientType::Generic,
+                        true,
+                    )
+                    .0;
+                    outcome(
+                        &m.request(PermissionRequest::new(
+                            AccessKind::Bash(cmd.clone()),
+                            tool_call(),
+                        ))
+                        .await,
+                    )
                 };
-                assert_eq!(outcome(&resolution), trusted_r14, "{cmd}: {:?}", resolution.event);
-                assert!(runner_trust_judge(cmd, &[r.as_path()]), "{cmd}: the runner agrees");
+                assert_eq!(
+                    outcome(&resolution),
+                    trusted_r14,
+                    "{cmd}: {:?}",
+                    resolution.event
+                );
+                assert!(
+                    runner_trust_judge(cmd, &[r.as_path()]),
+                    "{cmd}: the runner agrees"
+                );
             }
         })
         .await;
@@ -276,12 +399,31 @@ async fn t3_an_untrusted_start_folder_still_asks() {
             let (_r_tmp, r) = repo();
             let (_u_tmp, u) = repo();
             let _trust = TestFolderTrust::only(&[r.as_path()]);
-            let mgr = manager_with_recording_client_remember(&u, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            let mgr = manager_with_recording_client_remember(
+                &u,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
             let r_str = r.as_path().display().to_string();
-            for cmd in ["ls".to_owned(), format!("cd {r_str} && ls"), format!("git -C {r_str} status")] {
-                let resolution = mgr.request(PermissionRequest::new(AccessKind::Bash(cmd.clone()), tool_call())).await;
+            for cmd in [
+                "ls".to_owned(),
+                format!("cd {r_str} && ls"),
+                format!("git -C {r_str} status"),
+            ] {
+                let resolution = mgr
+                    .request(PermissionRequest::new(
+                        AccessKind::Bash(cmd.clone()),
+                        tool_call(),
+                    ))
+                    .await;
                 assert_eq!(outcome(&resolution), 'P', "{cmd}: {:?}", resolution.event);
-                assert!(!runner_trust_judge(&cmd, &[u.as_path()]), "{cmd}: the runner refuses an ungranted allow");
+                assert!(
+                    !runner_trust_judge(&cmd, &[u.as_path()]),
+                    "{cmd}: the runner refuses an ungranted allow"
+                );
             }
         })
         .await;
@@ -297,9 +439,20 @@ async fn t10_project_rules_apply_only_in_the_trusted_folder_and_drop_on_revoke()
             let (_r_tmp, r) = repo();
             let (_u_tmp, u) = repo();
             std::fs::create_dir_all(r.as_path().join(".fuigo")).unwrap();
-            std::fs::write(r.as_path().join(".fuigo/config.toml"), "[permission]\nallow = [\"Bash(make *)\"]\n").unwrap();
+            std::fs::write(
+                r.as_path().join(".fuigo/config.toml"),
+                "[permission]\nallow = [\"Bash(make *)\"]\n",
+            )
+            .unwrap();
             let trust = TestFolderTrust::only(&[r.as_path()]);
-            let mgr = manager_with_recording_client_remember(&r, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            let mgr = manager_with_recording_client_remember(
+                &r,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
             mgr.set_session_policy_inputs(crate::permission::resolution::SessionPolicyInputs {
                 cwd: r.as_path().to_path_buf(),
                 cli_rules: Vec::new(),
@@ -308,11 +461,26 @@ async fn t10_project_rules_apply_only_in_the_trusted_folder_and_drop_on_revoke()
                 session_policy: None,
             });
             let ask = |cmd: String| PermissionRequest::new(AccessKind::Bash(cmd), tool_call());
-            assert_eq!(outcome(&mgr.request(ask("make all".into())).await), 'R', "the project rule in its folder");
+            assert_eq!(
+                outcome(&mgr.request(ask("make all".into())).await),
+                'R',
+                "the project rule in its folder"
+            );
             // The same rule in an untrusted folder's own config is not used there.
             std::fs::create_dir_all(u.as_path().join(".fuigo")).unwrap();
-            std::fs::write(u.as_path().join(".fuigo/config.toml"), "[permission]\nallow = [\"Bash(make *)\"]\n").unwrap();
-            let in_u = manager_with_recording_client_remember(&u, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            std::fs::write(
+                u.as_path().join(".fuigo/config.toml"),
+                "[permission]\nallow = [\"Bash(make *)\"]\n",
+            )
+            .unwrap();
+            let in_u = manager_with_recording_client_remember(
+                &u,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
             in_u.set_session_policy_inputs(crate::permission::resolution::SessionPolicyInputs {
                 cwd: u.as_path().to_path_buf(),
                 cli_rules: Vec::new(),
@@ -321,12 +489,21 @@ async fn t10_project_rules_apply_only_in_the_trusted_folder_and_drop_on_revoke()
                 session_policy: None,
             });
             let resolution = in_u.request(ask("make all".into())).await;
-            assert_eq!(outcome(&resolution), 'P', "make in U: not a trusted folder: {:?}", resolution.event);
+            assert_eq!(
+                outcome(&resolution),
+                'P',
+                "make in U: not a trusted folder: {:?}",
+                resolution.event
+            );
             // T10: the folder is revoked: the next command asks (and the policy is rebuilt on the trust change).
             drop(trust);
             let _none = TestFolderTrust::only(&[]);
             crate::folder_trust::note_trust_changed();
-            assert_eq!(outcome(&mgr.request(ask("make all".into())).await), 'P', "after /untrust the next command asks");
+            assert_eq!(
+                outcome(&mgr.request(ask("make all".into())).await),
+                'P',
+                "after /untrust the next command asks"
+            );
         })
         .await;
 }
@@ -342,7 +519,10 @@ fn d1_sandbox_auto_allow_never_runs_a_command_outside_a_trusted_folder() {
     assert!(shell_switches_off_auto(Some(&evaluation)));
     assert!(classifier_allow_needs_user(Some(&evaluation)));
     evaluation.exact_grant = true;
-    assert!(!no_grant_approval_switched_off(&evaluation), "a grant still covers it");
+    assert!(
+        !no_grant_approval_switched_off(&evaluation),
+        "a grant still covers it"
+    );
 }
 
 /// u35 t1 (design d2 §5.4): dontAsk refuses a command outside a trusted folder with the folder-trust text.
@@ -353,11 +533,31 @@ async fn t9_dont_ask_refusal_names_the_trusted_folders_setting() {
         .run_until(async {
             let (_tmp, cwd) = repo();
             let _untrusted = TestFolderTrust::untrusted();
-            let config = PermissionConfig { prompt_policy: PromptPolicy::Deny, ..PermissionConfig::new(vec![]) };
-            let mgr = manager_with_recording_client_remember(&cwd, Some(config), SelectingClient::new(true), ClientType::Generic, true).0;
-            let resolution = mgr.request(PermissionRequest::new(AccessKind::Bash("ls".into()), tool_call())).await;
-            let Decision::PolicyDeny(text) = &resolution.decision else { panic!("{:?}", resolution.decision) };
-            assert!(text.contains("[folder_trust] trusted_folders") && text.contains("fuigo --trust"), "{text}");
+            let config = PermissionConfig {
+                prompt_policy: PromptPolicy::Deny,
+                ..PermissionConfig::new(vec![])
+            };
+            let mgr = manager_with_recording_client_remember(
+                &cwd,
+                Some(config),
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
+            let resolution = mgr
+                .request(PermissionRequest::new(
+                    AccessKind::Bash("ls".into()),
+                    tool_call(),
+                ))
+                .await;
+            let Decision::PolicyDeny(text) = &resolution.decision else {
+                panic!("{:?}", resolution.decision)
+            };
+            assert!(
+                text.contains("[folder_trust] trusted_folders") && text.contains("fuigo --trust"),
+                "{text}"
+            );
         })
         .await;
 }
@@ -369,19 +569,55 @@ async fn t11_trust_inputs_are_protected_and_fuigo_trust_asks_under_allow_all() {
     local
         .run_until(async {
             let (_tmp, cwd) = repo();
-            let state = PermissionState { allow_bash_execute: true, ..PermissionState::default() };
+            let state = PermissionState {
+                allow_bash_execute: true,
+                ..PermissionState::default()
+            };
             persist_state(&cwd, &state, None).await;
-            let mgr = manager_with_recording_client_remember(&cwd, None, SelectingClient::new(true), ClientType::Generic, true).0;
-            for cmd in ["fuigo --trust", "fuigo --trust-folder .", "/usr/local/bin/fuigo --trust"] {
-                let resolution = mgr.request(PermissionRequest::new(AccessKind::Bash(cmd.into()), tool_call())).await;
+            let mgr = manager_with_recording_client_remember(
+                &cwd,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
+            for cmd in [
+                "fuigo --trust",
+                "fuigo --trust-folder .",
+                "/usr/local/bin/fuigo --trust",
+            ] {
+                let resolution = mgr
+                    .request(PermissionRequest::new(
+                        AccessKind::Bash(cmd.into()),
+                        tool_call(),
+                    ))
+                    .await;
                 assert_eq!(outcome(&resolution), 'P', "{cmd}: {:?}", resolution.event);
             }
-            assert_eq!(outcome(&mgr.request(PermissionRequest::new(AccessKind::Bash("fuigo --version".into()), tool_call())).await), 'R');
+            assert_eq!(
+                outcome(
+                    &mgr.request(PermissionRequest::new(
+                        AccessKind::Bash("fuigo --version".into()),
+                        tool_call()
+                    ))
+                    .await
+                ),
+                'R'
+            );
         })
         .await;
     let home = std::path::Path::new("/home/u/.fuigo");
-    for name in [fuigo_config::TRUSTED_FOLDERS_FILENAME, "config.toml", "worktrees.db", "worktrees.h-box.db-wal"] {
-        assert!(crate::permission::shell_access::edit_target_protection(&home.join(name)).is_some(), "{name}");
+    for name in [
+        fuigo_config::TRUSTED_FOLDERS_FILENAME,
+        "config.toml",
+        "worktrees.db",
+        "worktrees.h-box.db-wal",
+    ] {
+        assert!(
+            crate::permission::shell_access::edit_target_protection(&home.join(name)).is_some(),
+            "{name}"
+        );
     }
 }
 
@@ -397,27 +633,54 @@ async fn t13_each_call_in_a_batch_needs_its_own_grant() {
             let mut state = PermissionState::default();
             state.allowed_bash_commands.insert("ls".to_owned());
             persist_state(&cwd, &state, None).await;
-            let mgr = manager_with_recording_client_remember(&cwd, None, SelectingClient::new(true), ClientType::Generic, true).0;
-            let first = mgr.request(PermissionRequest::new(AccessKind::Bash("ls".into()), tool_call()));
-            let second = mgr.request(PermissionRequest::new(AccessKind::Bash("git status".into()), tool_call()));
+            let mgr = manager_with_recording_client_remember(
+                &cwd,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
+            let first = mgr.request(PermissionRequest::new(
+                AccessKind::Bash("ls".into()),
+                tool_call(),
+            ));
+            let second = mgr.request(PermissionRequest::new(
+                AccessKind::Bash("git status".into()),
+                tool_call(),
+            ));
             let (first, second) = tokio::join!(first, second);
             assert_eq!(outcome(&first), 'R', "the granted call: {:?}", first.event);
-            assert_eq!(outcome(&second), 'P', "the ungranted call: {:?}", second.event);
+            assert_eq!(
+                outcome(&second),
+                'P',
+                "the ungranted call: {:?}",
+                second.event
+            );
         })
         .await;
 }
 
 /// u35 t2: a release-like trust world for a test of the real decision: own process, a fresh absolute `FUIGO_HOME`,
 /// `FUIGO_TEST_VERSION` set (the gate is live) and the switch unset. `None` in the parent of the re-run.
-fn real_trust_world() -> Option<(tempfile::TempDir, Vec<crate::TestEnvGuard>, std::sync::MutexGuard<'static, ()>)> {
+fn real_trust_world() -> Option<(
+    tempfile::TempDir,
+    Vec<crate::TestEnvGuard>,
+    std::sync::MutexGuard<'static, ()>,
+)> {
     if fuigo_test_support::env::rerun_in_own_process() {
         return None;
     }
-    let lock = crate::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let lock = crate::ENV_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let guards = vec![
         crate::TestEnvGuard::set("FUIGO_HOME", home.path()),
-        crate::TestEnvGuard::set(fuigo_version::TEST_VERSION_ENV, std::path::Path::new("0.0.0-sim")),
+        crate::TestEnvGuard::set(
+            fuigo_version::TEST_VERSION_ENV,
+            std::path::Path::new("0.0.0-sim"),
+        ),
         crate::TestEnvGuard::unset("FUIGO_FOLDER_TRUST"),
     ];
     Some((home, guards, lock))
@@ -429,7 +692,9 @@ fn real_trust_world() -> Option<(tempfile::TempDir, Vec<crate::TestEnvGuard>, st
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn t2_worktrees_of_a_granted_repository_route_commands_as_trusted() {
-    let Some((home, _guards, _lock)) = real_trust_world() else { return };
+    let Some((home, _guards, _lock)) = real_trust_world() else {
+        return;
+    };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -447,9 +712,27 @@ async fn t2_worktrees_of_a_granted_repository_route_commands_as_trusted() {
             assert!(crate::folder_trust::grant_folder_trust(&source).dismisses_gate());
             for wt in [linked, managed] {
                 let cwd = AbsPathBuf::new(wt.clone()).unwrap();
-                let mgr = manager_with_recording_client_remember(&cwd, None, SelectingClient::new(true), ClientType::Generic, true).0;
-                let resolution = mgr.request(PermissionRequest::new(AccessKind::Bash("ls".into()), tool_call())).await;
-                assert_eq!(outcome(&resolution), 'R', "{}: {:?}", wt.display(), resolution.event);
+                let mgr = manager_with_recording_client_remember(
+                    &cwd,
+                    None,
+                    SelectingClient::new(true),
+                    ClientType::Generic,
+                    true,
+                )
+                .0;
+                let resolution = mgr
+                    .request(PermissionRequest::new(
+                        AccessKind::Bash("ls".into()),
+                        tool_call(),
+                    ))
+                    .await;
+                assert_eq!(
+                    outcome(&resolution),
+                    'R',
+                    "{}: {:?}",
+                    wt.display(),
+                    resolution.event
+                );
             }
         })
         .await;
@@ -465,14 +748,27 @@ async fn t2_yolo_runs_outside_a_trusted_folder_after_auto() {
         .run_until(async {
             let (_tmp, cwd) = repo();
             let _untrusted = TestFolderTrust::untrusted();
-            let mgr = manager_with_recording_client_remember(&cwd, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            let mgr = manager_with_recording_client_remember(
+                &cwd,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
             mgr.set_auto_mode(true);
             let (clf, _seen) = capturing_classifier(ClassifierVerdict::Block);
             mgr.set_classifier(Some(clf));
             mgr.set_yolo_mode(true);
             let mut out = String::new();
             for cmd in CMDS {
-                out.push(outcome(&mgr.request(PermissionRequest::new(AccessKind::Bash(cmd.to_owned()), tool_call())).await));
+                out.push(outcome(
+                    &mgr.request(PermissionRequest::new(
+                        AccessKind::Bash(cmd.to_owned()),
+                        tool_call(),
+                    ))
+                    .await,
+                ));
             }
             assert_eq!(out, "RRRRRRRR");
         })
@@ -489,7 +785,14 @@ async fn x2_f1_a_child_in_a_trusted_folder_is_judged_in_its_untrusted_parent_fol
             let (_r_tmp, r) = repo();
             let (_u_tmp, u) = repo();
             let _trust = TestFolderTrust::only(&[r.as_path()]);
-            let mgr = manager_with_recording_client_remember(&u, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            let mgr = manager_with_recording_client_remember(
+                &u,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
             mgr.set_auto_mode(true);
             let (clf, _seen) = capturing_classifier(ClassifierVerdict::Allow);
             mgr.set_classifier(Some(clf));
@@ -502,10 +805,22 @@ async fn x2_f1_a_child_in_a_trusted_folder_is_judged_in_its_untrusted_parent_fol
                 ..PermissionRequest::new(AccessKind::Bash("cargo test".into()), tool_call())
             };
             // No new friction: the parent's folder is trusted too (or there is no parent), the command runs unasked.
-            assert_eq!(outcome(&mgr.request(child_request(None)).await), 'R', "no parent folder");
-            assert_eq!(outcome(&mgr.request(child_request(Some(&r))).await), 'R', "trusted parent folder");
+            assert_eq!(
+                outcome(&mgr.request(child_request(None)).await),
+                'R',
+                "no parent folder"
+            );
+            assert_eq!(
+                outcome(&mgr.request(child_request(Some(&r))).await),
+                'R',
+                "trusted parent folder"
+            );
             // The parent's folder is untrusted: the child is asked.
-            assert_eq!(outcome(&mgr.request(child_request(Some(&u))).await), 'P', "untrusted parent folder");
+            assert_eq!(
+                outcome(&mgr.request(child_request(Some(&u))).await),
+                'P',
+                "untrusted parent folder"
+            );
         })
         .await;
 }
@@ -521,7 +836,14 @@ async fn s3_f2_a_persistent_shell_in_an_untrusted_folder_is_judged_there() {
             let (_r_tmp, r) = repo();
             let (_u_tmp, u) = repo();
             let _trust = TestFolderTrust::only(&[r.as_path()]);
-            let mgr = manager_with_recording_client_remember(&r, None, SelectingClient::new(true), ClientType::Generic, true).0;
+            let mgr = manager_with_recording_client_remember(
+                &r,
+                None,
+                SelectingClient::new(true),
+                ClientType::Generic,
+                true,
+            )
+            .0;
             mgr.set_auto_mode(true);
             let (clf, _seen) = capturing_classifier(ClassifierVerdict::Allow);
             mgr.set_classifier(Some(clf));
@@ -533,14 +855,31 @@ async fn s3_f2_a_persistent_shell_in_an_untrusted_folder_is_judged_there() {
                 shell_run_dir: shell_dir.map(|dir| dir.as_path().to_path_buf()),
                 ..PermissionRequest::new(AccessKind::Bash("cargo test".into()), tool_call())
             };
-            assert_eq!(outcome(&mgr.request(request(None)).await), 'R', "no persistent shell");
-            assert_eq!(outcome(&mgr.request(request(Some(&r))).await), 'R', "shell in the trusted folder");
+            assert_eq!(
+                outcome(&mgr.request(request(None)).await),
+                'R',
+                "no persistent shell"
+            );
+            assert_eq!(
+                outcome(&mgr.request(request(Some(&r))).await),
+                'R',
+                "shell in the trusted folder"
+            );
             let mut evaluation = evaluate_bash("cargo test", &PermissionState::default(), true);
-            evaluation.untrusted_folder =
-                !crate::permission::run_dirs::run_dirs_trust(&[r.as_path().to_path_buf(), u.as_path().to_path_buf()])
-                    .is_trusted();
-            assert!(!sandbox_may_auto_allow_bash(Some(&evaluation), true), "sandbox auto-allow refuses there");
-            assert_eq!(outcome(&mgr.request(request(Some(&u))).await), 'P', "shell moved into an untrusted folder");
+            evaluation.untrusted_folder = !crate::permission::run_dirs::run_dirs_trust(&[
+                r.as_path().to_path_buf(),
+                u.as_path().to_path_buf(),
+            ])
+            .is_trusted();
+            assert!(
+                !sandbox_may_auto_allow_bash(Some(&evaluation), true),
+                "sandbox auto-allow refuses there"
+            );
+            assert_eq!(
+                outcome(&mgr.request(request(Some(&u))).await),
+                'P',
+                "shell moved into an untrusted folder"
+            );
         })
         .await;
 }

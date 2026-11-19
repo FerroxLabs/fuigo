@@ -99,7 +99,10 @@ async fn valid_written_workflow_needs_no_warning() {
     .expect("workflow path")
     .expect("workflow resolution");
 
-    assert_eq!(check_snapshot(snapshot, &permits(), VERDICT_BUDGET).await, None);
+    assert_eq!(
+        check_snapshot(snapshot, &permits(), VERDICT_BUDGET).await,
+        None
+    );
 }
 
 #[tokio::test]

@@ -15,49 +15,64 @@ mod dial;
 mod directory;
 mod dirs;
 pub(crate) mod driver;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+#[cfg(all(test, unix))]
+mod hardening_tests;
 pub(crate) mod host;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
+#[cfg(all(test, unix))]
+mod host_tests;
 #[cfg(unix)]
 mod inbox;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(all(test, unix))]
 mod inbox_tests;
 mod locator;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod locator_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-#[cfg(all(test, unix))]
-mod host_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
-#[cfg(all(test, unix))]
-mod hardening_tests;
 #[cfg(unix)]
 mod reap;
 mod rows;
-mod watch;
-#[cfg(all(test, unix))]
-mod watch_tests;
 pub(crate) mod tool_host;
 #[cfg(test)]
 mod tool_host_tests;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(all(test, unix))]
 mod uid_tests;
+mod watch;
+#[cfg(all(test, unix))]
+mod watch_tests;
 #[cfg(windows)]
 mod win_dirs;
 #[cfg(windows)]
-mod win_inbox;
-mod win_logic;
+#[doc(hidden)]
+pub mod win_evidence;
 #[cfg(windows)]
-mod win_watch;
+mod win_inbox;
 #[cfg(windows)]
 mod win_locator;
+mod win_logic;
 #[cfg(windows)]
 mod win_pipe;
 mod win_policy;
 #[cfg(windows)]
-#[doc(hidden)]
-pub mod win_evidence;
+mod win_watch;
 
 #[cfg(unix)]
 pub(crate) use inbox::{PeerInbox, StartOptions};
@@ -174,7 +189,9 @@ impl Disabled {
             }
             Disabled::UnsupportedPlatform => "peer messaging is unavailable: unsupported platform",
             Disabled::FeatureOff => "peer messaging is unavailable: the feature is off",
-            Disabled::RemoteClientAttached => "peer messaging is unavailable: a remote client is connected to this Fuigo",
+            Disabled::RemoteClientAttached => {
+                "peer messaging is unavailable: a remote client is connected to this Fuigo"
+            }
             Disabled::SocketDirUnavailable => {
                 "peer messaging is unavailable: no usable directory for the inbox socket"
             }
@@ -213,14 +230,28 @@ impl Disabled {
                 "peer messaging is unavailable: the runtime directory is not private to this user"
             }
             Disabled::StartPanicked => "peer messaging is unavailable: the inbox failed to start",
-            Disabled::LocatorFull => "peer messaging is unavailable: the host list is full of other hosts",
+            Disabled::LocatorFull => {
+                "peer messaging is unavailable: the host list is full of other hosts"
+            }
             Disabled::OutputTooLarge => "peer messaging is unavailable: locator data too large",
-            Disabled::IdentityUnreadable => "peer messaging is unavailable: this user account could not be read",
-            Disabled::PipeNameInUse => "peer messaging is unavailable: the inbox pipe name is already in use",
-            Disabled::PipeCreateFailed => "peer messaging is unavailable: the inbox pipe could not be created",
-            Disabled::PipeCheckFailed => "peer messaging is unavailable: the inbox pipe failed its safety checks",
-            Disabled::PeersMoved => "peer messaging is unavailable: the peers directory changed while Fuigo was running",
-            Disabled::NetworkLogon => "peer messaging is unavailable in a remote (network) logon session",
+            Disabled::IdentityUnreadable => {
+                "peer messaging is unavailable: this user account could not be read"
+            }
+            Disabled::PipeNameInUse => {
+                "peer messaging is unavailable: the inbox pipe name is already in use"
+            }
+            Disabled::PipeCreateFailed => {
+                "peer messaging is unavailable: the inbox pipe could not be created"
+            }
+            Disabled::PipeCheckFailed => {
+                "peer messaging is unavailable: the inbox pipe failed its safety checks"
+            }
+            Disabled::PeersMoved => {
+                "peer messaging is unavailable: the peers directory changed while Fuigo was running"
+            }
+            Disabled::NetworkLogon => {
+                "peer messaging is unavailable in a remote (network) logon session"
+            }
             Disabled::Io(_) => "peer messaging is unavailable: a file system error occurred",
         }
     }

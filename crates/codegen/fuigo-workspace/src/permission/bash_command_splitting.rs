@@ -496,7 +496,10 @@ pub(crate) fn strip_wrapper_command(cmd: &[String]) -> Option<&[String]> {
         }
         // `nice [OPTIONS] [COMMAND]`
         "nice" => {
-            if cmd.get(1).is_some_and(|w| w.len() > 1 && w[1..].bytes().all(|b| b.is_ascii_digit())) {
+            if cmd
+                .get(1)
+                .is_some_and(|w| w.len() > 1 && w[1..].bytes().all(|b| b.is_ascii_digit()))
+            {
                 // Historical `nice -5 COMMAND`.
                 i = 2;
             } else {
@@ -508,7 +511,18 @@ pub(crate) fn strip_wrapper_command(cmd: &[String]) -> Option<&[String]> {
             i = wrapper_options_end(
                 cmd,
                 &["-t", "--ignore"],
-                &["-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid", "--pgid", "--uid"],
+                &[
+                    "-c",
+                    "-n",
+                    "-p",
+                    "-P",
+                    "-u",
+                    "--class",
+                    "--classdata",
+                    "--pid",
+                    "--pgid",
+                    "--uid",
+                ],
             )?;
         }
         // `chrt [OPTIONS] PRIORITY COMMAND [ARGS]`
@@ -516,10 +530,34 @@ pub(crate) fn strip_wrapper_command(cmd: &[String]) -> Option<&[String]> {
             i = wrapper_options_end(
                 cmd,
                 &[
-                    "-a", "-b", "-d", "-e", "-f", "-i", "-o", "-r", "-R", "-v", "--all-tasks", "--batch", "--deadline",
-                    "--fifo", "--idle", "--other", "--rr", "--reset-on-fork", "--verbose",
+                    "-a",
+                    "-b",
+                    "-d",
+                    "-e",
+                    "-f",
+                    "-i",
+                    "-o",
+                    "-r",
+                    "-R",
+                    "-v",
+                    "--all-tasks",
+                    "--batch",
+                    "--deadline",
+                    "--fifo",
+                    "--idle",
+                    "--other",
+                    "--rr",
+                    "--reset-on-fork",
+                    "--verbose",
                 ],
-                &["-T", "-P", "-D", "--sched-runtime", "--sched-period", "--sched-deadline"],
+                &[
+                    "-T",
+                    "-P",
+                    "-D",
+                    "--sched-runtime",
+                    "--sched-period",
+                    "--sched-deadline",
+                ],
             )?;
             // mandatory PRIORITY token
             if i >= cmd.len() {
@@ -529,7 +567,11 @@ pub(crate) fn strip_wrapper_command(cmd: &[String]) -> Option<&[String]> {
         }
         // `stdbuf OPTIONS COMMAND [ARGS]`
         "stdbuf" => {
-            i = wrapper_options_end(cmd, &[], &["-i", "-o", "-e", "--input", "--output", "--error"])?;
+            i = wrapper_options_end(
+                cmd,
+                &[],
+                &["-i", "-o", "-e", "--input", "--output", "--error"],
+            )?;
         }
         // `env [OPTIONS]/[NAME=VALUE] (interspersed) [COMMAND] [ARGS]`
         "env" => {
@@ -569,7 +611,8 @@ fn wrapper_options_end(cmd: &[String], flags: &[&str], valued: &[&str]) -> Optio
             i += 2;
         } else if valued.iter().any(|option| {
             if option.starts_with("--") {
-                word.strip_prefix(*option).is_some_and(|rest| rest.starts_with('='))
+                word.strip_prefix(*option)
+                    .is_some_and(|rest| rest.starts_with('='))
             } else {
                 word.len() > option.len() && word.starts_with(*option)
             }
@@ -676,9 +719,9 @@ pub(crate) fn program_word_is_plain(word: &str) -> bool {
     !word.is_empty()
         && !word.starts_with(['-', '.'])
         && !word.ends_with(".exe")
-        && word
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+        && word.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'+' | b'-')
+        })
 }
 
 /// u35 r1: whether argv starts with the space-separated words of `pattern`, compared word by word (argv boundaries),
@@ -1052,7 +1095,10 @@ struct PathOperandTool {
 }
 
 fn path_operand_tool(program: &str) -> Option<PathOperandTool> {
-    const fn tool(short_value: &'static str, long_value: &'static [&'static str]) -> PathOperandTool {
+    const fn tool(
+        short_value: &'static str,
+        long_value: &'static [&'static str],
+    ) -> PathOperandTool {
         PathOperandTool {
             short_value,
             long_value,
@@ -1061,34 +1107,194 @@ fn path_operand_tool(program: &str) -> Option<PathOperandTool> {
         }
     }
     Some(match program {
-        "ls" => tool("ITw", &["--ignore", "--hide", "--format", "--sort", "--time-style", "--block-size", "--width", "--tabsize", "--time", "--indicator-style", "--quoting-style"]),
-        "cat" | "tac" | "echo" | "wc" | "realpath" | "readlink" | "md5sum" | "sha1sum" | "sha224sum" | "sha256sum"
-        | "sha384sum" | "sha512sum" | "b2sum" | "cksum" | "less" | "more" => tool("", &["--files0-from"]),
+        "ls" => tool(
+            "ITw",
+            &[
+                "--ignore",
+                "--hide",
+                "--format",
+                "--sort",
+                "--time-style",
+                "--block-size",
+                "--width",
+                "--tabsize",
+                "--time",
+                "--indicator-style",
+                "--quoting-style",
+            ],
+        ),
+        "cat" | "tac" | "echo" | "wc" | "realpath" | "readlink" | "md5sum" | "sha1sum"
+        | "sha224sum" | "sha256sum" | "sha384sum" | "sha512sum" | "b2sum" | "cksum" | "less"
+        | "more" => tool("", &["--files0-from"]),
         "stat" => tool("c", &["--format", "--printf"]),
-        "du" => tool("dBtX", &["--max-depth", "--block-size", "--exclude", "--exclude-from", "--files0-from", "--threshold", "--time-style"]),
-        "diff" => tool("CUIxXFLS", &["--label", "--ignore-matching-lines", "--exclude", "--exclude-from", "--starting-file", "--show-function-line", "--from-file", "--to-file", "--horizon-lines"]),
+        "du" => tool(
+            "dBtX",
+            &[
+                "--max-depth",
+                "--block-size",
+                "--exclude",
+                "--exclude-from",
+                "--files0-from",
+                "--threshold",
+                "--time-style",
+            ],
+        ),
+        "diff" => tool(
+            "CUIxXFLS",
+            &[
+                "--label",
+                "--ignore-matching-lines",
+                "--exclude",
+                "--exclude-from",
+                "--starting-file",
+                "--show-function-line",
+                "--from-file",
+                "--to-file",
+                "--horizon-lines",
+            ],
+        ),
         "cmp" => tool("in", &["--ignore-initial", "--bytes"]),
-        "head" | "tail" => tool("ncs", &["--lines", "--bytes", "--sleep-interval", "--pid", "--max-unchanged-stats"]),
-        "tree" => tool("LPIo", &["--filelimit", "--charset", "--sort", "--timefmt", "--ignore-case"]),
-        "sort" => tool("kStTyo", &["--key", "--field-separator", "--buffer-size", "--temporary-directory", "--output", "--files0-from", "--random-source", "--parallel", "--batch-size", "--sort", "--compress-program"]),
-        "uniq" => tool("fsw", &["--skip-fields", "--skip-chars", "--check-chars", "--group", "--all-repeated"]),
-        "cut" => tool("bcdf", &["--bytes", "--characters", "--delimiter", "--fields", "--output-delimiter"]),
+        "head" | "tail" => tool(
+            "ncs",
+            &[
+                "--lines",
+                "--bytes",
+                "--sleep-interval",
+                "--pid",
+                "--max-unchanged-stats",
+            ],
+        ),
+        "tree" => tool(
+            "LPIo",
+            &[
+                "--filelimit",
+                "--charset",
+                "--sort",
+                "--timefmt",
+                "--ignore-case",
+            ],
+        ),
+        "sort" => tool(
+            "kStTyo",
+            &[
+                "--key",
+                "--field-separator",
+                "--buffer-size",
+                "--temporary-directory",
+                "--output",
+                "--files0-from",
+                "--random-source",
+                "--parallel",
+                "--batch-size",
+                "--sort",
+                "--compress-program",
+            ],
+        ),
+        "uniq" => tool(
+            "fsw",
+            &[
+                "--skip-fields",
+                "--skip-chars",
+                "--check-chars",
+                "--group",
+                "--all-repeated",
+            ],
+        ),
+        "cut" => tool(
+            "bcdf",
+            &[
+                "--bytes",
+                "--characters",
+                "--delimiter",
+                "--fields",
+                "--output-delimiter",
+            ],
+        ),
         // u35: a plain `grep` runs Fuigo's ugrep shadow (`exec_surface/search_shadows.rs`), so its own value options.
         "grep" => PathOperandTool {
             short_value: "ABCDdefgJKMmNOt",
-            long_value: &["--after-context", "--before-context", "--binary-files", "--context", "--depth", "--devices", "--directories", "--exclude", "--exclude-dir", "--exclude-from", "--file", "--from", "--include", "--include-dir", "--include-from", "--label", "--regexp"],
+            long_value: &[
+                "--after-context",
+                "--before-context",
+                "--binary-files",
+                "--context",
+                "--depth",
+                "--devices",
+                "--directories",
+                "--exclude",
+                "--exclude-dir",
+                "--exclude-from",
+                "--file",
+                "--from",
+                "--include",
+                "--include-dir",
+                "--include-from",
+                "--label",
+                "--regexp",
+            ],
             pattern_first: true,
             pattern_options: "ef",
         },
         "egrep" | "fgrep" => PathOperandTool {
             short_value: "efmABCdD",
-            long_value: &["--regexp", "--file", "--max-count", "--after-context", "--before-context", "--context", "--include", "--exclude", "--exclude-dir", "--exclude-from", "--label", "--binary-files", "--devices", "--directories", "--group-separator"],
+            long_value: &[
+                "--regexp",
+                "--file",
+                "--max-count",
+                "--after-context",
+                "--before-context",
+                "--context",
+                "--include",
+                "--exclude",
+                "--exclude-dir",
+                "--exclude-from",
+                "--label",
+                "--binary-files",
+                "--devices",
+                "--directories",
+                "--group-separator",
+            ],
             pattern_first: true,
             pattern_options: "ef",
         },
         "rg" => PathOperandTool {
             short_value: "efgtTmABCjMEr",
-            long_value: &["--regexp", "--file", "--glob", "--iglob", "--type", "--type-not", "--max-count", "--after-context", "--before-context", "--context", "--threads", "--max-columns", "--encoding", "--replace", "--pre", "--pre-glob", "--type-add", "--type-clear", "--max-depth", "--max-filesize", "--path-separator", "--sort", "--sortr", "--colors", "--color", "--context-separator", "--field-match-separator", "--field-context-separator", "--hostname-bin", "--hyperlink-format", "--engine", "--dfa-size-limit", "--regex-size-limit", "--ignore-file"],
+            long_value: &[
+                "--regexp",
+                "--file",
+                "--glob",
+                "--iglob",
+                "--type",
+                "--type-not",
+                "--max-count",
+                "--after-context",
+                "--before-context",
+                "--context",
+                "--threads",
+                "--max-columns",
+                "--encoding",
+                "--replace",
+                "--pre",
+                "--pre-glob",
+                "--type-add",
+                "--type-clear",
+                "--max-depth",
+                "--max-filesize",
+                "--path-separator",
+                "--sort",
+                "--sortr",
+                "--colors",
+                "--color",
+                "--context-separator",
+                "--field-match-separator",
+                "--field-context-separator",
+                "--hostname-bin",
+                "--hyperlink-format",
+                "--engine",
+                "--dfa-size-limit",
+                "--regex-size-limit",
+                "--ignore-file",
+            ],
             pattern_first: true,
             pattern_options: "ef",
         },
@@ -1118,7 +1324,11 @@ fn glob_role_requires_approval(words: &[String], globbed: &[bool]) -> bool {
     if marks.first().copied().unwrap_or(true) {
         return true;
     }
-    let program = inner[0].rsplit(['/', '\\']).next().unwrap_or(&inner[0]).to_ascii_lowercase();
+    let program = inner[0]
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&inner[0])
+        .to_ascii_lowercase();
     let Some(tool) = path_operand_tool(&program) else {
         return true;
     };
@@ -1141,7 +1351,11 @@ fn glob_role_requires_approval(words: &[String], globbed: &[bool]) -> bool {
                 if ["regexp", "file"].contains(&name) && tool.pattern_first {
                     pattern_pending = false;
                 }
-                !long.contains('=') && tool.long_value.iter().any(|value| value.trim_start_matches('-') == name)
+                !long.contains('=')
+                    && tool
+                        .long_value
+                        .iter()
+                        .any(|value| value.trim_start_matches('-') == name)
             } else {
                 let cluster = &word[1..];
                 let mut next = false;

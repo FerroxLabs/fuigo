@@ -95,12 +95,28 @@ fn the_settings_save_stages_outside_the_lock_and_keeps_a_concurrent_change() {
     drop(held);
     wait_ok(child, "settings save");
     let v = toml_at(&path);
-    assert_eq!(v["ui"]["compact_mode"].as_bool(), Some(true), "the save's own change");
-    assert_eq!(v["ui"]["yolo"].as_bool(), Some(true), "the other writer's modeled field");
-    assert_eq!(v["p72_other"]["kept"].as_integer(), Some(1), "the other writer's key");
+    assert_eq!(
+        v["ui"]["compact_mode"].as_bool(),
+        Some(true),
+        "the save's own change"
+    );
+    assert_eq!(
+        v["ui"]["yolo"].as_bool(),
+        Some(true),
+        "the other writer's modeled field"
+    );
+    assert_eq!(
+        v["p72_other"]["kept"].as_integer(),
+        Some(1),
+        "the other writer's key"
+    );
     // The save's increment was decided again on the other writer's 101: a
     // replay of the value it first computed (101) would lose that increment.
-    assert_eq!(v["ui"]["max_thoughts_width"].as_integer(), Some(102), "read-dependent change");
+    assert_eq!(
+        v["ui"]["max_thoughts_width"].as_integer(),
+        Some(102),
+        "read-dependent change"
+    );
     assert!(
         !names_in(home.path()).iter().any(|n| n.contains(".tmp")),
         "{:?}",
@@ -128,7 +144,11 @@ fn settings_saves_of_different_fields_in_two_processes_keep_both() {
 #[test]
 fn read_dependent_settings_saves_in_two_processes_lose_no_increment() {
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join("config.toml"), "[ui]\nmax_thoughts_width = 100\n").unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[ui]\nmax_thoughts_width = 100\n",
+    )
+    .unwrap();
     let a = spawn_role(home.path(), "settings-incr");
     let b = spawn_role(home.path(), "settings-incr");
     wait_ok(a, "incrementer a");

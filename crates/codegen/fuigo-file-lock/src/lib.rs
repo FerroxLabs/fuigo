@@ -19,6 +19,9 @@
 //!   other. Every attempt re-opens the target path.
 
 #![deny(clippy::indexing_slicing)]
+// Panic-path lints are denied in this crate (shipped code is panic = "abort"); tests may unwrap.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::await_holding_lock)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod error;
 mod lock;

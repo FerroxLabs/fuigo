@@ -226,10 +226,16 @@ fn annotate_routes(
             if i == 0 {
                 // A model with a single route says nothing: that is the wire shape clients already know.
                 if model.choices.len() > 1 {
-                    meta.insert("routes".to_owned(), serde_json::Value::Array(routes.clone()));
+                    meta.insert(
+                        "routes".to_owned(),
+                        serde_json::Value::Array(routes.clone()),
+                    );
                 }
                 if !model.reachable() {
-                    meta.insert("connect".to_owned(), serde_json::json!(model.primary().reason()));
+                    meta.insert(
+                        "connect".to_owned(),
+                        serde_json::json!(model.primary().reason()),
+                    );
                 }
             } else {
                 meta.insert("altRouteOf".to_owned(), serde_json::json!(primary_key));
@@ -422,7 +428,13 @@ pub(crate) fn ai_suggest_wire_model(
     model_override: Option<&str>,
     session_model: Option<&str>,
 ) -> Option<String> {
-    helper_wire_model(allowlist, models, model_override, Some("grok-4.6"), session_model)
+    helper_wire_model(
+        allowlist,
+        models,
+        model_override,
+        Some("grok-4.6"),
+        session_model,
+    )
 }
 
 /// Memory-note rewrite (`handle_rewrite_memory_note`): `grok-4.6`.

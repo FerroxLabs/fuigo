@@ -40,14 +40,21 @@ impl acp::Client for Shared {
     }
 
     async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
-        let params = serde_json::from_str::<serde_json::Value>(args.params.get()).unwrap_or_default();
+        let params =
+            serde_json::from_str::<serde_json::Value>(args.params.get()).unwrap_or_default();
         let released = if params["_meta"][RELEASED_META_KEY] == serde_json::Value::Bool(true) {
             "+R"
         } else {
             ""
         };
-        self.0.params.borrow_mut().push(args.params.get().to_owned());
-        self.0.seen.borrow_mut().push(format!("extm:{}{released}", args.method));
+        self.0
+            .params
+            .borrow_mut()
+            .push(args.params.get().to_owned());
+        self.0
+            .seen
+            .borrow_mut()
+            .push(format!("extm:{}{released}", args.method));
         Ok(acp::ExtResponse::new(empty_raw()))
     }
 
@@ -65,11 +72,16 @@ impl acp::Client for Shared {
     }
 
     async fn ext_notification(&self, args: acp::ExtNotification) -> acp::Result<()> {
-        let params = serde_json::from_str::<serde_json::Value>(args.params.get()).unwrap_or_default();
+        let params =
+            serde_json::from_str::<serde_json::Value>(args.params.get()).unwrap_or_default();
         let tag = params["tag"]
             .as_str()
             .map(str::to_owned)
-            .or_else(|| params["update"]["sessionUpdate"].as_str().map(str::to_owned))
+            .or_else(|| {
+                params["update"]["sessionUpdate"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
             .unwrap_or_default();
         let released = if params["_meta"][RELEASED_META_KEY] == serde_json::Value::Bool(true) {
             "+R"
@@ -145,7 +157,9 @@ async fn parked_frames_are_held_then_released_in_order() {
     let other = sid("other");
     park(&hold, &parked);
 
-    conn.session_notification(chunk(&parked, "a")).await.unwrap();
+    conn.session_notification(chunk(&parked, "a"))
+        .await
+        .unwrap();
     conn.ext_notification(ext(
         "fuigo/session_notification",
         json!({ "sessionId": parked, "tag": "summary" }),
@@ -161,7 +175,13 @@ async fn parked_frames_are_held_then_released_in_order() {
 
     quiesce::unpark(&parked);
     let counts = hold.release(&parked).await;
-    assert_eq!(counts, ReleaseCounts { frames: 3, dropped: 0 });
+    assert_eq!(
+        counts,
+        ReleaseCounts {
+            frames: 3,
+            dropped: 0
+        }
+    );
     assert_eq!(
         *seen.seen.borrow(),
         vec![
@@ -173,8 +193,13 @@ async fn parked_frames_are_held_then_released_in_order() {
         ],
         "released frames are marked, in order, then the unparked marker"
     );
-    conn.session_notification(chunk(&parked, "b")).await.unwrap();
-    assert_eq!(seen.seen.borrow().last().unwrap(), &format!("su:{parked}:b"));
+    conn.session_notification(chunk(&parked, "b"))
+        .await
+        .unwrap();
+    assert_eq!(
+        seen.seen.borrow().last().unwrap(),
+        &format!("su:{parked}:b")
+    );
 }
 
 /// A frame produced after the park ended but before this connection released (another path ended it:
@@ -187,9 +212,13 @@ async fn a_frame_racing_the_release_keeps_its_place() {
     let (conn, seen) = client(&hold);
     let parked = sid("parked");
     park(&hold, &parked);
-    conn.session_notification(chunk(&parked, "old")).await.unwrap();
+    conn.session_notification(chunk(&parked, "old"))
+        .await
+        .unwrap();
     quiesce::unpark(&parked);
-    conn.session_notification(chunk(&parked, "new")).await.unwrap();
+    conn.session_notification(chunk(&parked, "new"))
+        .await
+        .unwrap();
     assert_eq!(
         *seen.seen.borrow(),
         vec![format!("su:{parked}:old+R"), format!("su:{parked}:new")]
@@ -240,7 +269,10 @@ async fn a_parked_sessions_request_waits_for_unpark() {
             for _ in 0..10 {
                 tokio::task::yield_now().await;
             }
-            assert!(seen.seen.borrow().is_empty(), "the request was sent while parked");
+            assert!(
+                seen.seen.borrow().is_empty(),
+                "the request was sent while parked"
+            );
             quiesce::unpark(&parked);
             hold.release(&parked).await;
             tokio::time::timeout(std::time::Duration::from_secs(5), request)
@@ -272,7 +304,9 @@ async fn implicit_unpark_cancels_held_requests() {
             let request = {
                 let conn = conn.clone();
                 let parked = parked.clone();
-                tokio::task::spawn_local(async move { conn.request_permission(permission(&parked)).await })
+                tokio::task::spawn_local(async move {
+                    conn.request_permission(permission(&parked)).await
+                })
             };
             for _ in 0..10 {
                 tokio::task::yield_now().await;
@@ -285,8 +319,15 @@ async fn implicit_unpark_cancels_held_requests() {
                 .expect("implicit unpark answers the request")
                 .expect("request task")
                 .expect("a cancelled outcome, not an error");
-            assert!(matches!(outcome.outcome, acp::RequestPermissionOutcome::Cancelled));
-            assert_eq!(*seen.seen.borrow(), vec![MARKER.to_owned()], "the request was sent");
+            assert!(matches!(
+                outcome.outcome,
+                acp::RequestPermissionOutcome::Cancelled
+            ));
+            assert_eq!(
+                *seen.seen.borrow(),
+                vec![MARKER.to_owned()],
+                "the request was sent"
+            );
         })
         .await;
 }
@@ -298,7 +339,9 @@ async fn nothing_is_held_without_a_park() {
     let hold = ParkFrameHold::new();
     let (conn, seen) = client(&hold);
     let session = sid("live");
-    conn.session_notification(chunk(&session, "x")).await.unwrap();
+    conn.session_notification(chunk(&session, "x"))
+        .await
+        .unwrap();
     conn.ext_notification(ext("fuigo/announcements", json!({ "tag": "g" })))
         .await
         .unwrap();
@@ -332,7 +375,10 @@ async fn released_fs_and_terminal_requests_are_marked() {
             for _ in 0..10 {
                 tokio::task::yield_now().await;
             }
-            assert!(seen.seen.borrow().is_empty(), "the request was sent while parked");
+            assert!(
+                seen.seen.borrow().is_empty(),
+                "the request was sent while parked"
+            );
             quiesce::unpark(&parked);
             hold.release(&parked).await;
             tokio::time::timeout(std::time::Duration::from_secs(5), request)
@@ -371,7 +417,8 @@ async fn closing_a_parked_root_stops_holding_process_wide_frames() {
 }
 
 fn sdk_call() -> acp::ExtRequest {
-    let params = serde_json::value::to_raw_value(&json!({ "serverId": "srv_0", "message": {} })).unwrap();
+    let params =
+        serde_json::value::to_raw_value(&json!({ "serverId": "srv_0", "message": {} })).unwrap();
     acp::ExtRequest::new("fuigo/mcp/sdk_call", std::sync::Arc::from(params))
 }
 
@@ -395,7 +442,11 @@ async fn reverse_mcp_calls_are_held_by_a_live_park_and_marked_released() {
             for _ in 0..10 {
                 tokio::task::yield_now().await;
             }
-            assert!(seen.seen.borrow().is_empty(), "a reverse MCP call went out while parked: {:?}", seen.seen.borrow());
+            assert!(
+                seen.seen.borrow().is_empty(),
+                "a reverse MCP call went out while parked: {:?}",
+                seen.seen.borrow()
+            );
             quiesce::unpark(&parked);
             hold.release(&parked).await;
             tokio::time::timeout(std::time::Duration::from_secs(5), call)
@@ -404,7 +455,9 @@ async fn reverse_mcp_calls_are_held_by_a_live_park_and_marked_released() {
                 .expect("task")
                 .expect("answered");
             assert!(
-                seen.seen.borrow().contains(&"extm:fuigo/mcp/sdk_call+R".to_owned()),
+                seen.seen
+                    .borrow()
+                    .contains(&"extm:fuigo/mcp/sdk_call+R".to_owned()),
                 "the released call was not marked: {:?}",
                 seen.seen.borrow()
             );
@@ -429,7 +482,10 @@ async fn reverse_mcp_calls_of_a_parked_load_window_go_out() {
     .await
     .expect("a parked load's call is not held")
     .expect("answered");
-    assert_eq!(*seen.seen.borrow(), vec!["extm:fuigo/mcp/sdk_call".to_owned()]);
+    assert_eq!(
+        *seen.seen.borrow(),
+        vec!["extm:fuigo/mcp/sdk_call".to_owned()]
+    );
     quiesce::unpark(&parked);
 }
 
@@ -471,7 +527,11 @@ async fn a_call_queued_before_its_park_is_not_let_out_by_another_sessions_load_w
                 tokio::task::spawn_local(async move { conn.ext_method(sdk_call_with(id)).await })
             };
             settle().await;
-            assert!(seen.seen.borrow().is_empty(), "went out under B's load window: {:?}", seen.seen.borrow());
+            assert!(
+                seen.seen.borrow().is_empty(),
+                "went out under B's load window: {:?}",
+                seen.seen.borrow()
+            );
             quiesce::unpark(&b);
             quiesce::unpark(&a);
             hold.release(&a).await;
@@ -480,7 +540,13 @@ async fn a_call_queued_before_its_park_is_not_let_out_by_another_sessions_load_w
                 .expect("A's unpark releases the call")
                 .expect("task")
                 .expect("answered");
-            assert!(seen.seen.borrow().contains(&"extm:fuigo/mcp/sdk_call+R".to_owned()), "{:?}", seen.seen.borrow());
+            assert!(
+                seen.seen
+                    .borrow()
+                    .contains(&"extm:fuigo/mcp/sdk_call+R".to_owned()),
+                "{:?}",
+                seen.seen.borrow()
+            );
         })
         .await;
 }
@@ -506,7 +572,11 @@ async fn a_released_call_of_a_is_not_held_by_bs_park_on_the_same_connection() {
             settle().await;
             quiesce::unpark(&a);
             hold.release(&a).await;
-            assert_eq!(invoker.await.expect("task"), Ok(true), "the invoker waited out A's park");
+            assert_eq!(
+                invoker.await.expect("task"),
+                Ok(true),
+                "the invoker waited out A's park"
+            );
             park(&hold, &b);
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
@@ -514,8 +584,16 @@ async fn a_released_call_of_a_is_not_held_by_bs_park_on_the_same_connection() {
             )
             .await;
             quiesce::unpark(&b);
-            result.expect("B's park held A's released call").expect("answered");
-            assert!(seen.seen.borrow().contains(&"extm:fuigo/mcp/sdk_call+R".to_owned()), "{:?}", seen.seen.borrow());
+            result
+                .expect("B's park held A's released call")
+                .expect("answered");
+            assert!(
+                seen.seen
+                    .borrow()
+                    .contains(&"extm:fuigo/mcp/sdk_call+R".to_owned()),
+                "{:?}",
+                seen.seen.borrow()
+            );
         })
         .await;
 }
@@ -565,7 +643,9 @@ async fn the_internal_ticket_is_never_written() {
             let (conn, seen) = client(&hold);
             let a = sid("strip-a");
             let ticket = reverse_ticket::create(&a);
-            conn.ext_method(sdk_call_with(ticket.id())).await.expect("unreleased call");
+            conn.ext_method(sdk_call_with(ticket.id()))
+                .await
+                .expect("unreleased call");
             // A released call (it waited out a park).
             park(&hold, &a);
             let released = reverse_ticket::create(&a);
@@ -584,19 +664,31 @@ async fn the_internal_ticket_is_never_written() {
                 "x": 1, "_meta": { reverse_ticket::TICKET_META_KEY: 7, "keep": true }
             }))
             .unwrap();
-            conn.ext_method(acp::ExtRequest::new("fuigo/other", std::sync::Arc::from(raw)))
-                .await
-                .expect("other method");
+            conn.ext_method(acp::ExtRequest::new(
+                "fuigo/other",
+                std::sync::Arc::from(raw),
+            ))
+            .await
+            .expect("other method");
             let written = seen.params.borrow().clone();
             assert_eq!(written.len(), 3, "{written:?}");
             for params in &written {
-                assert!(!params.contains(reverse_ticket::TICKET_META_KEY), "the ticket was written: {params}");
+                assert!(
+                    !params.contains(reverse_ticket::TICKET_META_KEY),
+                    "the ticket was written: {params}"
+                );
             }
             let first: serde_json::Value = serde_json::from_str(&written[0]).unwrap();
-            assert!(first.get("_meta").is_none(), "an emptied _meta stays: {first}");
+            assert!(
+                first.get("_meta").is_none(),
+                "an emptied _meta stays: {first}"
+            );
             assert_eq!(first["serverId"], "srv_0");
             let second: serde_json::Value = serde_json::from_str(&written[1]).unwrap();
-            assert_eq!(second["_meta"][RELEASED_META_KEY], serde_json::Value::Bool(true));
+            assert_eq!(
+                second["_meta"][RELEASED_META_KEY],
+                serde_json::Value::Bool(true)
+            );
             let third: serde_json::Value = serde_json::from_str(&written[2]).unwrap();
             assert_eq!(third["_meta"]["keep"], serde_json::Value::Bool(true));
         })
@@ -612,11 +704,17 @@ async fn a_ticket_created_while_parked_is_marked_released_when_an_unpark_won_fir
     assert!(quiesce::complete_park(&parked, op));
     let ticket = reverse_ticket::create(&parked);
     quiesce::unpark(&parked); // explicit unpark: the generation is not bumped
-    let released = tokio::time::timeout(std::time::Duration::from_secs(5), ticket.ticket().wait_admitted())
-        .await
-        .expect("admitted")
-        .expect("not cancelled");
-    assert!(released, "the call went out unmarked after the park it was created under");
+    let released = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ticket.ticket().wait_admitted(),
+    )
+    .await
+    .expect("admitted")
+    .expect("not cancelled");
+    assert!(
+        released,
+        "the call went out unmarked after the park it was created under"
+    );
 }
 
 /// A call created while nothing is parked is never marked.

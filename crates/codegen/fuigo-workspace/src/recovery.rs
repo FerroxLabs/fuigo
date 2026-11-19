@@ -10,11 +10,11 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
-use prometheus::{IntCounter, IntCounterVec, register_int_counter, register_int_counter_vec};
 use fuigo_file_utils::queue::{
     DEFAULT_MAX_AGE, EnqueueOutcome, QueueItemSidecar, SIDECAR_SUFFIX, UploadQueue,
     temp_path_for_sidecar, try_remove_temp,
 };
+use prometheus::{IntCounter, IntCounterVec, register_int_counter, register_int_counter_vec};
 
 /// Successful re-enqueues, labelled by artifact name.
 static ORPHAN_RECOVERED: LazyLock<IntCounterVec> = LazyLock::new(|| {
@@ -695,15 +695,26 @@ mod tests {
                 "session_artifact.tar.gz",
                 now_rfc3339(),
             );
-            let queue = UploadQueue::spawn(home.path(), Arc::new(ProxyAt(mock.proxy_base_url())), UploadRetryPolicy::default());
+            let queue = UploadQueue::spawn(
+                home.path(),
+                Arc::new(ProxyAt(mock.proxy_base_url())),
+                UploadRetryPolicy::default(),
+            );
             let report = run_startup_recovery(home.path(), &queue).await;
             assert_eq!(report.recovered, 1, "{host}: the orphan is re-enqueued");
             assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
             mock.settle(Duration::from_millis(300)).await;
             if delivered {
-                assert!(mock.received_contains(content), "{host}: FluxRouter-class proxy lost the spilled bytes");
+                assert!(
+                    mock.received_contains(content),
+                    "{host}: FluxRouter-class proxy lost the spilled bytes"
+                );
             } else {
-                assert_eq!(mock.connections(), 0, "{host}: a recovered spill reached a third-party proxy");
+                assert_eq!(
+                    mock.connections(),
+                    0,
+                    "{host}: a recovered spill reached a third-party proxy"
+                );
                 assert!(!mock.received_contains(b"P71-SPILLED"));
             }
         }

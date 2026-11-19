@@ -139,7 +139,9 @@ fn validate_git_transport(url: &str) -> Result<(), String> {
     if let Some((scheme, _)) = url.split_once("://") {
         let scheme = scheme.to_ascii_lowercase();
         if !matches!(scheme.as_str(), "https" | "http" | "ssh" | "git" | "file") {
-            return Err(format!("git URL scheme '{scheme}' is not allowed (https, ssh, git@host:path or a path)"));
+            return Err(format!(
+                "git URL scheme '{scheme}' is not allowed (https, ssh, git@host:path or a path)"
+            ));
         }
     }
     Ok(())
@@ -1550,7 +1552,8 @@ mod tests {
             path: src.path().to_path_buf(),
             subdir: None,
         };
-        let repo_key = InstallRegistry::repo_key(&repo_source_id(&normalize_install_source(&source).unwrap()));
+        let repo_key =
+            InstallRegistry::repo_key(&repo_source_id(&normalize_install_source(&source).unwrap()));
         // What an install killed half-way leaves behind: the repo directory, never registered.
         let stale = registry.install_dir().join(&repo_key);
         std::fs::create_dir_all(stale.join("half-copied")).unwrap();

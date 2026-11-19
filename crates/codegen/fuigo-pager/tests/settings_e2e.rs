@@ -248,10 +248,7 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
                 "SetVoiceKeybindEnabled value differs from expected"
             )
         }
-        (
-            "features.subagent_model_inheritance",
-            Action::SetSubagentModelInheritance(b),
-        ) => {
+        ("features.subagent_model_inheritance", Action::SetSubagentModelInheritance(b)) => {
             assert_eq!(
                 b, expected,
                 "SetSubagentModelInheritance value differs from expected"

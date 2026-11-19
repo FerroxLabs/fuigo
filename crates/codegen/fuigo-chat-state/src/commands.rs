@@ -2,11 +2,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use tokio::sync::oneshot;
 use fuigo_sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, SamplingConfig, TokenUsage,
     ToolSpec, TraceContext,
 };
+use tokio::sync::oneshot;
 
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
@@ -72,7 +72,9 @@ pub enum ChatStateCommand {
         epoch: u64,
         items: Vec<ConversationItem>,
         cancel: tokio_util::sync::CancellationToken,
-        commit: std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), CompactionCommitError>> + Send>>,
+        commit: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), CompactionCommitError>> + Send>,
+        >,
         reply: oneshot::Sender<std::io::Result<()>>,
     },
     // ═══ Mutations (fire-and-forget) ═══

@@ -218,7 +218,8 @@ fn handle_path(file: &File) -> Option<PathBuf> {
     let mut buf = vec![0u16; 1024];
     loop {
         // SAFETY: `handle` is a live file handle owned by `file`; the buffer length is passed via the slice.
-        let len = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) } as usize;
+        let len =
+            unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) } as usize;
         if len == 0 {
             return None;
         }
@@ -250,8 +251,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.md"), "inside").unwrap();
         let root = pin(tmp.path());
-        assert_eq!(read_contained(&tmp.path().join("a.md"), &root).unwrap(), "inside");
-        assert_eq!(read_contained_bytes(&tmp.path().join("a.md"), &root).unwrap(), b"inside");
+        assert_eq!(
+            read_contained(&tmp.path().join("a.md"), &root).unwrap(),
+            "inside"
+        );
+        assert_eq!(
+            read_contained_bytes(&tmp.path().join("a.md"), &root).unwrap(),
+            b"inside"
+        );
         assert!(is_contained(&tmp.path().join("a.md"), &root));
     }
 
@@ -285,7 +292,10 @@ mod tests {
         std::os::unix::fs::symlink(tmp.path(), root.join("updir")).unwrap();
         let pinned = pin(&root);
 
-        assert_eq!(read_contained(&root.join("in.md"), &pinned).unwrap(), "inside");
+        assert_eq!(
+            read_contained(&root.join("in.md"), &pinned).unwrap(),
+            "inside"
+        );
         let err = read_contained(&root.join("out.md"), &pinned).unwrap_err();
         assert_eq!(err.kind(), OUTSIDE_ROOT);
         assert!(read_contained(&root.join("updir").join("secret.md"), &pinned).is_err());
@@ -308,7 +318,10 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         std::fs::write(outside.join("SKILL.md"), "SECRET").unwrap();
         let pinned = pin(&root);
-        assert_eq!(read_contained(&root.join("SKILL.md"), &pinned).unwrap(), "inside");
+        assert_eq!(
+            read_contained(&root.join("SKILL.md"), &pinned).unwrap(),
+            "inside"
+        );
 
         std::fs::rename(&root, tmp.path().join("plugin.old")).unwrap();
         std::os::unix::fs::symlink(&outside, &root).unwrap();
@@ -391,7 +404,10 @@ mod tests {
         assert!(junction(&root.join("out"), &outside));
         assert!(junction(&root.join("in"), &root.join("real")));
         let pinned = pin(&root);
-        assert_eq!(read_contained(&root.join("in").join("a.md"), &pinned).unwrap(), "inside");
+        assert_eq!(
+            read_contained(&root.join("in").join("a.md"), &pinned).unwrap(),
+            "inside"
+        );
         assert!(read_contained(&root.join("out").join("a.md"), &pinned).is_err());
     }
 
@@ -421,7 +437,10 @@ mod tests {
         if len > 0 && len < buf.len() {
             // Short names can be disabled per volume; when one exists it must resolve to the same pinned root.
             let short = PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]));
-            assert_eq!(read_contained(&short.join("Readme.md"), &pinned).unwrap(), "inside");
+            assert_eq!(
+                read_contained(&short.join("Readme.md"), &pinned).unwrap(),
+                "inside"
+            );
             assert_eq!(PinnedRoot::pin(&short).unwrap(), pinned);
         }
     }

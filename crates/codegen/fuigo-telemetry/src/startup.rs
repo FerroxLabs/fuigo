@@ -800,7 +800,9 @@ mod tests {
         let log = Arc::new(Mutex::new(span_capture::SpanLog::default()));
         let subscriber =
             tracing_subscriber::registry().with(span_capture::SpanTimingLayer(Arc::clone(&log)));
+        let _second = crate::hold_second_dispatcher();
         let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
 
         let _p = begin(Owner::Client);
         enter(StartupPhase::ConfigLoad);
@@ -878,7 +880,9 @@ mod tests {
         let log = Arc::new(Mutex::new(span_capture::SpanLog::default()));
         let subscriber =
             tracing_subscriber::registry().with(span_capture::SpanTimingLayer(Arc::clone(&log)));
+        let _second = crate::hold_second_dispatcher();
         let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
 
         let _p = begin(Owner::Agent);
         enter(StartupPhase::ConfigLoad);

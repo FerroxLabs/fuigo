@@ -3,7 +3,7 @@
 # last public release, whose tree is the release candidate's tree minus every
 # raw Astra (codex exec) transcript, with local home, Mac volume, build-box and Windows user paths redacted in what is kept.
 #
-# Sean's rule (handoff UPDATE 211): raw Astra transcripts never enter public
+# Release rule: raw Astra transcripts never enter public
 # history. A squash is used, not a history filter, because the strike history
 # (v1.0.20..candidate) also holds transcript blobs that were deleted before the
 # tip; only a squash guarantees none of them is reachable from the public branch.
@@ -33,6 +33,7 @@ build_scope=docs/
 # Owner's Windows user dir (docs only): WSL mount form and backslash form, each
 # matched only when a path separator follows the name, so longer names such as
 # fixtures that merely start with the same letters are left alone.
+# shellcheck disable=SC1003 # a literal backslash
 bs='\'
 win_fs=$(printf '/mnt/c/%s/%s' Users seand)
 win_bk=$(printf 'C:%s%s%s%s' "$bs" Users "$bs" seand)
@@ -83,6 +84,10 @@ END_CHK
   if [ "$rc" -eq 0 ]; then echo "FAIL: $label still present" >&2; exit 1; fi
   if [ "$rc" -ne 1 ]; then echo "FAIL: $label check could not run (git grep exit $rc)" >&2; exit 1; fi
 done
+# Leak guard: an unsplit vendor-shaped token in the release tree fails the squash (push protection would
+# block the public push, and a real token must never ship). Fixtures are split with concat!("sk_", "live_...").
+here=$(cd "$(dirname "$0")" && pwd)
+python3 -I "$here/check-token-leaks.py" "$tree" >&2 || { echo "FAIL: leak guard (see above)" >&2; exit 1; }
 commit=$("$G" commit-tree "$tree" -p "$parent" -F "$msgfile")
 echo "dropped=$dropped redacted=$redacted tree=$tree"
 echo "$commit"

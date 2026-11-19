@@ -492,11 +492,13 @@ impl WorkspaceSession {
     }
     /// 1.0.36 item a: mark this session governed by a launch policy (never cleared).
     pub fn set_launch_policy_governed(&self) {
-        self.launch_policy.store(true, std::sync::atomic::Ordering::Release);
+        self.launch_policy
+            .store(true, std::sync::atomic::Ordering::Release);
     }
     /// Whether a launch policy governs this session (its own flag; the process policy is checked by `governs`).
     pub fn launch_policy_governed(&self) -> bool {
-        self.launch_policy.load(std::sync::atomic::Ordering::Acquire)
+        self.launch_policy
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     pub fn set_yolo_mode(&self, enabled: bool) {
         self.yolo_mode

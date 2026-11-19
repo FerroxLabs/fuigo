@@ -120,11 +120,13 @@ impl SessionActor {
         } else {
             session_id.clone()
         };
-        let items =
-            fuigo_chat_state::compaction_utils::ModelRequestHistory::from_raw(call.items).into_items();
+        let items = fuigo_chat_state::compaction_utils::ModelRequestHistory::from_raw(call.items)
+            .into_items();
         ConversationRequest {
             execution_admission: crate::session::execution_state::Execution::current(&session_id)
-                .map(|execution| execution as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>),
+                .map(|execution| {
+                    execution as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>
+                }),
             items,
             tools: call.tools,
             hosted_tools: call.hosted_tools,
@@ -149,7 +151,9 @@ impl SessionActor {
     /// Recap-style side-calls preserve reasoning so their conversation prefix stays byte-identical to the parent turn.
     /// Messages strips reasoning only when the matching effort cannot emit a top-level thinking configuration.
     pub(crate) async fn prepare_side_call(&self) -> Result<SideCallSetup, acp::Error> {
-        let client = self.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side).await?;
+        let client = self
+            .prepare_chat_completion(false, crate::session::acp_session::CallRole::Side)
+            .await?;
         // One config read serves the window, model, and reasoning effort.
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
         let context_window = sampling_config
@@ -195,7 +199,8 @@ impl SessionActor {
             backend: setup.client.api_backend(),
             conv_id: x_fuigo_conv_id,
             req_id: x_fuigo_req_id,
-        }).with_purpose(fuigo_sampling_types::RequestPurpose::Recap)
+        })
+        .with_purpose(fuigo_sampling_types::RequestPurpose::Recap)
     }
 
     /// Invalidate in-flight recap-style side-calls when a real user prompt is accepted (at queue time or turn start).

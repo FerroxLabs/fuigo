@@ -210,11 +210,19 @@ impl fuigo_tool_runtime::Tool for GrepTool {
             crate::types::resources::deny_read_globs_for_call(&ctx, &*resources.lock().await);
         // P198: ripgrep reads an explicit file despite an exclude, so a denied search path is refused before it runs.
         if input.path.as_deref().is_some_and(|p| !p.is_empty())
-            && crate::util::read_deny::explicit_search_path_denied(&search_cwd, &deny_read_globs, &search_path).await
+            && crate::util::read_deny::explicit_search_path_denied(
+                &search_cwd,
+                &deny_read_globs,
+                &search_path,
+            )
+            .await
         {
             return Ok(GrepSearchOutput {
-                stdout: format!("Error: {} is excluded by a read rule and cannot be searched.", search_path.display())
-                    .into_bytes(),
+                stdout: format!(
+                    "Error: {} is excluded by a read rule and cannot be searched.",
+                    search_path.display()
+                )
+                .into_bytes(),
                 stderr: Vec::new(),
                 exit_code: 2,
                 match_count: 0,
@@ -455,7 +463,10 @@ impl fuigo_tool_runtime::Tool for GrepTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
 
@@ -463,7 +474,11 @@ mod tests {
     #[test]
     fn interleaved_json_records_render_pipe_lines_for_each_allowed_file_once() {
         let f = crate::util::rg_json_tests::fx();
-        let out = crate::util::rg_json_tests::run(&f, crate::util::rg_json::RgJsonMode::Pipe, &crate::util::rg_json_tests::interleaved_allowed());
+        let out = crate::util::rg_json_tests::run(
+            &f,
+            crate::util::rg_json::RgJsonMode::Pipe,
+            &crate::util::rg_json_tests::interleaved_allowed(),
+        );
         let mut got: Vec<(&str, &str, &str)> = out
             .lines()
             .map(|l| {
@@ -472,8 +487,19 @@ mod tests {
             })
             .collect();
         got.sort();
-        assert_eq!(got, vec![("src/a.rs", "1", "A1"), ("src/a.rs", "2", "A2"), ("src/b.rs", "5", "B5")]);
-        let out = crate::util::rg_json_tests::run(&f, crate::util::rg_json::RgJsonMode::Pipe, &crate::util::rg_json_tests::interleaved_with_denied());
+        assert_eq!(
+            got,
+            vec![
+                ("src/a.rs", "1", "A1"),
+                ("src/a.rs", "2", "A2"),
+                ("src/b.rs", "5", "B5")
+            ]
+        );
+        let out = crate::util::rg_json_tests::run(
+            &f,
+            crate::util::rg_json::RgJsonMode::Pipe,
+            &crate::util::rg_json_tests::interleaved_with_denied(),
+        );
         assert_eq!(out.lines().count(), 2, "{out:?}");
         assert!(out.lines().all(|l| l.starts_with("src/a.rs|")), "{out:?}");
     }
@@ -1148,7 +1174,10 @@ mod tests {
         let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
         builder.add_line(None, "secret/").unwrap();
         let mut resources = test_resources(repo.path());
-        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        resources.insert(crate::types::resources::GitignoreFilter::new(
+            builder.build().unwrap(),
+            canonical,
+        ));
         resources.insert(crate::types::resources::RespectGitignore(true));
         let output = fuigo_tool_runtime::Tool::run(
             &GrepTool,
@@ -1167,9 +1196,12 @@ mod tests {
         assert_eq!(output.match_count, 0);
     }
 
-
     /// What the OpenCode `grep` tool prints for `FAKE`.
-    async fn oc_grep_text(cwd: std::path::PathBuf, path: Option<String>, deny: Option<Vec<String>>) -> String {
+    async fn oc_grep_text(
+        cwd: std::path::PathBuf,
+        path: Option<String>,
+        deny: Option<Vec<String>>,
+    ) -> String {
         let mut resources = test_resources(&cwd);
         if let Some(deny) = deny {
             resources.insert(crate::types::resources::DenyReadGlobs(deny));
@@ -1177,7 +1209,11 @@ mod tests {
         let out = fuigo_tool_runtime::Tool::run(
             &GrepTool,
             test_ctx(resources.into_shared()),
-            GrepInput { pattern: "FAKE".to_string(), path, include: None },
+            GrepInput {
+                pattern: "FAKE".to_string(),
+                path,
+                include: None,
+            },
         )
         .await
         .unwrap();
@@ -1254,15 +1290,26 @@ mod tests {
     async fn denied_matches_are_not_counted() {
         let t = crate::util::read_deny::fixture::tree();
         let mut resources = test_resources(&t.proj);
-        resources.insert(crate::types::resources::DenyReadGlobs(vec!["**/*.txt".to_string()]));
+        resources.insert(crate::types::resources::DenyReadGlobs(vec![
+            "**/*.txt".to_string(),
+        ]));
         let out = fuigo_tool_runtime::Tool::run(
             &GrepTool,
             test_ctx(resources.into_shared()),
-            GrepInput { pattern: "FAKE".to_string(), path: Some("secrets".to_string()), include: None },
+            GrepInput {
+                pattern: "FAKE".to_string(),
+                path: Some("secrets".to_string()),
+                include: None,
+            },
         )
         .await
         .unwrap();
-        assert_eq!(out.match_count, 0, "{}", String::from_utf8_lossy(&out.stdout));
+        assert_eq!(
+            out.match_count,
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
         assert!(String::from_utf8_lossy(&out.stdout).contains("No files found"));
     }
 }

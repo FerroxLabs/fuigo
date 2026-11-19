@@ -28,3 +28,19 @@ pub use self::stdin_reader::spawn_stdin_line_reader;
 
 #[doc(hidden)]
 pub use self::common::compact_json;
+
+/// Entry points for the fuzz targets in `fuzz/` (private line-handling functions); not a supported API.
+#[doc(hidden)]
+pub mod fuzz_support {
+    pub fn normalize_json_line(line: Vec<u8>) -> Vec<u8> {
+        crate::normalize::normalize_json_line(line)
+    }
+
+    pub fn read_until_capped<R: std::io::BufRead>(
+        reader: &mut R,
+        buf: &mut Vec<u8>,
+        max: usize,
+    ) -> std::io::Result<usize> {
+        crate::stdin_reader::read_until_capped(reader, buf, max)
+    }
+}

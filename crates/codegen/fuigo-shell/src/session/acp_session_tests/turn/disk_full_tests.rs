@@ -29,7 +29,8 @@ where
     tokio::task::LocalSet::new().block_on(&rt, f);
 }
 
-pub(super) const TODO_ARGS: &str = r#"{"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
+pub(super) const TODO_ARGS: &str =
+    r#"{"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
 /// A `search_replace` call: an edit, so a non-yolo permission manager always prompts for it.
 const SEARCH_REPLACE_ARGS: &str =
     r#"{"file_path":"/tmp/permission-hook.txt","old_string":"a","new_string":"b"}"#;
@@ -123,9 +124,9 @@ pub(super) fn spawn_persistence_stub_observing(
                     let _ = respond_to.send(Ok(fuigo_chat_state::StrictAppendAck::Appended));
                 }
                 PersistenceMsg::CopyFile { one_shot } => {
-                    let _ = one_shot.send(Ok(
-                        crate::session::persistence::SessionStateCopy { files: Vec::new() },
-                    ));
+                    let _ = one_shot.send(Ok(crate::session::persistence::SessionStateCopy {
+                        files: Vec::new(),
+                    }));
                 }
                 // Fire-and-forget: no `respond_to`, so nothing is waiting on these.
                 _ => {}

@@ -106,7 +106,9 @@ const BLANK_STAMP_CACHE: bool = cfg!(unix);
 fn read_user_layer_once_confirmed(path: &Path) -> Result<toml::Value, QuietReadError> {
     let raw = std::fs::read_to_string(path);
     let blank = matches!(&raw, Ok(s) if s.trim().is_empty());
-    let mut cache = CONFIRMED_BLANK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cache = CONFIRMED_BLANK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !blank {
         cache.remove(path);
         drop(cache);
@@ -323,7 +325,10 @@ pub fn load_config_file(path: &Path) -> std::io::Result<toml::Value> {
 }
 
 /// [`load_config_file`] with the tier decided by the caller (`may_name_saved_key`).
-pub fn load_config_file_with_key_naming(path: &Path, may_name_saved_key: bool) -> std::io::Result<toml::Value> {
+pub fn load_config_file_with_key_naming(
+    path: &Path,
+    may_name_saved_key: bool,
+) -> std::io::Result<toml::Value> {
     finish_config_file(read_toml_file(path)?, path, may_name_saved_key)
 }
 
@@ -348,17 +353,27 @@ pub fn load_project_config_file(path: &Path) -> std::io::Result<toml::Value> {
             tracing::error!(file = %path.display(), "config toml has syntax errors: {detail}");
             std::io::Error::other(detail)
         })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Value::Table(toml::map::Map::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            toml::Value::Table(toml::map::Map::new())
+        }
         Err(e) => {
             tracing::warn!(file = %path.display(), "project config not loaded: {e}");
             return Err(e);
         }
     };
-    finish_config_file(parsed, path, crate::key_naming::source_may_name_saved_key(path))
+    finish_config_file(
+        parsed,
+        path,
+        crate::key_naming::source_may_name_saved_key(path),
+    )
 }
 
 /// The P118 refusals, `$VAR` expansion and `[[version_overrides]]` applied to a parsed config file.
-fn finish_config_file(mut v: toml::Value, path: &Path, may_name_saved_key: bool) -> std::io::Result<toml::Value> {
+fn finish_config_file(
+    mut v: toml::Value,
+    path: &Path,
+    may_name_saved_key: bool,
+) -> std::io::Result<toml::Value> {
     let label = path.display().to_string();
     // Only the campaign merge may set the campaign marker; a file of any kind (project files included) loses it.
     crate::config_override::strip_campaign_source_marker(&mut v);
@@ -1043,9 +1058,9 @@ fn expand_env_vars_in_toml_at(value: &mut toml::Value, path: &mut Vec<String>) {
 
 /// `mcp_servers.<name>.bearer_token_file`, wherever the `mcp_servers` table sits (top level or inside a patch).
 fn is_bearer_token_file_path(path: &[String]) -> bool {
-    path.iter().position(|seg| seg == "mcp_servers").is_some_and(|i| {
-        path.len() == i + 3 && path[i + 2] == "bearer_token_file"
-    })
+    path.iter()
+        .position(|seg| seg == "mcp_servers")
+        .is_some_and(|i| path.len() == i + 3 && path[i + 2] == "bearer_token_file")
 }
 
 /// Whether a config value at `path` is resolved against the saved key where it is used (see
@@ -1061,7 +1076,10 @@ fn key_default_resolves_at(path: &[String]) -> bool {
     // r2 N1, r3 #1, #2).
     let model_api_key = path.len() >= 3
         && path[path.len() - 1] == "api_key"
-        && matches!(path[path.len() - 3].as_str(), "model" | "models" | "model_providers")
+        && matches!(
+            path[path.len() - 3].as_str(),
+            "model" | "models" | "model_providers"
+        )
         && !matches!(
             path[path.len() - 2].as_str(),
             "extra_headers" | "query_params" | "env_http_headers" | "http_headers" | "headers"
@@ -1083,8 +1101,8 @@ fn expand_env_vars_in_string_keeping(input: &str, key_default_resolves: bool) ->
     // P70a (Astra f4 #1, f6): a `$`-run before the first-party name (`$${FUIGO_API_KEY}`, any form) is kept as
     // written, so the `$$` escape cannot produce a plain reference that a destination would resolve to the saved key.
     // P147: an exported key is expanded here, as before.
-    let keep_defaulted =
-        key_default_resolves && std::env::var_os(crate::credential_env::FIRST_PARTY_KEY_ENV_VAR).is_none();
+    let keep_defaulted = key_default_resolves
+        && std::env::var_os(crate::credential_env::FIRST_PARTY_KEY_ENV_VAR).is_none();
     crate::credential_env::expand_keeping_first_party_references(input, keep_defaulted, |text| {
         let context = |name: &str| std::env::var(name).ok();
         shellexpand::env_with_context_no_errors(text, context).into_owned()
@@ -1103,26 +1121,46 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         blank_hook::set(None);
         for _ in 0..3 {
-            let v = read_user_layer_once_confirmed(&path).ok().expect("blank reads as empty");
+            let v = read_user_layer_once_confirmed(&path)
+                .ok()
+                .expect("blank reads as empty");
             assert!(v.as_table().is_some_and(toml::map::Map::is_empty));
         }
-        assert_eq!(blank_hook::fired(), 1, "one confirm for three reads of the same blank file");
+        assert_eq!(
+            blank_hook::fired(),
+            1,
+            "one confirm for three reads of the same blank file"
+        );
         // A rewrite (same blank content, new identity) is confirmed again. The precondition is checked, not assumed:
         // on a file system with a coarse ctime and inode reuse, rewrite until the identity really moved.
         replace_until_new_stamp(&path, "");
         blank_hook::set(None);
-        read_user_layer_once_confirmed(&path).ok().expect("blank reads as empty");
-        assert_eq!(blank_hook::fired(), 1, "a replaced file is not the confirmed one");
+        read_user_layer_once_confirmed(&path)
+            .ok()
+            .expect("blank reads as empty");
+        assert_eq!(
+            blank_hook::fired(),
+            1,
+            "a replaced file is not the confirmed one"
+        );
         // Mid-save: blank at first read, content by the confirm; the content wins and nothing is cached as blank.
         let writer = path.clone();
         replace_until_new_stamp(&path, "");
         blank_hook::set(Some(Box::new(move || {
             std::fs::write(&writer, "[permissions]\nlock = true\n").unwrap();
         })));
-        let v = read_user_layer_once_confirmed(&path).ok().expect("content read");
+        let v = read_user_layer_once_confirmed(&path)
+            .ok()
+            .expect("content read");
         blank_hook::set(None);
-        assert!(v.get("permissions").is_some(), "the in-place save's content is used: {v:?}");
-        assert!(!confirmed_blank_cached(&path), "a mid-save read caches nothing");
+        assert!(
+            v.get("permissions").is_some(),
+            "the in-place save's content is used: {v:?}"
+        );
+        assert!(
+            !confirmed_blank_cached(&path),
+            "a mid-save read caches nothing"
+        );
     }
 
     /// Replace `path` with `contents` until its [`FileStamp`] differs from the cached confirmed-blank one, so a test of
@@ -1132,16 +1170,24 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(30));
             std::fs::remove_file(path).unwrap();
             std::fs::write(path, contents).unwrap();
-            let cached = CONFIRMED_BLANK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cached = CONFIRMED_BLANK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if cached.get(path) != FileStamp::of(path).as_ref() {
                 return;
             }
         }
-        panic!("{} kept its confirmed-blank identity across 100 rewrites", path.display());
+        panic!(
+            "{} kept its confirmed-blank identity across 100 rewrites",
+            path.display()
+        );
     }
 
     fn confirmed_blank_cached(path: &Path) -> bool {
-        CONFIRMED_BLANK.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(path)
+        CONFIRMED_BLANK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(path)
     }
 
     /// u35 r2 (Astra M): a read that sees content drops the cached blank, so a confirmed-blank file that gained content
@@ -1153,18 +1199,31 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "").unwrap();
         blank_hook::set(None);
-        read_user_layer_once_confirmed(&path).ok().expect("blank reads as empty");
+        read_user_layer_once_confirmed(&path)
+            .ok()
+            .expect("blank reads as empty");
         assert_eq!(confirmed_blank_cached(&path), BLANK_STAMP_CACHE);
         // In place (same inode): the file now sets the lock.
         std::fs::write(&path, "[permissions]\nlock = true\n").unwrap();
-        let v = read_user_layer_once_confirmed(&path).ok().expect("content read");
+        let v = read_user_layer_once_confirmed(&path)
+            .ok()
+            .expect("content read");
         assert!(v.get("permissions").is_some(), "{v:?}");
-        assert!(!confirmed_blank_cached(&path), "content seen: the confirmed blank is forgotten");
+        assert!(
+            !confirmed_blank_cached(&path),
+            "content seen: the confirmed blank is forgotten"
+        );
         // Mid-save blank again: confirmed afresh, never answered from the old identity.
         std::fs::write(&path, "").unwrap();
         blank_hook::set(None);
-        read_user_layer_once_confirmed(&path).ok().expect("blank reads as empty");
-        assert_eq!(blank_hook::fired(), 1, "a blank after content is confirmed again");
+        read_user_layer_once_confirmed(&path)
+            .ok()
+            .expect("blank reads as empty");
+        assert_eq!(
+            blank_hook::fired(),
+            1,
+            "a blank after content is confirmed again"
+        );
     }
 
     /// P183 round 7 (sweep): MDM-forced `[hooks]` load as a managed-policy layer (before, they were never read); a non-table
@@ -1673,12 +1732,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let base = dunce::canonicalize(tmp.path()).unwrap();
         std::fs::create_dir_all(base.join("outside")).unwrap();
-        std::fs::write(base.join("outside").join("c.toml"), "marker = \"outside\"\n").unwrap();
+        std::fs::write(
+            base.join("outside").join("c.toml"),
+            "marker = \"outside\"\n",
+        )
+        .unwrap();
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".fuigo")).unwrap();
         let config = repo.join(".fuigo").join("config.toml");
         std::os::unix::fs::symlink(base.join("outside").join("c.toml"), &config).unwrap();
-        assert!(load_project_config_file(&config).is_err(), "outside config loaded");
+        assert!(
+            load_project_config_file(&config).is_err(),
+            "outside config loaded"
+        );
 
         std::fs::write(repo.join("shared.toml"), "marker = \"inside\"\n").unwrap();
         std::fs::remove_file(&config).unwrap();
@@ -1688,6 +1754,12 @@ mod tests {
 
         // Missing file: an empty table, as `load_config_file` gives.
         std::fs::remove_file(&config).unwrap();
-        assert!(load_project_config_file(&config).unwrap().as_table().unwrap().is_empty());
+        assert!(
+            load_project_config_file(&config)
+                .unwrap()
+                .as_table()
+                .unwrap()
+                .is_empty()
+        );
     }
 }

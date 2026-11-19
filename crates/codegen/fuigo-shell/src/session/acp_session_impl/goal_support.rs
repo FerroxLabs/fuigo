@@ -1099,11 +1099,9 @@ impl SessionActor {
                     // That way the UI never advertises "planning" while it can no longer replan
                     self.clear_goal_planning_latch(run_goal_id.as_deref()).await;
                     // F5-C5: published by a rename through the session's writer.
-                    let published = self
-                        .goal_tracker
-                        .lock()
-                        .writer_for(&attempt_file)
-                        .and_then(|(writer, from)| writer.rename_sync(from, writer.rel_of(&plan_file)?));
+                    let published = self.goal_tracker.lock().writer_for(&attempt_file).and_then(
+                        |(writer, from)| writer.rename_sync(from, writer.rel_of(&plan_file)?),
+                    );
                     drop(attempt_file);
                     if published.is_err() {
                         let still_same_goal =
@@ -1173,7 +1171,9 @@ impl SessionActor {
                                 if can_publish
                                     && writer
                                         .rel_of(&tmp)
-                                        .and_then(|from| writer.rename_sync(from, writer.rel_of(&dst)?))
+                                        .and_then(|from| {
+                                            writer.rename_sync(from, writer.rel_of(&dst)?)
+                                        })
                                         .is_ok()
                                     && let Some(goal) = tracker.snapshot_mut()
                                 {
@@ -1778,7 +1778,9 @@ mod compaction_goal_section_tests {
         let task = out.find("- \"t1\"").unwrap();
         let goal = out.find("A goal has been set: ship it").unwrap();
         assert!(bg < task && task < goal, "{out}");
-        let close = out.rfind("</system-reminder>").expect("the closing tag is kept");
+        let close = out
+            .rfind("</system-reminder>")
+            .expect("the closing tag is kept");
         assert!(
             goal < close,
             "the goal section sits inside the reminder, not after it: {out}"

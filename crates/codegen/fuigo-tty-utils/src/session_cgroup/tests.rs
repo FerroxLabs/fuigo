@@ -3,7 +3,7 @@
 #![allow(clippy::disallowed_methods)] // tests spawn and reap their own placed children
 #![allow(clippy::print_stdout)] // the receipt lines (P189-CGROUP-RAN/SKIP) are test output
 
-use super::imp::{check_lock_dir, is_uuid, open_lock, probe_for_pid, ProbeEnv};
+use super::imp::{ProbeEnv, check_lock_dir, is_uuid, open_lock, probe_for_pid};
 use super::*;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -29,7 +29,11 @@ fn fake(tag: &str) -> (ProbeEnv, PathBuf) {
     let root = tmp(tag);
     std::fs::create_dir_all(root.join("own")).unwrap();
     // The probe requires our own pid to be listed in our cgroup's procs.
-    std::fs::write(root.join("own/cgroup.procs"), format!("{}\n", std::process::id())).unwrap();
+    std::fs::write(
+        root.join("own/cgroup.procs"),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
     let mut env = ProbeEnv::system();
     env.cgroup_root = root.clone();
     env.own_cgroup = Some("/own".into());
@@ -65,21 +69,33 @@ fn fake_not_cgroup2() {
 fn fake_own_cgroup_missing_and_unreadable() {
     let (mut env, _r) = fake("own");
     env.own_cgroup = Some("/nope".into());
-    assert!(matches!(probe_with(&env), Err(Unavailable::OwnCgroupMissing(_))));
+    assert!(matches!(
+        probe_with(&env),
+        Err(Unavailable::OwnCgroupMissing(_))
+    ));
     env.own_cgroup = None;
-    assert_eq!(probe_with(&env).err(), Some(Unavailable::OwnCgroupUnreadable));
+    assert_eq!(
+        probe_with(&env).err(),
+        Some(Unavailable::OwnCgroupUnreadable)
+    );
 }
 
 #[test]
 fn fake_cgroup_type_threaded() {
     let (env, root) = fake("thr");
     std::fs::write(root.join("own/cgroup.type"), "threaded\n").unwrap();
-    assert_eq!(probe_with(&env).err(), Some(Unavailable::OwnCgroupNotDomain("threaded".into())));
+    assert_eq!(
+        probe_with(&env).err(),
+        Some(Unavailable::OwnCgroupNotDomain("threaded".into()))
+    );
     // `domain` passes this step (and proceeds to the next failure).
     std::fs::write(root.join("own/cgroup.type"), "domain\n").unwrap();
     let mut env = env;
     env.mkdir_errno = Some(libc::EACCES);
-    assert!(matches!(probe_with(&env), Err(Unavailable::MkdirRefused { .. })));
+    assert!(matches!(
+        probe_with(&env),
+        Err(Unavailable::MkdirRefused { .. })
+    ));
 }
 
 #[test]
@@ -88,7 +104,10 @@ fn fake_mkdir_refused_eacces_erofs() {
         let (mut env, root) = fake("mk");
         env.mkdir_errno = Some(e);
         let err = probe_with(&env).err().unwrap();
-        assert!(matches!(err, Unavailable::MkdirRefused { errno, .. } if errno == e), "{err}");
+        assert!(
+            matches!(err, Unavailable::MkdirRefused { errno, .. } if errno == e),
+            "{err}"
+        );
         assert!(err.to_string().contains(name), "{err}");
         no_leftovers(&root);
     }
@@ -109,7 +128,10 @@ fn fake_procs_not_writable() {
         std::fs::write(d.join("cgroup.kill"), "").unwrap();
         std::fs::create_dir(d.join("cgroup.procs")).unwrap(); // open for write: EISDIR
     });
-    assert!(matches!(probe_with(&env), Err(Unavailable::ProcsNotWritable(_))));
+    assert!(matches!(
+        probe_with(&env),
+        Err(Unavailable::ProcsNotWritable(_))
+    ));
     no_leftovers(&root);
 }
 
@@ -119,7 +141,10 @@ fn fake_round_trip_never_empties() {
     env.populate = Some(full_files); // events stays "populated 1" after the kill
     let t = Instant::now();
     let err = probe_with(&env).err().unwrap();
-    assert!(matches!(&err, Unavailable::RoundTrip(m) if m.contains("never returned to 0")), "{err}");
+    assert!(
+        matches!(&err, Unavailable::RoundTrip(m) if m.contains("never returned to 0")),
+        "{err}"
+    );
     assert!(t.elapsed() < Duration::from_secs(6));
     no_leftovers(&root);
 }
@@ -135,13 +160,20 @@ fn fake_probe_panic_is_unavailable() {
 fn fake_sweep_removes_only_empty_unlocked_valid_names() {
     let (env, root) = fake("sweep");
     let own = root.join("own");
-    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700).create(&env.lock_dir).unwrap();
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        .create(&env.lock_dir)
+        .unwrap();
     let mk = |n: &str| {
         let p = own.join(n);
         std::fs::create_dir_all(p.join("child")).unwrap();
         p
     };
-    let u = |c: char| format!("fuigo-park-{}", c.to_string().repeat(8) + "-1111-2222-3333-444444444444");
+    let u = |c: char| {
+        format!(
+            "fuigo-park-{}",
+            c.to_string().repeat(8) + "-1111-2222-3333-444444444444"
+        )
+    };
     let stale = mk(&u('a'));
     std::fs::File::create(env.lock_dir.join(format!("{}.lock", u('a')))).unwrap(); // free lock = dead owner
     let locked = mk(&u('b'));
@@ -152,12 +184,21 @@ fn fake_sweep_removes_only_empty_unlocked_valid_names() {
     // The lock of `locked` is held by a second open file description.
     let lp = env.lock_dir.join(format!("{}.lock", u('b')));
     let held = std::fs::File::create(&lp).unwrap();
-    assert_eq!(unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&held), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    assert_eq!(
+        unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&held),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        },
+        0
+    );
     // Orphan lock files: an old free one goes, a young one stays.
     let old_lock = env.lock_dir.join(format!("{}.lock", u('7')));
     let young_lock = env.lock_dir.join(format!("{}.lock", u('8')));
     let f = std::fs::File::create(&old_lock).unwrap();
-    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(3600)).unwrap();
+    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
     std::fs::File::create(&young_lock).unwrap();
     // Our own host: this also runs the sweep. (Real kernel files are absent, so
     // use a probe that fails after the sweep: the sweep ran before mkdir.)
@@ -198,9 +239,16 @@ fn real(name: &str) -> Option<Real> {
             let h = Real { host, _serial: g };
             let n = RAN.fetch_add(1, Ordering::SeqCst) + 1;
             let own = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-            let own_dir = ProbeEnv::system().cgroup_root.join(own.trim().trim_start_matches("0::").trim_start_matches('/'));
-            let members = std::fs::read_to_string(own_dir.join("cgroup.procs")).map(|s| s.lines().count()).unwrap_or(0);
-            println!("P189-CGROUP-RAN {n} {name} own_cgroup={} own_cgroup_procs={members}", own.trim());
+            let own_dir = ProbeEnv::system()
+                .cgroup_root
+                .join(own.trim().trim_start_matches("0::").trim_start_matches('/'));
+            let members = std::fs::read_to_string(own_dir.join("cgroup.procs"))
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
+            println!(
+                "P189-CGROUP-RAN {n} {name} own_cgroup={} own_cgroup_procs={members}",
+                own.trim()
+            );
             Some(h)
         }
         Err(r) => {
@@ -216,21 +264,31 @@ fn real(name: &str) -> Option<Real> {
 
 fn placed(cg: &SessionCgroup, script: &str) -> Child {
     let mut cmd = Command::new("/bin/sh");
-    cmd.args(["-c", script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(["-c", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     cg.spawn(&mut cmd).expect("spawn placed")
 }
 
 /// Not dead: alive and not a zombie.
 fn alive(pid: u32) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(s) => !s.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'),
+        Ok(s) => !s
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z'),
         Err(_) => false,
     }
 }
 
 fn wait_file_pid(f: &Path) -> u32 {
     for _ in 0..300 {
-        if let Ok(s) = std::fs::read_to_string(f) && let Ok(p) = s.trim().parse() {
+        if let Ok(s) = std::fs::read_to_string(f)
+            && let Ok(p) = s.trim().parse()
+        {
             return p;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -255,7 +313,9 @@ fn pids_gone(pids: &[u32]) -> bool {
 
 #[test]
 fn real_setsid_double_fork_daemon_dies_and_sibling_survives() {
-    let Some(host) = real("daemon_and_sibling") else { return };
+    let Some(host) = real("daemon_and_sibling") else {
+        return;
+    };
     let a = host.create_session().unwrap();
     let b = host.create_session().unwrap();
     let t = tmp("daemon");
@@ -277,7 +337,10 @@ fn real_setsid_double_fork_daemon_dies_and_sibling_survives() {
     // Sibling session in the same process directory is untouched.
     assert!(alive(cb.id()), "sibling killed");
     b.close();
-    assert!(matches!(b.kill_and_wait(Duration::from_secs(5)), KillOutcome::Emptied { .. }));
+    assert!(matches!(
+        b.kill_and_wait(Duration::from_secs(5)),
+        KillOutcome::Emptied { .. }
+    ));
     assert_eq!(cb.wait().unwrap().signal(), Some(9));
     assert_eq!(a.teardown(), TeardownOutcome::Removed);
     assert_eq!(b.teardown(), TeardownOutcome::Removed);
@@ -310,7 +373,10 @@ fn real_failed_placement_latches_breach_and_blocks_kill() {
     let err = cg.spawn(&mut cmd).expect_err("placement must fail");
     assert!(matches!(err, SpawnError::Placement(_)), "{err:?}");
     assert!(cg.is_breached());
-    assert_eq!(cg.kill_and_wait(Duration::from_secs(1)), KillOutcome::Refused(RefuseReason::Breached));
+    assert_eq!(
+        cg.kill_and_wait(Duration::from_secs(1)),
+        KillOutcome::Refused(RefuseReason::Breached)
+    );
     assert!(alive(live.id()), "refused kill must not kill");
     // Cleanup: this test created the cgroup, so it may write its kill file.
     std::fs::write(cg.dir().join("cgroup.kill"), "1").unwrap();
@@ -326,11 +392,17 @@ fn real_own_pid_in_cgroup_refuses_kill() {
     let out = cg.kill_and_wait_as(Duration::from_secs(1), c.id(), None);
     assert_eq!(out, KillOutcome::Refused(RefuseReason::SelfInCgroup));
     assert!(alive(c.id()));
-    let rel = cgroup_of(c.id()).trim().trim_start_matches("0::").to_string();
+    let rel = cgroup_of(c.id())
+        .trim()
+        .trim_start_matches("0::")
+        .to_string();
     let out = cg.kill_and_wait_as(Duration::from_secs(1), 1, Some(&rel));
     assert_eq!(out, KillOutcome::Refused(RefuseReason::SelfInCgroup));
     assert!(alive(c.id()));
-    assert!(matches!(cg.kill_and_wait(Duration::from_secs(5)), KillOutcome::Emptied { .. }));
+    assert!(matches!(
+        cg.kill_and_wait(Duration::from_secs(5)),
+        KillOutcome::Emptied { .. }
+    ));
     let _ = c.wait();
 }
 
@@ -343,8 +415,14 @@ fn real_teardown_leaves_populated_removes_empty() {
     let busy = host.create_session().unwrap();
     let mut c = placed(&busy, "sleep 300");
     assert_eq!(busy.teardown(), TeardownOutcome::LeftPopulated);
-    assert!(busy.dir().exists() && alive(c.id()), "teardown must not kill");
-    assert!(matches!(busy.kill_and_wait(Duration::from_secs(5)), KillOutcome::Emptied { .. }));
+    assert!(
+        busy.dir().exists() && alive(c.id()),
+        "teardown must not kill"
+    );
+    assert!(matches!(
+        busy.kill_and_wait(Duration::from_secs(5)),
+        KillOutcome::Emptied { .. }
+    ));
     let _ = c.wait();
     assert_eq!(busy.teardown(), TeardownOutcome::Removed);
 }
@@ -353,7 +431,10 @@ fn real_teardown_leaves_populated_removes_empty() {
 fn real_sweep_removes_only_empty_unlocked() {
     let Some(host) = real("sweep") else { return };
     let own = host.process_dir().parent().unwrap().to_path_buf();
-    let tail = std::fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap().trim()[8..].to_string();
+    let tail = std::fs::read_to_string("/proc/sys/kernel/random/uuid")
+        .unwrap()
+        .trim()[8..]
+        .to_string();
     let u = |c: char| format!("fuigo-park-{}{tail}", c.to_string().repeat(8));
     let (stale, locked, busy) = (own.join(u('d')), own.join(u('e')), own.join(u('f')));
     std::fs::create_dir(&stale).unwrap();
@@ -364,21 +445,42 @@ fn real_sweep_removes_only_empty_unlocked() {
     std::fs::create_dir_all(&env.lock_dir).unwrap();
     let lp = env.lock_dir.join(format!("{}.lock", u('e')));
     // `stale` and `busy` have free lock files (dead owners); a missing lock would keep them.
-    let (lock_stale, lock_busy) = (env.lock_dir.join(format!("{}.lock", u('d'))), env.lock_dir.join(format!("{}.lock", u('f'))));
+    let (lock_stale, lock_busy) = (
+        env.lock_dir.join(format!("{}.lock", u('d'))),
+        env.lock_dir.join(format!("{}.lock", u('f'))),
+    );
     std::fs::File::create(&lock_stale).unwrap();
     std::fs::File::create(&lock_busy).unwrap();
     let held = std::fs::File::create(&lp).unwrap();
-    assert_eq!(unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&held), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    assert_eq!(
+        unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&held),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        },
+        0
+    );
     // A populated stale directory: a placed sleep inside `busy/s1`.
     let busy_host_dir = busy.join("s1");
     std::fs::create_dir(&busy_host_dir).unwrap();
-    let procs = std::fs::OpenOptions::new().write(true).open(busy_host_dir.join("cgroup.procs")).unwrap();
+    let procs = std::fs::OpenOptions::new()
+        .write(true)
+        .open(busy_host_dir.join("cgroup.procs"))
+        .unwrap();
     let mut cmd = Command::new("/bin/sh");
-    cmd.args(["-c", "sleep 300"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(["-c", "sleep 300"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let fd = std::os::fd::AsRawFd::as_raw_fd(&procs);
     unsafe {
         std::os::unix::process::CommandExt::pre_exec(&mut cmd, move || {
-            if libc::write(fd, b"0".as_ptr().cast(), 1) == 1 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+            if libc::write(fd, b"0".as_ptr().cast(), 1) == 1 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
         });
     }
     let mut c = cmd.spawn().unwrap();
@@ -386,7 +488,10 @@ fn real_sweep_removes_only_empty_unlocked() {
     assert!(!stale.exists(), "empty unlocked dir must go: {rep:?}");
     assert!(locked.exists(), "locked dir must stay");
     // `busy` has a free lock (owner "dead"), but is populated: kept.
-    assert!(busy.exists() && alive(c.id()), "populated dir must stay and nothing is killed");
+    assert!(
+        busy.exists() && alive(c.id()),
+        "populated dir must stay and nothing is killed"
+    );
     // Cleanup of exactly what this test made.
     // Kill via the cgroup this test created (never via a pid).
     std::fs::write(busy_host_dir.join("cgroup.kill"), "1").unwrap();
@@ -413,9 +518,20 @@ fn real_zombie_and_populated() {
     // Do NOT reap `c`: after the kill it is a zombie until wait().
     let out = cg.kill_and_wait(Duration::from_secs(5));
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-    let state = stat.rsplit(')').next().unwrap_or("").trim().chars().next().unwrap_or('?');
-    let listed = std::fs::read_to_string(cg.dir().join("cgroup.procs")).unwrap_or_default().contains(&pid.to_string());
-    println!("P189-ZOMBIE outcome={out:?} state_after={state} zombie_listed_in_cgroup_procs={listed}");
+    let state = stat
+        .rsplit(')')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .next()
+        .unwrap_or('?');
+    let listed = std::fs::read_to_string(cg.dir().join("cgroup.procs"))
+        .unwrap_or_default()
+        .contains(&pid.to_string());
+    println!(
+        "P189-ZOMBIE outcome={out:?} state_after={state} zombie_listed_in_cgroup_procs={listed}"
+    );
     // Verified on the build box: a zombie does not keep `populated` at 1.
     assert!(matches!(out, KillOutcome::Emptied { .. }), "{out:?}");
     assert_eq!(state, 'Z', "child should be an unreaped zombie");
@@ -426,10 +542,18 @@ fn real_zombie_and_populated() {
 #[test]
 fn real_cached_probe_agrees() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let a = probe().map(|h| h.process_dir().to_path_buf()).map_err(|e| e.clone());
-    let b = probe().map(|h| h.process_dir().to_path_buf()).map_err(|e| e.clone());
+    let a = probe()
+        .map(|h| h.process_dir().to_path_buf())
+        .map_err(|e| e.clone());
+    let b = probe()
+        .map(|h| h.process_dir().to_path_buf())
+        .map_err(|e| e.clone());
     assert_eq!(a, b);
-    println!("P189-PROBE {}", a.map(|p| format!("usable {}", p.display())).unwrap_or_else(|e| format!("unavailable: {e}")));
+    println!(
+        "P189-PROBE {}",
+        a.map(|p| format!("usable {}", p.display()))
+            .unwrap_or_else(|e| format!("unavailable: {e}"))
+    );
 }
 
 #[test]
@@ -478,11 +602,18 @@ fn fake_sweep_keeps_directory_when_lock_file_not_found() {
     std::fs::File::create(theirs.join(format!("{UA}.lock"))).unwrap(); // free, but in THEIR dir
     let rep = host.sweep_stale();
     assert!(root.join("own").join(UA).exists(), "must keep: {rep:?}");
-    assert!(rep.kept.contains(&(UA.to_string(), "no lock file".to_string())), "{rep:?}");
+    assert!(
+        rep.kept
+            .contains(&(UA.to_string(), "no lock file".to_string())),
+        "{rep:?}"
+    );
     // The same directory with its lock visible and free goes.
     std::fs::File::create(env.lock_dir.join(format!("{UA}.lock"))).unwrap();
     let rep = host.sweep_stale();
-    assert!(!root.join("own").join(UA).exists() && rep.removed == vec![UA.to_string()], "{rep:?}");
+    assert!(
+        !root.join("own").join(UA).exists() && rep.removed == vec![UA.to_string()],
+        "{rep:?}"
+    );
     drop(host);
     let _ = std::fs::remove_dir_all(root);
 }
@@ -497,7 +628,12 @@ fn fake_nested_fuigo_directories_are_never_removed() {
     std::fs::File::create(env.lock_dir.join(format!("{UA}.lock"))).unwrap();
     let rep = host.sweep_stale();
     assert!(nested.exists(), "nested tree touched: {rep:?}");
-    assert!(rep.kept.iter().any(|(n, why)| n == UA && why == "populated"), "{rep:?}");
+    assert!(
+        rep.kept
+            .iter()
+            .any(|(n, why)| n == UA && why == "populated"),
+        "{rep:?}"
+    );
     // Session teardown and Drop leave the nested directory too.
     let s = host.create_session().unwrap();
     let nested2 = s.dir().join(UB).join("inner");
@@ -522,7 +658,10 @@ fn fake_spawn_places_and_runs() {
     let mut cmd = Command::new("/bin/true");
     let mut c = s.spawn(&mut cmd).unwrap();
     assert!(c.wait().unwrap().success());
-    assert_eq!(std::fs::read_to_string(s.dir().join("cgroup.procs")).unwrap(), "0");
+    assert_eq!(
+        std::fs::read_to_string(s.dir().join("cgroup.procs")).unwrap(),
+        "0"
+    );
     assert!(!s.is_breached());
     let _ = std::fs::remove_dir_all(root);
 }
@@ -532,14 +671,26 @@ fn fake_placement_failure_latches_breach_and_blocks_kill() {
     let (_h, s, root) = fake_session("fullprocs", full_procs_files);
     let mut cmd = Command::new("/bin/true");
     let err = s.spawn(&mut cmd).unwrap_err();
-    assert!(matches!(&err, SpawnError::Placement(e) if e.raw_os_error() == Some(PLACE_SENTINEL_ERRNO)), "{err:?}");
+    assert!(
+        matches!(&err, SpawnError::Placement(e) if e.raw_os_error() == Some(PLACE_SENTINEL_ERRNO)),
+        "{err:?}"
+    );
     assert!(s.is_breached());
-    assert_eq!(s.kill_and_wait(Duration::from_secs(1)), KillOutcome::Refused(RefuseReason::Breached));
+    assert_eq!(
+        s.kill_and_wait(Duration::from_secs(1)),
+        KillOutcome::Refused(RefuseReason::Breached)
+    );
     // Round 3: even a refusal leaves the gate Stopping until reopen(); breached survives it.
-    assert!(matches!(s.spawn(&mut Command::new("/bin/true")), Err(SpawnError::Stopping)));
+    assert!(matches!(
+        s.spawn(&mut Command::new("/bin/true")),
+        Err(SpawnError::Stopping)
+    ));
     s.reopen();
     assert!(s.is_breached(), "reopen() never clears breached");
-    assert!(matches!(s.spawn(&mut Command::new("/bin/true")), Err(SpawnError::Placement(_))));
+    assert!(matches!(
+        s.spawn(&mut Command::new("/bin/true")),
+        Err(SpawnError::Placement(_))
+    ));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -550,11 +701,18 @@ fn fake_clobbered_fd_gives_sentinel_and_child_never_starts() {
     let mut cmd = Command::new("/bin/sh");
     cmd.args(["-c", &format!("touch {}", marker.display())]);
     let devnull = std::fs::File::open("/dev/null").unwrap();
-    let (src, dst) = (std::os::fd::AsRawFd::as_raw_fd(&devnull), s.procs_fd_for_test());
+    let (src, dst) = (
+        std::os::fd::AsRawFd::as_raw_fd(&devnull),
+        s.procs_fd_for_test(),
+    );
     // An EARLIER hook that dup2s onto our fd number: the write would "succeed" on /dev/null.
     unsafe {
         std::os::unix::process::CommandExt::pre_exec(&mut cmd, move || {
-            if libc::dup2(src, dst) < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+            if libc::dup2(src, dst) < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
         });
     }
     // /dev/null swallows the write, so only the st_dev/st_ino check can catch it.
@@ -575,10 +733,19 @@ fn fake_respawn_after_cgroup_dropped_keeps_its_fd_and_touches_no_bystander() {
     drop(s);
     // The Command still owns the fd, so nothing else can be handed that number.
     let by_path = root.join("bystander");
-    let by = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&by_path).unwrap();
+    let by = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&by_path)
+        .unwrap();
     assert_ne!(std::os::fd::AsRawFd::as_raw_fd(&by), fd);
     let _ = cmd.spawn().map(|mut c| c.wait());
-    assert_eq!(std::fs::read_to_string(&by_path).unwrap(), "", "bystander written");
+    assert_eq!(
+        std::fs::read_to_string(&by_path).unwrap(),
+        "",
+        "bystander written"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -586,10 +753,22 @@ fn fake_respawn_after_cgroup_dropped_keeps_its_fd_and_touches_no_bystander() {
 fn fake_kill_without_close_takes_the_gate_and_closes_it() {
     let (_h, s, root) = fake_session("nocloseA", ok_files);
     // No close() call: kill_and_wait must hold the gate itself.
-    assert!(matches!(s.kill_and_wait(Duration::from_secs(1)), KillOutcome::Emptied { .. }));
-    assert!(matches!(s.spawn(&mut Command::new("/bin/true")), Err(SpawnError::Stopping)));
+    assert!(matches!(
+        s.kill_and_wait(Duration::from_secs(1)),
+        KillOutcome::Emptied { .. }
+    ));
+    assert!(matches!(
+        s.spawn(&mut Command::new("/bin/true")),
+        Err(SpawnError::Stopping)
+    ));
     s.reopen();
-    assert!(s.spawn(&mut Command::new("/bin/true")).unwrap().wait().unwrap().success());
+    assert!(
+        s.spawn(&mut Command::new("/bin/true"))
+            .unwrap()
+            .wait()
+            .unwrap()
+            .success()
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -598,7 +777,10 @@ fn fake_outstanding_lease_refuses_then_delays_the_kill() {
     let (_h, s, root) = fake_session("lease", ok_files);
     let mut cmd = Command::new("/bin/true");
     let lease = s.place(&mut cmd).unwrap();
-    assert_eq!(s.kill_and_wait(Duration::from_millis(150)), KillOutcome::Refused(RefuseReason::GateOpen));
+    assert_eq!(
+        s.kill_and_wait(Duration::from_millis(150)),
+        KillOutcome::Refused(RefuseReason::GateOpen)
+    );
     drop(lease);
     // A lease that ends mid-wait delays the kill instead of refusing it.
     let s = &s;
@@ -623,7 +805,10 @@ fn fake_outstanding_lease_refuses_then_delays_the_kill() {
         });
         // A late killer can only make this pass vacuously, never fail it.
         std::thread::sleep(Duration::from_millis(300));
-        assert!(!finished.load(Ordering::SeqCst), "kill_and_wait returned with a lease out");
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "kill_and_wait returned with a lease out"
+        );
         release_tx.send(()).unwrap();
         let out = killer.join().unwrap();
         assert!(matches!(out, KillOutcome::Emptied { .. }), "{out:?}");
@@ -656,12 +841,18 @@ fn fake_close_waits_for_outstanding_lease() {
         });
         // A late closer can only make this pass vacuously, never fail it.
         std::thread::sleep(Duration::from_millis(300));
-        assert!(!closed.load(Ordering::SeqCst), "close() returned with a lease out");
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "close() returned with a lease out"
+        );
         release_tx.send(()).unwrap();
         closer.join().unwrap();
         assert!(closed.load(Ordering::SeqCst));
     });
-    assert_eq!(s.place(&mut Command::new("/bin/true")).err(), Some(PlaceError::Closed));
+    assert_eq!(
+        s.place(&mut Command::new("/bin/true")).err(),
+        Some(PlaceError::Closed)
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -679,8 +870,13 @@ fn fake_spawn_during_kill_is_refused() {
     }));
     std::thread::scope(|sc| {
         let k = sc.spawn(|| s.kill_and_wait(Duration::from_millis(600)));
-        in_kill_rx.recv_timeout(Duration::from_secs(30)).expect("kill never started");
-        assert!(matches!(s.spawn(&mut Command::new("/bin/true")), Err(SpawnError::Stopping)));
+        in_kill_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("kill never started");
+        assert!(matches!(
+            s.spawn(&mut Command::new("/bin/true")),
+            Err(SpawnError::Stopping)
+        ));
         assert!(matches!(k.join().unwrap(), KillOutcome::NotEmptied { .. }));
     });
     let _ = std::fs::remove_dir_all(root);
@@ -692,7 +888,11 @@ fn fake_events_unreadable_after_kill_is_killed_unverified() {
     std::fs::remove_file(s.dir().join("cgroup.events")).unwrap();
     let out = s.kill_and_wait(Duration::from_secs(1));
     assert!(matches!(out, KillOutcome::KilledUnverified(_)), "{out:?}");
-    assert_eq!(std::fs::read_to_string(s.dir().join("cgroup.kill")).unwrap(), "1", "kill was written");
+    assert_eq!(
+        std::fs::read_to_string(s.dir().join("cgroup.kill")).unwrap(),
+        "1",
+        "kill was written"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -701,8 +901,15 @@ fn fake_unreadable_procs_refuses_the_kill() {
     let (_h, s, root) = fake_session("noprocs2", ok_files);
     std::fs::remove_file(s.dir().join("cgroup.procs")).unwrap();
     let out = s.kill_and_wait(Duration::from_secs(1));
-    assert!(matches!(out, KillOutcome::Refused(RefuseReason::Io(_))), "{out:?}");
-    assert_eq!(std::fs::read_to_string(s.dir().join("cgroup.kill")).unwrap(), "", "nothing written");
+    assert!(
+        matches!(out, KillOutcome::Refused(RefuseReason::Io(_))),
+        "{out:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(s.dir().join("cgroup.kill")).unwrap(),
+        "",
+        "nothing written"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -721,7 +928,10 @@ fn fake_lock_dir_branches() {
     std::fs::set_permissions(&wide, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     env.lock_dir = wide;
     let e = probe_with(&env).err().unwrap();
-    assert!(matches!(&e, Unavailable::LockDir(m) if m.contains("group/other")), "{e}");
+    assert!(
+        matches!(&e, Unavailable::LockDir(m) if m.contains("group/other")),
+        "{e}"
+    );
     // A symlink to a good directory.
     let good = root.join("good");
     std::fs::create_dir(&good).unwrap();
@@ -730,7 +940,10 @@ fn fake_lock_dir_branches() {
     std::os::unix::fs::symlink(&good, &link).unwrap();
     env.lock_dir = link;
     let e = probe_with(&env).err().unwrap();
-    assert!(matches!(&e, Unavailable::LockDir(m) if m.contains("not a real directory")), "{e}");
+    assert!(
+        matches!(&e, Unavailable::LockDir(m) if m.contains("not a real directory")),
+        "{e}"
+    );
     // Wrong owner (as seen by the checker) and the happy case.
     assert!(check_lock_dir(&good, 0xFFFF_FFF0).is_err());
     assert!(check_lock_dir(&good, unsafe { libc::geteuid() }).is_ok());
@@ -747,12 +960,21 @@ fn fake_lock_dir_branches() {
 fn fake_own_cgroup_validation() {
     let (mut env, root) = fake("ownvalid");
     env.own_cgroup = Some("/own/../own".into());
-    assert!(matches!(probe_with(&env), Err(Unavailable::OwnCgroupInvalid(_))));
+    assert!(matches!(
+        probe_with(&env),
+        Err(Unavailable::OwnCgroupInvalid(_))
+    ));
     env.own_cgroup = Some("/own".into());
     std::fs::write(root.join("own/cgroup.procs"), "1\n").unwrap(); // not us
-    assert!(matches!(probe_with(&env), Err(Unavailable::OwnCgroupInvalid(_))));
+    assert!(matches!(
+        probe_with(&env),
+        Err(Unavailable::OwnCgroupInvalid(_))
+    ));
     std::fs::remove_file(root.join("own/cgroup.procs")).unwrap();
-    assert!(matches!(probe_with(&env), Err(Unavailable::OwnCgroupInvalid(_))));
+    assert!(matches!(
+        probe_with(&env),
+        Err(Unavailable::OwnCgroupInvalid(_))
+    ));
 }
 
 #[test]
@@ -761,11 +983,17 @@ fn fake_statfs_error_and_cgroup_type_read_error() {
     env.require_cgroup2 = true;
     env.cgroup_root = root.join("does-not-exist");
     let e = probe_with(&env).err().unwrap();
-    assert!(matches!(&e, Unavailable::NotCgroup2(m) if m.starts_with("statfs:")), "{e}");
+    assert!(
+        matches!(&e, Unavailable::NotCgroup2(m) if m.starts_with("statfs:")),
+        "{e}"
+    );
     let (env, root) = fake("typeerr");
     std::fs::create_dir(root.join("own/cgroup.type")).unwrap(); // read: EISDIR
     let e = probe_with(&env).err().unwrap();
-    assert!(matches!(&e, Unavailable::OwnCgroupMissing(m) if m.contains("cgroup.type")), "{e}");
+    assert!(
+        matches!(&e, Unavailable::OwnCgroupMissing(m) if m.contains("cgroup.type")),
+        "{e}"
+    );
 }
 
 #[test]
@@ -773,7 +1001,10 @@ fn fake_round_trip_never_saw_populated() {
     let (mut env, root) = fake("neversaw");
     env.populate = Some(ok_files); // events stays "populated 0"
     let e = probe_with(&env).err().unwrap();
-    assert!(matches!(&e, Unavailable::RoundTrip(m) if m.contains("never saw populated 1")), "{e}");
+    assert!(
+        matches!(&e, Unavailable::RoundTrip(m) if m.contains("never saw populated 1")),
+        "{e}"
+    );
     no_leftovers(&root);
 }
 
@@ -782,7 +1013,10 @@ fn fake_round_trip_spawn_place_failed() {
     let (mut env, root) = fake("placefail");
     env.populate = Some(full_procs_files);
     let e = probe_with(&env).err().unwrap();
-    assert!(matches!(&e, Unavailable::RoundTrip(m) if m.contains("spawn/place failed")), "{e}");
+    assert!(
+        matches!(&e, Unavailable::RoundTrip(m) if m.contains("spawn/place failed")),
+        "{e}"
+    );
     no_leftovers(&root);
 }
 
@@ -809,7 +1043,10 @@ fn fake_round_trip_child_not_killed_by_sigkill() {
     let (mut env, root) = fake("nosig");
     env.populate = Some(pretend_kernel);
     let e = probe_with(&env).err().unwrap();
-    assert!(matches!(&e, Unavailable::RoundTrip(m) if m.contains("not killed by SIGKILL")), "{e}");
+    assert!(
+        matches!(&e, Unavailable::RoundTrip(m) if m.contains("not killed by SIGKILL")),
+        "{e}"
+    );
     no_leftovers(&root);
 }
 
@@ -817,7 +1054,10 @@ fn fake_round_trip_child_not_killed_by_sigkill() {
 fn fake_cached_probe_is_not_an_answer_for_a_forked_process() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let other = std::process::id().wrapping_add(1);
-    assert_eq!(probe_for_pid(other).err(), Some(&Unavailable::InheritedProbe));
+    assert_eq!(
+        probe_for_pid(other).err(),
+        Some(&Unavailable::InheritedProbe)
+    );
 }
 
 // The always-running contract test (finding 7).
@@ -830,9 +1070,18 @@ fn require_cgroup_contract() {
     let required = std::env::var("FUIGO_TEST_REQUIRE_CGROUP").as_deref() == Ok("1");
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let r = probe_with(&ProbeEnv::system());
-    println!("P189-CGROUP-CONTRACT required={required} probe={}", r.as_ref().map(|_| "usable".to_string()).unwrap_or_else(|e| e.to_string()));
+    println!(
+        "P189-CGROUP-CONTRACT required={required} probe={}",
+        r.as_ref()
+            .map(|_| "usable".to_string())
+            .unwrap_or_else(|e| e.to_string())
+    );
     if required {
-        assert!(r.is_ok(), "FUIGO_TEST_REQUIRE_CGROUP=1 but the probe is unavailable: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "FUIGO_TEST_REQUIRE_CGROUP=1 but the probe is unavailable: {:?}",
+            r.err()
+        );
     }
 }
 
@@ -848,7 +1097,10 @@ fn real_nested_park_directory_is_left_in_place() {
     std::fs::create_dir(&nested).unwrap();
     std::fs::create_dir(&inner).unwrap();
     assert_eq!(cg.teardown(), TeardownOutcome::LeftPopulated);
-    assert!(inner.exists() && nested.exists(), "nested Fuigo's directories must stay");
+    assert!(
+        inner.exists() && nested.exists(),
+        "nested Fuigo's directories must stay"
+    );
     // This test made them, so it removes them.
     std::fs::remove_dir(&inner).unwrap();
     std::fs::remove_dir(&nested).unwrap();
@@ -862,7 +1114,9 @@ fn real_respawn_after_cgroup_removed_fails_closed() {
     let mut cmd = Command::new("/bin/true");
     drop(cg.place(&mut cmd).unwrap());
     drop(cg); // removes the (empty) cgroup; the Command still owns the fd
-    let err = cmd.spawn().expect_err("write into a removed cgroup must fail");
+    let err = cmd
+        .spawn()
+        .expect_err("write into a removed cgroup must fail");
     assert_eq!(err.raw_os_error(), Some(PLACE_SENTINEL_ERRNO), "{err}");
 }
 
@@ -879,24 +1133,42 @@ mod scope_wiring {
         tokio::process::Command::new("/bin/sh")
     }
 
-    fn cfg(script: &str) -> impl FnMut(&mut tokio::process::Command, &crate::PlaceHook) -> Result<(), ()> + '_ {
+    fn cfg(
+        script: &str,
+    ) -> impl FnMut(&mut tokio::process::Command, &crate::PlaceHook) -> Result<(), ()> + '_ {
         move |cmd, _hook| {
-            cmd.args(["-c", script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            cmd.args(["-c", script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
             Ok(())
         }
     }
 
-    fn place_sh(scope: Option<&ProcessScope>, script: &str) -> Result<tokio::process::Child, crate::SpawnPlacedError<()>> {
+    fn place_sh(
+        scope: Option<&ProcessScope>,
+        script: &str,
+    ) -> Result<tokio::process::Child, crate::SpawnPlacedError<()>> {
         ProcessScope::spawn_placed(scope, new_sh, cfg(script))
     }
 
     fn rt() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
     }
 
     #[test]
     fn unset_or_not_on_never_probes_or_creates() {
-        for value in [None, Some(""), Some("off"), Some("1"), Some("ON"), Some("true")] {
+        for value in [
+            None,
+            Some(""),
+            Some("off"),
+            Some("1"),
+            Some("ON"),
+            Some("true"),
+        ] {
             let probes = AtomicUsize::new(0);
             assert!(!decide_placement(value, || {
                 probes.fetch_add(1, Ordering::SeqCst);
@@ -920,15 +1192,11 @@ mod scope_wiring {
         let scope = ProcessScope::new();
         let built = AtomicUsize::new(0);
         let mut child = rt().block_on(async {
-            ProcessScope::spawn_placed(
-                Some(&scope),
-                new_sh,
-                |cmd, hook| {
-                    assert!(!hook.retry_may_follow());
-                    built.fetch_add(1, Ordering::SeqCst);
-                    cfg("exit 0")(cmd, hook)
-                },
-            )
+            ProcessScope::spawn_placed(Some(&scope), new_sh, |cmd, hook| {
+                assert!(!hook.retry_may_follow());
+                built.fetch_add(1, Ordering::SeqCst);
+                cfg("exit 0")(cmd, hook)
+            })
             .unwrap()
         });
         assert_eq!(built.load(Ordering::SeqCst), 1);
@@ -953,7 +1221,11 @@ mod scope_wiring {
             .unwrap()
         });
         assert!(rt().block_on(child.wait()).unwrap().success());
-        assert_eq!(built.load(Ordering::SeqCst), 2, "placed attempt then unplaced retry");
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            2,
+            "placed attempt then unplaced retry"
+        );
         assert!(scope.session_cgroup().unwrap().is_breached());
         assert!(marker.exists(), "the command must still have run");
         let _ = std::fs::remove_dir_all(root);
@@ -966,29 +1238,44 @@ mod scope_wiring {
         let mut child = rt().block_on(async { place_sh(Some(&scope), "exit 0").unwrap() });
         assert!(rt().block_on(child.wait()).unwrap().success());
         let cg = scope.session_cgroup().unwrap();
-        assert_eq!(std::fs::read_to_string(cg.dir().join("cgroup.procs")).unwrap(), "0");
+        assert_eq!(
+            std::fs::read_to_string(cg.dir().join("cgroup.procs")).unwrap(),
+            "0"
+        );
         assert!(!cg.is_breached());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn real_placed_setsid_grandchild_in_cgroup_enrolled_child_not_and_nohup_survives_release() {
-        let Some(host) = real("scope-wiring") else { return };
+        let Some(host) = real("scope-wiring") else {
+            return;
+        };
         let scope = ProcessScope::with_session_cgroup(host.create_session().unwrap());
         let cg_rel = |pid: u32| cgroup_of(pid);
         let dir = scope.session_cgroup().unwrap().dir().to_path_buf();
-        let want = dir.strip_prefix("/sys/fs/cgroup").unwrap().to_string_lossy().to_string();
+        let want = dir
+            .strip_prefix("/sys/fs/cgroup")
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let tmpd = tmp("scope-real");
         let (fg, gc, nh) = (tmpd.join("fg"), tmpd.join("gc"), tmpd.join("nh"));
         // placed: leader, setsid grandchild, nohup child
         let script = format!(
             "echo $$ > {fg}; setsid sh -c 'echo $$ > {gc}; sleep 60' & nohup sh -c 'echo $$ > {nh}; sleep 60' >/dev/null 2>&1 & sleep 60",
-            fg = fg.display(), gc = gc.display(), nh = nh.display()
+            fg = fg.display(),
+            gc = gc.display(),
+            nh = nh.display()
         );
         let mut child = rt().block_on(async { place_sh(Some(&scope), &script).unwrap() });
         let (fg_pid, gc_pid, nh_pid) = (wait_file_pid(&fg), wait_file_pid(&gc), wait_file_pid(&nh));
         for pid in [fg_pid, gc_pid, nh_pid] {
-            assert!(cg_rel(pid).contains(&want), "{pid} not in session cgroup: {}", cg_rel(pid));
+            assert!(
+                cg_rel(pid).contains(&want),
+                "{pid} not in session cgroup: {}",
+                cg_rel(pid)
+            );
         }
         // An enrolled-but-unplaced child (the MCP/LSP path: ProcessScope::spawn) is not.
         let mut other = tokio::process::Command::new("/bin/sh");
@@ -997,7 +1284,10 @@ mod scope_wiring {
         other.args(["-c", "exec sleep 60"]).stdin(Stdio::null());
         let (mut other_child, _group) = rt().block_on(async { scope.spawn(other).unwrap() });
         let other_pid = other_child.id().unwrap();
-        assert!(!cg_rel(other_pid).contains(&want), "unplaced child landed in the session cgroup");
+        assert!(
+            !cg_rel(other_pid).contains(&want),
+            "unplaced child landed in the session cgroup"
+        );
         // Release while populated: nothing is killed and the directory stays.
         scope.release_session_cgroup();
         assert!(dir.exists(), "populated directory must stay");
@@ -1012,7 +1302,8 @@ mod scope_wiring {
         // The killed grandchildren are reparented and reaped by init, not by us; a zombie still
         // populates the cgroup (rmdir would be EBUSY), so wait for the kernel to say it is empty.
         let t = Instant::now();
-        while !std::fs::read_to_string(dir.join("cgroup.events")).is_ok_and(|e| e.contains("populated 0"))
+        while !std::fs::read_to_string(dir.join("cgroup.events"))
+            .is_ok_and(|e| e.contains("populated 0"))
             && t.elapsed() < Duration::from_secs(30)
         {
             std::thread::sleep(Duration::from_millis(10));
@@ -1024,12 +1315,20 @@ mod scope_wiring {
 
     #[test]
     fn real_two_sessions_two_cgroups() {
-        let Some(host) = real("scope-two") else { return };
+        let Some(host) = real("scope-two") else {
+            return;
+        };
         let a = ProcessScope::with_session_cgroup(host.create_session().unwrap());
         let b = ProcessScope::with_session_cgroup(host.create_session().unwrap());
-        assert_ne!(a.session_cgroup().unwrap().dir(), b.session_cgroup().unwrap().dir());
+        assert_ne!(
+            a.session_cgroup().unwrap().dir(),
+            b.session_cgroup().unwrap().dir()
+        );
         // A scope clone (what a subagent holds) shares the root's cgroup.
-        assert_eq!(a.clone().session_cgroup().unwrap().dir(), a.session_cgroup().unwrap().dir());
+        assert_eq!(
+            a.clone().session_cgroup().unwrap().dir(),
+            a.session_cgroup().unwrap().dir()
+        );
     }
 
     // ---- Round 2 -------------------------------------------------------
@@ -1047,7 +1346,11 @@ mod scope_wiring {
         assert!(rt().block_on(child.wait()).unwrap().success());
         assert!(marker.exists(), "a closed gate must not stop the command");
         assert!(cg.is_breached(), "an unplaced start must latch breached");
-        assert_eq!(std::fs::read_to_string(cg.dir().join("cgroup.procs")).unwrap(), "", "it was not placed");
+        assert_eq!(
+            std::fs::read_to_string(cg.dir().join("cgroup.procs")).unwrap(),
+            "",
+            "it was not placed"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1060,9 +1363,15 @@ mod scope_wiring {
         let guard = cg.gate.write().unwrap();
         let marker = root.join("ran-wlocked");
         let script = format!("echo ran > {}", marker.display());
-        assert!(matches!(place_sh(Some(&scope), &script), Err(crate::SpawnPlacedError::Stopping)));
+        assert!(matches!(
+            place_sh(Some(&scope), &script),
+            Err(crate::SpawnPlacedError::Stopping)
+        ));
         drop(guard);
-        assert!(!marker.exists(), "nothing may start while the write side is held");
+        assert!(
+            !marker.exists(),
+            "nothing may start while the write side is held"
+        );
         assert!(!cg.is_breached());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1081,13 +1390,23 @@ mod scope_wiring {
             cfg(&script)(cmd, hook)
         });
         assert!(matches!(r, Err(crate::SpawnPlacedError::Stopping)));
-        assert_eq!(built.load(Ordering::SeqCst), 0, "configure must not even run");
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            0,
+            "configure must not even run"
+        );
         assert!(!marker.exists(), "nothing may run during a stop");
         assert!(!cg.is_breached(), "a refused spawn escaped nothing");
-        assert!(matches!(cg.spawn(&mut Command::new("/bin/true")), Err(SpawnError::Stopping)));
+        assert!(matches!(
+            cg.spawn(&mut Command::new("/bin/true")),
+            Err(SpawnError::Stopping)
+        ));
         // close() does not downgrade Stopping; reopen() opens the gate again.
         cg.close();
-        assert!(matches!(place_sh(Some(&scope), &script), Err(crate::SpawnPlacedError::Stopping)));
+        assert!(matches!(
+            place_sh(Some(&scope), &script),
+            Err(crate::SpawnPlacedError::Stopping)
+        ));
         cg.reopen();
         let mut child = rt().block_on(async { place_sh(Some(&scope), &script).unwrap() });
         assert!(rt().block_on(child.wait()).unwrap().success());
@@ -1128,16 +1447,29 @@ mod scope_wiring {
     fn std_command_entry_places_and_falls_back() {
         let (_h, s, root) = fake_session("scope-std-ok", ok_files);
         let scope = ProcessScope::with_session_cgroup(s);
-        let mut c = ProcessScope::spawn_placed_std(Some(&scope), || Command::new("/bin/true"), |_c, _h| Ok::<(), ()>(())).unwrap();
+        let mut c = ProcessScope::spawn_placed_std(
+            Some(&scope),
+            || Command::new("/bin/true"),
+            |_c, _h| Ok::<(), ()>(()),
+        )
+        .unwrap();
         assert!(c.wait().unwrap().success());
         let cg = scope.session_cgroup().unwrap();
-        assert_eq!(std::fs::read_to_string(cg.dir().join("cgroup.procs")).unwrap(), "0");
+        assert_eq!(
+            std::fs::read_to_string(cg.dir().join("cgroup.procs")).unwrap(),
+            "0"
+        );
         assert!(!cg.is_breached());
         let _ = std::fs::remove_dir_all(root);
 
         let (_h, s, root) = fake_session("scope-std-full", full_procs_files);
         let scope = ProcessScope::with_session_cgroup(s);
-        let mut c = ProcessScope::spawn_placed_std(Some(&scope), || Command::new("/bin/true"), |_c, _h| Ok::<(), ()>(())).unwrap();
+        let mut c = ProcessScope::spawn_placed_std(
+            Some(&scope),
+            || Command::new("/bin/true"),
+            |_c, _h| Ok::<(), ()>(()),
+        )
+        .unwrap();
         assert!(c.wait().unwrap().success());
         assert!(scope.session_cgroup().unwrap().is_breached());
         let _ = std::fs::remove_dir_all(root);
@@ -1162,7 +1494,11 @@ mod scope_wiring {
                     cmd.as_std_mut().pre_exec(move || {
                         let mut buf = [0u8; 8];
                         let fd = libc::open(p.as_ptr(), libc::O_RDONLY);
-                        let n = if fd >= 0 { libc::read(fd, buf.as_mut_ptr().cast(), 8) } else { -1 };
+                        let n = if fd >= 0 {
+                            libc::read(fd, buf.as_mut_ptr().cast(), 8)
+                        } else {
+                            -1
+                        };
                         if fd >= 0 {
                             libc::close(fd);
                         }
@@ -1181,7 +1517,11 @@ mod scope_wiring {
             .unwrap()
         });
         assert!(rt().block_on(child.wait()).unwrap().success());
-        assert_eq!(std::fs::read_to_string(&seen).unwrap(), "0", "the placement write ran before the caller's pre_exec");
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "0",
+            "the placement write ran before the caller's pre_exec"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1194,7 +1534,10 @@ mod scope_wiring {
     fn pause_at(cg: &SessionCgroup, at: &'static str) -> Pause {
         let (reached_tx, reached_rx) = std::sync::mpsc::channel();
         let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-        let (reached_tx, go_rx) = (std::sync::Mutex::new(reached_tx), std::sync::Mutex::new(go_rx));
+        let (reached_tx, go_rx) = (
+            std::sync::Mutex::new(reached_tx),
+            std::sync::Mutex::new(go_rx),
+        );
         *cg.hook.lock().unwrap() = Some(Arc::new(move |stage: &'static str| {
             if stage == at {
                 let _ = reached_tx.lock().unwrap().send(());
@@ -1209,7 +1552,12 @@ mod scope_wiring {
     /// An unplaced start parked inside the entry with its lease held: a
     /// concurrent kill must not return until the start finished, and then must
     /// refuse (breached), never report Emptied.
-    fn kill_waits_for_parked_unplaced_spawn(tag: &str, populate: fn(&Path), at: &'static str, close_first: bool) {
+    fn kill_waits_for_parked_unplaced_spawn(
+        tag: &str,
+        populate: fn(&Path),
+        at: &'static str,
+        close_first: bool,
+    ) {
         let (_h, s, root) = fake_session(tag, populate);
         let scope = ProcessScope::with_session_cgroup(s);
         let cg = scope.session_cgroup().unwrap();
@@ -1225,21 +1573,35 @@ mod scope_wiring {
                     Some(&scope),
                     || Command::new("/bin/sh"),
                     |cmd, _h| {
-                        cmd.args(["-c", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+                        cmd.args(["-c", &script])
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null());
                         Ok::<(), ()>(())
                     },
                 )
                 .unwrap();
                 c.wait().unwrap().success()
             });
-            reached.recv_timeout(Duration::from_secs(10)).expect("spawn never reached the pause point");
-            assert!(cg.is_breached(), "the latch is set under the lease, before the unplaced start");
+            reached
+                .recv_timeout(Duration::from_secs(10))
+                .expect("spawn never reached the pause point");
+            assert!(
+                cg.is_breached(),
+                "the latch is set under the lease, before the unplaced start"
+            );
             let k = sc.spawn(|| cg.kill_and_wait(Duration::from_secs(5)));
             std::thread::sleep(Duration::from_millis(300));
-            assert!(!k.is_finished(), "kill_and_wait returned while an unplaced spawn was in flight");
+            assert!(
+                !k.is_finished(),
+                "kill_and_wait returned while an unplaced spawn was in flight"
+            );
             go.send(()).unwrap();
             assert!(sp.join().unwrap());
-            assert_eq!(k.join().unwrap(), KillOutcome::Refused(RefuseReason::Breached));
+            assert_eq!(
+                k.join().unwrap(),
+                KillOutcome::Refused(RefuseReason::Breached)
+            );
         });
         assert!(marker.exists(), "the unplaced command still ran");
         let _ = std::fs::remove_dir_all(root);
@@ -1269,16 +1631,24 @@ mod scope_wiring {
                 Some(scope),
                 || Command::new("/bin/sh"),
                 move |cmd, _h| {
-                    cmd.args(["-c", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+                    cmd.args(["-c", &script])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
                     Ok::<(), ()>(())
                 },
             )
         };
         std::thread::scope(|sc| {
             let k = sc.spawn(|| cg.kill_and_wait(Duration::from_secs(5)));
-            reached.recv_timeout(Duration::from_secs(10)).expect("kill never reached the pause point");
+            reached
+                .recv_timeout(Duration::from_secs(10))
+                .expect("kill never reached the pause point");
             assert!(matches!(mk(&scope), Err(crate::SpawnPlacedError::Stopping)));
-            assert!(matches!(rt().block_on(async { place_sh(Some(&scope), &script) }), Err(crate::SpawnPlacedError::Stopping)));
+            assert!(matches!(
+                rt().block_on(async { place_sh(Some(&scope), &script) }),
+                Err(crate::SpawnPlacedError::Stopping)
+            ));
             go.send(()).unwrap();
             assert!(matches!(k.join().unwrap(), KillOutcome::Emptied { .. }));
         });
@@ -1302,12 +1672,18 @@ mod scope_wiring {
         let mut c0 = rt().block_on(async { place_sh(Some(&scope), "exit 0").unwrap() });
         assert!(rt().block_on(c0.wait()).unwrap().success());
         assert!(cg.is_breached());
-        assert_eq!(cg.kill_and_wait(Duration::from_secs(1)), KillOutcome::Refused(RefuseReason::Breached));
+        assert_eq!(
+            cg.kill_and_wait(Duration::from_secs(1)),
+            KillOutcome::Refused(RefuseReason::Breached)
+        );
         cg.reopen();
         assert!(cg.is_breached(), "reopen() must not clear the latch");
         let mut c = rt().block_on(async { place_sh(Some(&scope), "exit 0").unwrap() });
         assert!(rt().block_on(c.wait()).unwrap().success());
-        assert_eq!(cg.kill_and_wait(Duration::from_secs(1)), KillOutcome::Refused(RefuseReason::Breached));
+        assert_eq!(
+            cg.kill_and_wait(Duration::from_secs(1)),
+            KillOutcome::Refused(RefuseReason::Breached)
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gate-verify.sh <log> <derived> [expected-n-file]   -- judge ONE gate log by Contract A.2.1 (docs/strike/contracts/A-release-acceptance.md)
+# gate-verify.sh <log> <derived> [expected-n-file]   -- judge ONE gate log by the release-gate rules (see the header of scripts/strike/final-gate.sh)
 #
 # COMPLETENESS IS CHECKED BEFORE CORRECTNESS (R011). A log is ADMISSIBLE only if ALL hold:
 #   1. target_headers (cargo `^ +(Running|Doc-tests) ` lines, log captured with 2>&1) == <derived>

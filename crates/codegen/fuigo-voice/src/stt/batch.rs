@@ -81,8 +81,10 @@ fn attribution_headers(url: &str, config: &VoiceConfig) -> reqwest::header::Head
     if config.client_identifier.is_empty() {
         return reqwest::header::HeaderMap::new();
     }
-    fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url)
-        .header_map([("x-fuigo-client-identifier", config.client_identifier.as_str())])
+    fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url).header_map([(
+        "x-fuigo-client-identifier",
+        config.client_identifier.as_str(),
+    )])
 }
 
 pub fn transcription_url(config: &VoiceConfig) -> Result<String, VoiceError> {
@@ -370,7 +372,10 @@ mod tests {
             "https://stt.example/v1/audio/transcriptions",
             "http://api.fluxrouter.ai/v1/audio/transcriptions",
         ] {
-            assert!(attribution_headers(url, &config).is_empty(), "{url} got identity");
+            assert!(
+                attribution_headers(url, &config).is_empty(),
+                "{url} got identity"
+            );
         }
     }
     use super::*;

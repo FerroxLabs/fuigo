@@ -17,12 +17,15 @@ pub mod jsonl;
 pub(crate) mod owner_only;
 pub(crate) mod relocation;
 mod replay;
-pub(crate) mod snapshot_lock;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod replay_tests;
 pub mod search;
 mod search_content;
+pub(crate) mod snapshot_lock;
 pub(crate) mod summary_write;
 
 /// The session search index moved to its own crate; re-exported here so `session::storage::search_fts::…` keeps resolving for its consumers.
@@ -84,13 +87,18 @@ impl<'a> Access<'a> {
     pub(crate) fn repair_writer(self, id: &str, dir: &Path) -> Option<RepairWriter<'a>> {
         match self {
             Access::Owner(w) => Some(RepairWriter::Owner(w)),
-            Access::Reader => match fuigo_session_writer::SessionWriter::try_claim_reader(id, dir) {
-                Ok(w) => Some(RepairWriter::Claimed(w)),
-                Err(_busy) => {
-                    tracing::debug!(session_id = id, "storage read: a live writer owns the session; reading only");
-                    None
+            Access::Reader => {
+                match fuigo_session_writer::SessionWriter::try_claim_reader(id, dir) {
+                    Ok(w) => Some(RepairWriter::Claimed(w)),
+                    Err(_busy) => {
+                        tracing::debug!(
+                            session_id = id,
+                            "storage read: a live writer owns the session; reading only"
+                        );
+                        None
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -98,14 +106,21 @@ impl<'a> Access<'a> {
     /// only. True for a reader only: an owner's refusal is a real error.
     pub(crate) fn reads_on_after(self, error: &io::Error) -> bool {
         matches!(self, Access::Reader)
-            && matches!(fuigo_session_writer::refusal(error), Some(fuigo_session_writer::Refusal::HeldElsewhere))
+            && matches!(
+                fuigo_session_writer::refusal(error),
+                Some(fuigo_session_writer::Refusal::HeldElsewhere)
+            )
     }
 }
 
 /// Write `bytes` to `path` by writing a uniquely named sibling temp file and renaming it over the target.
 /// A crash or a concurrent writer never leaves a torn file; the temp is removed on failure.
 /// [`write_bytes_atomic`] of a session file, as the session's writer (F5-C4): `path` must be inside `writer`'s folder.
-pub(crate) fn write_bytes_atomic_as(writer: &fuigo_session_writer::SessionWriter, path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_bytes_atomic_as(
+    writer: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
     #[cfg(test)]
     jsonl::load_repair::seams::wait_if_held(path);
     writer.replace_atomic_sync(writer.rel_of(path)?, bytes)
@@ -120,11 +135,19 @@ pub(crate) fn write_bytes_atomic_reporting_as(
     #[cfg(test)]
     jsonl::load_repair::seams::wait_if_held(path);
     let rel = writer.rel_of(path).map_err(AtomicWriteError::NotReplaced)?;
-    let result = writer.replace_atomic_reporting_sync(rel, bytes).map_err(|error| match error {
-        fuigo_session_writer::ReplaceError::NotReplaced(error) => AtomicWriteError::NotReplaced(error),
-        fuigo_session_writer::ReplaceError::Replaced(error) => AtomicWriteError::Replaced(error),
-    });
-    if matches!(&result, Ok(()) | Err(AtomicWriteError::Replaced(_))) && rel == Path::new(CHAT_HISTORY_FILE) {
+    let result = writer
+        .replace_atomic_reporting_sync(rel, bytes)
+        .map_err(|error| match error {
+            fuigo_session_writer::ReplaceError::NotReplaced(error) => {
+                AtomicWriteError::NotReplaced(error)
+            }
+            fuigo_session_writer::ReplaceError::Replaced(error) => {
+                AtomicWriteError::Replaced(error)
+            }
+        });
+    if matches!(&result, Ok(()) | Err(AtomicWriteError::Replaced(_)))
+        && rel == Path::new(CHAT_HISTORY_FILE)
+    {
         // The whole chat history was rewritten: a compaction rewrite that had not landed is superseded (P111).
         jsonl::compaction_witness::clear_after_chat_rewrite_through(writer, Some(bytes));
     }
@@ -132,8 +155,14 @@ pub(crate) fn write_bytes_atomic_reporting_as(
 }
 
 /// [`write_bytes_atomic_as`] on the blocking pool.
-pub(crate) async fn write_bytes_atomic_as_async(writer: &fuigo_session_writer::SessionWriter, path: &Path, bytes: Vec<u8>) -> io::Result<()> {
-    write_bytes_atomic_reporting_as_async(writer, path, bytes).await.map_err(AtomicWriteError::into_io)
+pub(crate) async fn write_bytes_atomic_as_async(
+    writer: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+    bytes: Vec<u8>,
+) -> io::Result<()> {
+    write_bytes_atomic_reporting_as_async(writer, path, bytes)
+        .await
+        .map_err(AtomicWriteError::into_io)
 }
 
 /// [`write_bytes_atomic_reporting_as`] on the blocking pool.
@@ -149,7 +178,10 @@ pub(crate) async fn write_bytes_atomic_reporting_as_async(
 }
 
 /// Remove the session file `path` as the session's writer; a missing file is success (F5-C4).
-pub(crate) fn remove_file_as(writer: &fuigo_session_writer::SessionWriter, path: &Path) -> io::Result<()> {
+pub(crate) fn remove_file_as(
+    writer: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+) -> io::Result<()> {
     match writer.remove_sync(writer.rel_of(path)?) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
@@ -159,16 +191,23 @@ pub(crate) fn remove_file_as(writer: &fuigo_session_writer::SessionWriter, path:
 /// [`write_bytes_atomic_reporting`] for a caller that needs only the outcome.
 /// Like it, this needs the session's `writer` (review r2): there is no by-path atomic write of a session file that a
 /// caller can reach without one.
-pub(crate) fn write_bytes_atomic(writer: &fuigo_session_writer::SessionWriter, path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_bytes_atomic(
+    writer: &fuigo_session_writer::SessionWriter,
+    path: &Path,
+    bytes: &[u8],
+) -> io::Result<()> {
     write_bytes_atomic_reporting(writer, path, bytes).map_err(AtomicWriteError::into_io)
 }
 
 /// A test fixture staging `path` by path: it claims a writer for the file's folder for the one write.
 #[cfg(test)]
 pub(crate) fn write_bytes_atomic_fixture(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let dir = path.parent().ok_or_else(|| io::Error::other("fixture path has no folder"))?;
-    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
-        .map_err(|_busy| io::Error::other("fixture folder is claimed"))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("fixture path has no folder"))?;
+    let writer =
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .map_err(|_busy| io::Error::other("fixture folder is claimed"))?;
     write_bytes_atomic(&writer, path, bytes)
 }
 
@@ -201,7 +240,8 @@ pub(crate) fn write_bytes_atomic_reporting(
         sync_parent_dir_durable(path)
     });
     debug_assert!(
-        path.file_name().is_none_or(|name| name != CHAT_HISTORY_FILE),
+        path.file_name()
+            .is_none_or(|name| name != CHAT_HISTORY_FILE),
         "chat_history.jsonl is rewritten only through the session writer (write_bytes_atomic_reporting_as)"
     );
     result
@@ -214,13 +254,20 @@ fn write_bytes_atomic_with(
     sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
     sync_parent: impl Fn() -> io::Result<()>,
 ) -> io::Result<()> {
-    let dir = path.parent().ok_or_else(|| io::Error::other("fixture path has no folder"))?;
-    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
-        .map_err(|_busy| io::Error::other("fixture folder is claimed"))?;
-    write_bytes_atomic_outcome_with(&writer, path, bytes, sync_file, sync_parent).map_err(AtomicWriteError::into_io)
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("fixture path has no folder"))?;
+    let writer =
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .map_err(|_busy| io::Error::other("fixture folder is claimed"))?;
+    write_bytes_atomic_outcome_with(&writer, path, bytes, sync_file, sync_parent)
+        .map_err(AtomicWriteError::into_io)
 }
 
-#[allow(clippy::disallowed_methods, reason = "summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic"
+)]
 fn write_bytes_atomic_outcome_with(
     writer: &fuigo_session_writer::SessionWriter,
     path: &Path,
@@ -242,7 +289,8 @@ fn write_bytes_atomic_outcome_with(
     // Its new entry can vanish on power loss until the parent directory is synced
     // A retry after a rename whose parent sync failed sees the file present and cannot tell create from replace
     // So every successful rename pays the parent sync
-    match write_synced().and_then(|()| std::fs::rename(&tmp, path)) { // F5-A: summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic
+    match write_synced().and_then(|()| std::fs::rename(&tmp, path)) {
+        // F5-A: summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic
         Ok(()) => sync_parent().map_err(AtomicWriteError::Replaced),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp); // F5-A: summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic
@@ -338,7 +386,10 @@ pub(crate) fn sync_cwd_marker_if_present(cwd_dir: &Path) -> io::Result<()> {
     sync_cwd_marker_if_present_with(cwd_dir, sync_file_durable)
 }
 
-#[allow(clippy::disallowed_methods, reason = "fsync of <cwd_dir>/.cwd marker; the cwd dir parents session folders; no content written; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "fsync of <cwd_dir>/.cwd marker; the cwd dir parents session folders; no content written; not inside a session folder"
+)]
 pub(crate) fn sync_cwd_marker_if_present_with(
     cwd_dir: &Path,
     sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
@@ -435,7 +486,10 @@ pub(crate) fn replace_chat_history_through(
     #[cfg(test)]
     jsonl::load_repair::seams::wait_if_held(&session_writer.dir().join(CHAT_HISTORY_FILE));
     let result = session_writer.replace_atomic_reporting_sync(CHAT_HISTORY_FILE, bytes);
-    if matches!(&result, Ok(()) | Err(fuigo_session_writer::ReplaceError::Replaced(_))) {
+    if matches!(
+        &result,
+        Ok(()) | Err(fuigo_session_writer::ReplaceError::Replaced(_))
+    ) {
         jsonl::compaction_witness::clear_after_chat_rewrite_through(session_writer, Some(bytes));
     }
     result.map_err(fuigo_session_writer::ReplaceError::into_io)
@@ -456,8 +510,6 @@ pub(crate) fn to_jsonl_bytes<T: serde::Serialize>(items: &[T]) -> io::Result<Vec
 pub(crate) fn write_jsonl_atomic<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> {
     write_bytes_atomic_fixture(path, &to_jsonl_bytes(items)?)
 }
-
-
 
 /// A unique sibling temp path, e.g. `summary.json` becomes `summary.json.<uuid>.tmp`.
 fn temp_sibling(path: &Path) -> PathBuf {
@@ -485,7 +537,9 @@ pub(crate) mod chat_rebuild {
     ///
     /// F5 (design §5.3, §5.7): the rebuild is built in memory and published with the session writer's
     /// `replace_atomic_sync` (temp sibling + rename, as before), so it is that writer's work.
-    pub(crate) fn rebuild_chat_history(session_writer: &fuigo_session_writer::SessionWriter) -> io::Result<usize> {
+    pub(crate) fn rebuild_chat_history(
+        session_writer: &fuigo_session_writer::SessionWriter,
+    ) -> io::Result<usize> {
         let Some((bytes, count)) = build_chat_history(session_writer.dir())? else {
             return Ok(0);
         };
@@ -554,7 +608,10 @@ pub(crate) mod chat_rebuild {
         // projection and keep the reducer's tail, which is what this rebuild produced before P88.
         let mut drop_projection = 0;
         if reducer.rewound_after_checkpoint {
-            match crate::session::helpers::replay::replay_if_latest_compaction_active(&updates_path, dir) {
+            match crate::session::helpers::replay::replay_if_latest_compaction_active(
+                &updates_path,
+                dir,
+            ) {
                 Ok(Some(conversation)) => {
                     let _ = writer.seek(std::io::SeekFrom::Start(0));
                     writer.get_mut().clear();
@@ -580,7 +637,8 @@ pub(crate) mod chat_rebuild {
         writer.flush()?;
         let mut bytes = writer.into_inner();
         if drop_projection > 0 {
-            let text = String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let text = String::from_utf8(bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             let kept: String = text.split_inclusive('\n').skip(drop_projection).collect();
             bytes = kept.into_bytes();
             reducer.item_count = reducer.item_count.saturating_sub(drop_projection);
@@ -591,8 +649,9 @@ pub(crate) mod chat_rebuild {
     /// Tests: [`rebuild_chat_history`] for a folder, through a writer claimed for it under a fresh id.
     #[cfg(test)]
     pub(crate) fn rebuild_chat_history_for_test(dir: &Path) -> io::Result<usize> {
-        let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
-            .map_err(|_| io::Error::other("slot busy"))?;
+        let writer =
+            fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+                .map_err(|_| io::Error::other("slot busy"))?;
         rebuild_chat_history(&writer)
     }
 
@@ -600,12 +659,15 @@ pub(crate) mod chat_rebuild {
     /// the post-compaction tail, losing the summary (P88). An unreadable file degrades to that tail, with a warning.
     fn compacted_projection(dir: &Path, checkpoint_file: &str) -> Vec<ConversationItem> {
         let path = crate::extensions::notification::contained_checkpoint_path(dir, checkpoint_file);
-        let parsed = crate::extensions::notification::read_contained_checkpoint(dir, checkpoint_file)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| {
-                serde_json::from_slice::<crate::extensions::notification::CompactionCheckpointFile>(&bytes)
+        let parsed =
+            crate::extensions::notification::read_contained_checkpoint(dir, checkpoint_file)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    serde_json::from_slice::<
+                        crate::extensions::notification::CompactionCheckpointFile,
+                    >(&bytes)
                     .map_err(|e| e.to_string())
-            });
+                });
         match parsed {
             Ok(file) if file.schema_version == 1 => file.compacted_history,
             Ok(file) => {
@@ -691,8 +753,12 @@ pub(crate) mod chat_rebuild {
                         .as_ref()
                         .and_then(|m| m.get("streamStartMs"))
                         .and_then(serde_json::Value::as_i64);
-                    if let (acp::SessionUpdate::AgentMessageChunk(_), Some(stream)) = (&n.update, stream)
-                        && self.text_streams.last().is_none_or(|(last, _)| *last != stream)
+                    if let (acp::SessionUpdate::AgentMessageChunk(_), Some(stream)) =
+                        (&n.update, stream)
+                        && self
+                            .text_streams
+                            .last()
+                            .is_none_or(|(last, _)| *last != stream)
                     {
                         self.text_streams.push((stream, self.agent_text.len()));
                     }
@@ -704,7 +770,8 @@ pub(crate) mod chat_rebuild {
                             .and_then(serde_json::Value::as_bool)
                             == Some(true)
                     {
-                        self.hosted_streams.insert(tc.tool_call_id.0.to_string(), stream);
+                        self.hosted_streams
+                            .insert(tc.tool_call_id.0.to_string(), stream);
                     }
                     self.handle_acp(&n.update)
                 }
@@ -744,11 +811,13 @@ pub(crate) mod chat_rebuild {
                 }
                 // P188: the attempt whose text streamed since the last committed response was resent; the live
                 // history never kept that text, so the rebuilt one must not either
-                FuigoUpdate::RetryState(crate::extensions::notification::RetryState::Retrying {
-                    discard_emitted: true,
-                    stream_start_ms,
-                    ..
-                }) => {
+                FuigoUpdate::RetryState(
+                    crate::extensions::notification::RetryState::Retrying {
+                        discard_emitted: true,
+                        stream_start_ms,
+                        ..
+                    },
+                ) => {
                     let cut = match stream_start_ms {
                         // The attempt's own text, wherever it began; an attempt that wrote none voids nothing
                         Some(stream) => self
@@ -815,7 +884,10 @@ pub(crate) mod chat_rebuild {
                 .and_then(|m| m.get("promptIndex"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
-            if prompt_index.is_some() && self.user_prompt_index.is_some() && prompt_index != self.user_prompt_index {
+            if prompt_index.is_some()
+                && self.user_prompt_index.is_some()
+                && prompt_index != self.user_prompt_index
+            {
                 out.extend(self.flush_user());
             }
             if !interjection && self.user_prompt_index.is_none() {
@@ -1050,7 +1122,10 @@ pub(crate) mod chat_rebuild {
         String::new()
     }
 
-    #[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+    )]
     #[cfg(test)]
     mod contained_checkpoint_tests {
         use super::*;
@@ -1072,10 +1147,17 @@ pub(crate) mod chat_rebuild {
                 original_head_withheld: false,
                 reread_file_paths: vec![],
             };
-            std::fs::write(tmp.path().join("outside.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+            std::fs::write(
+                tmp.path().join("outside.json"),
+                serde_json::to_vec(&file).unwrap(),
+            )
+            .unwrap();
             let abs = tmp.path().join("outside.json").display().to_string();
             for hostile in ["../outside.json", abs.as_str()] {
-                assert!(compacted_projection(&dir, hostile).is_empty(), "{hostile} was read");
+                assert!(
+                    compacted_projection(&dir, hostile).is_empty(),
+                    "{hostile} was read"
+                );
             }
         }
     }
@@ -1647,15 +1729,23 @@ pub(crate) enum BeneathRefusal {
 /// cannot be swapped for a link in between (P154). On any other platform every folder is checked with
 /// `symlink_metadata` and the file is opened without following a link (a folder swapped between the check and the
 /// open is not caught there). `base` itself is trusted.
-pub(crate) fn open_beneath_nofollow(base: &Path, relative: &Path) -> Result<std::fs::File, BeneathRefusal> {
+pub(crate) fn open_beneath_nofollow(
+    base: &Path,
+    relative: &Path,
+) -> Result<std::fs::File, BeneathRefusal> {
     const NOT_REGULAR: &str = "it is not a regular file (a symlink is never followed)";
     #[cfg(not(windows))]
-    const NOT_DIR: &str = "a folder on its path is not a real directory (a symlink is never followed)";
+    const NOT_DIR: &str =
+        "a folder on its path is not a real directory (a symlink is never followed)";
     let mut parts = Vec::new();
     for component in relative.components() {
         match component {
             std::path::Component::Normal(part) => parts.push(part),
-            _ => return Err(BeneathRefusal::Refused("its path leaves the session folder")),
+            _ => {
+                return Err(BeneathRefusal::Refused(
+                    "its path leaves the session folder",
+                ));
+            }
         }
     }
     let Some(leaf) = parts.pop() else {
@@ -1666,11 +1756,17 @@ pub(crate) fn open_beneath_nofollow(base: &Path, relative: &Path) -> Result<std:
         use std::os::unix::ffi::OsStrExt as _;
         use std::os::unix::io::{AsRawFd as _, FromRawFd as _};
         let c = |p: &std::ffi::OsStr| {
-            std::ffi::CString::new(p.as_bytes()).map_err(|e| BeneathRefusal::Io(io::Error::other(e)))
+            std::ffi::CString::new(p.as_bytes())
+                .map_err(|e| BeneathRefusal::Io(io::Error::other(e)))
         };
         let base_c = c(base.as_os_str())?;
         // SAFETY: open(2) on a NUL-terminated path; the descriptor is owned by the File right after.
-        let fd = unsafe { libc::open(base_c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+        let fd = unsafe {
+            libc::open(
+                base_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
         if fd < 0 {
             return Err(BeneathRefusal::Io(io::Error::last_os_error()));
         }
@@ -1776,12 +1872,24 @@ pub(crate) fn final_path_windows(file: &std::fs::File) -> io::Result<Vec<u16>> {
     // kernel32 is linked by std.
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn GetFinalPathNameByHandleW(file: *mut std::ffi::c_void, path: *mut u16, len: u32, flags: u32) -> u32;
+        fn GetFinalPathNameByHandleW(
+            file: *mut std::ffi::c_void,
+            path: *mut u16,
+            len: u32,
+            flags: u32,
+        ) -> u32;
     }
     let mut buffer = vec![0u16; 1024];
     loop {
         // SAFETY: a live handle and a writable buffer of the length passed.
-        let len = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), buffer.as_mut_ptr(), buffer.len() as u32, 0) };
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                0,
+            )
+        };
         if len == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -1799,7 +1907,11 @@ pub(crate) fn final_path_windows(file: &std::fs::File) -> io::Result<Vec<u16>> {
 /// would turn into the same U+FFFD as another name. Only the last name is compared without regard to case, as the
 /// volume itself may be case-insensitive.
 #[cfg(windows)]
-pub(crate) fn is_direct_child_windows(parent: &[u16], child: &[u16], name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_direct_child_windows(
+    parent: &[u16],
+    child: &[u16],
+    name: &std::ffi::OsStr,
+) -> bool {
     use std::os::windows::ffi::OsStrExt as _;
     let backslash = u16::from(b'\\');
     let mut parent = parent;
@@ -1830,7 +1942,13 @@ fn equal_ignoring_case_windows(a: &[u16], b: &[u16]) -> bool {
     // kernel32 is linked by std.
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn CompareStringOrdinal(a: *const u16, a_len: i32, b: *const u16, b_len: i32, ignore_case: i32) -> i32;
+        fn CompareStringOrdinal(
+            a: *const u16,
+            a_len: i32,
+            b: *const u16,
+            b_len: i32,
+            ignore_case: i32,
+        ) -> i32;
     }
     const CSTR_EQUAL: i32 = 2;
     let (Ok(a_len), Ok(b_len)) = (i32::try_from(a.len()), i32::try_from(b.len())) else {
@@ -1852,7 +1970,8 @@ fn open_leaf_beneath_windows(
     leaf: &std::ffi::OsStr,
 ) -> Result<std::fs::File, BeneathRefusal> {
     const NOT_REGULAR: &str = "it is not a regular file (a symlink is never followed)";
-    const NOT_DIR: &str = "a folder on its path is not a real directory (a symlink is never followed)";
+    const NOT_DIR: &str =
+        "a folder on its path is not a real directory (a symlink is never followed)";
     let file = open_leaf_windows(&dir.join(leaf))?;
     match file.metadata() {
         Ok(meta) if meta.is_file() && !is_reparse_point_windows(&meta) => {}
@@ -1892,7 +2011,8 @@ fn hold_folders_beneath_windows_with(
     after_each: &mut dyn FnMut(usize),
 ) -> Result<(Vec<std::fs::File>, PathBuf), BeneathRefusal> {
     use std::os::windows::fs::OpenOptionsExt as _;
-    const NOT_DIR: &str = "a folder on its path is not a real directory (a symlink is never followed)";
+    const NOT_DIR: &str =
+        "a folder on its path is not a real directory (a symlink is never followed)";
     // FILE_TRAVERSE too: an open that asks for attribute access alone is not share-checked, so a handle with only
     // FILE_READ_ATTRIBUTES would not stop a rename of its folder (found on a Windows host, P154).
     const FILE_ACCESS: u32 = 0x80 | 0x20; // FILE_READ_ATTRIBUTES | FILE_TRAVERSE
@@ -1993,7 +2113,10 @@ pub mod rewind_crash_seam {
 
     /// Stop the next rewind of `session_id` at `stage`.
     pub fn arm(session_id: &str, stage: Stage) {
-        *ARMED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((session_id.to_owned(), stage));
+        *ARMED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((session_id.to_owned(), stage));
     }
 
     static HISTORY_READS: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
@@ -2020,8 +2143,12 @@ pub mod rewind_crash_seam {
 
     /// Whether a rewind of `session_id` reaching `stage` stops there (disarms the seam when it does).
     pub(crate) fn fires(session_id: &str, stage: Stage) -> bool {
-        let mut armed = ARMED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let hit = armed.as_ref().is_some_and(|(id, at)| id == session_id && *at == stage);
+        let mut armed = ARMED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hit = armed
+            .as_ref()
+            .is_some_and(|(id, at)| id == session_id && *at == stage);
         if hit {
             *armed = None;
         }
@@ -2039,7 +2166,10 @@ pub struct ContentFingerprint {
 impl ContentFingerprint {
     pub(crate) fn of(bytes: &[u8]) -> Self {
         use sha2::Digest;
-        Self { len: bytes.len() as u64, sha256: format!("{:x}", sha2::Sha256::digest(bytes)) }
+        Self {
+            len: bytes.len() as u64,
+            sha256: format!("{:x}", sha2::Sha256::digest(bytes)),
+        }
     }
 
     /// The fingerprint of `items` written as a JSONL file, exactly as a whole rewrite of the file writes them.
@@ -2091,7 +2221,10 @@ pub trait StorageAdapter: Send + Sync {
     /// adapter (disk probe, presentation hints, execution state). Default: none, refused.
     fn session_writer(&self, info: &Info) -> io::Result<fuigo_session_writer::SessionWriter> {
         let _ = info;
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, "no session writer: refusing to write the session folder by path"))
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "no session writer: refusing to write the session folder by path",
+        ))
     }
 
     /// Initialize a new session or load existing one
@@ -2295,7 +2428,11 @@ pub trait StorageAdapter: Send + Sync {
     /// Load session data WITHOUT updates (for memory efficiency when updates will be streamed).
     /// Implementations also do NOT read rewind points here.
     /// Those are deferred and lazily loaded on demand from the path returned by [`rewind_points_file_path`](StorageAdapter::rewind_points_file_path).
-    async fn load_session_without_updates(&self, info: &Info, access: Access<'_>) -> io::Result<PersistedDataLight>;
+    async fn load_session_without_updates(
+        &self,
+        info: &Info,
+        access: Access<'_>,
+    ) -> io::Result<PersistedDataLight>;
 
     async fn load_summary(&self, info: &Info) -> io::Result<Summary>;
 
@@ -2352,7 +2489,12 @@ pub trait StorageAdapter: Send + Sync {
     /// The rewind [`Self::rewrite_rewind_points_holding`] was made for is done, its rewrite lock still held.
     /// `put_back`: it did not go through, so `rewind_points.jsonl` gets back what it held, followed by any row appended
     /// since. The durable copy is then removed; it stays when the put-back failed.
-    async fn end_rewind_points_rewrite(&self, info: &Info, undo: RewindPointsUndo, put_back: bool) -> io::Result<()>;
+    async fn end_rewind_points_rewrite(
+        &self,
+        info: &Info,
+        undo: RewindPointsUndo,
+        put_back: bool,
+    ) -> io::Result<()>;
 
     /// Replace the entire chat history (used for compaction and rewind)
     async fn replace_chat_history(
@@ -3247,7 +3389,10 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
 // Tests
 // ============================================================================
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3289,12 +3434,15 @@ mod tests {
         /// Try to turn the EMPTY folder `victim` into a junction to `target` in place, through a second handle
         /// (`FSCTL_SET_REPARSE_POINT`), with each access mask that could allow it. True when one of them worked.
         fn convert_in_place(victim: &Path, target: &Path) -> bool {
+            use std::os::windows::ffi::OsStrExt as _;
             use std::os::windows::fs::OpenOptionsExt as _;
             use std::os::windows::io::AsRawHandle as _;
-            use std::os::windows::ffi::OsStrExt as _;
             // A temp dir path is plain `C:\...`; the NT form of it starts `\??\`. Lossless: a name may hold an
             // isolated surrogate.
-            let substitute: Vec<u16> = "\\??\\".encode_utf16().chain(target.as_os_str().encode_wide()).collect();
+            let substitute: Vec<u16> = "\\??\\"
+                .encode_utf16()
+                .chain(target.as_os_str().encode_wide())
+                .collect();
             let sub_bytes = (substitute.len() * 2) as u16;
             let data_len = 8 + sub_bytes + 2 + 2;
             let mut buffer: Vec<u8> = Vec::new();
@@ -3355,9 +3503,14 @@ mod tests {
             // the only way to get a file is through the junction, and that must be refused.
             let opened = open_leaf_beneath_windows(&held, &dir, std::ffi::OsStr::new("f.txt"));
             if !converted {
-                eprintln!("P154 SKIPPED-JUNCTION: this lane could not convert the folder; only the plain refusal was checked");
+                eprintln!(
+                    "P154 SKIPPED-JUNCTION: this lane could not convert the folder; only the plain refusal was checked"
+                );
             }
-            assert!(opened.is_err(), "the leaf opened (junction made: {converted})");
+            assert!(
+                opened.is_err(),
+                "the leaf opened (junction made: {converted})"
+            );
         }
 
         #[test]
@@ -3392,7 +3545,9 @@ mod tests {
         #[test]
         fn a_sibling_that_differs_only_in_case_is_not_the_folder() {
             let name = std::ffi::OsStr::new("f.txt");
-            let ok = |parent: &str, child: &str| is_direct_child_windows(&wide(parent), &wide(child), name);
+            let ok = |parent: &str, child: &str| {
+                is_direct_child_windows(&wide(parent), &wide(child), name)
+            };
             assert!(ok(r"\\?\C:\s\session\ck", r"\\?\C:\s\session\ck\f.txt"));
             // A case-sensitive folder can hold `session` and `SESSION` apart; a read from the other one is refused.
             assert!(!ok(r"\\?\C:\s\session\ck", r"\\?\C:\s\SESSION\ck\f.txt"));
@@ -3418,21 +3573,40 @@ mod tests {
                 std::ffi::OsString::from_wide(&name)
             };
             // Same broken name: equal. A different broken name (lone D801 vs lone D800): different.
-            assert!(is_direct_child_windows(&parent, &child_with(0xD800), &asked(0xD800)));
-            assert!(!is_direct_child_windows(&parent, &child_with(0xD800), &asked(0xD801)));
+            assert!(is_direct_child_windows(
+                &parent,
+                &child_with(0xD800),
+                &asked(0xD800)
+            ));
+            assert!(!is_direct_child_windows(
+                &parent,
+                &child_with(0xD800),
+                &asked(0xD801)
+            ));
             // And a lone surrogate is not the replacement character either.
-            assert!(!is_direct_child_windows(&parent, &child_with(0xD800), std::ffi::OsStr::new("f\u{FFFD}.txt")));
+            assert!(!is_direct_child_windows(
+                &parent,
+                &child_with(0xD800),
+                std::ffi::OsStr::new("f\u{FFFD}.txt")
+            ));
         }
 
         #[test]
         fn leaf_names_compare_without_regard_to_case_the_way_windows_does() {
             let parent = wide(r"\\?\C:\s\ck");
             let ok = |on_disk: &str, asked: &str| {
-                is_direct_child_windows(&parent, &wide(&format!(r"\\?\C:\s\ck\{on_disk}")), std::ffi::OsStr::new(asked))
+                is_direct_child_windows(
+                    &parent,
+                    &wide(&format!(r"\\?\C:\s\ck\{on_disk}")),
+                    std::ffi::OsStr::new(asked),
+                )
             };
             assert!(ok("F.TXT", "f.txt"));
             assert!(ok("caf\u{e9}.txt", "caf\u{e9}.txt"));
-            assert!(ok("\u{c9}t\u{e9}.txt", "\u{e9}t\u{c9}.txt"), "non-ASCII names in another case are the same file");
+            assert!(
+                ok("\u{c9}t\u{e9}.txt", "\u{e9}t\u{c9}.txt"),
+                "non-ASCII names in another case are the same file"
+            );
             assert!(!ok("caf\u{e9}.txt", "cafe.txt"));
         }
 
@@ -3455,7 +3629,10 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             // `<U+FFFD>/id/ck` is the trusted folder; `<D800>/id/ck` is outside and holds the same-named file.
             let replacement = tmp.path().join("\u{FFFD}").join("id");
-            let lone = tmp.path().join(std::ffi::OsString::from_wide(&[0xD800])).join("id");
+            let lone = tmp
+                .path()
+                .join(std::ffi::OsString::from_wide(&[0xD800]))
+                .join("id");
             std::fs::create_dir_all(replacement.join("ck")).unwrap(); // empty: can be converted in place
             std::fs::create_dir_all(lone.join("ck")).unwrap();
             std::fs::write(lone.join("ck").join("f.txt"), b"secret").unwrap();
@@ -3465,11 +3642,23 @@ mod tests {
             eprintln!("P154 lookalike conversion succeeded: {converted}");
             let opened = open_leaf_beneath_windows(&held, &dir, std::ffi::OsStr::new("f.txt"));
             if !converted {
-                eprintln!("P154 SKIPPED-JUNCTION: this lane could not convert the folder; only the plain refusal was checked");
+                eprintln!(
+                    "P154 SKIPPED-JUNCTION: this lane could not convert the folder; only the plain refusal was checked"
+                );
             }
             // `<U+FFFD>/id/ck` has no f.txt: any success is a read from the lookalike folder `<D800>/id/ck`.
-            assert!(opened.is_err(), "the leaf was read from a lookalike folder (junction made: {converted})");
-            eprintln!("P154 lookalike open refused: {}", match opened { Err(BeneathRefusal::Refused(why)) => why.to_string(), Err(BeneathRefusal::Io(e)) => e.to_string(), Ok(_) => unreachable!() });
+            assert!(
+                opened.is_err(),
+                "the leaf was read from a lookalike folder (junction made: {converted})"
+            );
+            eprintln!(
+                "P154 lookalike open refused: {}",
+                match opened {
+                    Err(BeneathRefusal::Refused(why)) => why.to_string(),
+                    Err(BeneathRefusal::Io(e)) => e.to_string(),
+                    Ok(_) => unreachable!(),
+                }
+            );
         }
 
         #[test]
@@ -3477,7 +3666,8 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(tmp.path().join("a").join("b")).unwrap();
             std::fs::write(tmp.path().join("a").join("b").join("f.txt"), b"hello").unwrap();
-            let mut file = open_beneath_nofollow(tmp.path(), Path::new("a/b/f.txt")).expect("opens");
+            let mut file =
+                open_beneath_nofollow(tmp.path(), Path::new("a/b/f.txt")).expect("opens");
             let mut text = String::new();
             io::Read::read_to_string(&mut file, &mut text).unwrap();
             assert_eq!(text, "hello");
@@ -3507,8 +3697,11 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let outside = tempfile::tempdir().unwrap();
             std::fs::write(outside.path().join("f.txt"), b"secret").unwrap();
-            std::os::windows::fs::symlink_file(outside.path().join("f.txt"), tmp.path().join("l.txt"))
-                .expect("create a file symlink (needs the symlink privilege)");
+            std::os::windows::fs::symlink_file(
+                outside.path().join("f.txt"),
+                tmp.path().join("l.txt"),
+            )
+            .expect("create a file symlink (needs the symlink privilege)");
             assert!(matches!(
                 open_beneath_nofollow(tmp.path(), Path::new("l.txt")),
                 Err(BeneathRefusal::Refused(_))
@@ -3524,10 +3717,17 @@ mod tests {
             assert_eq!(held.len(), 2);
             assert_eq!(dir, tmp.path().join("a").join("b"));
             assert!(std::fs::rename(tmp.path().join("a"), tmp.path().join("a-moved")).is_err());
-            assert!(std::fs::rename(tmp.path().join("a").join("b"), tmp.path().join("a").join("b-moved")).is_err());
+            assert!(
+                std::fs::rename(
+                    tmp.path().join("a").join("b"),
+                    tmp.path().join("a").join("b-moved")
+                )
+                .is_err()
+            );
             assert!(std::fs::remove_dir(tmp.path().join("a").join("b")).is_err());
             drop(held);
-            std::fs::rename(tmp.path().join("a"), tmp.path().join("a-moved")).expect("free after the handles drop");
+            std::fs::rename(tmp.path().join("a"), tmp.path().join("a-moved"))
+                .expect("free after the handles drop");
         }
     }
 
@@ -3678,7 +3878,9 @@ mod tests {
     /// A history rebuilt from `updates.jsonl` must hold what the live history held: the accepted attempt only.
     mod rebuild_discarded_attempts {
         use super::*;
-        use crate::extensions::notification::{RetryState, SessionNotification as FuigoNotification};
+        use crate::extensions::notification::{
+            RetryState, SessionNotification as FuigoNotification,
+        };
         use crate::sampling::ConversationItem;
         use std::sync::Arc;
 
@@ -3715,11 +3917,14 @@ mod tests {
         }
 
         fn retry_of(stream: i64) -> SessionUpdate {
-            let SessionUpdate::Fuigo(mut n) = retry(true) else { unreachable!() };
-            if let crate::extensions::notification::SessionUpdate::RetryState(RetryState::Retrying {
-                stream_start_ms,
-                ..
-            }) = &mut n.update
+            let SessionUpdate::Fuigo(mut n) = retry(true) else {
+                unreachable!()
+            };
+            if let crate::extensions::notification::SessionUpdate::RetryState(
+                RetryState::Retrying {
+                    stream_start_ms, ..
+                },
+            ) = &mut n.update
             {
                 *stream_start_ms = Some(stream);
             }
@@ -3742,7 +3947,12 @@ mod tests {
             );
             // An attempt that streamed no text (tool-call deltas only) voids nothing
             assert_eq!(
-                assistant_texts(vec![user("hi"), agent_in("P. ", 1), retry_of(2), agent_in("live", 3)]),
+                assistant_texts(vec![
+                    user("hi"),
+                    agent_in("P. ", 1),
+                    retry_of(2),
+                    agent_in("live", 3)
+                ]),
                 ["P. live"]
             );
         }
@@ -3775,10 +3985,12 @@ mod tests {
         }
 
         fn tool_done(id: &str) -> SessionUpdate {
-            acp_update(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                acp::ToolCallId::new(id),
-                acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
-            )))
+            acp_update(acp::SessionUpdate::ToolCallUpdate(
+                acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(id),
+                    acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+                ),
+            ))
         }
 
         fn assistant_texts(updates: Vec<SessionUpdate>) -> Vec<String> {
@@ -3793,16 +4005,20 @@ mod tests {
                 .unwrap()
                 .lines()
                 .filter(|l| !l.is_empty())
-                .filter_map(|l| match serde_json::from_str::<ConversationItem>(l).unwrap() {
-                    ConversationItem::Assistant(a) => Some(a.content.to_string()),
-                    _ => None,
-                })
+                .filter_map(
+                    |l| match serde_json::from_str::<ConversationItem>(l).unwrap() {
+                        ConversationItem::Assistant(a) => Some(a.content.to_string()),
+                        _ => None,
+                    },
+                )
                 .collect()
         }
 
         /// P201 r2: `streamStartMs` stamped on a persisted notification, as the shell does for every update.
         fn in_stream(update: SessionUpdate, stream: i64) -> SessionUpdate {
-            let SessionUpdate::Acp(mut n) = update else { unreachable!() };
+            let SessionUpdate::Acp(mut n) = update else {
+                unreachable!()
+            };
             let mut meta = serde_json::Map::new();
             meta.insert("streamStartMs".into(), serde_json::json!(stream));
             n.meta = Some(meta);
@@ -3824,12 +4040,14 @@ mod tests {
         /// The update that closes a hosted row of a failed attempt: `failed`, title only, no output.
         fn hosted_row_closed(id: &str, stream: i64) -> SessionUpdate {
             in_stream(
-                acp_update(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                    acp::ToolCallId::new(id),
-                    acp::ToolCallUpdateFields::new()
-                        .status(Some(acp::ToolCallStatus::Failed))
-                        .title(Some("Searching".into())),
-                ))),
+                acp_update(acp::SessionUpdate::ToolCallUpdate(
+                    acp::ToolCallUpdate::new(
+                        acp::ToolCallId::new(id),
+                        acp::ToolCallUpdateFields::new()
+                            .status(Some(acp::ToolCallStatus::Failed))
+                            .title(Some("Searching".into())),
+                    ),
+                )),
                 stream,
             )
         }
@@ -3837,12 +4055,16 @@ mod tests {
         /// A hosted tool that itself failed (the backend reported it): `failed` with its payload.
         fn hosted_row_failed_for_real(id: &str, stream: i64) -> SessionUpdate {
             in_stream(
-                acp_update(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                    acp::ToolCallId::new(id),
-                    acp::ToolCallUpdateFields::new()
-                        .status(Some(acp::ToolCallStatus::Failed))
-                        .raw_output(Some(serde_json::json!({"status": "failed", "error": "boom"}))),
-                ))),
+                acp_update(acp::SessionUpdate::ToolCallUpdate(
+                    acp::ToolCallUpdate::new(
+                        acp::ToolCallId::new(id),
+                        acp::ToolCallUpdateFields::new()
+                            .status(Some(acp::ToolCallStatus::Failed))
+                            .raw_output(Some(
+                                serde_json::json!({"status": "failed", "error": "boom"}),
+                            )),
+                    ),
+                )),
                 stream,
             )
         }
@@ -3860,15 +4082,23 @@ mod tests {
                 .unwrap()
                 .lines()
                 .filter(|l| !l.is_empty())
-                .filter_map(|l| match serde_json::from_str::<ConversationItem>(l).unwrap() {
-                    ConversationItem::Assistant(a) => Some(format!(
-                        "assistant:{}:calls={}",
-                        a.content,
-                        a.tool_calls.iter().map(|c| c.id.to_string()).collect::<Vec<_>>().join(",")
-                    )),
-                    ConversationItem::ToolResult(r) => Some(format!("tool_result:{}", r.tool_call_id)),
-                    _ => None,
-                })
+                .filter_map(
+                    |l| match serde_json::from_str::<ConversationItem>(l).unwrap() {
+                        ConversationItem::Assistant(a) => Some(format!(
+                            "assistant:{}:calls={}",
+                            a.content,
+                            a.tool_calls
+                                .iter()
+                                .map(|c| c.id.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )),
+                        ConversationItem::ToolResult(r) => {
+                            Some(format!("tool_result:{}", r.tool_call_id))
+                        }
+                        _ => None,
+                    },
+                )
                 .collect()
         }
 
@@ -3912,7 +4142,11 @@ mod tests {
                     hosted_row_failed_for_real("h1", 1),
                     agent_in("B", 1),
                 ]),
-                ["assistant:A:calls=h1", "tool_result:h1", "assistant:B:calls="]
+                [
+                    "assistant:A:calls=h1",
+                    "tool_result:h1",
+                    "assistant:B:calls="
+                ]
             );
         }
 

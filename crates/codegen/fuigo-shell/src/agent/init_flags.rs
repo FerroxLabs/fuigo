@@ -68,7 +68,10 @@ mod tests {
     #[test]
     fn flags_have_the_pinned_wire_shape() {
         let v = serde_json::json!({ "capabilities": capability_entries() });
-        assert_eq!(v["capabilities"]["interject"], serde_json::json!({"version": 1}));
+        assert_eq!(
+            v["capabilities"]["interject"],
+            serde_json::json!({"version": 1})
+        );
         assert_eq!(v["capabilities"]["queue"]["version"], 1);
         let methods: Vec<&str> = v["capabilities"]["queue"]["methods"]
             .as_array()

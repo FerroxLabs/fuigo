@@ -105,7 +105,11 @@ impl ReadDedupeCache {
 
     pub(crate) fn invalidate_all(&mut self, reason: &str) {
         if !self.entries.is_empty() {
-            tracing::debug!(entries = self.entries.len(), reason, "read-dedupe cache cleared");
+            tracing::debug!(
+                entries = self.entries.len(),
+                reason,
+                "read-dedupe cache cleared"
+            );
             self.entries.clear();
         }
     }
@@ -123,7 +127,11 @@ impl ReadDedupeCache {
 
     /// Whether the earlier result is still intact for the model: present in `conversation`
     /// under its tool-call id and, per the pruner mirror, neither soft-trimmed nor hard-cleared.
-    pub(crate) fn result_intact(&self, entry: &ReadEntry, conversation: &[ConversationItem]) -> bool {
+    pub(crate) fn result_intact(
+        &self,
+        entry: &ReadEntry,
+        conversation: &[ConversationItem],
+    ) -> bool {
         let mut turn_from_end = 0usize;
         let mut seen_first_user = false;
         for item in conversation.iter().rev() {
@@ -134,7 +142,9 @@ impl ReadDedupeCache {
                     }
                     seen_first_user = true;
                 }
-                ConversationItem::ToolResult(result) if result.tool_call_id == entry.tool_call_id => {
+                ConversationItem::ToolResult(result)
+                    if result.tool_call_id == entry.tool_call_id =>
+                {
                     if !self.prune.enabled {
                         return true;
                     }
@@ -163,7 +173,10 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
 /// not read-only, plus subagent spawns and MCP tools regardless of their read-only flag.
 pub(crate) fn call_invalidates(tool_name: &str, is_read_only: bool) -> bool {
     !is_read_only
-        || matches!(tool_name, "spawn_subagent" | "task" | "use_tool" | "Task" | "Agent")
+        || matches!(
+            tool_name,
+            "spawn_subagent" | "task" | "use_tool" | "Task" | "Agent"
+        )
         || tool_name.contains(crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER)
 }
 
@@ -280,8 +293,16 @@ mod tests {
         let mut cache = ReadDedupeCache::new(PruneMirror::disabled());
         cache.record(key("/w/a.rs"), entry("call_1", 10));
         let hit = cache.get(&key("/w/a.rs")).expect("cached");
-        assert_eq!(hit.hash, hash_bytes(b"hello"), "hash compares the current bytes");
-        assert_ne!(hit.hash, hash_bytes(b"hello world"), "changed bytes must not hit");
+        assert_eq!(
+            hit.hash,
+            hash_bytes(b"hello"),
+            "hash compares the current bytes"
+        );
+        assert_ne!(
+            hit.hash,
+            hash_bytes(b"hello world"),
+            "changed bytes must not hit"
+        );
         let conversation = vec![user(), tool_result("call_1"), user()];
         assert!(cache.result_intact(hit, &conversation));
         assert_eq!(
@@ -296,19 +317,28 @@ mod tests {
         cache.record(key("/w/a.rs"), entry("call_1", 10));
         assert!(call_invalidates("search_replace", false));
         assert!(call_invalidates("run_terminal_command", false));
-        assert!(call_invalidates("spawn_subagent", true), "a child may edit files");
+        assert!(
+            call_invalidates("spawn_subagent", true),
+            "a child may edit files"
+        );
         assert!(call_invalidates("use_tool", true));
         assert!(call_invalidates("linear__save_issue", true));
         assert!(!call_invalidates("read_file", true));
         assert!(!call_invalidates("grep", true));
         cache.invalidate_all("edit");
-        assert!(cache.get(&key("/w/a.rs")).is_none(), "read after an edit returns content");
+        assert!(
+            cache.get(&key("/w/a.rs")).is_none(),
+            "read after an edit returns content"
+        );
 
         cache.record(key("/w/a.rs"), entry("call_2", 10));
         cache.observe_compaction_marker(None);
         assert_eq!(cache.len(), 1, "no compaction yet");
         cache.observe_compaction_marker(Some(4));
-        assert!(cache.get(&key("/w/a.rs")).is_none(), "read after compaction returns content");
+        assert!(
+            cache.get(&key("/w/a.rs")).is_none(),
+            "read after compaction returns content"
+        );
         cache.record(key("/w/a.rs"), entry("call_3", 10));
         cache.observe_compaction_marker(Some(4));
         assert_eq!(cache.len(), 1, "same marker keeps entries");
@@ -327,17 +357,32 @@ mod tests {
         let cache = ReadDedupeCache::new(prune);
         let recent = vec![user(), tool_result("call_1"), user()];
         assert!(cache.result_intact(&entry("call_1", 10), &recent));
-        assert!(!cache.result_intact(&entry("call_9", 10), &recent), "missing (compacted) result");
+        assert!(
+            !cache.result_intact(&entry("call_9", 10), &recent),
+            "missing (compacted) result"
+        );
         // Four user turns after the result: older than keep_last_n_turns.
         let mut aged = vec![user(), tool_result("call_1")];
         aged.extend((0..4).map(|_| user()));
-        assert!(cache.result_intact(&entry("call_1", 10), &aged), "small results are never soft-trimmed");
-        assert!(!cache.result_intact(&entry("call_1", 5000), &aged), "large result would be soft-trimmed");
+        assert!(
+            cache.result_intact(&entry("call_1", 10), &aged),
+            "small results are never soft-trimmed"
+        );
+        assert!(
+            !cache.result_intact(&entry("call_1", 5000), &aged),
+            "large result would be soft-trimmed"
+        );
         let mut ancient = vec![user(), tool_result("call_1")];
         ancient.extend((0..11).map(|_| user()));
-        assert!(!cache.result_intact(&entry("call_1", 10), &ancient), "hard-cleared");
+        assert!(
+            !cache.result_intact(&entry("call_1", 10), &ancient),
+            "hard-cleared"
+        );
         let off = ReadDedupeCache::new(PruneMirror::disabled());
-        assert!(off.result_intact(&entry("call_1", 5000), &ancient), "pruning disabled: intact");
+        assert!(
+            off.result_intact(&entry("call_1", 5000), &ancient),
+            "pruning disabled: intact"
+        );
     }
 
     #[test]
@@ -351,8 +396,17 @@ mod tests {
 
     #[test]
     fn parses_single_and_multi_path_reads() {
-        let single = parse_read_entries(&serde_json::json!({"target_file": "a.rs", "offset": 5, "limit": "20"}));
-        assert_eq!(single, vec![ReadRequestEntry { path: "a.rs".into(), offset: Some(5), limit: Some(20) }]);
+        let single = parse_read_entries(
+            &serde_json::json!({"target_file": "a.rs", "offset": 5, "limit": "20"}),
+        );
+        assert_eq!(
+            single,
+            vec![ReadRequestEntry {
+                path: "a.rs".into(),
+                offset: Some(5),
+                limit: Some(20)
+            }]
+        );
         let codex = parse_read_entries(&serde_json::json!({"file_path": "/w/b.rs"}));
         assert_eq!(codex[0].path, "/w/b.rs");
         let multi = parse_read_entries(&serde_json::json!({
@@ -363,7 +417,10 @@ mod tests {
         assert_eq!(multi[1].path, "b.rs");
         assert_eq!(multi[2].limit, Some(3));
         assert!(parse_read_entries(&serde_json::json!({"target_file": ""})).is_empty());
-        assert_eq!(read_mode(&serde_json::json!({"mode": "indentation"})), "indentation");
+        assert_eq!(
+            read_mode(&serde_json::json!({"mode": "indentation"})),
+            "indentation"
+        );
         assert_eq!(read_mode(&serde_json::json!({})), "slice");
     }
 }

@@ -28,11 +28,7 @@ impl HookRegistry {
     /// Managed-policy hooks always count as enabled (not user-disableable), matching `dispatcher::eligible_or_record_skip`.
     pub fn has_enabled_hooks_for_canonical(&self, event: HookEventName) -> bool {
         let disabled = crate::trust::DisabledHooks::load();
-        let enabled = |specs: &[HookSpec]| {
-            specs
-                .iter()
-                .any(|s| !disabled.blocks(s))
-        };
+        let enabled = |specs: &[HookSpec]| specs.iter().any(|s| !disabled.blocks(s));
         let canonical = event.canonical();
         enabled(self.hooks_for(canonical))
             || (canonical == HookEventName::SubagentStop
@@ -286,7 +282,8 @@ pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
                     spec.fail_closed |= kept.fail_closed;
                     *kept = spec;
                 } else {
-                    if let Some(kept) = hooks.get_mut(&kept_event).and_then(|v| v.get_mut(kept_idx)) {
+                    if let Some(kept) = hooks.get_mut(&kept_event).and_then(|v| v.get_mut(kept_idx))
+                    {
                         kept.fail_closed |= duplicate_fail_closed;
                     }
                     tracing::debug!(
@@ -315,8 +312,15 @@ pub fn load_hooks(
 
 /// `may_name_saved_key`: project sources never name the saved API key (P118); a global source's FILE may only when its
 /// real path is under `$FUIGO_HOME/hooks/` (P147, S16/B32).
-fn load_from_source(source: &HookSource<'_>, may_name_saved_key: bool) -> (Vec<HookSpec>, Vec<HookError>) {
-    load_from_source_in(source, may_name_saved_key, fuigo_config::user_fuigo_home().as_deref())
+fn load_from_source(
+    source: &HookSource<'_>,
+    may_name_saved_key: bool,
+) -> (Vec<HookSpec>, Vec<HookError>) {
+    load_from_source_in(
+        source,
+        may_name_saved_key,
+        fuigo_config::user_fuigo_home().as_deref(),
+    )
 }
 
 /// The folder a project hook source belongs to: `<dir>` of `<dir>/<config dir>/<file or dir>`.
@@ -347,9 +351,14 @@ pub(crate) fn load_from_source_scoped(
     // P147: trust is decided per hook FILE by its real path, never by the source it was listed under: a global
     // `~/.claude/settings.json`, a `hooks-paths` target outside `$FUIGO_HOME/hooks`, a symlink in `$FUIGO_HOME/hooks`
     // that points outside it, and anything resolving into `worktrees/` or `plugins/` are all refused.
-    let may_name = |file: &Path| may_name_saved_key && fuigo_config::key_naming::hook_file_may_name_saved_key_in(file, user_home);
+    let may_name = |file: &Path| {
+        may_name_saved_key
+            && fuigo_config::key_naming::hook_file_may_name_saved_key_in(file, user_home)
+    };
     match source {
-        HookSource::SettingsFile(path) => load_hooks_from_settings_file(path, may_name(path), contain),
+        HookSource::SettingsFile(path) => {
+            load_hooks_from_settings_file(path, may_name(path), contain)
+        }
         HookSource::Directory(dir) => load_hooks_from_directory(dir, &may_name, contain),
     }
 }
@@ -376,7 +385,8 @@ fn load_hooks_from_settings_file(
         }
     };
 
-    let (specs, errors) = config::parse_hook_file_with_key_naming(&content, path, may_name_saved_key);
+    let (specs, errors) =
+        config::parse_hook_file_with_key_naming(&content, path, may_name_saved_key);
     for err in &errors {
         tracing::warn!("hook loading from settings file: {err}");
     }
@@ -453,7 +463,8 @@ fn load_hooks_from_directory(
             }
         };
 
-        let (file_specs, file_errors) = config::parse_hook_file_with_key_naming(&content, &path, may_name_saved_key(&path));
+        let (file_specs, file_errors) =
+            config::parse_hook_file_with_key_naming(&content, &path, may_name_saved_key(&path));
         for err in &file_errors {
             tracing::warn!("hook loading: {err}");
         }
@@ -829,7 +840,10 @@ mod tests {
         ] {
             // The opt-in on the later copy, then on the earlier one.
             for (a, b) in [(false, true), (true, false)] {
-                let registry = registry_from_specs_deduped(vec![spec("one", first, a), spec("two", second, b)]);
+                let registry = registry_from_specs_deduped(vec![
+                    spec("one", first, a),
+                    spec("two", second, b),
+                ]);
                 let hooks = registry.hooks_for(HookEventName::PreToolUse);
                 assert_eq!(hooks.len(), 1);
                 assert!(hooks[0].fail_closed, "({first:?}, {a}) + ({second:?}, {b})");
@@ -1218,15 +1232,31 @@ mod tests {
         let base = tmp.path().to_path_buf();
         let outside = base.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        write_json(&outside, "settings.json", &simple_hook_with_id("SessionStart", "outside-settings"));
-        write_json(&outside, "hooks.json", &simple_hook_with_id("SessionStart", "outside-file"));
+        write_json(
+            &outside,
+            "settings.json",
+            &simple_hook_with_id("SessionStart", "outside-settings"),
+        );
+        write_json(
+            &outside,
+            "hooks.json",
+            &simple_hook_with_id("SessionStart", "outside-file"),
+        );
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".claude")).unwrap();
-        symlink(outside.join("settings.json"), repo.join(".claude").join("settings.json")).unwrap();
+        symlink(
+            outside.join("settings.json"),
+            repo.join(".claude").join("settings.json"),
+        )
+        .unwrap();
         let hooks = repo.join(".fuigo").join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         symlink(outside.join("hooks.json"), hooks.join("leak.json")).unwrap();
-        write_json(&repo, "own.json", &simple_hook_with_id("SessionStart", "own-linked"));
+        write_json(
+            &repo,
+            "own.json",
+            &simple_hook_with_id("SessionStart", "own-linked"),
+        );
         symlink(repo.join("own.json"), hooks.join("own.json")).unwrap();
         let sub = repo.join("sub");
         std::fs::create_dir_all(sub.join(".fuigo")).unwrap();
@@ -1245,10 +1275,16 @@ mod tests {
         // Hook names carry the file stem (commands are redacted in Debug): only `own.json` may load.
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names.len(), 1, "outside hooks loaded: {names:?}");
-        assert!(names[0].starts_with("project/own:"), "in-folder linked hook missing: {names:?}");
+        assert!(
+            names[0].starts_with("project/own:"),
+            "in-folder linked hook missing: {names:?}"
+        );
 
         // A global (user) source follows links.
         let (global, _) = collect_specs_from_sources(&[HookSource::SettingsFile(&settings)], &[]);
-        assert!(!global.is_empty(), "a global source's link must still be followed");
+        assert!(
+            !global.is_empty(),
+            "a global source's link must still be followed"
+        );
     }
 }

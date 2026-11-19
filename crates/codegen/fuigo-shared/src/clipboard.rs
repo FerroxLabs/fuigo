@@ -3279,7 +3279,11 @@ mod tests {
         }
         // One empty variable must not mask a real one.
         let mut mixed = only("SSH_TTY", "");
-        mixed.iter_mut().find(|(n, _)| *n == "SSH_CLIENT").unwrap().1 = Some("198.51.100.1 50000 22");
+        mixed
+            .iter_mut()
+            .find(|(n, _)| *n == "SSH_CLIENT")
+            .unwrap()
+            .1 = Some("198.51.100.1 50000 22");
         run_self_in_child("remote", &mixed);
     }
 }

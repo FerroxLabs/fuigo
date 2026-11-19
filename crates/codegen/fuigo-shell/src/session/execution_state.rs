@@ -104,7 +104,10 @@ fn is_zero_pair(pair: &(u64, u64)) -> bool {
 /// Remember the largest single request that reported usage ([`Snapshot::largest_request`]).
 fn note_reported_usage(state: &mut Snapshot, usage: &fuigo_sampling_types::TokenUsage) {
     state.largest_request.0 = state.largest_request.0.max(u64::from(usage.total_tokens));
-    state.largest_request.1 = state.largest_request.1.max(u64::from(usage.completion_tokens));
+    state.largest_request.1 = state
+        .largest_request
+        .1
+        .max(u64::from(usage.completion_tokens));
 }
 
 /// P121 (K8). What an attempt whose usage is unknown is charged under a token budget, in tokens.
@@ -125,7 +128,9 @@ fn charge_unknown_usage(state: &mut Snapshot, attempt_id: &str) {
         return;
     }
     let (total, output) = charge_estimate(state);
-    state.estimated.insert(attempt_id.to_owned(), (total, output));
+    state
+        .estimated
+        .insert(attempt_id.to_owned(), (total, output));
 }
 
 /// Debit one unknown attempt's estimate against each token limit the record has.
@@ -150,7 +155,11 @@ fn charge_estimate(state: &mut Snapshot) -> (u64, u64) {
 /// P121 (K8). Usage reported late for an attempt that was already charged an estimate: the
 /// estimate stays, and only what the real figure exceeds it by is added. Reporting less never
 /// lowers the charge.
-fn settle_estimated(state: &mut Snapshot, attempt_id: &str, usage: Option<&fuigo_sampling_types::TokenUsage>) {
+fn settle_estimated(
+    state: &mut Snapshot,
+    attempt_id: &str,
+    usage: Option<&fuigo_sampling_types::TokenUsage>,
+) {
     let Some((estimated_total, estimated_output)) = state.estimated.remove(attempt_id) else {
         return;
     };
@@ -184,7 +193,11 @@ pub(crate) enum TurnEnd {
 
 impl TurnEnd {
     fn of_succeeded(succeeded: bool) -> Self {
-        if succeeded { Self::Succeeded } else { Self::Stopped }
+        if succeeded {
+            Self::Succeeded
+        } else {
+            Self::Stopped
+        }
     }
 }
 
@@ -237,7 +250,10 @@ pub(crate) fn budget_finalization_denial(state: &Snapshot) -> Option<ExecutionBu
 
 /// [`budget_finalization_denial`] judged at `now_ms`, the moment the turn returned (Astra r3): a clock
 /// read later, after an await, could find the deadline passed and relabel a call-limit answer.
-pub(crate) fn budget_finalization_denial_at(state: &Snapshot, now_ms: i64) -> Option<ExecutionBudgetDenial> {
+pub(crate) fn budget_finalization_denial_at(
+    state: &Snapshot,
+    now_ms: i64,
+) -> Option<ExecutionBudgetDenial> {
     if state.phase != Phase::Finalizing || state.recall_finalization {
         return None;
     }
@@ -262,7 +278,10 @@ pub(crate) fn budget_finalization_denial_at(state: &Snapshot, now_ms: i64) -> Op
 /// liabilities and stays terminal.
 fn legacy_reopenable(state: &Snapshot) -> bool {
     (!state.completion_admitted || state.recall_finalization)
-        && state.pending.iter().all(|id| state.optional_attempts.contains(id))
+        && state
+            .pending
+            .iter()
+            .all(|id| state.optional_attempts.contains(id))
         && state.pending_tools.is_empty()
         && state.abandoned.is_empty()
 }
@@ -292,7 +311,11 @@ pub(crate) fn goal_end_reason(state: &Snapshot, now_ms: i64) -> Option<String> {
             "This goal's execution stopped at a limit or with work whose outcome is unknown \
              (receipt {}), so it is not continued automatically. \
              Use /goal clear, then /goal <objective> to start a new one.",
-            state.terminal.as_ref().map(|r| r.id.as_str()).unwrap_or("unknown")
+            state
+                .terminal
+                .as_ref()
+                .map(|r| r.id.as_str())
+                .unwrap_or("unknown")
         ),
     })
 }
@@ -304,7 +327,8 @@ fn goal_ended_error(state: &Snapshot, now_ms: i64) -> io::Error {
     match exhaustion(state, now_ms) {
         Some(Exhaustion::Budget(rule)) => io::Error::other(budget_denial(state, rule)),
         _ => io::Error::other(GoalExecutionEnded(
-            goal_end_reason(state, now_ms).unwrap_or_else(|| "This goal's execution has ended.".into()),
+            goal_end_reason(state, now_ms)
+                .unwrap_or_else(|| "This goal's execution has ended.".into()),
         )),
     }
 }
@@ -454,7 +478,9 @@ pub(crate) enum Change {
     /// P121 (K8). The model request about to be sent has at least `tokens` of input: a floor for what
     /// an unreported request costs ([`Snapshot::largest_request`]), known even when no request of
     /// this execution has reported usage yet.
-    NoteContext { tokens: u64 },
+    NoteContext {
+        tokens: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -494,10 +520,21 @@ pub(crate) fn token_budget_denial(state: &Snapshot) -> Option<ExecutionBudgetDen
 /// record's `unknown_usage` (set by an earlier version, or by a completion that reported nothing)
 /// does not keep a goal from resuming; reopening charges it an estimate instead ([`Change::Reopen`]).
 /// Admission to a live execution still fails closed on it (Contract D.4).
-fn token_budget_denial_for(state: &Snapshot, ignore_unknown: bool) -> Option<ExecutionBudgetDenial> {
-    let rule = if state.limits.total.is_some_and(|limit| state.total_tokens >= limit) {
+fn token_budget_denial_for(
+    state: &Snapshot,
+    ignore_unknown: bool,
+) -> Option<ExecutionBudgetDenial> {
+    let rule = if state
+        .limits
+        .total
+        .is_some_and(|limit| state.total_tokens >= limit)
+    {
         ExecutionBudgetRule::TotalTokensExhausted
-    } else if state.limits.output.is_some_and(|limit| state.output_tokens >= limit) {
+    } else if state
+        .limits
+        .output
+        .is_some_and(|limit| state.output_tokens >= limit)
+    {
         ExecutionBudgetRule::OutputTokensExhausted
     } else if !ignore_unknown
         && state.unknown_usage
@@ -546,7 +583,8 @@ fn limit_denied(state: &Snapshot, rule: ExecutionBudgetRule) -> io::Error {
 pub(crate) fn process_limit_rule(message: &str) -> Option<ExecutionBudgetRule> {
     use fuigo_sampler::execution_budget::{CALL_LIMIT, WALL_LIMIT};
     use fuigo_sampling_types::SamplingError;
-    let refused_by = |limit: &'static str| message == SamplingError::InvalidConfiguration(limit).to_string();
+    let refused_by =
+        |limit: &'static str| message == SamplingError::InvalidConfiguration(limit).to_string();
     if refused_by(CALL_LIMIT) {
         Some(ExecutionBudgetRule::ModelCallLimit)
     } else if refused_by(WALL_LIMIT) {
@@ -562,13 +600,17 @@ const EXECUTION_STATE_MISSING: &str = "execution state missing";
 /// Tests: [`apply_as`] with a writer claimed for `dir`.
 #[cfg(test)]
 pub(crate) async fn apply(dir: &Path, mutation: ExecutionMutation) -> io::Result<Snapshot> {
-    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
-        .map_err(|_busy| io::Error::other("busy"))?;
+    let writer =
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .map_err(|_busy| io::Error::other("busy"))?;
     apply_as(&writer, mutation).await
 }
 
 /// Apply `mutation` to the execution state file in `writer`'s session folder, written as that writer (F5-C6).
-pub(crate) async fn apply_as(writer: &fuigo_session_writer::SessionWriter, mutation: ExecutionMutation) -> io::Result<Snapshot> {
+pub(crate) async fn apply_as(
+    writer: &fuigo_session_writer::SessionWriter,
+    mutation: ExecutionMutation,
+) -> io::Result<Snapshot> {
     let dir = writer.dir();
     // The key is a fixed-length hash minted locally, never a client-provided path.
     if mutation.key.len() != 64 || !mutation.key.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -655,8 +697,12 @@ pub(crate) async fn apply_as(writer: &fuigo_session_writer::SessionWriter, mutat
 }
 
 fn background_grant_may_continue(state: &Snapshot, optional: bool) -> bool {
-    optional && state.phase == Phase::Terminal
-        && state.terminal.as_ref().is_some_and(|receipt| !receipt.partial)
+    optional
+        && state.phase == Phase::Terminal
+        && state
+            .terminal
+            .as_ref()
+            .is_some_and(|receipt| !receipt.partial)
 }
 
 fn admit_attempt(
@@ -827,7 +873,10 @@ fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<(
                 state.abandoned.insert(attempt_id);
             }
         }
-        Change::Refund { completion, attempt_id } => {
+        Change::Refund {
+            completion,
+            attempt_id,
+        } => {
             // Only an attempt that is still pending and was never charged an estimate can be refunded.
             if state.admitted.contains(&attempt_id)
                 && !state.estimated.contains_key(&attempt_id)
@@ -1015,8 +1064,10 @@ fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<(
                 .grants
                 .get(&grant_id)
                 .ok_or_else(|| denied("child grant missing"))?;
-            if (state.phase != Phase::Working && !background_grant_may_continue(state, grant.optional))
-                || state.deadline_ms.is_some_and(|d| now_ms >= d) {
+            if (state.phase != Phase::Working
+                && !background_grant_may_continue(state, grant.optional))
+                || state.deadline_ms.is_some_and(|d| now_ms >= d)
+            {
                 return Err(denied("parent execution actions unavailable"));
             }
             if !grant.optional {
@@ -1190,8 +1241,16 @@ impl Execution {
         parent_grant: Option<Arc<ChildGrant>>,
     ) -> io::Result<Arc<Self>> {
         Self::open_inner(
-            tx, session_id, root_id, prompt_id, max_calls, deadline_ms, max_tool_rounds, limits,
-            parent_grant, false,
+            tx,
+            session_id,
+            root_id,
+            prompt_id,
+            max_calls,
+            deadline_ms,
+            max_tool_rounds,
+            limits,
+            parent_grant,
+            false,
         )
         .await
     }
@@ -1215,8 +1274,16 @@ impl Execution {
         parent_grant: Option<Arc<ChildGrant>>,
     ) -> io::Result<Arc<Self>> {
         Self::open_inner(
-            tx, session_id, goal_id, prompt_id, max_calls, deadline_ms, max_tool_rounds, limits,
-            parent_grant, true,
+            tx,
+            session_id,
+            goal_id,
+            prompt_id,
+            max_calls,
+            deadline_ms,
+            max_tool_rounds,
+            limits,
+            parent_grant,
+            true,
         )
         .await
     }
@@ -1278,7 +1345,9 @@ impl Execution {
         let reopening = continuing && state.phase == Phase::Terminal;
         let state = if reopening {
             // P89. Refused here, before the turn records anything, with the reason and the remedy.
-            execution.reopen_record(session_id, &state, observed_total).await?
+            execution
+                .reopen_record(session_id, &state, observed_total)
+                .await?
         } else if state.phase == Phase::Terminal && !state.abandoned.is_empty() {
             // P03. A crash-poisoned execution can be Terminal with unresolved liabilities.
             // Reconcile BEFORE arming the sweep below: otherwise the sweep fires on every
@@ -1323,7 +1392,9 @@ impl Execution {
     async fn reopen(&self, session_id: &str, observed_total: u64) -> io::Result<()> {
         let state = self.snapshot().await?;
         if state.phase == Phase::Terminal {
-            let state = self.reopen_record(session_id, &state, observed_total).await?;
+            let state = self
+                .reopen_record(session_id, &state, observed_total)
+                .await?;
             self.abandoned_attempts
                 .store(!state.abandoned.is_empty(), Ordering::Release);
         }
@@ -1490,12 +1561,17 @@ impl Execution {
         if let Some(parent) = &self.parent_grant {
             parent.tools(ids.clone()).await?;
         }
-        let admitted = self.change(Change::Tools { ids: ids.clone() }).await.map(|_| ());
+        let admitted = self
+            .change(Change::Tools { ids: ids.clone() })
+            .await
+            .map(|_| ());
         // A round this record refuses (its own bound, phase or deadline) never runs, so it must
         // not stay registered on the parent as a liability: `tools_settled` is only reached after
         // the calls execute, and an unsettled entry would mark the parent's receipt `partial`
         // for work that never started.
-        if admitted.is_err() && let Some(parent) = &self.parent_grant {
+        if admitted.is_err()
+            && let Some(parent) = &self.parent_grant
+        {
             let _ = Box::pin(parent.parent.tools_settled(parent.scoped_ids(ids))).await;
         }
         admitted
@@ -1650,8 +1726,8 @@ fn make_room(session_id: &str, key: &str) {
         let mut registry = registry.lock().unwrap_or_else(|e| e.into_inner());
         let mut displaced = Vec::new();
         registry.retain(|session, execution| {
-            let keep = execution.tx.strong_count() > 0
-                && !(session == session_id && execution.key != key);
+            let keep =
+                execution.tx.strong_count() > 0 && !(session == session_id && execution.key != key);
             if !keep {
                 displaced.push(execution.clone());
             }
@@ -1781,10 +1857,13 @@ impl ExecutionAdmission for Execution {
             if let Some(parent) = &self.parent_grant {
                 parent.parent.refund(purpose, attempt_id.clone()).await?;
             }
-            self.change(Change::Refund { completion: purpose == RequestPurpose::Completion, attempt_id })
-                .await
-                .map(|_| ())
-                .map_err(|_| "execution refund not durable".into())
+            self.change(Change::Refund {
+                completion: purpose == RequestPurpose::Completion,
+                attempt_id,
+            })
+            .await
+            .map(|_| ())
+            .map_err(|_| "execution refund not durable".into())
         })
     }
     fn abandon(&self, attempt_id: String) -> AdmissionFuture<'_> {
@@ -1848,7 +1927,10 @@ impl ChildGrant {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1859,7 +1941,9 @@ mod tests {
         for i in 0..5 {
             let mut inputs = [false; 5];
             inputs[i] = true;
-            assert!(should_track_execution(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]));
+            assert!(should_track_execution(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]
+            ));
         }
         assert!(!should_terminalize(true, true, Phase::Working));
         assert!(should_terminalize(true, false, Phase::Working));
@@ -1870,20 +1954,72 @@ mod tests {
 
     #[tokio::test]
     async fn settled_recall_can_complete_but_budget_stop_and_pending_work_cannot() {
-        for (recall, succeeded, pending) in [(true, true, false), (false, true, false), (true, false, false), (true, true, true)] {
+        for (recall, succeeded, pending) in [
+            (true, true, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
             let dir = tempfile::tempdir().unwrap();
-            let mut state = apply(dir.path(), mutation(&key(), Change::Open {
-                max_calls: 4, deadline_ms: None, max_tool_rounds: Some(3), limits: TokenLimits::default(),
-            })).await.unwrap();
+            let mut state = apply(
+                dir.path(),
+                mutation(
+                    &key(),
+                    Change::Open {
+                        max_calls: 4,
+                        deadline_ms: None,
+                        max_tool_rounds: Some(3),
+                        limits: TokenLimits::default(),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
             if pending {
-                transition(&mut state, Change::Tools { ids: vec!["unresolved".into()] }, 0).unwrap();
+                transition(
+                    &mut state,
+                    Change::Tools {
+                        ids: vec!["unresolved".into()],
+                    },
+                    0,
+                )
+                .unwrap();
             }
-            transition(&mut state, if recall { Change::FinalizeRecall } else { Change::Finalize }, 0).unwrap();
+            transition(
+                &mut state,
+                if recall {
+                    Change::FinalizeRecall
+                } else {
+                    Change::Finalize
+                },
+                0,
+            )
+            .unwrap();
             let attempt = uuid::Uuid::new_v4().to_string();
-            transition(&mut state, Change::Admit { completion: true, optional: false, attempt_id: attempt.clone() }, 0).unwrap();
-            transition(&mut state, Change::Settle { attempt_id: attempt, usage: Some(Default::default()) }, 0).unwrap();
+            transition(
+                &mut state,
+                Change::Admit {
+                    completion: true,
+                    optional: false,
+                    attempt_id: attempt.clone(),
+                },
+                0,
+            )
+            .unwrap();
+            transition(
+                &mut state,
+                Change::Settle {
+                    attempt_id: attempt,
+                    usage: Some(Default::default()),
+                },
+                0,
+            )
+            .unwrap();
             transition(&mut state, Change::Terminal { succeeded }, 0).unwrap();
-            assert_eq!(state.terminal.unwrap().partial, !recall || !succeeded || pending);
+            assert_eq!(
+                state.terminal.unwrap().partial,
+                !recall || !succeeded || pending
+            );
         }
     }
 
@@ -1891,19 +2027,72 @@ mod tests {
     #[tokio::test]
     async fn a_refunded_admission_gives_its_call_slot_back_and_a_settled_one_does_not() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = apply(dir.path(), mutation(&key(), Change::Open {
-            max_calls: 4, deadline_ms: None, max_tool_rounds: Some(3), limits: TokenLimits::default(),
-        })).await.unwrap();
+        let mut state = apply(
+            dir.path(),
+            mutation(
+                &key(),
+                Change::Open {
+                    max_calls: 4,
+                    deadline_ms: None,
+                    max_tool_rounds: Some(3),
+                    limits: TokenLimits::default(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
         let a = uuid::Uuid::new_v4().to_string();
-        transition(&mut state, Change::Admit { completion: false, optional: false, attempt_id: a.clone() }, 0).unwrap();
+        transition(
+            &mut state,
+            Change::Admit {
+                completion: false,
+                optional: false,
+                attempt_id: a.clone(),
+            },
+            0,
+        )
+        .unwrap();
         assert_eq!(state.calls, 1);
-        transition(&mut state, Change::Refund { completion: false, attempt_id: a.clone() }, 0).unwrap();
+        transition(
+            &mut state,
+            Change::Refund {
+                completion: false,
+                attempt_id: a.clone(),
+            },
+            0,
+        )
+        .unwrap();
         assert_eq!(state.calls, 0);
         assert!(!state.pending.contains(&a) && !state.admitted.contains(&a));
         let b = uuid::Uuid::new_v4().to_string();
-        transition(&mut state, Change::Admit { completion: false, optional: false, attempt_id: b.clone() }, 0).unwrap();
-        transition(&mut state, Change::Settle { attempt_id: b.clone(), usage: Some(Default::default()) }, 0).unwrap();
-        transition(&mut state, Change::Refund { completion: false, attempt_id: b }, 0).unwrap();
+        transition(
+            &mut state,
+            Change::Admit {
+                completion: false,
+                optional: false,
+                attempt_id: b.clone(),
+            },
+            0,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            Change::Settle {
+                attempt_id: b.clone(),
+                usage: Some(Default::default()),
+            },
+            0,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            Change::Refund {
+                completion: false,
+                attempt_id: b,
+            },
+            0,
+        )
+        .unwrap();
         assert_eq!(state.calls, 1, "a settled attempt must not be refunded");
     }
 
@@ -1912,36 +2101,101 @@ mod tests {
         for (optional, succeeded) in [(true, true), (true, false), (false, true)] {
             let dir = tempfile::tempdir().unwrap();
             let key = key();
-            let mut state = apply(dir.path(), mutation(&key, Change::Open {
-                max_calls: 4, deadline_ms: None, max_tool_rounds: Some(2),
-                limits: TokenLimits::default(),
-            })).await.unwrap();
-            transition(&mut state, Change::Grant {
-                child_id: "named-child".into(), resume_from: None, optional,
-            }, 0).unwrap();
+            let mut state = apply(
+                dir.path(),
+                mutation(
+                    &key,
+                    Change::Open {
+                        max_calls: 4,
+                        deadline_ms: None,
+                        max_tool_rounds: Some(2),
+                        limits: TokenLimits::default(),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            transition(
+                &mut state,
+                Change::Grant {
+                    child_id: "named-child".into(),
+                    resume_from: None,
+                    optional,
+                },
+                0,
+            )
+            .unwrap();
             transition(&mut state, Change::Terminal { succeeded }, 0).unwrap();
             let receipt = serde_json::to_value(&state.terminal).unwrap();
             let child_call = || Change::ChildAdmit {
-                grant_id: "named-child".into(), attempt_id: uuid::Uuid::new_v4().to_string(),
+                grant_id: "named-child".into(),
+                attempt_id: uuid::Uuid::new_v4().to_string(),
             };
             let may_continue = optional && succeeded;
-            assert_eq!(transition(&mut state, child_call(), 0).is_ok(), may_continue);
-            assert_eq!(transition(&mut state, Change::ChildTools {
-                grant_id: "named-child".into(), ids: vec!["child-action".into()],
-            }, 0).is_ok(), may_continue);
-            assert!(transition(&mut state, Change::Grant {
-                child_id: "late-child".into(), resume_from: None, optional: true,
-            }, 0).is_err());
-            assert!(transition(&mut state, Change::Tools { ids: vec!["parent-action".into()] }, 0).is_err());
-            assert!(transition(&mut state, Change::Admit {
-                completion: false, optional: true, attempt_id: uuid::Uuid::new_v4().to_string(),
-            }, 0).is_err());
+            assert_eq!(
+                transition(&mut state, child_call(), 0).is_ok(),
+                may_continue
+            );
+            assert_eq!(
+                transition(
+                    &mut state,
+                    Change::ChildTools {
+                        grant_id: "named-child".into(),
+                        ids: vec!["child-action".into()],
+                    },
+                    0
+                )
+                .is_ok(),
+                may_continue
+            );
+            assert!(
+                transition(
+                    &mut state,
+                    Change::Grant {
+                        child_id: "late-child".into(),
+                        resume_from: None,
+                        optional: true,
+                    },
+                    0
+                )
+                .is_err()
+            );
+            assert!(
+                transition(
+                    &mut state,
+                    Change::Tools {
+                        ids: vec!["parent-action".into()]
+                    },
+                    0
+                )
+                .is_err()
+            );
+            assert!(
+                transition(
+                    &mut state,
+                    Change::Admit {
+                        completion: false,
+                        optional: true,
+                        attempt_id: uuid::Uuid::new_v4().to_string(),
+                    },
+                    0
+                )
+                .is_err()
+            );
             if may_continue {
                 state.deadline_ms = Some(0);
                 assert!(transition(&mut state, child_call(), 1).is_err());
-                assert!(transition(&mut state, Change::ChildTools {
-                    grant_id: "named-child".into(), ids: vec!["late-action".into()],
-                }, 1).is_err());
+                assert!(
+                    transition(
+                        &mut state,
+                        Change::ChildTools {
+                            grant_id: "named-child".into(),
+                            ids: vec!["late-action".into()],
+                        },
+                        1
+                    )
+                    .is_err()
+                );
                 state.deadline_ms = None;
                 state.limits.total = Some(0);
                 assert!(transition(&mut state, child_call(), 0).is_err());
@@ -1957,11 +2211,20 @@ mod tests {
         }
     }
 
-    fn fixture_actor(dir: std::path::PathBuf) -> (mpsc::UnboundedSender<PersistenceMsg>, tokio::task::JoinHandle<()>) {
+    fn fixture_actor(
+        dir: std::path::PathBuf,
+    ) -> (
+        mpsc::UnboundedSender<PersistenceMsg>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
-                if let PersistenceMsg::ExecutionState { mutation, respond_to } = message {
+                if let PersistenceMsg::ExecutionState {
+                    mutation,
+                    respond_to,
+                } = message
+                {
                     let _ = respond_to.send(apply(&dir, mutation).await);
                 } else {
                     panic!("unexpected fixture message");
@@ -2179,18 +2442,53 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, actor) = fixture_actor(dir.path().to_owned());
         let session = uuid::Uuid::new_v4().to_string();
-        let first = Execution::open(&tx, &session, "goal", "turn1", 4, None, Some(2), TokenLimits::default(), None).await.unwrap();
+        let first = Execution::open(
+            &tx,
+            &session,
+            "goal",
+            "turn1",
+            4,
+            None,
+            Some(2),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
         let attempt = uuid::Uuid::new_v4().to_string();
-        first.admit(RequestPurpose::Work, attempt.clone()).await.unwrap();
-        first.settle(attempt, Some(fuigo_sampling_types::TokenUsage::default())).await.unwrap();
-        let next = Execution::open(&tx, &session, "goal", "turn2", 99, None, Some(99), TokenLimits::default(), None).await.unwrap();
+        first
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+        first
+            .settle(attempt, Some(fuigo_sampling_types::TokenUsage::default()))
+            .await
+            .unwrap();
+        let next = Execution::open(
+            &tx,
+            &session,
+            "goal",
+            "turn2",
+            99,
+            None,
+            Some(99),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(Arc::ptr_eq(&first, &next));
         assert!(Execution::for_prompt(&session, "turn1").is_none());
         assert!(Execution::for_prompt(&session, "turn2").is_some());
         let state = next.snapshot().await.unwrap();
-        assert_eq!((state.calls, state.max_calls, state.max_tool_rounds), (1, 4, Some(2)));
+        assert_eq!(
+            (state.calls, state.max_calls, state.max_tool_rounds),
+            (1, 4, Some(2))
+        );
         assert_eq!(state.phase, Phase::Working);
-        next.record_edited_paths((0..130).map(|n| format!("src/{n:03}.rs")).collect()).await.unwrap();
+        next.record_edited_paths((0..130).map(|n| format!("src/{n:03}.rs")).collect())
+            .await
+            .unwrap();
         let receipt = next.terminal(true).await.unwrap();
         assert!(!receipt.partial);
         assert_eq!(receipt.known_session_edited_paths.len(), 128);
@@ -2198,7 +2496,10 @@ mod tests {
         assert!(receipt.completed_checks.starts_with("unknown"));
         next.record_edited_paths(BTreeSet::new()).await.unwrap();
         let repeated = next.terminal(false).await.unwrap();
-        assert_eq!(serde_json::to_value(&receipt).unwrap(), serde_json::to_value(&repeated).unwrap());
+        assert_eq!(
+            serde_json::to_value(&receipt).unwrap(),
+            serde_json::to_value(&repeated).unwrap()
+        );
         next.release(&session);
         drop(tx);
         actor.await.unwrap();
@@ -2220,12 +2521,39 @@ mod tests {
         let (tx, actor) = fixture_actor(dir.path().to_owned());
         let parent_session = uuid::Uuid::new_v4().to_string();
         let child_session = uuid::Uuid::new_v4().to_string();
-        let parent = Execution::open(&tx, &parent_session, "parent-root", "parent-prompt", 99, None, Some(2), TokenLimits::default(), None).await.unwrap();
+        let parent = Execution::open(
+            &tx,
+            &parent_session,
+            "parent-root",
+            "parent-prompt",
+            99,
+            None,
+            Some(2),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
         // Round 1 of 2: the parent spawns the child. The spawn call stays pending until the
         // child returns, exactly as a blocking `spawn_subagent` does in the turn loop.
         parent.tools(vec!["spawn".into()]).await.unwrap();
-        let grant = parent.grant_child("child", None, /* optional */ false).await.unwrap();
-        let child = Execution::open(&tx, &child_session, "child-root", "child-prompt", 99, None, Some(2), TokenLimits::default(), Some(grant)).await.unwrap();
+        let grant = parent
+            .grant_child("child", None, /* optional */ false)
+            .await
+            .unwrap();
+        let child = Execution::open(
+            &tx,
+            &child_session,
+            "child-root",
+            "child-prompt",
+            99,
+            None,
+            Some(2),
+            TokenLimits::default(),
+            Some(grant),
+        )
+        .await
+        .unwrap();
 
         for round in ["c1", "c2"] {
             child.tools(vec![round.into()]).await.unwrap_or_else(|e| {
@@ -2258,9 +2586,15 @@ mod tests {
         );
         // Round 2 of 2 for the parent, after the child came back.
         parent.tools_settled(vec!["spawn".into()]).await.unwrap();
-        parent.tools(vec!["second".into()]).await.expect("the parent's own second round");
+        parent
+            .tools(vec!["second".into()])
+            .await
+            .expect("the parent's own second round");
         parent.tools_settled(vec!["second".into()]).await.unwrap();
-        assert!(parent.tools(vec!["third".into()]).await.is_err(), "the parent's bound still holds");
+        assert!(
+            parent.tools(vec!["third".into()]).await.is_err(),
+            "the parent's bound still holds"
+        );
 
         parent.release(&parent_session);
         child.release(&child_session);
@@ -2270,15 +2604,45 @@ mod tests {
         // parent's own outstanding.
         let parent_session = uuid::Uuid::new_v4().to_string();
         let child_session = uuid::Uuid::new_v4().to_string();
-        let parent = Execution::open(&tx, &parent_session, "parent-root", "parent-prompt", 99, None, Some(2), TokenLimits::default(), None).await.unwrap();
+        let parent = Execution::open(
+            &tx,
+            &parent_session,
+            "parent-root",
+            "parent-prompt",
+            99,
+            None,
+            Some(2),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
         parent.tools(vec!["spawn".into()]).await.unwrap();
         parent.tools_settled(vec!["spawn".into()]).await.unwrap();
         let grant = parent.grant_child("child", None, false).await.unwrap();
-        let child = Execution::open(&tx, &child_session, "child-root", "child-prompt", 99, None, Some(2), TokenLimits::default(), Some(grant)).await.unwrap();
+        let child = Execution::open(
+            &tx,
+            &child_session,
+            "child-root",
+            "child-prompt",
+            99,
+            None,
+            Some(2),
+            TokenLimits::default(),
+            Some(grant),
+        )
+        .await
+        .unwrap();
         child.tools(vec!["unsettled".into()]).await.unwrap();
         let receipt = parent.terminal(true).await.unwrap();
-        assert!(receipt.partial, "an unsettled foreground child action is unresolved work");
-        assert_eq!(receipt.pending_tool_calls, vec!["child:unsettled".to_string()]);
+        assert!(
+            receipt.partial,
+            "an unsettled foreground child action is unresolved work"
+        );
+        assert_eq!(
+            receipt.pending_tool_calls,
+            vec!["child:unsettled".to_string()]
+        );
         parent.release(&parent_session);
         child.release(&child_session);
         drop(tx);
@@ -2413,9 +2777,27 @@ mod tests {
         if let Some(dir) = std::env::var_os(CHILD_DIR) {
             let dir = std::path::PathBuf::from(dir);
             let (tx, _actor) = fixture_actor(dir.clone());
-            let execution = Execution::open(&tx, SESSION, ROOT, "first", 3, None, Some(2), TokenLimits::default(), None).await.unwrap();
-            execution.admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string()).await.unwrap();
-            execution.tools(vec!["unsettled-action".into()]).await.unwrap();
+            let execution = Execution::open(
+                &tx,
+                SESSION,
+                ROOT,
+                "first",
+                3,
+                None,
+                Some(2),
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .unwrap();
+            execution
+                .admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string())
+                .await
+                .unwrap();
+            execution
+                .tools(vec!["unsettled-action".into()])
+                .await
+                .unwrap();
             let stage = std::env::var(CHILD_STAGE).unwrap();
             if stage != "admitted" {
                 let receipt = execution.terminal(false).await.unwrap();
@@ -2423,8 +2805,11 @@ mod tests {
                     // Scripted consumer receives the durable ID; no acknowledgment
                     // is made before process exit. This is not an ACP E2E claim.
                     crate::session::storage::write_bytes_atomic_async(
-                        &dir.join("consumer-received.json"), serde_json::to_vec(&receipt).unwrap(),
-                    ).await.unwrap();
+                        &dir.join("consumer-received.json"),
+                        serde_json::to_vec(&receipt).unwrap(),
+                    )
+                    .await
+                    .unwrap();
                 }
             }
             std::process::exit(0); // No actor drain or Rust destructor cleanup.
@@ -2437,26 +2822,64 @@ mod tests {
                 .env(CHILD_DIR, dir.path()).env(CHILD_STAGE, stage)
                 .env_remove("FUIGO_MAX_MODEL_CALLS").env_remove("FUIGO_MAX_RUNTIME_SECS")
                 .kill_on_drop(true);
-            let result = tokio::time::timeout(std::time::Duration::from_secs(60), child.output()).await
-                .expect("crash fixture child timed out").unwrap();
-            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-            let key = blake3::hash(format!("{SESSION}\0{ROOT}").as_bytes()).to_hex().to_string();
-            let before = apply(dir.path(), mutation(&key, Change::Read)).await.unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(60), child.output())
+                .await
+                .expect("crash fixture child timed out")
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let key = blake3::hash(format!("{SESSION}\0{ROOT}").as_bytes())
+                .to_hex()
+                .to_string();
+            let before = apply(dir.path(), mutation(&key, Change::Read))
+                .await
+                .unwrap();
             let (tx, actor) = fixture_actor(dir.path().to_owned());
-            let restored = Execution::open(&tx, SESSION, ROOT, "resumed", 99, None, Some(99), TokenLimits::default(), None).await.unwrap();
+            let restored = Execution::open(
+                &tx,
+                SESSION,
+                ROOT,
+                "resumed",
+                99,
+                None,
+                Some(99),
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .unwrap();
             let state = restored.snapshot().await.unwrap();
             assert_eq!((state.calls, state.max_calls), (1, 3));
             assert_eq!(state.pending, before.pending);
             assert_eq!(state.pending_tools, before.pending_tools);
-            assert!(restored.admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string()).await.is_err());
+            assert!(
+                restored
+                    .admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string())
+                    .await
+                    .is_err()
+            );
             assert!(restored.tools(vec!["stale-action".into()]).await.is_err());
             let receipt = restored.terminal(true).await.unwrap();
-            assert!(receipt.partial, "unknown effects cannot become success on restart");
+            assert!(
+                receipt.partial,
+                "unknown effects cannot become success on restart"
+            );
             if let Some(previous) = before.terminal {
-                assert_eq!(serde_json::to_value(previous).unwrap(), serde_json::to_value(&receipt).unwrap());
+                assert_eq!(
+                    serde_json::to_value(previous).unwrap(),
+                    serde_json::to_value(&receipt).unwrap()
+                );
             }
             if stage == "delivered" {
-                let received: TerminalReceipt = serde_json::from_slice(&tokio::fs::read(dir.path().join("consumer-received.json")).await.unwrap()).unwrap();
+                let received: TerminalReceipt = serde_json::from_slice(
+                    &tokio::fs::read(dir.path().join("consumer-received.json"))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
                 assert_eq!(received.id, receipt.id);
             }
             restored.release(SESSION);
@@ -2485,29 +2908,69 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             // Session A: its goal is still working when the session closes.
             let (closed_tx, closed_actor) = fixture_actor(dir.path().to_owned());
-            let stranded = Execution::open(&closed_tx, "p89-closed", "goal-a", "a-1", 3, None, None, TokenLimits::default(), None)
-                .await
-                .unwrap();
+            let stranded = Execution::open(
+                &closed_tx,
+                "p89-closed",
+                "goal-a",
+                "a-1",
+                3,
+                None,
+                None,
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .unwrap();
             drop(stranded);
             drop(closed_tx);
             closed_actor.await.unwrap();
             // Session B: a goal turn, then a plain prompt of the same session displaces it.
             let (tx, actor) = fixture_actor(dir.path().to_owned());
-            let goal = Execution::open(&tx, "p89-live", "goal-b", "b-1", 3, None, None, TokenLimits::default(), None)
-                .await
-                .unwrap();
+            let goal = Execution::open(
+                &tx,
+                "p89-live",
+                "goal-b",
+                "b-1",
+                3,
+                None,
+                None,
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .unwrap();
             drop(goal);
-            let prompt = Execution::open(&tx, "p89-live", "prompt-b-2", "b-2", 3, None, None, TokenLimits::default(), None)
-                .await
-                .unwrap();
+            let prompt = Execution::open(
+                &tx,
+                "p89-live",
+                "prompt-b-2",
+                "b-2",
+                3,
+                None,
+                None,
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .unwrap();
             assert!(
                 !budget.working_capacity_exhausted(),
                 "only the live execution may hold a reservation"
             );
             // A further session can still open and do work.
-            let other = Execution::open(&tx, "p89-other", "prompt-c", "c-1", 3, None, None, TokenLimits::default(), None)
-                .await
-                .expect("a stranded reservation must not refuse another session");
+            let other = Execution::open(
+                &tx,
+                "p89-other",
+                "prompt-c",
+                "c-1",
+                3,
+                None,
+                None,
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .expect("a stranded reservation must not refuse another session");
             other
                 .admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string())
                 .await
@@ -2563,10 +3026,18 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let (tx, actor) = fixture_actor(dir.path().to_owned());
             let session = uuid::Uuid::new_v4().to_string();
-            let first = goal_turn(&tx, &session, "goal", "turn-1", TokenLimits::default()).await.unwrap();
+            let first = goal_turn(&tx, &session, "goal", "turn-1", TokenLimits::default())
+                .await
+                .unwrap();
             let attempt = uuid::Uuid::new_v4().to_string();
-            first.admit(RequestPurpose::Work, attempt.clone()).await.unwrap();
-            first.settle(attempt, Some(fuigo_sampling_types::TokenUsage::default())).await.unwrap();
+            first
+                .admit(RequestPurpose::Work, attempt.clone())
+                .await
+                .unwrap();
+            first
+                .settle(attempt, Some(fuigo_sampling_types::TokenUsage::default()))
+                .await
+                .unwrap();
             first.tools(vec!["round-1".into()]).await.unwrap();
             first.tools_settled(vec!["round-1".into()]).await.unwrap();
             let receipt = first.terminal_after(end).await.unwrap();
@@ -2576,26 +3047,39 @@ mod tests {
             let next = goal_turn(&tx, &session, "goal", "turn-2", TokenLimits::default()).await;
             if end == TurnEnd::Stopped {
                 let error = next.expect_err("a turn a limit stopped leaves the goal terminal");
-                let ended = goal_ended_of(&error).expect("refused with the reason, not a storage error");
+                let ended =
+                    goal_ended_of(&error).expect("refused with the reason, not a storage error");
                 assert!(ended.0.contains("/goal clear"), "{}", ended.0);
             } else {
-                let next = next.unwrap_or_else(|e| panic!("{end:?}: the goal's next turn must reopen: {e}"));
+                let next = next
+                    .unwrap_or_else(|e| panic!("{end:?}: the goal's next turn must reopen: {e}"));
                 let state = next.snapshot().await.unwrap();
                 assert_eq!(state.phase, Phase::Working, "{end:?}");
                 assert!(state.terminal.is_none(), "{end:?}");
                 assert_eq!(
-                    (state.calls, state.max_calls, state.tool_rounds, state.max_tool_rounds),
+                    (
+                        state.calls,
+                        state.max_calls,
+                        state.tool_rounds,
+                        state.max_tool_rounds
+                    ),
                     (1, 9, 1, Some(5)),
                     "{end:?}: the goal's limits still bind across the reopen"
                 );
                 assert_eq!(state.reopened, 1);
                 assert_eq!(state.earlier_receipts.len(), 1);
-                assert_eq!(state.earlier_receipts[0].id, receipt.id, "the interrupted turn's receipt is kept");
+                assert_eq!(
+                    state.earlier_receipts[0].id, receipt.id,
+                    "the interrupted turn's receipt is kept"
+                );
                 next.admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string())
                     .await
                     .unwrap_or_else(|e| panic!("{end:?}: the reopened goal must admit work: {e}"));
                 let second = next.terminal_after(TurnEnd::Succeeded).await.unwrap();
-                assert_ne!(second.id, receipt.id, "a reopened turn issues its own receipt");
+                assert_ne!(
+                    second.id, receipt.id,
+                    "a reopened turn issues its own receipt"
+                );
                 next.release(&session);
             }
             drop(tx);
@@ -2611,18 +3095,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, actor) = fixture_actor(dir.path().to_owned());
         let session = uuid::Uuid::new_v4().to_string();
-        let first = goal_turn(&tx, &session, "goal", "turn-1", TokenLimits::default()).await.unwrap();
+        let first = goal_turn(&tx, &session, "goal", "turn-1", TokenLimits::default())
+            .await
+            .unwrap();
         first.terminal_after(TurnEnd::Interrupted).await.unwrap();
-        let next = goal_turn(&tx, &session, "goal", "turn-2", TokenLimits::default()).await.unwrap();
-        assert!(Arc::ptr_eq(&first, &next), "the registered instance is adopted");
+        let next = goal_turn(&tx, &session, "goal", "turn-2", TokenLimits::default())
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &next),
+            "the registered instance is adopted"
+        );
         assert_eq!(next.snapshot().await.unwrap().phase, Phase::Working);
-        next.admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string()).await.unwrap();
+        next.admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string())
+            .await
+            .unwrap();
         // A plain open (not a goal continuation) of a terminal record never reopens it.
         next.terminal_after(TurnEnd::Interrupted).await.unwrap();
         next.release(&session);
-        let plain = Execution::open(&tx, &session, "goal", "turn-3", 9, None, Some(5), TokenLimits::default(), None)
-            .await
-            .unwrap();
+        let plain = Execution::open(
+            &tx,
+            &session,
+            "goal",
+            "turn-3",
+            9,
+            None,
+            Some(5),
+            TokenLimits::default(),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(plain.snapshot().await.unwrap().phase, Phase::Terminal);
         plain.release(&session);
         drop((first, next, plain, tx));
@@ -2650,10 +3153,20 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let (tx, actor) = fixture_actor(dir.path().to_owned());
             let session = uuid::Uuid::new_v4().to_string();
-            let limits = TokenLimits { total, output, initial_total: 0 };
-            let first = goal_turn(&tx, &session, "goal", "turn-1", limits.clone()).await.unwrap();
+            let limits = TokenLimits {
+                total,
+                output,
+                initial_total: 0,
+            };
+            let first = goal_turn(&tx, &session, "goal", "turn-1", limits.clone())
+                .await
+                .unwrap();
             let in_flight = uuid::Uuid::new_v4().to_string();
-            let purpose = if optional { RequestPurpose::Title } else { RequestPurpose::Work };
+            let purpose = if optional {
+                RequestPurpose::Title
+            } else {
+                RequestPurpose::Work
+            };
             first.admit(purpose, in_flight.clone()).await.unwrap();
             first.tools(vec!["running-tool".into()]).await.unwrap();
             let receipt = first.terminal_after(TurnEnd::Interrupted).await.unwrap();
@@ -2664,35 +3177,56 @@ mod tests {
             drop(first);
 
             // The goal tracker counted 700 tokens, some streamed by the interrupted attempt.
-            let observed = TokenLimits { initial_total: 700, ..limits };
+            let observed = TokenLimits {
+                initial_total: 700,
+                ..limits
+            };
             let next = goal_turn(&tx, &session, "goal", "turn-2", observed).await;
             if budgeted {
                 // P121 (K8): the in-flight attempt's usage is unknown, so it is charged a
                 // conservative estimate and the goal resumes. The refusal that used to latch here
                 // could not be lifted by anything but a late settlement that never came.
-                let next = next.expect("unknown in-flight usage is charged, never a permanent refusal");
+                let next =
+                    next.expect("unknown in-flight usage is charged, never a permanent refusal");
                 let state = next.snapshot().await.unwrap();
                 assert_eq!(state.phase, Phase::Working, "{state:?}");
-                assert!(!state.unknown_usage, "an estimate is charged instead: {state:?}");
+                assert!(
+                    !state.unknown_usage,
+                    "an estimate is charged instead: {state:?}"
+                );
                 let (spent, limit) = match (total, output) {
                     (Some(limit), _) => (state.total_tokens, limit),
                     (None, Some(limit)) => (state.output_tokens, limit),
                     (None, None) => unreachable!("budgeted"),
                 };
-                assert!(spent > 0 && spent < limit, "a conservative charge below the limit: {state:?}");
-                next.tools(vec!["next-tool".into()]).await.expect("the reopened goal may act");
+                assert!(
+                    spent > 0 && spent < limit,
+                    "a conservative charge below the limit: {state:?}"
+                );
+                next.tools(vec!["next-tool".into()])
+                    .await
+                    .expect("the reopened goal may act");
                 next.release(&session);
             } else {
                 let next = next.unwrap();
                 let state = next.snapshot().await.unwrap();
-                assert_eq!(state.phase, Phase::Working, "no forced finalization: {state:?}");
+                assert_eq!(
+                    state.phase,
+                    Phase::Working,
+                    "no forced finalization: {state:?}"
+                );
                 // An optional attempt (a title) may still come back and settle, so it stays.
                 assert_eq!(state.pending.is_empty(), !optional, "{state:?}");
                 assert!(state.pending_tools.is_empty() && state.abandoned.is_empty());
                 assert_eq!(state.calls, 1, "the interrupted attempt keeps its debit");
-                assert_eq!(state.total_tokens, 700, "the goal's own count is carried in");
+                assert_eq!(
+                    state.total_tokens, 700,
+                    "the goal's own count is carried in"
+                );
                 assert_eq!(state.earlier_receipts[0].pending_attempts, vec![in_flight]);
-                next.tools(vec!["next-tool".into()]).await.expect("the reopened goal may act");
+                next.tools(vec!["next-tool".into()])
+                    .await
+                    .expect("the reopened goal may act");
                 next.release(&session);
             }
             drop(tx);
@@ -2709,15 +3243,33 @@ mod tests {
         for with_usage in [false, true] {
             let mut state = budgeted_terminal_with_pending_attempt();
             let attempt = state.pending.iter().next().cloned().unwrap();
-            let usage = with_usage.then(|| fuigo_sampling_types::TokenUsage { total_tokens: 30, ..Default::default() });
-            transition(&mut state, Change::Supersede { attempt_id: attempt, usage }, 0).unwrap();
+            let usage = with_usage.then(|| fuigo_sampling_types::TokenUsage {
+                total_tokens: 30,
+                ..Default::default()
+            });
+            transition(
+                &mut state,
+                Change::Supersede {
+                    attempt_id: attempt,
+                    usage,
+                },
+                0,
+            )
+            .unwrap();
             assert!(state.pending.is_empty());
-            assert!(!state.unknown_usage, "with_usage={with_usage}: an estimate, never unknown usage");
+            assert!(
+                !state.unknown_usage,
+                "with_usage={with_usage}: an estimate, never unknown usage"
+            );
             assert!(may_reopen(&state, 0), "with_usage={with_usage}");
             if with_usage {
                 assert_eq!(state.total_tokens, 30);
             } else {
-                assert!(state.total_tokens > 0 && state.total_tokens < 1_000_000, "{}", state.total_tokens);
+                assert!(
+                    state.total_tokens > 0 && state.total_tokens < 1_000_000,
+                    "{}",
+                    state.total_tokens
+                );
             }
             transition(&mut state, Change::Reopen { observed_total: 0 }, 0).unwrap();
             assert_eq!(state.phase, Phase::Working);
@@ -2735,9 +3287,17 @@ mod tests {
         state.max_calls = 2;
         state.calls = 1;
         let rule = |state: &Snapshot| budget_finalization_denial(state).map(|denial| denial.rule);
-        assert_eq!(rule(&state), Some(ExecutionBudgetRule::ModelCallLimit), "{state:?}");
+        assert_eq!(
+            rule(&state),
+            Some(ExecutionBudgetRule::ModelCallLimit),
+            "{state:?}"
+        );
         state.recall_finalization = true;
-        assert_eq!(rule(&state), None, "a recall finalization is not a budget's");
+        assert_eq!(
+            rule(&state),
+            None,
+            "a recall finalization is not a budget's"
+        );
         state.recall_finalization = false;
         state.phase = Phase::Working;
         assert_eq!(rule(&state), None, "a record that is not finalizing");
@@ -2746,7 +3306,10 @@ mod tests {
         state.calls = 0;
         assert_eq!(rule(&state), None, "a finalization with no budget spent");
         state.total_tokens = 1_000_000;
-        assert_eq!(rule(&state), Some(ExecutionBudgetRule::TotalTokensExhausted));
+        assert_eq!(
+            rule(&state),
+            Some(ExecutionBudgetRule::TotalTokensExhausted)
+        );
     }
 
     /// P144 (Astra r3). The finalization's budget is judged at the moment given, not when the
@@ -2762,8 +3325,16 @@ mod tests {
         let now = chrono::Utc::now().timestamp_millis();
         state.deadline_ms = Some(now - 1);
         let rule = |at: i64| budget_finalization_denial_at(&state, at).map(|denial| denial.rule);
-        assert_eq!(rule(now - 2), Some(ExecutionBudgetRule::ModelCallLimit), "returned before the deadline");
-        assert_eq!(rule(now - 1), Some(ExecutionBudgetRule::RuntimeLimit), "returned at the deadline");
+        assert_eq!(
+            rule(now - 2),
+            Some(ExecutionBudgetRule::ModelCallLimit),
+            "returned before the deadline"
+        );
+        assert_eq!(
+            rule(now - 1),
+            Some(ExecutionBudgetRule::RuntimeLimit),
+            "returned at the deadline"
+        );
     }
 
     fn budgeted_terminal_with_pending_attempt() -> Snapshot {
@@ -2777,7 +3348,11 @@ mod tests {
         state.tool_rounds = 0;
         state.deadline_ms = None;
         state.max_tool_rounds = None;
-        state.limits = TokenLimits { total: Some(1_000_000), output: Some(500_000), initial_total: 0 };
+        state.limits = TokenLimits {
+            total: Some(1_000_000),
+            output: Some(500_000),
+            initial_total: 0,
+        };
         state.total_tokens = 0;
         state.output_tokens = 0;
         state.unknown_usage = false;
@@ -2793,16 +3368,40 @@ mod tests {
     /// limit, only the limit it counts against, and never past what is left.
     #[test]
     fn a_superseded_attempt_without_usage_is_charged_under_a_token_limit_only() {
-        for (total, output) in [(Some(1_000_000u64), None), (None, Some(500_000u64)), (None, None)] {
+        for (total, output) in [
+            (Some(1_000_000u64), None),
+            (None, Some(500_000u64)),
+            (None, None),
+        ] {
             let mut state = budgeted_terminal_with_pending_attempt();
             state.phase = Phase::Working;
             state.terminal = None;
-            state.limits = TokenLimits { total, output, initial_total: 0 };
+            state.limits = TokenLimits {
+                total,
+                output,
+                initial_total: 0,
+            };
             let attempt = state.pending.iter().next().cloned().unwrap();
-            transition(&mut state, Change::Supersede { attempt_id: attempt, usage: None }, 0).unwrap();
+            transition(
+                &mut state,
+                Change::Supersede {
+                    attempt_id: attempt,
+                    usage: None,
+                },
+                0,
+            )
+            .unwrap();
             assert!(!state.unknown_usage);
-            assert_eq!(state.total_tokens > 0, total.is_some(), "total limit {total:?}");
-            assert_eq!(state.output_tokens > 0, output.is_some(), "output limit {output:?}");
+            assert_eq!(
+                state.total_tokens > 0,
+                total.is_some(),
+                "total limit {total:?}"
+            );
+            assert_eq!(
+                state.output_tokens > 0,
+                output.is_some(),
+                "output limit {output:?}"
+            );
             assert!(state.total_tokens < total.unwrap_or(u64::MAX));
             assert!(state.output_tokens < output.unwrap_or(u64::MAX));
         }
@@ -2815,7 +3414,11 @@ mod tests {
     #[test]
     fn repeated_interruptions_spend_the_budget_and_stop_with_its_own_denial() {
         let mut state = budgeted_terminal_with_pending_attempt();
-        state.limits = TokenLimits { total: Some(50_000), output: Some(9_000), initial_total: 0 };
+        state.limits = TokenLimits {
+            total: Some(50_000),
+            output: Some(9_000),
+            initial_total: 0,
+        };
         state.max_calls = 1_000;
         let mut resumed = 0;
         let denial = loop {
@@ -2823,11 +3426,26 @@ mod tests {
             resumed += 1;
             assert!(resumed < 20, "estimates must spend the budget: {state:?}");
             let attempt = uuid::Uuid::new_v4().to_string();
-            let admitted = transition(&mut state, Change::Admit { completion: false, optional: false, attempt_id: attempt }, 0);
+            let admitted = transition(
+                &mut state,
+                Change::Admit {
+                    completion: false,
+                    optional: false,
+                    attempt_id: attempt,
+                },
+                0,
+            );
             if let Err(error) = admitted {
                 break budget_denial_of(&error).expect("the budget's own typed denial");
             }
-            transition(&mut state, Change::TurnTerminal { end: TurnEnd::Interrupted }, 0).unwrap();
+            transition(
+                &mut state,
+                Change::TurnTerminal {
+                    end: TurnEnd::Interrupted,
+                },
+                0,
+            )
+            .unwrap();
             if !may_reopen(&state, 0) {
                 break match exhaustion(&state, 0) {
                     Some(Exhaustion::Budget(rule)) => budget_denial(&state, rule),
@@ -2838,7 +3456,11 @@ mod tests {
         assert_eq!(resumed, 3, "{state:?}");
         assert!(!state.unknown_usage && !denial.unknown_usage, "{denial:?}");
         assert!(
-            matches!(denial.rule, ExecutionBudgetRule::TotalTokensExhausted | ExecutionBudgetRule::OutputTokensExhausted),
+            matches!(
+                denial.rule,
+                ExecutionBudgetRule::TotalTokensExhausted
+                    | ExecutionBudgetRule::OutputTokensExhausted
+            ),
             "{denial:?}"
         );
     }
@@ -2849,19 +3471,41 @@ mod tests {
     #[test]
     fn an_unreported_request_costs_at_least_the_largest_request_seen() {
         let mut state = budgeted_terminal_with_pending_attempt();
-        state.limits = TokenLimits { total: Some(100_000), output: None, initial_total: 0 };
+        state.limits = TokenLimits {
+            total: Some(100_000),
+            output: None,
+            initial_total: 0,
+        };
         let second = uuid::Uuid::new_v4().to_string();
         state.admitted.insert(second.clone());
         state.pending.insert(second);
         let reported = uuid::Uuid::new_v4().to_string();
         state.admitted.insert(reported.clone());
         state.pending.insert(reported.clone());
-        let usage = fuigo_sampling_types::TokenUsage { total_tokens: 60_000, ..Default::default() };
-        transition(&mut state, Change::Settle { attempt_id: reported, usage: Some(usage) }, 0).unwrap();
+        let usage = fuigo_sampling_types::TokenUsage {
+            total_tokens: 60_000,
+            ..Default::default()
+        };
+        transition(
+            &mut state,
+            Change::Settle {
+                attempt_id: reported,
+                usage: Some(usage),
+            },
+            0,
+        )
+        .unwrap();
         assert_eq!(state.total_tokens, 60_000);
-        assert!(may_reopen(&state, 0), "60,000 of 100,000 is spent: the goal may resume");
+        assert!(
+            may_reopen(&state, 0),
+            "60,000 of 100,000 is spent: the goal may resume"
+        );
         transition(&mut state, Change::Reopen { observed_total: 0 }, 0).unwrap();
-        assert!(state.total_tokens >= 60_000 * 3, "each unreported request costs at least 60,000: {}", state.total_tokens);
+        assert!(
+            state.total_tokens >= 60_000 * 3,
+            "each unreported request costs at least 60,000: {}",
+            state.total_tokens
+        );
         assert_eq!(
             token_budget_denial(&state).map(|denial| denial.rule),
             Some(ExecutionBudgetRule::TotalTokensExhausted),
@@ -2877,24 +3521,43 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, actor) = fixture_actor(dir.path().to_owned());
         let session = uuid::Uuid::new_v4().to_string();
-        let limits = TokenLimits { total: Some(100_000), output: None, initial_total: 0 };
+        let limits = TokenLimits {
+            total: Some(100_000),
+            output: None,
+            initial_total: 0,
+        };
         let mut resumes = 0;
         let denial = loop {
-            let turn = match goal_turn(&tx, &session, "goal", &format!("turn-{resumes}"), limits.clone()).await {
+            let turn = match goal_turn(
+                &tx,
+                &session,
+                "goal",
+                &format!("turn-{resumes}"),
+                limits.clone(),
+            )
+            .await
+            {
                 Ok(turn) => turn,
                 Err(error) => break budget_denial_of(&error).expect("the budget's own denial"),
             };
             resumes += 1;
             assert!(resumes < 6, "the budget must be spent");
             turn.note_request_context(60_000);
-            if turn.admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string()).await.is_err() {
+            if turn
+                .admit(RequestPurpose::Work, uuid::Uuid::new_v4().to_string())
+                .await
+                .is_err()
+            {
                 let state = turn.snapshot().await.unwrap();
                 break token_budget_denial(&state).expect("the budget's own denial");
             }
             turn.terminal_after(TurnEnd::Interrupted).await.unwrap();
             turn.release(&session);
         };
-        assert_eq!(resumes, 3, "two interrupted 60,000-token requests spend 100,000: the third turn is refused");
+        assert_eq!(
+            resumes, 3,
+            "two interrupted 60,000-token requests spend 100,000: the third turn is refused"
+        );
         assert_eq!(denial.rule, ExecutionBudgetRule::TotalTokensExhausted);
         drop(tx);
         actor.await.unwrap();
@@ -2904,16 +3567,52 @@ mod tests {
     #[test]
     fn a_late_report_raises_the_floor_for_later_estimates() {
         let mut state = budgeted_terminal_with_pending_attempt();
-        state.limits = TokenLimits { total: Some(1_000_000), output: None, initial_total: 0 };
+        state.limits = TokenLimits {
+            total: Some(1_000_000),
+            output: None,
+            initial_total: 0,
+        };
         let attempt = state.pending.iter().next().cloned().unwrap();
         transition(&mut state, Change::Reopen { observed_total: 0 }, 0).unwrap();
-        let usage = fuigo_sampling_types::TokenUsage { total_tokens: 60_000, ..Default::default() };
-        transition(&mut state, Change::Settle { attempt_id: attempt, usage: Some(usage) }, 0).unwrap();
+        let usage = fuigo_sampling_types::TokenUsage {
+            total_tokens: 60_000,
+            ..Default::default()
+        };
+        transition(
+            &mut state,
+            Change::Settle {
+                attempt_id: attempt,
+                usage: Some(usage),
+            },
+            0,
+        )
+        .unwrap();
         let next = uuid::Uuid::new_v4().to_string();
-        transition(&mut state, Change::Admit { completion: false, optional: false, attempt_id: next.clone() }, 0).unwrap();
+        transition(
+            &mut state,
+            Change::Admit {
+                completion: false,
+                optional: false,
+                attempt_id: next.clone(),
+            },
+            0,
+        )
+        .unwrap();
         let before = state.total_tokens;
-        transition(&mut state, Change::Supersede { attempt_id: next, usage: None }, 0).unwrap();
-        assert!(state.total_tokens - before >= 60_000, "{}", state.total_tokens - before);
+        transition(
+            &mut state,
+            Change::Supersede {
+                attempt_id: next,
+                usage: None,
+            },
+            0,
+        )
+        .unwrap();
+        assert!(
+            state.total_tokens - before >= 60_000,
+            "{}",
+            state.total_tokens - before
+        );
     }
 
     /// P121 (K8). A turn rewound after its request was sent (no terminal receipt) settles the
@@ -2936,12 +3635,22 @@ mod tests {
             let calls = state.calls;
             transition(&mut state, Change::ChargeInFlight, 0).unwrap();
             assert!(!state.pending.contains(&work), "the request is settled");
-            assert!(state.pending.contains(&title), "an optional attempt may still settle");
+            assert!(
+                state.pending.contains(&title),
+                "an optional attempt may still settle"
+            );
             assert_eq!(state.calls, calls, "its call debit stays");
             assert!(!state.unknown_usage);
             assert_eq!(state.total_tokens > 0, limited, "{state:?}");
             // However the goal continues, the request is already accounted for.
-            transition(&mut state, Change::TurnTerminal { end: TurnEnd::Interrupted }, 0).unwrap();
+            transition(
+                &mut state,
+                Change::TurnTerminal {
+                    end: TurnEnd::Interrupted,
+                },
+                0,
+            )
+            .unwrap();
             assert!(may_reopen(&state, 0));
         }
     }
@@ -2954,7 +3663,10 @@ mod tests {
         let mut state = budgeted_terminal_with_pending_attempt();
         state.pending.clear();
         state.unknown_usage = true;
-        assert!(may_reopen(&state, 0), "a terminal record's unknown usage no longer blocks the resume");
+        assert!(
+            may_reopen(&state, 0),
+            "a terminal record's unknown usage no longer blocks the resume"
+        );
         transition(&mut state, Change::Reopen { observed_total: 0 }, 0).unwrap();
         assert_eq!(state.phase, Phase::Working);
         assert!(!state.unknown_usage);
@@ -2973,16 +3685,42 @@ mod tests {
     fn an_estimate_is_charged_once_and_late_usage_never_lowers_it() {
         for (actual, expect_actual) in [(100_000u64, true), (10, false)] {
             let mut state = budgeted_terminal_with_pending_attempt();
-            state.limits = TokenLimits { total: Some(1_000_000), output: None, initial_total: 0 };
+            state.limits = TokenLimits {
+                total: Some(1_000_000),
+                output: None,
+                initial_total: 0,
+            };
             let attempt = state.pending.iter().next().cloned().unwrap();
             transition(&mut state, Change::Reopen { observed_total: 0 }, 0).unwrap();
             let estimate = state.total_tokens;
             assert!(estimate > 0 && estimate < 100_000, "{estimate}");
-            transition(&mut state, Change::Supersede { attempt_id: attempt.clone(), usage: None }, 0).unwrap();
+            transition(
+                &mut state,
+                Change::Supersede {
+                    attempt_id: attempt.clone(),
+                    usage: None,
+                },
+                0,
+            )
+            .unwrap();
             assert_eq!(state.total_tokens, estimate, "charged once");
-            let usage = fuigo_sampling_types::TokenUsage { total_tokens: actual as _, ..Default::default() };
-            transition(&mut state, Change::Settle { attempt_id: attempt, usage: Some(usage) }, 0).unwrap();
-            assert_eq!(state.total_tokens, if expect_actual { actual } else { estimate });
+            let usage = fuigo_sampling_types::TokenUsage {
+                total_tokens: actual as _,
+                ..Default::default()
+            };
+            transition(
+                &mut state,
+                Change::Settle {
+                    attempt_id: attempt,
+                    usage: Some(usage),
+                },
+                0,
+            )
+            .unwrap();
+            assert_eq!(
+                state.total_tokens,
+                if expect_actual { actual } else { estimate }
+            );
             assert!(!state.unknown_usage);
         }
     }
@@ -3012,7 +3750,10 @@ mod tests {
         state.deadline_ms = None;
         state.reopenable = Some(false);
         let error = transition(&mut state, Change::Reopen { observed_total: 0 }, 20).unwrap_err();
-        assert!(goal_ended_of(&error).is_some(), "a stopped turn's record is refused with its reason");
+        assert!(
+            goal_ended_of(&error).is_some(),
+            "a stopped turn's record is refused with its reason"
+        );
     }
 
     /// The counter-test: an interrupted turn on a goal whose budget is genuinely spent stays
@@ -3022,24 +3763,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, actor) = fixture_actor(dir.path().to_owned());
         let session = uuid::Uuid::new_v4().to_string();
-        let limits = TokenLimits { total: Some(100), output: None, initial_total: 0 };
-        let first = goal_turn(&tx, &session, "goal", "turn-1", limits.clone()).await.unwrap();
+        let limits = TokenLimits {
+            total: Some(100),
+            output: None,
+            initial_total: 0,
+        };
+        let first = goal_turn(&tx, &session, "goal", "turn-1", limits.clone())
+            .await
+            .unwrap();
         let attempt = uuid::Uuid::new_v4().to_string();
-        first.admit(RequestPurpose::Work, attempt.clone()).await.unwrap();
         first
-            .settle(attempt, Some(fuigo_sampling_types::TokenUsage { total_tokens: 150, ..Default::default() }))
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+        first
+            .settle(
+                attempt,
+                Some(fuigo_sampling_types::TokenUsage {
+                    total_tokens: 150,
+                    ..Default::default()
+                }),
+            )
             .await
             .unwrap();
         first.terminal_after(TurnEnd::Interrupted).await.unwrap();
         first.release(&session);
         drop(first);
-        let error = goal_turn(&tx, &session, "goal", "turn-2", limits).await.expect_err("spent stays spent");
+        let error = goal_turn(&tx, &session, "goal", "turn-2", limits)
+            .await
+            .expect_err("spent stays spent");
         let denial = budget_denial_of(&error).expect("the typed budget denial");
         assert_eq!(denial.rule, ExecutionBudgetRule::TotalTokensExhausted);
-        assert_eq!((denial.total_tokens_used, denial.total_token_limit), (150, Some(100)));
-        let key = blake3::hash(format!("{session}\0goal").as_bytes()).to_hex().to_string();
-        let state = apply(dir.path(), mutation(&key, Change::Read)).await.unwrap();
-        assert_eq!(state.phase, Phase::Terminal, "the refused reopen left the record untouched");
+        assert_eq!(
+            (denial.total_tokens_used, denial.total_token_limit),
+            (150, Some(100))
+        );
+        let key = blake3::hash(format!("{session}\0goal").as_bytes())
+            .to_hex()
+            .to_string();
+        let state = apply(dir.path(), mutation(&key, Change::Read))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.phase,
+            Phase::Terminal,
+            "the refused reopen left the record untouched"
+        );
         assert!(goal_end_reason(&state, 0).unwrap().contains("Remedy"));
         drop(tx);
         actor.await.unwrap();
@@ -3053,7 +3822,10 @@ mod tests {
         for raw in [LATCH_PENDING_TOOLS, LATCH_STRANDED_ATTEMPT] {
             let state = latch_fixture(raw);
             assert_eq!(state.reopenable, None, "a pre-P89 record");
-            assert!(!may_reopen(&state, 0), "a crash-poisoned record stays terminal");
+            assert!(
+                !may_reopen(&state, 0),
+                "a crash-poisoned record stays terminal"
+            );
             let mut state = state;
             assert!(transition(&mut state, Change::Reopen { observed_total: 0 }, 0).is_err());
             assert_eq!(state.phase, Phase::Terminal);
@@ -3072,7 +3844,10 @@ mod tests {
         clean.unknown_usage = false;
         // The shape the audit's probe produced: Terminal, partial, nothing outstanding.
         let raw = serde_json::to_value(&clean).unwrap();
-        assert!(raw.get("reopenable").is_none(), "absent on the wire, as in an old file");
+        assert!(
+            raw.get("reopenable").is_none(),
+            "absent on the wire, as in an old file"
+        );
         assert!(may_reopen(&clean, 0));
         transition(&mut clean, Change::Reopen { observed_total: 0 }, 0).unwrap();
         assert_eq!(clean.phase, Phase::Working);
@@ -3109,10 +3884,23 @@ mod tests {
         ] {
             let mut state = open();
             if finalizing {
-                transition(&mut state, if recall { Change::FinalizeRecall } else { Change::Finalize }, 0).unwrap();
+                transition(
+                    &mut state,
+                    if recall {
+                        Change::FinalizeRecall
+                    } else {
+                        Change::Finalize
+                    },
+                    0,
+                )
+                .unwrap();
             }
             transition(&mut state, Change::TurnTerminal { end }, 0).unwrap();
-            assert_eq!(state.reopenable, Some(reopenable), "{end:?} finalizing={finalizing} recall={recall}");
+            assert_eq!(
+                state.reopenable,
+                Some(reopenable),
+                "{end:?} finalizing={finalizing} recall={recall}"
+            );
             assert_eq!(may_reopen(&state, 0), reopenable);
         }
         // The legacy entry point keeps its meaning: a non-success is a stop.
@@ -3145,13 +3933,30 @@ mod tests {
         interrupted.reopenable = Some(true);
         assert!(may_reopen(&interrupted, 1_000));
         interrupted.deadline_ms = Some(500);
-        assert!(!may_reopen(&interrupted, 1_000), "the deadline passed while the goal waited");
-        assert!(goal_end_reason(&interrupted, 1_000).unwrap().contains(ExecutionBudgetRule::RuntimeLimit.id()));
-        assert!(transition(&mut interrupted, Change::Reopen { observed_total: 0 }, 1_000).is_err());
+        assert!(
+            !may_reopen(&interrupted, 1_000),
+            "the deadline passed while the goal waited"
+        );
+        assert!(
+            goal_end_reason(&interrupted, 1_000)
+                .unwrap()
+                .contains(ExecutionBudgetRule::RuntimeLimit.id())
+        );
+        assert!(
+            transition(
+                &mut interrupted,
+                Change::Reopen { observed_total: 0 },
+                1_000
+            )
+            .is_err()
+        );
         assert_eq!(interrupted.phase, Phase::Terminal);
 
         let mut legacy = clean();
-        assert!(may_reopen(&legacy, 0), "precondition: a clean pre-P89 record reopens");
+        assert!(
+            may_reopen(&legacy, 0),
+            "precondition: a clean pre-P89 record reopens"
+        );
         legacy.calls = 8;
         assert!(!may_reopen(&legacy, 0), "its model calls are spent");
         let mut legacy = clean();
@@ -3161,7 +3966,10 @@ mod tests {
         let mut legacy = clean();
         legacy.max_tool_rounds = Some(3);
         legacy.tool_rounds = 3;
-        assert!(!may_reopen(&legacy, 0), "its `--max-turns` rounds are spent");
+        assert!(
+            !may_reopen(&legacy, 0),
+            "its `--max-turns` rounds are spent"
+        );
         assert!(goal_end_reason(&legacy, 0).unwrap().contains("--max-turns"));
     }
 
@@ -3182,7 +3990,20 @@ mod tests {
             let open = |tx: &mpsc::UnboundedSender<PersistenceMsg>, session: &str, root: &str| {
                 let tx = tx.clone();
                 let (session, root) = (session.to_owned(), root.to_owned());
-                async move { Execution::open(&tx, &session, &root, "p", 2, None, None, TokenLimits::default(), None).await }
+                async move {
+                    Execution::open(
+                        &tx,
+                        &session,
+                        &root,
+                        "p",
+                        2,
+                        None,
+                        None,
+                        TokenLimits::default(),
+                        None,
+                    )
+                    .await
+                }
             };
             // Two sessions close while their executions are still working.
             let (closed_a, actor_a) = fixture_actor(dir.path().to_owned());
@@ -3195,13 +4016,24 @@ mod tests {
             actor_b.await.unwrap();
 
             let (tx, actor) = fixture_actor(dir.path().to_owned());
-            let goal = Execution::open_goal(&tx, "p89-live", "goal", "g-1", 2, None, None, TokenLimits::default(), None)
-                .await
-                .expect("closed sessions' reservations are back before this one is counted");
+            let goal = Execution::open_goal(
+                &tx,
+                "p89-live",
+                "goal",
+                "g-1",
+                2,
+                None,
+                None,
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .expect("closed sessions' reservations are back before this one is counted");
             let other = open(&tx, "p89-other", "work").await.unwrap();
             assert!(reserved_both());
             drop(goal);
-            let prompt = open(&tx, "p89-live", "prompt").await
+            let prompt = open(&tx, "p89-live", "prompt")
+                .await
                 .expect("the displaced goal's reservation is back before the prompt's is counted");
             prompt.terminal(true).await.unwrap();
             other.terminal(true).await.unwrap();
@@ -3211,16 +4043,39 @@ mod tests {
             assert!(!reserved_both());
 
             // Reopen re-reserves: interrupted (slot given back), reopened (slot retaken).
-            let goal = Execution::open_goal(&tx, "p89-reopen", "goal", "r-1", 2, None, None, TokenLimits::default(), None)
-                .await
-                .unwrap();
+            let goal = Execution::open_goal(
+                &tx,
+                "p89-reopen",
+                "goal",
+                "r-1",
+                2,
+                None,
+                None,
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .unwrap();
             goal.terminal_after(TurnEnd::Interrupted).await.unwrap();
-            let again = Execution::open_goal(&tx, "p89-reopen", "goal", "r-2", 2, None, None, TokenLimits::default(), None)
-                .await
-                .unwrap();
+            let again = Execution::open_goal(
+                &tx,
+                "p89-reopen",
+                "goal",
+                "r-2",
+                2,
+                None,
+                None,
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .unwrap();
             assert!(Arc::ptr_eq(&goal, &again));
             let third = open(&tx, "p89-third", "work").await.unwrap();
-            assert!(reserved_both(), "the reopened goal holds its final answer's slot again");
+            assert!(
+                reserved_both(),
+                "the reopened goal holds its final answer's slot again"
+            );
             again.terminal(true).await.unwrap();
             third.terminal(true).await.unwrap();
             again.release("p89-reopen");
@@ -3232,7 +4087,10 @@ mod tests {
             let displaced = open(&tx, "p89-overlap", "goal").await.unwrap();
             let prompt = open(&tx, "p89-overlap", "prompt").await.unwrap();
             let successor = open(&tx, "p89-overlap", "goal").await.unwrap();
-            assert!(!Arc::ptr_eq(&displaced, &successor), "a second instance of the same key");
+            assert!(
+                !Arc::ptr_eq(&displaced, &successor),
+                "a second instance of the same key"
+            );
             assert!(reserved_both());
             drop(displaced);
             assert!(reserved_both(), "the successor still holds the key's slot");
@@ -3389,13 +4247,24 @@ mod tests {
         let mut state = latch_fixture(LATCH_STRANDED_ATTEMPT);
         transition(&mut state, Change::Reconcile, 0).unwrap();
 
-        assert_eq!(state.phase, Phase::Terminal, "phase is monotone toward Terminal");
+        assert_eq!(
+            state.phase,
+            Phase::Terminal,
+            "phase is monotone toward Terminal"
+        );
 
         // Finalize is still refused, so a caller cannot double-finalize.
         assert!(transition(&mut state, Change::Finalize, 0).is_err());
         // Tools are still refused.
         assert!(
-            transition(&mut state, Change::Tools { ids: vec!["t".into()] }, 0).is_err()
+            transition(
+                &mut state,
+                Change::Tools {
+                    ids: vec!["t".into()]
+                },
+                0
+            )
+            .is_err()
         );
         // A non-background admission is still refused.
         assert!(
@@ -4068,7 +4937,6 @@ mod tests {
         );
     }
 
-
     fn usage(total: u32, output: u32) -> fuigo_sampling_types::TokenUsage {
         fuigo_sampling_types::TokenUsage {
             total_tokens: total,
@@ -4079,7 +4947,15 @@ mod tests {
 
     fn admit_work(state: &mut Snapshot) -> io::Result<String> {
         let attempt = uuid::Uuid::new_v4().to_string();
-        transition(state, Change::Admit { completion: false, optional: false, attempt_id: attempt.clone() }, 0)?;
+        transition(
+            state,
+            Change::Admit {
+                completion: false,
+                optional: false,
+                attempt_id: attempt.clone(),
+            },
+            0,
+        )?;
         Ok(attempt)
     }
 
@@ -4093,46 +4969,125 @@ mod tests {
     async fn every_token_budget_clause_refuses_with_its_own_typed_rule() {
         let open = |limits: TokenLimits| async move {
             let dir = tempfile::tempdir().unwrap();
-            let state = apply(dir.path(), mutation(&key(), Change::Open {
-                max_calls: 9, deadline_ms: None, max_tool_rounds: None, limits,
-            })).await.unwrap();
+            let state = apply(
+                dir.path(),
+                mutation(
+                    &key(),
+                    Change::Open {
+                        max_calls: 9,
+                        deadline_ms: None,
+                        max_tool_rounds: None,
+                        limits,
+                    },
+                ),
+            )
+            .await
+            .unwrap();
             (dir, state)
         };
         // Total budget spent.
-        let (_dir, mut state) = open(TokenLimits { total: Some(100), output: Some(1_000), initial_total: 0 }).await;
+        let (_dir, mut state) = open(TokenLimits {
+            total: Some(100),
+            output: Some(1_000),
+            initial_total: 0,
+        })
+        .await;
         let attempt = admit_work(&mut state).unwrap();
-        transition(&mut state, Change::Settle { attempt_id: attempt, usage: Some(usage(100, 10)) }, 0).unwrap();
+        transition(
+            &mut state,
+            Change::Settle {
+                attempt_id: attempt,
+                usage: Some(usage(100, 10)),
+            },
+            0,
+        )
+        .unwrap();
         let denial = budget_denial_of(&admit_work(&mut state).unwrap_err()).expect("typed");
         assert_eq!(denial.rule, ExecutionBudgetRule::TotalTokensExhausted);
-        assert_eq!((denial.total_token_limit, denial.total_tokens_used), (Some(100), 100));
+        assert_eq!(
+            (denial.total_token_limit, denial.total_tokens_used),
+            (Some(100), 100)
+        );
         assert_eq!(state.calls, 1, "a refused admission debits nothing");
 
         // Output budget spent; the total budget still has room.
-        let (_dir, mut state) = open(TokenLimits { total: Some(1_000), output: Some(40), initial_total: 0 }).await;
+        let (_dir, mut state) = open(TokenLimits {
+            total: Some(1_000),
+            output: Some(40),
+            initial_total: 0,
+        })
+        .await;
         let attempt = admit_work(&mut state).unwrap();
-        transition(&mut state, Change::Settle { attempt_id: attempt, usage: Some(usage(50, 40)) }, 0).unwrap();
+        transition(
+            &mut state,
+            Change::Settle {
+                attempt_id: attempt,
+                usage: Some(usage(50, 40)),
+            },
+            0,
+        )
+        .unwrap();
         let denial = budget_denial_of(&admit_work(&mut state).unwrap_err()).expect("typed");
         assert_eq!(denial.rule, ExecutionBudgetRule::OutputTokensExhausted);
-        assert_eq!((denial.output_token_limit, denial.output_tokens_used), (Some(40), 40));
+        assert_eq!(
+            (denial.output_token_limit, denial.output_tokens_used),
+            (Some(40), 40)
+        );
 
         // Usage unknown under a token budget: fails CLOSED with room left on both limits.
-        let (_dir, mut state) = open(TokenLimits { total: Some(1_000_000), output: None, initial_total: 0 }).await;
+        let (_dir, mut state) = open(TokenLimits {
+            total: Some(1_000_000),
+            output: None,
+            initial_total: 0,
+        })
+        .await;
         let attempt = admit_work(&mut state).unwrap();
-        transition(&mut state, Change::Settle { attempt_id: attempt, usage: None }, 0).unwrap();
+        transition(
+            &mut state,
+            Change::Settle {
+                attempt_id: attempt,
+                usage: None,
+            },
+            0,
+        )
+        .unwrap();
         let denial = budget_denial_of(&admit_work(&mut state).unwrap_err()).expect("typed");
         assert_eq!(denial.rule, ExecutionBudgetRule::TokenUsageUnknown);
         assert!(denial.unknown_usage);
         // ...and a completion admission is refused by the same guard, before its own checks.
         transition(&mut state, Change::Finalize, 0).unwrap();
-        let completion = transition(&mut state, Change::Admit {
-            completion: true, optional: false, attempt_id: uuid::Uuid::new_v4().to_string(),
-        }, 0).unwrap_err();
-        assert_eq!(budget_denial_of(&completion).map(|d| d.rule), Some(ExecutionBudgetRule::TokenUsageUnknown));
+        let completion = transition(
+            &mut state,
+            Change::Admit {
+                completion: true,
+                optional: false,
+                attempt_id: uuid::Uuid::new_v4().to_string(),
+            },
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            budget_denial_of(&completion).map(|d| d.rule),
+            Some(ExecutionBudgetRule::TokenUsageUnknown)
+        );
 
         // Order: total before output before unknown, the order the guard always checked them in.
-        let (_dir, mut state) = open(TokenLimits { total: Some(10), output: Some(10), initial_total: 0 }).await;
+        let (_dir, mut state) = open(TokenLimits {
+            total: Some(10),
+            output: Some(10),
+            initial_total: 0,
+        })
+        .await;
         let attempt = admit_work(&mut state).unwrap();
-        transition(&mut state, Change::Settle { attempt_id: attempt, usage: Some(usage(10, 10)) }, 0).unwrap();
+        transition(
+            &mut state,
+            Change::Settle {
+                attempt_id: attempt,
+                usage: Some(usage(10, 10)),
+            },
+            0,
+        )
+        .unwrap();
         state.unknown_usage = true;
         assert_eq!(
             budget_denial_of(&admit_work(&mut state).unwrap_err()).map(|d| d.rule),
@@ -4146,7 +5101,10 @@ mod tests {
         admit_work(&mut state).expect("no token budget, nothing to fail closed on");
         state.calls = state.max_calls - 1;
         let reserved = admit_work(&mut state).unwrap_err();
-        assert_eq!(budget_denial_of(&reserved).map(|d| d.rule), Some(ExecutionBudgetRule::ModelCallLimit));
+        assert_eq!(
+            budget_denial_of(&reserved).map(|d| d.rule),
+            Some(ExecutionBudgetRule::ModelCallLimit)
+        );
         assert!(token_budget_denial(&state).is_none());
     }
 
@@ -4157,69 +5115,146 @@ mod tests {
     async fn every_limit_clause_refuses_with_its_own_typed_rule() {
         let open = |max_calls: u64, deadline_ms: Option<i64>| async move {
             let dir = tempfile::tempdir().unwrap();
-            let state = apply(dir.path(), mutation(&key(), Change::Open {
-                max_calls, deadline_ms, max_tool_rounds: None, limits: TokenLimits::default(),
-            })).await.unwrap();
+            let state = apply(
+                dir.path(),
+                mutation(
+                    &key(),
+                    Change::Open {
+                        max_calls,
+                        deadline_ms,
+                        max_tool_rounds: None,
+                        limits: TokenLimits::default(),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
             (dir, state)
         };
         let admit = |state: &mut Snapshot, completion: bool, now_ms: i64| {
-            transition(state, Change::Admit {
-                completion, optional: false, attempt_id: uuid::Uuid::new_v4().to_string(),
-            }, now_ms)
+            transition(
+                state,
+                Change::Admit {
+                    completion,
+                    optional: false,
+                    attempt_id: uuid::Uuid::new_v4().to_string(),
+                },
+                now_ms,
+            )
         };
-        let rule_of = |error: io::Error| budget_denial_of(&error).map(|d| d.rule).ok_or(error.to_string());
+        let rule_of = |error: io::Error| {
+            budget_denial_of(&error)
+                .map(|d| d.rule)
+                .ok_or(error.to_string())
+        };
 
         // Deadline: refused at and after it, as the runtime limit; admitted just before.
         let (_dir, mut state) = open(9, Some(1_000)).await;
         admit(&mut state, false, 999).expect("before the deadline");
-        assert_eq!(rule_of(admit(&mut state, false, 1_000).unwrap_err()), Ok(ExecutionBudgetRule::RuntimeLimit));
+        assert_eq!(
+            rule_of(admit(&mut state, false, 1_000).unwrap_err()),
+            Ok(ExecutionBudgetRule::RuntimeLimit)
+        );
         assert_eq!(state.calls, 1, "a refused admission debits nothing");
         // ...and before the token guard, which it always preceded.
         state.limits.total = Some(0);
-        assert_eq!(rule_of(admit(&mut state, false, 1_000).unwrap_err()), Ok(ExecutionBudgetRule::RuntimeLimit));
+        assert_eq!(
+            rule_of(admit(&mut state, false, 1_000).unwrap_err()),
+            Ok(ExecutionBudgetRule::RuntimeLimit)
+        );
         state.limits.total = None;
         // A terminal execution is not a limit: it stays the plain refusal, deadline or not.
         transition(&mut state, Change::Terminal { succeeded: true }, 0).unwrap();
-        assert_eq!(rule_of(admit(&mut state, false, 1_000).unwrap_err()), Err("execution is terminal or expired".into()));
+        assert_eq!(
+            rule_of(admit(&mut state, false, 1_000).unwrap_err()),
+            Err("execution is terminal or expired".into())
+        );
 
         // Work: the last call is reserved for the final answer, so work is refused one call early.
         let (_dir, mut state) = open(3, None).await;
         admit(&mut state, false, 0).unwrap();
         admit(&mut state, false, 0).unwrap();
-        assert_eq!(rule_of(admit(&mut state, false, 0).unwrap_err()), Ok(ExecutionBudgetRule::ModelCallLimit));
+        assert_eq!(
+            rule_of(admit(&mut state, false, 0).unwrap_err()),
+            Ok(ExecutionBudgetRule::ModelCallLimit)
+        );
         // A completion before finalizing is a protocol refusal, not a limit.
-        assert_eq!(rule_of(admit(&mut state, true, 0).unwrap_err()), Err("completion admission unavailable".into()));
+        assert_eq!(
+            rule_of(admit(&mut state, true, 0).unwrap_err()),
+            Err("completion admission unavailable".into())
+        );
         // Finalizing: work is refused for the phase (plain), the final answer is admitted.
         transition(&mut state, Change::Finalize, 0).unwrap();
         state.calls = 0;
-        assert_eq!(rule_of(admit(&mut state, false, 0).unwrap_err()), Err("execution completion capacity reserved".into()));
+        assert_eq!(
+            rule_of(admit(&mut state, false, 0).unwrap_err()),
+            Err("execution completion capacity reserved".into())
+        );
         state.calls = 2;
         admit(&mut state, true, 0).expect("the reserved final call");
         // A second completion is a protocol refusal even with calls to spare...
         state.max_calls = 9;
-        assert_eq!(rule_of(admit(&mut state, true, 0).unwrap_err()), Err("completion admission unavailable".into()));
+        assert_eq!(
+            rule_of(admit(&mut state, true, 0).unwrap_err()),
+            Err("completion admission unavailable".into())
+        );
         // ...and a completion with every call spent is the limit.
         state.completion_admitted = false;
         state.calls = state.max_calls;
-        assert_eq!(rule_of(admit(&mut state, true, 0).unwrap_err()), Ok(ExecutionBudgetRule::ModelCallLimit));
+        assert_eq!(
+            rule_of(admit(&mut state, true, 0).unwrap_err()),
+            Ok(ExecutionBudgetRule::ModelCallLimit)
+        );
 
         // A child's grant is its share of the parent's call limit.
         let (_dir, mut state) = open(3, None).await;
-        transition(&mut state, Change::Grant { child_id: "child".into(), resume_from: None, optional: false }, 0).unwrap();
-        let child_call = || Change::ChildAdmit { grant_id: "child".into(), attempt_id: uuid::Uuid::new_v4().to_string() };
+        transition(
+            &mut state,
+            Change::Grant {
+                child_id: "child".into(),
+                resume_from: None,
+                optional: false,
+            },
+            0,
+        )
+        .unwrap();
+        let child_call = || Change::ChildAdmit {
+            grant_id: "child".into(),
+            attempt_id: uuid::Uuid::new_v4().to_string(),
+        };
         transition(&mut state, child_call(), 0).unwrap();
         transition(&mut state, child_call(), 0).unwrap();
-        assert_eq!(rule_of(transition(&mut state, child_call(), 0).unwrap_err()), Ok(ExecutionBudgetRule::ModelCallLimit));
+        assert_eq!(
+            rule_of(transition(&mut state, child_call(), 0).unwrap_err()),
+            Ok(ExecutionBudgetRule::ModelCallLimit)
+        );
 
         // An execution opened with no call left (`remaining_calls() == Some(0)`) is the limit too.
         let dir = tempfile::tempdir().unwrap();
-        let refused = apply(dir.path(), mutation(&key(), Change::Open {
-            max_calls: 0, deadline_ms: None, max_tool_rounds: None,
-            limits: TokenLimits { total: Some(50), output: None, initial_total: 7 },
-        })).await.unwrap_err();
+        let refused = apply(
+            dir.path(),
+            mutation(
+                &key(),
+                Change::Open {
+                    max_calls: 0,
+                    deadline_ms: None,
+                    max_tool_rounds: None,
+                    limits: TokenLimits {
+                        total: Some(50),
+                        output: None,
+                        initial_total: 7,
+                    },
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
         let denial = budget_denial_of(&refused).expect("typed");
         assert_eq!(denial.rule, ExecutionBudgetRule::ModelCallLimit);
-        assert_eq!((denial.total_token_limit, denial.total_tokens_used), (Some(50), 7));
+        assert_eq!(
+            (denial.total_token_limit, denial.total_tokens_used),
+            (Some(50), 7)
+        );
     }
 
     /// P44: the sampler's process-wide refusals are recognized from the error the turn actually
@@ -4230,10 +5265,17 @@ mod tests {
         use fuigo_sampler::execution_budget::{CALL_LIMIT, WALL_LIMIT};
         use fuigo_sampling_types::SamplingError;
         let message = |reason: &'static str| {
-            fuigo_sampler::SamplingErrorInfo::from(&SamplingError::InvalidConfiguration(reason)).message
+            fuigo_sampler::SamplingErrorInfo::from(&SamplingError::InvalidConfiguration(reason))
+                .message
         };
-        assert_eq!(process_limit_rule(&message(CALL_LIMIT)), Some(ExecutionBudgetRule::ModelCallLimit));
-        assert_eq!(process_limit_rule(&message(WALL_LIMIT)), Some(ExecutionBudgetRule::RuntimeLimit));
+        assert_eq!(
+            process_limit_rule(&message(CALL_LIMIT)),
+            Some(ExecutionBudgetRule::ModelCallLimit)
+        );
+        assert_eq!(
+            process_limit_rule(&message(WALL_LIMIT)),
+            Some(ExecutionBudgetRule::RuntimeLimit)
+        );
         for other in [
             "execution admission denied or could not be persisted",
             "execution budget limits must be positive integers",
@@ -4242,7 +5284,10 @@ mod tests {
             assert_eq!(process_limit_rule(&message(other)), None, "{other}");
         }
         // A provider's own error that merely quotes the text is not the local limit.
-        for quoted in [CALL_LIMIT.to_string(), format!("stream error: {}", message(WALL_LIMIT))] {
+        for quoted in [
+            CALL_LIMIT.to_string(),
+            format!("stream error: {}", message(WALL_LIMIT)),
+        ] {
             assert_eq!(process_limit_rule(&quoted), None, "{quoted}");
         }
     }
@@ -4257,60 +5302,120 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, actor) = fixture_actor(dir.path().to_owned());
         let session = uuid::Uuid::new_v4().to_string();
-        let limits = || TokenLimits { total: Some(100), output: None, initial_total: 0 };
+        let limits = || TokenLimits {
+            total: Some(100),
+            output: None,
+            initial_total: 0,
+        };
         let execution = Execution::open(
-            &tx, &session, "budget-latch", "turn1", 9, None, None, limits(), None,
+            &tx,
+            &session,
+            "budget-latch",
+            "turn1",
+            9,
+            None,
+            None,
+            limits(),
+            None,
         )
         .await
         .unwrap();
         let child_grant = execution.grant_child("child", None, false).await.unwrap();
         let child_session = uuid::Uuid::new_v4().to_string();
         let child = Execution::open(
-            &tx, &child_session, "child-root", "child-turn", 9, None, None,
-            TokenLimits::default(), Some(child_grant),
+            &tx,
+            &child_session,
+            "child-root",
+            "child-turn",
+            9,
+            None,
+            None,
+            TokenLimits::default(),
+            Some(child_grant),
         )
         .await
         .unwrap();
 
         let attempt = uuid::Uuid::new_v4().to_string();
-        execution.admit(RequestPurpose::Work, attempt.clone()).await.unwrap();
-        execution.settle(attempt, Some(usage(150, 20))).await.unwrap();
+        execution
+            .admit(RequestPurpose::Work, attempt.clone())
+            .await
+            .unwrap();
+        execution
+            .settle(attempt, Some(usage(150, 20)))
+            .await
+            .unwrap();
         let next = || uuid::Uuid::new_v4().to_string();
 
         // A side call refused under the same execution records into its own request only.
         let side = execution.request_admission();
         let turn = execution.begin_turn_request();
         assert!(side.admit(RequestPurpose::Work, next()).await.is_err());
-        assert_eq!(side.take_budget_denial().map(|d| d.rule), Some(ExecutionBudgetRule::TotalTokensExhausted));
-        assert_eq!(execution.take_turn_request_denial(), None, "a side call's refusal is not the turn's");
+        assert_eq!(
+            side.take_budget_denial().map(|d| d.rule),
+            Some(ExecutionBudgetRule::TotalTokensExhausted)
+        );
+        assert_eq!(
+            execution.take_turn_request_denial(),
+            None,
+            "a side call's refusal is not the turn's"
+        );
 
         // Optional purposes never record, even on the turn's own request.
         for optional in [RequestPurpose::Title, RequestPurpose::Recap] {
             assert!(turn.admit(optional, next()).await.is_err());
         }
-        assert_eq!(execution.take_turn_request_denial(), None, "an optional refusal never records");
+        assert_eq!(
+            execution.take_turn_request_denial(),
+            None,
+            "an optional refusal never records"
+        );
 
         // The execution's own capability records nothing, for anyone.
         let refused = execution.admit(RequestPurpose::Work, next()).await;
-        assert_eq!(refused, Err("execution admission denied or not durable".to_string()),
-            "the sampler-facing string is unchanged");
+        assert_eq!(
+            refused,
+            Err("execution admission denied or not durable".to_string()),
+            "the sampler-facing string is unchanged"
+        );
         assert_eq!(execution.take_turn_request_denial(), None);
 
         let refused = turn.admit(RequestPurpose::Work, next()).await;
-        assert_eq!(refused, Err("execution admission denied or not durable".to_string()));
-        let denial = execution.take_turn_request_denial().expect("the turn's request recorded it");
+        assert_eq!(
+            refused,
+            Err("execution admission denied or not durable".to_string())
+        );
+        let denial = execution
+            .take_turn_request_denial()
+            .expect("the turn's request recorded it");
         assert_eq!(denial.rule, ExecutionBudgetRule::TotalTokensExhausted);
-        assert_eq!((denial.total_token_limit, denial.total_tokens_used), (Some(100), 150));
+        assert_eq!(
+            (denial.total_token_limit, denial.total_tokens_used),
+            (Some(100), 150)
+        );
         assert_eq!(execution.take_turn_request_denial(), None, "taken once");
 
         // A later request replaces the earlier one: its unreported refusal is not the new request's.
-        assert!(turn.admit(RequestPurpose::Completion, next()).await.is_err());
+        assert!(
+            turn.admit(RequestPurpose::Completion, next())
+                .await
+                .is_err()
+        );
         let _later = execution.begin_turn_request();
-        assert_eq!(execution.take_turn_request_denial(), None, "an earlier request's refusal is gone");
+        assert_eq!(
+            execution.take_turn_request_denial(),
+            None,
+            "an earlier request's refusal is gone"
+        );
 
         // A child refused by its parent's budget reports the parent's denial.
         let child_request = child.begin_turn_request();
-        assert!(child_request.admit(RequestPurpose::Work, next()).await.is_err());
+        assert!(
+            child_request
+                .admit(RequestPurpose::Work, next())
+                .await
+                .is_err()
+        );
         assert_eq!(
             child.take_turn_request_denial().map(|d| d.rule),
             Some(ExecutionBudgetRule::TotalTokensExhausted)
@@ -4320,19 +5425,43 @@ mod tests {
         let stale = execution.begin_turn_request();
         assert!(stale.admit(RequestPurpose::Work, next()).await.is_err());
         let reopened = Execution::open(
-            &tx, &session, "budget-latch", "turn2", 9, None, None, limits(), None,
+            &tx,
+            &session,
+            "budget-latch",
+            "turn2",
+            9,
+            None,
+            None,
+            limits(),
+            None,
         )
         .await
         .unwrap();
         assert!(Arc::ptr_eq(&reopened, &execution));
-        assert_eq!(reopened.take_turn_request_denial(), None, "an earlier turn's refusal is not this turn's");
+        assert_eq!(
+            reopened.take_turn_request_denial(),
+            None,
+            "an earlier turn's refusal is not this turn's"
+        );
 
         child.release(&child_session);
         execution.release(&session);
         // No reference cycle: once the registry and every request handle are gone, so is the record.
         let weak = Arc::downgrade(&execution);
-        drop((child, child_request, side, turn, stale, _later, reopened, execution));
-        assert!(weak.upgrade().is_none(), "the execution outlived its requests: a reference cycle");
+        drop((
+            child,
+            child_request,
+            side,
+            turn,
+            stale,
+            _later,
+            reopened,
+            execution,
+        ));
+        assert!(
+            weak.upgrade().is_none(),
+            "the execution outlived its requests: a reference cycle"
+        );
         drop(tx);
         actor.await.unwrap();
     }

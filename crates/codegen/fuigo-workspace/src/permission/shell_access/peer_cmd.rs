@@ -6,21 +6,49 @@ use super::{
     shell_sed_in_place,
 };
 
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh", "busybox"];
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh", "busybox",
+];
 
 /// Whether a command launched by `xargs` / `find -exec` writes or deletes (or runs shell text).
 fn launched_writer(command: &[String]) -> bool {
     let peel = peel_write_command(command);
-    let Some(program) = peel.words.first().map(|w| shell_program_name(w).to_ascii_lowercase()) else {
+    let Some(program) = peel
+        .words
+        .first()
+        .map(|w| shell_program_name(w).to_ascii_lowercase())
+    else {
         return false;
     };
     matches!(
         program.as_str(),
-        "rm" | "rmdir" | "unlink" | "shred" | "mv" | "cp" | "tee" | "chmod" | "chown" | "chgrp" | "chattr"
-            | "truncate" | "dd" | "install" | "ln" | "touch" | "rsync" | "eval" | "source" | "."
+        "rm" | "rmdir"
+            | "unlink"
+            | "shred"
+            | "mv"
+            | "cp"
+            | "tee"
+            | "chmod"
+            | "chown"
+            | "chgrp"
+            | "chattr"
+            | "truncate"
+            | "dd"
+            | "install"
+            | "ln"
+            | "touch"
+            | "rsync"
+            | "eval"
+            | "source"
+            | "."
     ) || SHELLS.contains(&program.as_str())
         || (program == "sed" && shell_sed_in_place(peel.words))
-        || (program == "perl" && peel.words.iter().skip(1).any(|w| w.starts_with('-') && w.contains('i')))
+        || (program == "perl"
+            && peel
+                .words
+                .iter()
+                .skip(1)
+                .any(|w| w.starts_with('-') && w.contains('i')))
 }
 
 /// Positional operands of a command (`--` ends options); `-t`/`--target-directory` values are returned separately.
@@ -53,7 +81,11 @@ fn operands(inner: &[String]) -> (Vec<&String>, bool) {
 
 /// A `-c` / `--config-env` key that makes git run a program of the caller's choosing.
 fn risky_git_key(kv: &str) -> bool {
-    let key = kv.split('=').next().unwrap_or_default().to_ascii_lowercase();
+    let key = kv
+        .split('=')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     matches!(
         key.as_str(),
         "core.hookspath" | "core.sshcommand" | "core.fsmonitor" | "core.editor"
@@ -74,7 +106,10 @@ fn git_parts(inner: &[String]) -> (Option<&str>, &[String], bool) {
             risky |= risky_git_key(kv);
         } else if word.starts_with("--exec-p") {
             risky = true;
-        } else if matches!(word.as_str(), "-C" | "--git-dir" | "--work-tree" | "--namespace") {
+        } else if matches!(
+            word.as_str(),
+            "-C" | "--git-dir" | "--work-tree" | "--namespace"
+        ) {
             i += 1;
         } else if let Some(kv) = word.strip_prefix("-c").filter(|_| !word.starts_with("--")) {
             risky |= risky_git_key(kv);
@@ -92,8 +127,14 @@ fn git_config_write(inner: &[String]) -> bool {
     if risky {
         return true;
     }
-    let first = args.iter().find(|a| !a.starts_with('-')).map(String::as_str);
-    let has = |f: &[&str]| args.iter().any(|a| f.iter().any(|x| a == x || a.starts_with(&format!("{x}="))));
+    let first = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(String::as_str);
+    let has = |f: &[&str]| {
+        args.iter()
+            .any(|a| f.iter().any(|x| a == x || a.starts_with(&format!("{x}="))))
+    };
     match sub {
         Some("remote") => matches!(
             first,
@@ -105,14 +146,18 @@ fn git_config_write(inner: &[String]) -> bool {
         ),
         // `-uorigin/main` (attached) and abbreviated long options (`--set-up=`) write the upstream too.
         Some("branch") => {
-            has(&["-u", "--set-upstream-to", "--unset-upstream", "--edit-description"])
-                || args.iter().any(|a| {
-                    (a.starts_with('-') && !a.starts_with("--") && a.contains('u'))
+            has(&[
+                "-u",
+                "--set-upstream-to",
+                "--unset-upstream",
+                "--edit-description",
+            ]) || args.iter().any(|a| {
+                (a.starts_with('-') && !a.starts_with("--") && a.contains('u'))
                         // Git accepts any unique prefix of a long option: `--u`, `--unset`, `--e`, `--edit`, `--set-up`.
                         || a.starts_with("--u")
                         || a.starts_with("--e")
                         || a.starts_with("--set")
-                })
+            })
         }
         Some("init" | "clone") => true,
         Some("worktree") => first == Some("add"),
@@ -126,7 +171,9 @@ pub(super) fn peer_command_targets(program: &str, inner: &[String], out: &mut Co
         // Shell text nothing here can read.
         "source" | "." | "eval" => out.unpinned(),
         "xargs" | "find" => {
-            if launched_commands(program, inner).into_iter().any(launched_writer)
+            if launched_commands(program, inner)
+                .into_iter()
+                .any(launched_writer)
                 || (program == "find" && inner.iter().any(|w| w == "-delete" || w == "-rm"))
             {
                 out.unpinned();
@@ -144,7 +191,8 @@ pub(super) fn peer_command_targets(program: &str, inner: &[String], out: &mut Co
         }
         "chmod" | "chown" | "chgrp" | "chattr" | "touch" => {
             let (ops, _) = operands(inner);
-            out.targets.extend(ops.into_iter().map(|op| (op.clone(), None, None)));
+            out.targets
+                .extend(ops.into_iter().map(|op| (op.clone(), None, None)));
         }
         "git" if git_config_write(inner) => out.unpinned(),
         _ => {}

@@ -84,7 +84,9 @@ impl DialClass {
 
     /// The outcome a send reports when its dial failed this way: the same one the unix path reports for every failure.
     pub(crate) fn delivery(self) -> DeliveryOutcome {
-        DeliveryOutcome::Rejected { reason: RejectReason::Unavailable }
+        DeliveryOutcome::Rejected {
+            reason: RejectReason::Unavailable,
+        }
     }
 }
 
@@ -92,7 +94,10 @@ impl DialClass {
 /// no pipe of that name. A busy pipe, access denied, a refusal, a version mismatch, a timeout, a hello of anyone, or any
 /// other failure keeps it.
 pub(crate) fn win_reap_decision(first: &TryResult, second: &TryResult) -> bool {
-    matches!((first, second), (TryResult::NoSuchFile, TryResult::NoSuchFile))
+    matches!(
+        (first, second),
+        (TryResult::NoSuchFile, TryResult::NoSuchFile)
+    )
 }
 
 /// The locator already holds the maximum number of rows of other hosts.
@@ -124,7 +129,10 @@ pub(crate) fn without_host(cur: Option<&[u8]>, host: &HostId) -> Option<Vec<u8>>
 
 /// `cur` without exactly the `victims` that are still present unchanged (same host id, pid, start marker and dir), and the
 /// host ids actually removed. A changed or gone row is left alone.
-pub(crate) fn without_exact(cur: Option<&[u8]>, victims: &[HostRow]) -> (Option<Vec<u8>>, Vec<HostId>) {
+pub(crate) fn without_exact(
+    cur: Option<&[u8]>,
+    victims: &[HostRow],
+) -> (Option<Vec<u8>>, Vec<HostId>) {
     let mut rows = decode_rows(cur);
     let mut removed = Vec::new();
     for v in victims {
@@ -157,7 +165,12 @@ mod tests {
     }
 
     fn row(c: char, pid: u32) -> HostRow {
-        HostRow { host_id: hid(c), pid, started: 100, dir: HostDir::Home }
+        HostRow {
+            host_id: hid(c),
+            pid,
+            started: 100,
+            dir: HostDir::Home,
+        }
     }
 
     fn bytes(rows: &[HostRow]) -> Vec<u8> {
@@ -168,19 +181,57 @@ mod tests {
     fn dial_error_table() {
         use super::super::win_policy::ServerRefusal;
         let cases = [
-            (WinDialError::NoServer, DialClass::Gone, TryResult::NoSuchFile),
-            (WinDialError::Timeout, DialClass::Timeout, TryResult::Timeout),
-            (WinDialError::VersionMismatch, DialClass::VersionMismatch, TryResult::VersionMismatch),
-            (WinDialError::IdentityUnreadable, DialClass::Unavailable, TryResult::Other),
-            (WinDialError::NotAPipe, DialClass::Unavailable, TryResult::Other),
-            (WinDialError::WrongServer(ServerRefusal::NotAPipe), DialClass::Unavailable, TryResult::Other),
-            (WinDialError::ForeignHello, DialClass::Unavailable, TryResult::Other),
-            (WinDialError::Other, DialClass::Unavailable, TryResult::Other),
+            (
+                WinDialError::NoServer,
+                DialClass::Gone,
+                TryResult::NoSuchFile,
+            ),
+            (
+                WinDialError::Timeout,
+                DialClass::Timeout,
+                TryResult::Timeout,
+            ),
+            (
+                WinDialError::VersionMismatch,
+                DialClass::VersionMismatch,
+                TryResult::VersionMismatch,
+            ),
+            (
+                WinDialError::IdentityUnreadable,
+                DialClass::Unavailable,
+                TryResult::Other,
+            ),
+            (
+                WinDialError::NotAPipe,
+                DialClass::Unavailable,
+                TryResult::Other,
+            ),
+            (
+                WinDialError::WrongServer(ServerRefusal::NotAPipe),
+                DialClass::Unavailable,
+                TryResult::Other,
+            ),
+            (
+                WinDialError::ForeignHello,
+                DialClass::Unavailable,
+                TryResult::Other,
+            ),
+            (
+                WinDialError::Other,
+                DialClass::Unavailable,
+                TryResult::Other,
+            ),
         ];
         for (e, class, tr) in cases {
             assert_eq!(classify(&e), class, "{e:?}");
             assert_eq!(class.try_result(), tr, "{e:?}");
-            assert_eq!(class.delivery(), DeliveryOutcome::Rejected { reason: RejectReason::Unavailable }, "{e:?}");
+            assert_eq!(
+                class.delivery(),
+                DeliveryOutcome::Rejected {
+                    reason: RejectReason::Unavailable
+                },
+                "{e:?}"
+            );
         }
     }
 
@@ -209,18 +260,32 @@ mod tests {
         let cases = [
             (WinUnavailable::FeatureOff, Disabled::FeatureOff),
             (WinUnavailable::NotWindows, Disabled::UnsupportedPlatform),
-            (WinUnavailable::IdentityUnreadable, Disabled::IdentityUnreadable),
+            (
+                WinUnavailable::IdentityUnreadable,
+                Disabled::IdentityUnreadable,
+            ),
             (WinUnavailable::NetworkLogon, Disabled::NetworkLogon),
             (WinUnavailable::NameInUse, Disabled::PipeNameInUse),
             (WinUnavailable::CreateFailed(5), Disabled::PipeCreateFailed),
-            (WinUnavailable::CreateFailed(1234), Disabled::PipeCreateFailed),
+            (
+                WinUnavailable::CreateFailed(1234),
+                Disabled::PipeCreateFailed,
+            ),
             (WinUnavailable::ReadbackFailed, Disabled::PipeCheckFailed),
         ];
         for (u, d) in cases {
             assert_eq!(disabled_of(u), d, "{u:?}");
-            assert_eq!(d.reason_text(), u.reason_text(), "{u:?}: same fixed text on both sides");
+            assert_eq!(
+                d.reason_text(),
+                u.reason_text(),
+                "{u:?}: same fixed text on both sides"
+            );
         }
-        assert!(Disabled::NetworkLogon.reason_text().contains("remote (network) logon session"));
+        assert!(
+            Disabled::NetworkLogon
+                .reason_text()
+                .contains("remote (network) logon session")
+        );
     }
 
     #[test]
@@ -234,11 +299,18 @@ mod tests {
         let next = with_row_added(Some(&cur), a2.clone()).unwrap().unwrap();
         assert_eq!(decode_rows(Some(&next)), vec![b.clone(), a2]);
         // a garbage file counts as no rows
-        let g = with_row_added(Some(b"not json"), a.clone()).unwrap().unwrap();
+        let g = with_row_added(Some(b"not json"), a.clone())
+            .unwrap()
+            .unwrap();
         assert_eq!(decode_rows(Some(&g)), vec![a.clone()]);
         // full of other hosts
         let full: Vec<HostRow> = (0..MAX_ROWS)
-            .map(|i| HostRow { host_id: HostId::new(&format!("{i:032x}")).unwrap(), pid: i as u32, started: 1, dir: HostDir::Home })
+            .map(|i| HostRow {
+                host_id: HostId::new(&format!("{i:032x}")).unwrap(),
+                pid: i as u32,
+                started: 1,
+                dir: HostDir::Home,
+            })
             .collect();
         let cur = bytes(&full);
         assert!(with_row_added(Some(&cur), a).is_err());
@@ -254,7 +326,10 @@ mod tests {
         assert!(without_host(Some(&left), &hid('b')).is_none());
         // not present: bytes unchanged
         assert_eq!(without_host(Some(&cur), &hid('9')).unwrap(), cur);
-        assert_eq!(without_host(Some(b"garbage"), &hid('a')).unwrap(), b"garbage".to_vec());
+        assert_eq!(
+            without_host(Some(b"garbage"), &hid('a')).unwrap(),
+            b"garbage".to_vec()
+        );
         // exact: a row restarted under the same host id (other pid or start marker) is not removed
         let restarted = row('a', 99);
         let (out, removed) = without_exact(Some(&cur), &[restarted]);

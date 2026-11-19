@@ -93,7 +93,11 @@ impl Agent {
 
     /// Replace the instruction list after a folder-trust grant. A definition without `agents_md` keeps an empty list.
     pub fn set_agents_md_files(&mut self, files: Vec<crate::prompt::agents_md::AgentConfigFile>) {
-        self.prompt_context.agents_md_files = if self.definition.agents_md { files } else { Vec::new() };
+        self.prompt_context.agents_md_files = if self.definition.agents_md {
+            files
+        } else {
+            Vec::new()
+        };
     }
 
     /// Record allowlist entries that matched no known tool. See the field docs. P01.

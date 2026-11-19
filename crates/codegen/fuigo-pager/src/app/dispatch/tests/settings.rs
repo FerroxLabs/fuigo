@@ -3655,11 +3655,13 @@ fn set_subagent_model_inheritance_persists_and_mirrors_the_config_layer() {
     app.subagent_model_inheritance = crate::settings::FeatureTiers::default();
     let effects = dispatch(Action::SetSubagentModelInheritance(true), &mut app);
     match effects.as_slice() {
-        [Effect::PersistSetting {
-            key,
-            value,
-            rollback_value,
-        }] => {
+        [
+            Effect::PersistSetting {
+                key,
+                value,
+                rollback_value,
+            },
+        ] => {
             assert_eq!(*key, "features.subagent_model_inheritance");
             assert_eq!(value, &SettingValue::Bool(true));
             assert_eq!(rollback_value, &SettingValue::Bool(false));
@@ -3687,8 +3689,14 @@ fn set_subagent_model_inheritance_names_an_overriding_tier_and_writes_nothing() 
         config: None,
     };
     let effects = dispatch(Action::SetSubagentModelInheritance(true), &mut app);
-    assert!(effects.is_empty(), "nothing is persisted under an override: {effects:?}");
-    assert_eq!(app.subagent_model_inheritance.config, None, "the mirror is untouched");
+    assert!(
+        effects.is_empty(),
+        "nothing is persisted under an override: {effects:?}"
+    );
+    assert_eq!(
+        app.subagent_model_inheritance.config, None,
+        "the mirror is untouched"
+    );
     let toast = read_toast(&app);
     assert!(
         toast.contains("FUIGO_SUBAGENT_MODEL_INHERITANCE"),
@@ -3700,7 +3708,11 @@ fn set_subagent_model_inheritance_names_an_overriding_tier_and_writes_nothing() 
         config: None,
     };
     assert!(dispatch(Action::SetSubagentModelInheritance(false), &mut app).is_empty());
-    assert!(read_toast(&app).contains("requirements.toml"), "{:?}", read_toast(&app));
+    assert!(
+        read_toast(&app).contains("requirements.toml"),
+        "{:?}",
+        read_toast(&app)
+    );
 }
 
 /// The row reads the value in force: pin over environment over config over the default.
@@ -3712,9 +3724,19 @@ fn feature_tiers_resolve_with_the_registry_precedence() {
     assert!(!FeatureTiers::default().effective(f), "default is off");
     let t = |pin, env, config| FeatureTiers { pin, env, config };
     assert!(t(None, None, Some(true)).effective(f), "config turns it on");
-    assert!(!t(None, Some(false), Some(true)).effective(f), "env outranks config");
-    assert!(t(Some(true), Some(false), Some(false)).effective(f), "a pin outranks both");
-    assert_eq!(t(None, None, Some(true)).override_label(f), None, "config is not an override");
+    assert!(
+        !t(None, Some(false), Some(true)).effective(f),
+        "env outranks config"
+    );
+    assert!(
+        t(Some(true), Some(false), Some(false)).effective(f),
+        "a pin outranks both"
+    );
+    assert_eq!(
+        t(None, None, Some(true)).override_label(f),
+        None,
+        "config is not an override"
+    );
     assert!(
         t(None, Some(true), None)
             .override_label(f)
@@ -3736,11 +3758,21 @@ mod tool_density_default {
     #[test]
     fn the_persisted_value_applies_to_a_new_session_at_startup() {
         let mut app = test_app();
-        assert_eq!(app.new_scrollback().tool_density(), None, "unset keeps per-call folds");
+        assert_eq!(
+            app.new_scrollback().tool_density(),
+            None,
+            "unset keeps per-call folds"
+        );
         app.current_ui.tool_density = Some("compact".to_string());
-        assert_eq!(app.new_scrollback().tool_density(), Some(DisplayMode::Collapsed));
+        assert_eq!(
+            app.new_scrollback().tool_density(),
+            Some(DisplayMode::Collapsed)
+        );
         app.current_ui.tool_density = Some("detailed".to_string());
-        assert_eq!(app.new_scrollback().tool_density(), Some(DisplayMode::Expanded));
+        assert_eq!(
+            app.new_scrollback().tool_density(),
+            Some(DisplayMode::Expanded)
+        );
     }
 
     #[test]
@@ -3754,7 +3786,10 @@ mod tool_density_default {
             Some(DisplayMode::Collapsed)
         );
         let effects = dispatch(Action::SetToolDensity(Some(false)), &mut app);
-        assert!(effects.is_empty(), "/density must not persist anything: {effects:?}");
+        assert!(
+            effects.is_empty(),
+            "/density must not persist anything: {effects:?}"
+        );
         assert_eq!(
             app.agents[&id].scrollback.tool_density(),
             Some(DisplayMode::Expanded),
@@ -3775,7 +3810,10 @@ mod tool_density_default {
     #[test]
     fn the_settings_dialog_persists_the_default() {
         let mut app = test_app_with_agent();
-        let effects = dispatch(Action::SetToolDensityDefault("compact".to_string()), &mut app);
+        let effects = dispatch(
+            Action::SetToolDensityDefault("compact".to_string()),
+            &mut app,
+        );
         assert!(
             matches!(
                 effects.as_slice(),
@@ -3849,7 +3887,10 @@ fn set_vim_level_nav_keeps_scrollback_and_drops_prompt_vim() {
     assert!(crate::appearance::cache::load_vim_mode());
     assert!(!crate::appearance::cache::load_vim_prompt());
     assert!(
-        matches!(effects.last(), Some(Effect::PersistKeysVim { value: "nav" })),
+        matches!(
+            effects.last(),
+            Some(Effect::PersistKeysVim { value: "nav" })
+        ),
         "{effects:?}"
     );
 }
@@ -3865,7 +3906,10 @@ fn set_vim_level_off_disables_both() {
     assert!(!crate::appearance::cache::load_vim_prompt());
     assert!(!app.agents[&AgentId(0)].vim_mode);
     assert!(
-        matches!(effects.last(), Some(Effect::PersistKeysVim { value: "off" })),
+        matches!(
+            effects.last(),
+            Some(Effect::PersistKeysVim { value: "off" })
+        ),
         "{effects:?}"
     );
 }
@@ -3882,7 +3926,10 @@ fn toggle_vim_mode_off_also_ends_prompt_vim() {
         matches!(
             effects.as_slice(),
             [
-                Effect::PersistSetting { key: "vim_mode", .. },
+                Effect::PersistSetting {
+                    key: "vim_mode",
+                    ..
+                },
                 Effect::PersistKeysVim { value: "off" },
             ]
         ),
@@ -3908,13 +3955,19 @@ fn set_simple_mode_drives_prompt_vim() {
     assert!(crate::appearance::cache::load_vim_prompt());
     assert!(crate::appearance::cache::load_vim_mode());
     assert!(
-        matches!(effects.last(), Some(Effect::PersistKeysVim { value: "all" })),
+        matches!(
+            effects.last(),
+            Some(Effect::PersistKeysVim { value: "all" })
+        ),
         "{effects:?}"
     );
     let effects = dispatch(Action::SetSimpleMode(true), &mut app);
     assert!(!crate::appearance::cache::load_vim_prompt());
     assert!(
-        matches!(effects.last(), Some(Effect::PersistKeysVim { value: "nav" })),
+        matches!(
+            effects.last(),
+            Some(Effect::PersistKeysVim { value: "nav" })
+        ),
         "{effects:?}"
     );
     // Already off: nothing more to persist for `[keys] vim`

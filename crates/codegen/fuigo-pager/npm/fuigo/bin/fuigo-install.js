@@ -315,4 +315,4 @@ function installCanonical({ fuigoHome, version, brotliPath, binaryPath, stamp, p
     }
 }
 
-module.exports = { installCanonical, writeVendorBinary, cleanupOldVersions, byVersionDescending };
+module.exports = { installCanonical, writeVendorBinary, cleanupOldVersions, byVersionDescending, writeInstallerConfig };

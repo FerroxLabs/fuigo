@@ -257,7 +257,9 @@ fn a_model_that_answers_inside_the_bound_completes_normally() {
         run.advertised_tools
     );
     assert!(
-        run.advertised_tools.iter().all(|advertised| *advertised > 0),
+        run.advertised_tools
+            .iter()
+            .all(|advertised| *advertised > 0),
         "a run inside the bound never has its tools taken away; advertised {:?}",
         run.advertised_tools
     );

@@ -386,7 +386,11 @@ fn host_is_loopback(host: &str) -> bool {
     let name = if let Some(rest) = host.strip_prefix('[') {
         match rest.split_once(']') {
             Some((inner, "")) => format!("[{inner}]"),
-            Some((inner, port)) if port.strip_prefix(':').is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())) => {
+            Some((inner, port))
+                if port
+                    .strip_prefix(':')
+                    .is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())) =>
+            {
                 format!("[{inner}]")
             }
             _ => return false,
@@ -511,7 +515,12 @@ fn bind_unix_private(
         let listener = std::os::unix::net::UnixListener::bind(&temp_sock)?;
         set_mode(&temp_sock)?;
         fs::rename(&temp_sock, path).map_err(|e| {
-            io::Error::new(e.kind(), format!("cannot move the socket into place (is the path owned by another user?): {e}"))
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot move the socket into place (is the path owned by another user?): {e}"
+                ),
+            )
         })?;
         Ok(listener)
     })();
@@ -582,6 +591,10 @@ pub struct BoundDiag {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test clients hit localhost mocks"
+)]
 mod tests {
 
     #[cfg(unix)]
@@ -621,7 +634,8 @@ mod tests {
         fn chmod_failure_returns_error_and_nothing_listens() {
             let tmp = tempfile::tempdir().unwrap();
             let sock = tmp.path().join("d.sock");
-            let err = bind_unix_private(&sock, |_| Err(io::Error::other("injected chmod failure"))).unwrap_err();
+            let err = bind_unix_private(&sock, |_| Err(io::Error::other("injected chmod failure")))
+                .unwrap_err();
             assert!(err.to_string().contains("injected chmod failure"));
             assert!(!sock.exists());
             assert!(std::os::unix::net::UnixStream::connect(&sock).is_err());
@@ -645,7 +659,12 @@ mod tests {
             }
             assert_eq!(fs::read(&file).unwrap(), b"keep");
             assert!(sub.is_dir());
-            assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
             assert_eq!(fs::read(&target).unwrap(), b"target");
             let mut names = leftovers(tmp.path());
             names.sort();
@@ -683,12 +702,20 @@ mod tests {
             let real_before = fs::symlink_metadata(&real).unwrap();
             let err = bind_unix_private(&link, set_owner_only).unwrap_err();
             assert!(err.to_string().contains("not a socket"), "{err}");
-            assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+            assert!(
+                fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
             assert_eq!(fs::read_link(&link).unwrap(), real);
             let real_after = fs::symlink_metadata(&real).unwrap();
             assert!(real_after.file_type().is_socket());
             assert_eq!(real_after.ino(), real_before.ino());
-            assert_eq!(real_after.permissions().mode(), real_before.permissions().mode());
+            assert_eq!(
+                real_after.permissions().mode(),
+                real_before.permissions().mode()
+            );
             let mut names = leftovers(tmp.path());
             names.sort();
             assert_eq!(names, vec!["link.sock", "real.sock"]);
@@ -701,7 +728,10 @@ mod tests {
             drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
             let _l = bind_unix_private(&sock, set_owner_only).unwrap();
             assert!(std::os::unix::net::UnixStream::connect(&sock).is_ok());
-            assert_eq!(fs::metadata(&sock).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&sock).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
     use serde_json::Value;
@@ -1221,23 +1251,52 @@ mod tests {
             }
             async move { request.send().await.expect("request") }
         };
-        for host in ["evil.example", "evil.example:6016", "127.0.0.1.evil.example", "localhost.evil.example"] {
+        for host in [
+            "evil.example",
+            "evil.example:6016",
+            "127.0.0.1.evil.example",
+            "localhost.evil.example",
+        ] {
             let response = get("/logs", Some(host)).await;
             assert_eq!(response.status().as_u16(), 403, "{host}");
             assert!(!response.text().await.unwrap().contains("secret-ish"));
         }
-        for host in [None, Some("localhost"), Some("localhost:6016"), Some("127.0.0.1"), Some("[::1]:6016")] {
+        for host in [
+            None,
+            Some("localhost"),
+            Some("localhost:6016"),
+            Some("127.0.0.1"),
+            Some("[::1]:6016"),
+        ] {
             assert_eq!(get("/logs", host).await.status().as_u16(), 200, "{host:?}");
         }
-        assert_ne!(get("/ready", Some("evil.example")).await.status().as_u16(), 403);
+        assert_ne!(
+            get("/ready", Some("evil.example")).await.status().as_u16(),
+            403
+        );
     }
 
     #[test]
     fn host_header_loopback_names() {
-        for ok in ["localhost", "LOCALHOST:80", "127.0.0.1", "127.0.0.1:6016", "[::1]", "[::1]:6016"] {
+        for ok in [
+            "localhost",
+            "LOCALHOST:80",
+            "127.0.0.1",
+            "127.0.0.1:6016",
+            "[::1]",
+            "[::1]:6016",
+        ] {
             assert!(host_is_loopback(ok), "{ok}");
         }
-        for bad in ["", "evil.example", "127.0.0.1.evil.example", "localhost.evil.example:80", "::1", "10.0.0.1", "0.0.0.0"] {
+        for bad in [
+            "",
+            "evil.example",
+            "127.0.0.1.evil.example",
+            "localhost.evil.example:80",
+            "::1",
+            "10.0.0.1",
+            "0.0.0.0",
+        ] {
             assert!(!host_is_loopback(bad), "{bad}");
         }
     }

@@ -600,15 +600,12 @@ mod tests {
                 if legacy { "▼" } else { "▾" }
             );
             assert_eq!(heavy_horizontal_for(legacy), if legacy { "─" } else { "━" });
-            assert_eq!(light_horizontal_for(legacy), if legacy { "─" } else { "─" });
+            assert_eq!(light_horizontal_for(legacy), "─");
             assert_eq!(
                 timeline_tick_active_for(legacy),
                 if legacy { "══" } else { "━━" }
             );
-            assert_eq!(
-                timeline_tick_hover_for(legacy),
-                if legacy { "──" } else { "──" }
-            );
+            assert_eq!(timeline_tick_hover_for(legacy), "──");
             assert_eq!(filled_dot_for(legacy), if legacy { "•" } else { "●" });
             assert_eq!(selection_bar_for(legacy), if legacy { "│" } else { "▏" });
             assert_eq!(chevron_for(legacy), if legacy { ">" } else { "›" });

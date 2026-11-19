@@ -19,15 +19,27 @@ use super::dial::{DialError, dial};
 use super::inbox::PeerInbox;
 use super::inbox_tests::{hid, home_in, on, tmp};
 
-const PRIV: [&str; 4] = ["--reuid=65534", "--regid=65534", "--clear-groups", "python3"];
+const PRIV: [&str; 4] = [
+    "--reuid=65534",
+    "--regid=65534",
+    "--clear-groups",
+    "python3",
+];
 
-#[allow(clippy::print_stdout, reason = "the skip line is the contract: the release log must show P8D-UID-SKIP")]
+#[allow(
+    clippy::print_stdout,
+    reason = "the skip line is the contract: the release log must show P8D-UID-SKIP"
+)]
 /// Whether the second-uid machinery works here. Panics (a failed test) when it does not, unless allowed to skip.
 fn second_uid_available(t: &std::path::Path) -> bool {
     let probe = t.join("probe.py");
     std::fs::write(&probe, "import os; print(os.getuid())").unwrap();
     std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let out = Command::new("setpriv").args(PRIV).arg("-I").arg(&probe).output();
+    let out = Command::new("setpriv")
+        .args(PRIV)
+        .arg("-I")
+        .arg(&probe)
+        .output();
     let ok = matches!(&out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "65534");
     if ok {
         return true;
@@ -118,9 +130,18 @@ async fn a_second_uid_cannot_traverse_the_peers_directory() {
     let a = PeerInbox::start_with(&home, on()).await.unwrap();
     let sock = a.locations().socket(a.host_id(), HostDir::Home).unwrap();
     let st = script(t.path(), "stat.py", STAT);
-    let out = as_other(&st, &[&home, &home.join("peers"), &sock]).output().unwrap();
-    let lines: Vec<_> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect();
-    assert_eq!(lines, vec!["OK", "OK", "EACCES"], "can see home and the directory itself, not enter it: {out:?}");
+    let out = as_other(&st, &[&home, &home.join("peers"), &sock])
+        .output()
+        .unwrap();
+    let lines: Vec<_> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        lines,
+        vec!["OK", "OK", "EACCES"],
+        "can see home and the directory itself, not enter it: {out:?}"
+    );
 }
 
 #[tokio::test]
@@ -143,9 +164,14 @@ async fn with_a_test_only_chmod_a_second_uid_connects_and_is_dropped_unread() {
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666)).unwrap();
     let cl = script(t.path(), "client.py", CLIENT);
     let sock2 = sock.clone();
-    let out = tokio::task::spawn_blocking(move || as_other(&cl, &[&sock2]).output().unwrap()).await.unwrap();
+    let out = tokio::task::spawn_blocking(move || as_other(&cl, &[&sock2]).output().unwrap())
+        .await
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(text.contains("BYTES=0"), "no reply byte, ever: {text:?} {out:?}");
+    assert!(
+        text.contains("BYTES=0"),
+        "no reply byte, ever: {text:?} {out:?}"
+    );
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(hits.load(Ordering::SeqCst), 0, "the host was never called");
 }
@@ -173,12 +199,30 @@ async fn a_client_refuses_a_server_of_the_second_uid_reached_through_a_symlinked
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(theirs.join("ready").exists(), "the second-uid server did not start");
+    assert!(
+        theirs.join("ready").exists(),
+        "the second-uid server did not start"
+    );
     let x = hid("5e5e0000000000005e5e000000000000");
-    std::os::unix::fs::symlink(theirs.join("s.sock"), home.join("peers").join(format!("{x}.sock"))).unwrap();
-    let r = dial(a.locations(), a.host_id(), &x, HostDir::Home, Op::List { page: 0 }).await;
+    std::os::unix::fs::symlink(
+        theirs.join("s.sock"),
+        home.join("peers").join(format!("{x}.sock")),
+    )
+    .unwrap();
+    let r = dial(
+        a.locations(),
+        a.host_id(),
+        &x,
+        HostDir::Home,
+        Op::List { page: 0 },
+    )
+    .await;
     assert_eq!(r.err(), Some(DialError::WrongUser));
     let out = child.await.unwrap();
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(std::fs::read_to_string(theirs.join("got")).unwrap(), "0", "not one byte was written to it");
+    assert_eq!(
+        std::fs::read_to_string(theirs.join("got")).unwrap(),
+        "0",
+        "not one byte was written to it"
+    );
 }

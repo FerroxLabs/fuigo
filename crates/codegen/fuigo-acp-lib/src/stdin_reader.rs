@@ -136,7 +136,7 @@ fn forward_lines<R: BufRead>(mut reader: R, tx: &mpsc::Sender<Vec<u8>>) {
 
 /// `read_until(b'\n')` that stops once `buf` holds more than `max` bytes, so a newline-free flood is never buffered whole.
 /// Returns the bytes read (0 at EOF), like `read_until`.
-fn read_until_capped<R: BufRead>(
+pub(crate) fn read_until_capped<R: BufRead>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     max: usize,
@@ -279,8 +279,15 @@ mod tests {
         assert_eq!(b"{\"a\":1}\n".to_vec(), rx.blocking_recv().unwrap());
         let capped = rx.blocking_recv().unwrap();
         assert!(capped.len() > MAX_LINE_SIZE, "{}", capped.len());
-        assert!(capped.len() <= MAX_LINE_SIZE + 64 * 1024, "{}", capped.len());
-        assert!(rx.blocking_recv().is_none(), "reading stops after the over-cap line");
+        assert!(
+            capped.len() <= MAX_LINE_SIZE + 64 * 1024,
+            "{}",
+            capped.len()
+        );
+        assert!(
+            rx.blocking_recv().is_none(),
+            "reading stops after the over-cap line"
+        );
         reader.join().unwrap();
     }
 

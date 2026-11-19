@@ -225,7 +225,9 @@ fn write_import_marker(config_path: &Path) -> anyhow::Result<()> {
 /// their `std::io::Error`.
 fn edit_owner_only<T>(
     config_path: &Path,
-    edit: impl FnMut(fuigo_config::fs_atomic::Current<'_>) -> anyhow::Result<fuigo_config::fs_atomic::Edit<T>>,
+    edit: impl FnMut(
+        fuigo_config::fs_atomic::Current<'_>,
+    ) -> anyhow::Result<fuigo_config::fs_atomic::Edit<T>>,
 ) -> anyhow::Result<T> {
     use fuigo_config::fs_atomic::EditError;
     crate::util::config::edit_config_file_raw(
@@ -328,7 +330,10 @@ pub fn apply_import(plan: &ImportPlan, cwd: &Path) -> anyhow::Result<ImportResul
 /// The read-modify-write goes through the shared helper ([`edit_owner_only`]),
 /// on the lock every writer of that file takes (for a project file, one under
 /// `~/.fuigo/locks/`, the lock the MCP writers of project files take too).
-pub(crate) fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
+pub(crate) fn apply_items_to_config(
+    config_path: &Path,
+    items: &[ImportableItem],
+) -> anyhow::Result<usize> {
     let count = edit_owner_only(config_path, |current| {
         apply_items_to_text(config_path, current, items)
     })?;
@@ -367,7 +372,10 @@ fn apply_items_to_text(
 ///
 /// Returns the number of newly added hook entries.
 fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
-    if !items.iter().any(|i| matches!(i, ImportableItem::Hook { .. })) {
+    if !items
+        .iter()
+        .any(|i| matches!(i, ImportableItem::Hook { .. }))
+    {
         return Ok(0);
     }
 
@@ -426,7 +434,10 @@ fn merge_hooks_text(
     })
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,8 +460,11 @@ mod tests {
         // Reparsing must still yield an equivalent rule
         let parsed = parse_permission_rule("Bash(sed:*)", RuleAction::Deny).unwrap();
         assert_eq!(parsed.pattern.as_deref(), Some("sed"));
-        let reparsed =
-            parse_permission_rule(&format_rule_string(&import_permission(&parsed)), RuleAction::Deny).unwrap();
+        let reparsed = parse_permission_rule(
+            &format_rule_string(&import_permission(&parsed)),
+            RuleAction::Deny,
+        )
+        .unwrap();
         assert_eq!(parsed.tool, reparsed.tool);
         assert_eq!(parsed.pattern, reparsed.pattern);
         assert_eq!(parsed.pattern_mode, reparsed.pattern_mode);
@@ -884,7 +898,10 @@ mod tests {
             paths.global.len(),
             "headless: global sources must survive an untrusted folder"
         );
-        assert!(project.is_empty(), "headless untrusted: project sources stay off");
+        assert!(
+            project.is_empty(),
+            "headless untrusted: project sources stay off"
+        );
 
         let (_global, project) = paths.as_sources(true);
         assert!(
@@ -1187,7 +1204,10 @@ extra_rule_dirs = ["/c/rules"]
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "claude_import_formats_tests.rs"]
 mod formats_tests;

@@ -74,8 +74,8 @@ mod tests {
         assert!(!is_grove_strategy(STRATEGY_COPY));
         assert!(!is_grove_strategy("linked"));
     }
-    use tempfile::TempDir;
     use fuigo_test_utils::git::{git_commit_all, init_git_repo};
+    use tempfile::TempDir;
 
     #[test]
     fn test_create_worktree_simple() {
@@ -1306,7 +1306,10 @@ mod tests {
             format!("+refs/heads/{branch}:refs/remotes/origin/{branch}")
         );
         assert_eq!(
-            fuigo_test_utils::git::run_git(&worktree_path, &["config", "--get", "remote.origin.url"]),
+            fuigo_test_utils::git::run_git(
+                &worktree_path,
+                &["config", "--get", "remote.origin.url"]
+            ),
             "https://github.com/fuigo-org/fuigo.git"
         );
     }
@@ -1339,7 +1342,10 @@ mod tests {
 
         assert!(!worktree_path.join(".git/shallow").exists());
         assert_eq!(
-            fuigo_test_utils::git::run_git(&worktree_path, &["rev-parse", "--is-shallow-repository"]),
+            fuigo_test_utils::git::run_git(
+                &worktree_path,
+                &["rev-parse", "--is-shallow-repository"]
+            ),
             "false"
         );
         assert_eq!(
@@ -1393,7 +1399,10 @@ mod tests {
             &repo_path,
             &["update-ref", "refs/remotes/origin/feature", &a],
         );
-        fuigo_test_utils::git::run_git(&repo_path, &["update-ref", "refs/remotes/origin/noise", &b]);
+        fuigo_test_utils::git::run_git(
+            &repo_path,
+            &["update-ref", "refs/remotes/origin/noise", &b],
+        );
         std::fs::write(repo_path.join(".git/shallow"), format!("{b}\n")).unwrap();
 
         let worktree_path = temp.path().join("standalone");
@@ -1436,7 +1445,10 @@ mod tests {
             "after checkout, graft B is unused and its parent is in the ODB"
         );
         assert_eq!(
-            fuigo_test_utils::git::run_git(&worktree_path, &["rev-parse", "--is-shallow-repository"]),
+            fuigo_test_utils::git::run_git(
+                &worktree_path,
+                &["rev-parse", "--is-shallow-repository"]
+            ),
             "false"
         );
         assert_eq!(
@@ -1472,7 +1484,10 @@ mod tests {
             &repo_path,
             &["update-ref", "refs/remotes/origin/feature", &a],
         );
-        fuigo_test_utils::git::run_git(&repo_path, &["update-ref", "refs/remotes/origin/noise", &b]);
+        fuigo_test_utils::git::run_git(
+            &repo_path,
+            &["update-ref", "refs/remotes/origin/noise", &b],
+        );
 
         let worktree_path = temp.path().join("standalone");
         WorktreeBuilder::new(repo_path, worktree_path.clone())
@@ -1719,7 +1734,10 @@ mod tests {
         std::fs::write(repo_path.join("file.txt"), "content").unwrap();
         git_commit_all(&repo_path, "initial");
 
-        for (i, bad) in ["--upload-pack=touch pwned", "-b", "-"].into_iter().enumerate() {
+        for (i, bad) in ["--upload-pack=touch pwned", "-b", "-"]
+            .into_iter()
+            .enumerate()
+        {
             for standalone in [false, true] {
                 let dest = temp.path().join(format!("wt-{i}-{standalone}"));
                 let err = WorktreeBuilder::new(repo_path.clone(), dest.clone())
@@ -1772,7 +1790,10 @@ mod tests {
             let typed = err
                 .downcast_ref::<crate::TrackedCopyError>()
                 .unwrap_or_else(|| panic!("standalone={standalone}: untyped error: {err:#}"));
-            assert!(crate::is_copy_abort(&err), "a tracked copy failure is a copy abort");
+            assert!(
+                crate::is_copy_abort(&err),
+                "a tracked copy failure is a copy abort"
+            );
             assert_eq!(typed.paths, vec![std::path::PathBuf::from("secret.txt")]);
             let line = err.to_string();
             assert!(line.contains("secret.txt"), "{line}");

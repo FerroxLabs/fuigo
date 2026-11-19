@@ -17,7 +17,9 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use fuigo_peer::limits::{MAX_WATCHES_PER_HOST, MAX_WATCHES_PER_SESSION, WATCH_EXPIRY_SECS, WATCH_PROBES_AT_ONCE};
+use fuigo_peer::limits::{
+    MAX_WATCHES_PER_HOST, MAX_WATCHES_PER_SESSION, WATCH_EXPIRY_SECS, WATCH_PROBES_AT_ONCE,
+};
 use fuigo_peer::{Address, HostId, NoticeKind};
 
 use super::directory::PeerDirectory;
@@ -42,7 +44,13 @@ impl WatchTable {
     /// Add a watch; returns the watches pushed out by the caps (oldest first), which the caller ends with `unavailable`.
     pub(crate) fn add(&mut self, w: SentWatch) -> Vec<SentWatch> {
         let mut out = Vec::new();
-        while self.items.iter().filter(|i| i.session_id == w.session_id).count() >= MAX_WATCHES_PER_SESSION {
+        while self
+            .items
+            .iter()
+            .filter(|i| i.session_id == w.session_id)
+            .count()
+            >= MAX_WATCHES_PER_SESSION
+        {
             if let Some(pos) = self.items.iter().position(|i| i.session_id == w.session_id) {
                 out.push(self.items.remove(pos));
             }
@@ -111,11 +119,20 @@ pub(crate) async fn probe_pass<P: Prober>(dir: &PeerDirectory, prober: &P, now: 
     hosts.dedup();
     let mut found: std::collections::HashMap<HostId, Probe> = std::collections::HashMap::new();
     for chunk in hosts.chunks(WATCH_PROBES_AT_ONCE) {
-        let results = futures::future::join_all(chunk.iter().map(|h| async move { (h.clone(), prober.probe(h).await) })).await;
+        let results = futures::future::join_all(
+            chunk
+                .iter()
+                .map(|h| async move { (h.clone(), prober.probe(h).await) }),
+        )
+        .await;
         found.extend(results);
     }
     for w in remote {
-        match found.get(&HostId::of(&w.target)).copied().unwrap_or(Probe::Alive) {
+        match found
+            .get(&HostId::of(&w.target))
+            .copied()
+            .unwrap_or(Probe::Alive)
+        {
             Probe::Alive => dir.with_watches(|t| t.set_gone(&w.message_id, 0)),
             Probe::Gone { row_present: true } => verdicts.push((w, Some(NoticeKind::Unavailable))),
             Probe::Gone { row_present: false } => {
@@ -158,11 +175,13 @@ pub(super) mod io {
     /// The locator rows (display data only) from the home's locator file.
     pub(crate) async fn rows(home_dir: &Arc<CheckedDir>) -> Vec<HostRow> {
         let dir = home_dir.clone();
-        let bytes = tokio::task::spawn_blocking(move || super::super::locator::read_locator(&dir, reap::LOCATOR_NAME))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .flatten();
+        let bytes = tokio::task::spawn_blocking(move || {
+            super::super::locator::read_locator(&dir, reap::LOCATOR_NAME)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
         reap::decode_rows(bytes.as_deref())
     }
 
@@ -174,7 +193,10 @@ pub(super) mod io {
 
     impl Prober for SocketProber {
         async fn probe(&self, host: &HostId) -> Probe {
-            let row = rows(&self.home_dir).await.into_iter().find(|r| &r.host_id == host);
+            let row = rows(&self.home_dir)
+                .await
+                .into_iter()
+                .find(|r| &r.host_id == host);
             let Some(row) = row else {
                 // No row: still look for a socket (the row file can lag), in the home's own directory choice.
                 return Probe::Gone { row_present: false };
@@ -188,17 +210,31 @@ pub(super) mod io {
     }
 
     /// Send one notice to the host that sent the message. A same-host target is routed in process.
-    async fn deliver(dir: &Arc<PeerDirectory>, loc: &Locations, home_dir: &Arc<CheckedDir>, out: &Outbound) {
+    async fn deliver(
+        dir: &Arc<PeerDirectory>,
+        loc: &Locations,
+        home_dir: &Arc<CheckedDir>,
+        out: &Outbound,
+    ) {
         let own = dir.host_id().clone();
         let target = HostId::of(&out.to);
-        let Ok(id) = BoundedId::new(&out.message_id) else { return };
+        let Ok(id) = BoundedId::new(&out.message_id) else {
+            return;
+        };
         if target == own {
             dir.route_notice(&id, out.kind, Some(&own));
             return;
         }
         for attempt in 0..2 {
-            if let Some(row) = rows(home_dir).await.into_iter().find(|r| r.host_id == target) {
-                let op = Op::Notice { message_id: id.clone(), kind: out.kind };
+            if let Some(row) = rows(home_dir)
+                .await
+                .into_iter()
+                .find(|r| r.host_id == target)
+            {
+                let op = Op::Notice {
+                    message_id: id.clone(),
+                    kind: out.kind,
+                };
                 let call = dial(loc, &own, &row.host_id, row.dir, op);
                 if let Ok(Ok(Reply::Notice {})) = tokio::time::timeout(NOTICE_ATTEMPT, call).await {
                     return;
@@ -227,7 +263,9 @@ pub(super) mod io {
                 None => rx.recv().await,
             };
             let Some(out) = next else { break };
-            let Ok(permit) = gate.clone().acquire_owned().await else { break };
+            let Ok(permit) = gate.clone().acquire_owned().await else {
+                break;
+            };
             let (dir, loc, home_dir) = (dir.clone(), loc.clone(), home_dir.clone());
             tasks.spawn(async move {
                 deliver(&dir, &loc, &home_dir, &out).await;
@@ -238,7 +276,11 @@ pub(super) mod io {
     }
 
     /// Once a minute until `token` is cancelled.
-    pub(crate) async fn ticker(dir: Arc<PeerDirectory>, prober: SocketProber, token: CancellationToken) {
+    pub(crate) async fn ticker(
+        dir: Arc<PeerDirectory>,
+        prober: SocketProber,
+        token: CancellationToken,
+    ) {
         let mut tick = tokio::time::interval(Duration::from_secs(WATCH_PROBE_SECS));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;

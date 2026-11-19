@@ -50,14 +50,14 @@ pub mod process;
 pub mod reexec;
 pub mod resources;
 pub mod sandbox;
-pub mod session_front;
 pub mod scripted;
+pub mod session_front;
 pub mod sse;
 #[cfg(unix)]
 pub mod uds_proxy;
 pub use acp_client::{AgentSpawnSpec, FuigoStdioClient, RawReply, RawStdioClient};
 pub use counting_server::spawn_counting_server;
-pub use env::{EnvGuard, FuigoHome, git_workdir, fuigo_binary, isolate_fuigo_env};
+pub use env::{EnvGuard, FuigoHome, fuigo_binary, git_workdir, isolate_fuigo_env};
 pub use headless::{
     HeadlessResult, assert_headless_success, assert_no_crashes, run_headless,
     run_headless_in_sandbox, run_headless_in_sandbox_borrowed,
@@ -71,12 +71,12 @@ pub use loopback::{loopback_ip, refused_loopback_url};
 pub use mock_server::{
     MockInferenceServer, MockModelEntry, ScriptedResponse, SseEvent, StorageUpload,
 };
-#[cfg(unix)]
-pub use process::{classify_kill_zero, pid_liveness, process_has_exited_without_reap, sigkill};
 pub use process::{
     PidLiveness, TestOutput, TestOutputSnapshot, TestProcess, TestProcessConfig, TestProcessState,
     TestProcessStderr, TestProcessStdout, TestProcessTermination, TestProcessTree, TestStdin,
 };
+#[cfg(unix)]
+pub use process::{classify_kill_zero, pid_liveness, process_has_exited_without_reap, sigkill};
 pub use resources::{ResourceGrowth, ResourceSnapshot, RssMeasurement, RssOutcome, RssSampler};
 pub use sandbox::{TestSandbox, TestSandboxBuilder};
 pub use session_front::SessionFront;

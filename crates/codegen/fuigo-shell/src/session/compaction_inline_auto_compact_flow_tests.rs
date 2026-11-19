@@ -373,7 +373,9 @@ async fn create_test_actor(
     chat_state_handle.record_token_usage(total_tokens);
     SessionActor {
         held_wakes: Default::default(),
-        refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
+        refusal_prompt: std::sync::Arc::new(std::sync::Mutex::new(
+            fuigo_sampling_types::refusal::PromptSM::new(false),
+        )),
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,
@@ -2450,7 +2452,8 @@ async fn an_auto_compaction_refused_for_the_backup_shows_its_note_once() {
         .run_until(async {
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
-            let mut actor = create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
+            let mut actor =
+                create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await;
             give_test_writer(&mut actor);
             let actor = Arc::new(actor);
             let (_chat, blocker) = owe_backup(&actor);
@@ -2576,7 +2579,10 @@ async fn actor_with_prepared_client() -> (
         )
         .await
         .expect("switch");
-    let client = actor.prepare_chat_completion(false, crate::session::acp_session::CallRole::Main).await.expect("client");
+    let client = actor
+        .prepare_chat_completion(false, crate::session::acp_session::CallRole::Main)
+        .await
+        .expect("client");
     (actor, server, client)
 }
 /// Astra r2 #5 (a): a compaction request prepared before the park but sent after it must wait for the unpark.
@@ -2591,7 +2597,9 @@ async fn compaction_request_prepared_before_a_park_is_not_sent_while_parked() {
         .run_until(async {
             let (actor, server, client) = actor_with_prepared_client().await;
             let session_id = actor.session_info.id.0.to_string();
-            let sampling_config = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+            let sampling_config = actor
+                .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                .await;
             let parked = park_session(&session_id);
             let cancel = tokio_util::sync::CancellationToken::new();
             let run = tokio::task::spawn_local({
@@ -2644,7 +2652,9 @@ async fn subagent_compaction_retry_is_not_sent_while_the_parent_is_parked() {
             let child = actor.session_info.id.0.to_string();
             let parent = format!("{child}-parent");
             let _link = crate::session::quiesce::SessionGuard::new(&child, Some(&parent));
-            let sampling_config = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+            let sampling_config = actor
+                .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                .await;
             let sampler =
                 crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
                     false,
@@ -2760,7 +2770,13 @@ async fn overflow_recovery_attempts_compaction(
         .overflow_compactions_since_response
         .set(consecutive_before);
     let result = actor
-        .handle_sampling_failure(error, 0, transient_state(0, true), false, TurnParkState::Fresh)
+        .handle_sampling_failure(
+            error,
+            0,
+            transient_state(0, true),
+            false,
+            TurnParkState::Fresh,
+        )
         .await;
     assert!(
         result.is_err(),
@@ -2782,7 +2798,10 @@ async fn context_length_error_without_window_header_attempts_compaction() {
             let (attempted, counted) =
                 overflow_recovery_attempts_compaction(0, context_length_error_without_metadata())
                     .await;
-            assert!(attempted, "an overflow reported only in the message must compact");
+            assert!(
+                attempted,
+                "an overflow reported only in the message must compact"
+            );
             assert_eq!(counted, 1, "the attempt is counted");
         })
         .await;
@@ -2802,7 +2821,10 @@ async fn overflow_compaction_stops_after_three_consecutive_refills() {
             let (attempted, counted) =
                 overflow_recovery_attempts_compaction(3, context_length_error_without_metadata())
                     .await;
-            assert!(!attempted, "the fourth consecutive overflow must not compact again");
+            assert!(
+                !attempted,
+                "the fourth consecutive overflow must not compact again"
+            );
             assert_eq!(counted, 3, "the cap leaves the counter alone");
         })
         .await;

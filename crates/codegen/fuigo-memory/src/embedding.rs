@@ -355,7 +355,9 @@ mod tests {
                 head.extend_from_slice(&buf[..n]);
             }
             let _ = socket
-                .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
                 .await;
             String::from_utf8_lossy(&head).to_ascii_lowercase()
         });
@@ -363,8 +365,14 @@ mod tests {
         let provider = ApiEmbeddingProvider::new(api_base, "m".into(), 4, client);
         let _ = provider.embed_batch(&["hello"]).await;
         let head = server.await.unwrap();
-        assert!(head.starts_with("post /v1/embeddings"), "no embeddings request: {head}");
-        assert!(!head.contains("x-fuigo-client-version"), "identity leaked: {head}");
+        assert!(
+            head.starts_with("post /v1/embeddings"),
+            "no embeddings request: {head}"
+        );
+        assert!(
+            !head.contains("x-fuigo-client-version"),
+            "identity leaked: {head}"
+        );
     }
 
     #[tokio::test]

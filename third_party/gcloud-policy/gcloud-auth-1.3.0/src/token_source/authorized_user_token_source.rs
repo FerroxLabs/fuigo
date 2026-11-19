@@ -1,5 +1,5 @@
-use google_cloud_metadata::transport::RequestPolicyExt;
 use async_trait::async_trait;
+use google_cloud_metadata::transport::RequestPolicyExt;
 
 use crate::credentials;
 use crate::error::Error;
@@ -21,7 +21,9 @@ pub struct UserAccountTokenSource {
 }
 
 impl UserAccountTokenSource {
-    pub(crate) fn new(cred: &credentials::CredentialsFile) -> Result<UserAccountTokenSource, Error> {
+    pub(crate) fn new(
+        cred: &credentials::CredentialsFile,
+    ) -> Result<UserAccountTokenSource, Error> {
         if cred.refresh_token.is_none() {
             return Err(Error::RefreshTokenIsRequired);
         }
@@ -82,24 +84,40 @@ mod transport_tests {
         use google_cloud_metadata::transport::{self, Policy};
         transport::install(Policy {
             configure: |b| b,
-            check_url: |url| if url.host_str() == Some("127.0.0.1") { Ok(()) } else { Err("denied".into()) },
-        }).unwrap();
+            check_url: |url| {
+                if url.host_str() == Some("127.0.0.1") {
+                    Ok(())
+                } else {
+                    Err("denied".into())
+                }
+            },
+        })
+        .unwrap();
         let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         proxy.set_nonblocking(true).unwrap();
         let credentials: credentials::CredentialsFile = serde_json::from_value(serde_json::json!({
             "type": "authorized_user", "client_id": "fake-client",
             "client_secret": "fake-client-secret", "refresh_token": "fake-refresh",
             "token_uri": "http://blocked.invalid/token"
-        })).unwrap();
+        }))
+        .unwrap();
         let mut source = UserAccountTokenSource::new(&credentials).unwrap();
-        source.client = reqwest::Client::builder().no_proxy()
+        source.client = reqwest::Client::builder()
+            .no_proxy()
             .proxy(reqwest::Proxy::all(format!("http://{}", proxy.local_addr().unwrap())).unwrap())
-            .build().unwrap();
+            .build()
+            .unwrap();
         for _ in 0..2 {
             let error = source.token().await.unwrap_err();
-            assert!(matches!(error, Error::TransportPolicy(transport::Error::Denied)));
+            assert!(matches!(
+                error,
+                Error::TransportPolicy(transport::Error::Denied)
+            ));
             assert!(!error.to_string().contains("fake-refresh"));
         }
-        assert_eq!(proxy.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(
+            proxy.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 }

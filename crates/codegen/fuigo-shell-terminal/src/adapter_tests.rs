@@ -71,7 +71,9 @@ fn scripted_gateway(outputs: Vec<(String, bool)>) -> GatewaySender {
     tokio::spawn(async move {
         let mut next = 0usize;
         let mut wait_reply: Option<
-            tokio::sync::oneshot::Sender<fuigo_acp_lib::AcpResult<acp::WaitForTerminalExitResponse>>,
+            tokio::sync::oneshot::Sender<
+                fuigo_acp_lib::AcpResult<acp::WaitForTerminalExitResponse>,
+            >,
         > = None;
         let mut exited = false;
         while let Some(msg) = rx.recv().await {
@@ -935,8 +937,17 @@ async fn list_tasks_with_a_held_client_answers_from_the_log_files() {
     let adapter = AcpTerminalAdapter::new(output_held_gateway(), acp::SessionId::new("s"));
     for name in ["a", "b", "c"] {
         let log = dir.path().join(format!("{name}.log"));
-        tokio::fs::write(&log, format!("log of {name}")).await.unwrap();
-        insert_task(&adapter, name, TrackedTask { output_file: log, ..Default::default() });
+        tokio::fs::write(&log, format!("log of {name}"))
+            .await
+            .unwrap();
+        insert_task(
+            &adapter,
+            name,
+            TrackedTask {
+                output_file: log,
+                ..Default::default()
+            },
+        );
     }
     let started = std::time::Instant::now();
     let snaps = tokio::time::timeout(std::time::Duration::from_secs(4), adapter.list_tasks())
@@ -963,16 +974,27 @@ async fn get_task_with_a_log_that_never_answers_is_bounded() {
     insert_task(
         &adapter,
         "t-stalled",
-        TrackedTask { output_file: fifo.clone(), output_byte_limit: 1024, ..Default::default() },
+        TrackedTask {
+            output_file: fifo.clone(),
+            output_byte_limit: 1024,
+            ..Default::default()
+        },
     );
-    let snap = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.get_task("t-stalled"))
-        .await
-        .expect("the log read was not bounded")
-        .expect("task is tracked");
+    let snap = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        adapter.get_task("t-stalled"),
+    )
+    .await
+    .expect("the log read was not bounded")
+    .expect("task is tracked");
     assert!(snap.output.is_empty());
     assert!(!snap.completed);
     // Let the blocked `open` finish so the runtime can shut down.
-    let _unblock = std::fs::OpenOptions::new().read(true).write(true).open(&fifo).unwrap();
+    let _unblock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fifo)
+        .unwrap();
 }
 
 /// The env of every `terminal/create` a [`recording_gateway`] received, in order.
@@ -988,21 +1010,32 @@ fn recording_gateway(creates: CreatedEnvs) -> GatewaySender {
         while let Some(msg) = rx.recv().await {
             match msg {
                 AcpClientMessage::CreateTerminal(args) => {
-                    let env = args.env.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
+                    let env = args
+                        .env
+                        .iter()
+                        .map(|v| (v.name.clone(), v.value.clone()))
+                        .collect();
                     creates.lock().unwrap().push(env);
-                    let _ = args.response_tx.send(Ok(acp::CreateTerminalResponse::new("term-1")));
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::CreateTerminalResponse::new("term-1")));
                 }
                 AcpClientMessage::WaitForTerminalExit(args) => {
                     let exit = acp::TerminalExitStatus::new().exit_code(Some(0));
-                    let _ = args.response_tx.send(Ok(acp::WaitForTerminalExitResponse::new(exit)));
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::WaitForTerminalExitResponse::new(exit)));
                 }
                 AcpClientMessage::TerminalOutput(args) => {
                     let exit = acp::TerminalExitStatus::new().exit_code(Some(0));
-                    let response = acp::TerminalOutputResponse::new(String::new(), false).exit_status(Some(exit));
+                    let response = acp::TerminalOutputResponse::new(String::new(), false)
+                        .exit_status(Some(exit));
                     let _ = args.response_tx.send(Ok(response));
                 }
                 AcpClientMessage::ReleaseTerminal(args) => {
-                    let _ = args.response_tx.send(Ok(acp::ReleaseTerminalResponse::new()));
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::ReleaseTerminalResponse::new()));
                 }
                 _ => {}
             }
@@ -1014,8 +1047,15 @@ fn recording_gateway(creates: CreatedEnvs) -> GatewaySender {
 /// The `PATH` rule installed for this crate's tests (process-wide): an empty or relative entry, or one inside the
 /// directory the command runs in, steers.
 #[cfg(unix)]
-fn u37_path_judge(_command: &str, env: &[(String, String)], dir: &std::path::Path) -> Option<String> {
-    let path = &env.iter().find(|(name, _)| name.eq_ignore_ascii_case("PATH"))?.1;
+fn u37_path_judge(
+    _command: &str,
+    env: &[(String, String)],
+    dir: &std::path::Path,
+) -> Option<String> {
+    let path = &env
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))?
+        .1;
     std::env::split_paths(path)
         .any(|entry| !entry.is_absolute() || entry.starts_with(dir))
         .then(|| "PATH".to_owned())
@@ -1042,16 +1082,26 @@ async fn u37_client_terminal_create_is_judged_as_the_local_runner_judges() {
     let workdir = dir.path().to_path_buf();
     let inherited = std::env::var_os("PATH").expect("the test process has a PATH");
     assert_eq!(
-        u37_path_judge("ls", &[("PATH".into(), inherited.to_string_lossy().into_owned())], &workdir),
+        u37_path_judge(
+            "ls",
+            &[("PATH".into(), inherited.to_string_lossy().into_owned())],
+            &workdir
+        ),
         None,
         "precondition: the test process's own PATH is clean"
     );
     let prepend = |first: PathBuf| {
         let paths = std::iter::once(first).chain(std::env::split_paths(&inherited));
-        std::env::join_paths(paths).unwrap().to_string_lossy().into_owned()
+        std::env::join_paths(paths)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
     };
     let creates = Arc::new(Mutex::new(Vec::new()));
-    let adapter = AcpTerminalAdapter::new(recording_gateway(Arc::clone(&creates)), acp::SessionId::new("s"));
+    let adapter = AcpTerminalAdapter::new(
+        recording_gateway(Arc::clone(&creates)),
+        acp::SessionId::new("s"),
+    );
     let request = |path: Option<&str>, approved_without_grant: bool| {
         let mut request = background_request(workdir.join("out.log"));
         request.command = "ls".into();
@@ -1065,7 +1115,9 @@ async fn u37_client_terminal_create_is_judged_as_the_local_runner_judges() {
     };
     let last_create = || creates.lock().unwrap().last().cloned().map(sorted);
     let expected = |request: &TerminalRunRequest| {
-        sorted(fuigo_tools::sandbox_launch::client_terminal_env(request.env.clone()))
+        sorted(fuigo_tools::sandbox_launch::client_terminal_env(
+            request.env.clone(),
+        ))
     };
 
     // No override: allowed, and the request's own variables go out unchanged (nothing added on Unix).
@@ -1089,16 +1141,26 @@ async fn u37_client_terminal_create_is_judged_as_the_local_runner_judges() {
             panic!("{path}: a steering session PATH must be refused");
         };
         let local = std::io::Error::from(fuigo_tools::sandbox_launch::SandboxLaunchError::new(
-            fuigo_tools::sandbox_launch::ChildEnvSteers { name: "PATH".to_owned() },
+            fuigo_tools::sandbox_launch::ChildEnvSteers {
+                name: "PATH".to_owned(),
+            },
         ));
         let local = ComputerError::from(local).to_string();
         assert_eq!(err.to_string(), local, "{path}");
-        assert_eq!(creates.lock().unwrap().len(), sent, "{path}: nothing reaches the client");
+        assert_eq!(
+            creates.lock().unwrap().len(),
+            sent,
+            "{path}: nothing reaches the client"
+        );
         let Err(err) = adapter.run_background(request(Some(&path), true)).await else {
             panic!("{path}: a steering session PATH must be refused in the background too");
         };
         assert_eq!(err.to_string(), local, "{path}: background");
-        assert_eq!(creates.lock().unwrap().len(), sent, "{path}: nothing reaches the client from the background");
+        assert_eq!(
+            creates.lock().unwrap().len(),
+            sent,
+            "{path}: nothing reaches the client from the background"
+        );
 
         // A grant approved it: not judged, sent as it is.
         let granted = request(Some(&path), false);

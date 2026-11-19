@@ -3045,7 +3045,10 @@ mod tests {
                 .any(|c| c != '\n' && fuigo_tty_utils::is_unsafe_display_char(c))
         };
         let text = render_to_text(&state, area);
-        assert!(!paints_unsafe(&text), "option row painted an unsafe character:\n{text:?}");
+        assert!(
+            !paints_unsafe(&text),
+            "option row painted an unsafe character:\n{text:?}"
+        );
         assert!(text.contains("Allow a b"), "{text}");
 
         state.focus = PermissionFocus::PatternEdit;
@@ -3059,6 +3062,9 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect();
-        assert!(!paints_unsafe(&text), "pattern editor painted an unsafe character:\n{text:?}");
+        assert!(
+            !paints_unsafe(&text),
+            "pattern editor painted an unsafe character:\n{text:?}"
+        );
     }
 }

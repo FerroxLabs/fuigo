@@ -25,8 +25,8 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use regex::Regex;
 use fuigo_config::shell::AmpersandSemantics;
+use regex::Regex;
 
 use crate::DEFAULT_TOOL_OUTPUT_CHARS;
 use crate::computer::types::{ComputerError, TerminalRunRequest};
@@ -904,7 +904,9 @@ fn contains_background_operator(command: &str) -> bool {
 /// share one log: the first use of an id in a session folder keeps the plain name, every later use gets a unique one.
 fn unique_log_stem(session_folder: &std::path::Path, call_id: &str) -> String {
     static SEEN: LazyLock<std::sync::Mutex<LogStemsSeen>> = LazyLock::new(Default::default);
-    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut seen = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     unique_log_stem_in(&mut seen, LOG_STEMS_SEEN_CAP, session_folder, call_id)
 }
 
@@ -920,7 +922,8 @@ fn unique_log_stem_in(
     session_folder: &std::path::Path,
     call_id: &str,
 ) -> String {
-    let first_use = seen.len() < cap && seen.insert((session_folder.to_path_buf(), call_id.to_owned()));
+    let first_use =
+        seen.len() < cap && seen.insert((session_folder.to_path_buf(), call_id.to_owned()));
     if first_use && !call_id.is_empty() {
         return call_id.to_owned();
     }
@@ -1680,7 +1683,8 @@ impl BashTool {
                 }
             }
             if let Some(required) = obj.get_mut("required").and_then(|r| r.as_array_mut()) {
-                required.retain(|v| !matches!(v.as_str(), Some("is_background" | "block_until_ms")));
+                required
+                    .retain(|v| !matches!(v.as_str(), Some("is_background" | "block_until_ms")));
             }
         }
         schema
@@ -2101,7 +2105,9 @@ impl fuigo_tool_runtime::Tool for BashTool {
         let tool_call_id = ctx.call_id.clone();
         // u35 g9: how the permission check approved this call travels to the shell runner.
         let approved_without_grant = crate::sandbox_launch::ApprovedWithoutGrant::of(
-            ctx.extensions.get::<crate::sandbox_launch::ApprovedWithoutGrant>().as_deref(),
+            ctx.extensions
+                .get::<crate::sandbox_launch::ApprovedWithoutGrant>()
+                .as_deref(),
         );
 
         // --- Read resources ---
@@ -2496,8 +2502,11 @@ impl fuigo_tool_runtime::Tool for BashTool {
                 was_bare_echo: false,
             };
             bash.output_for_prompt = format_default_prompt(&bash);
-            if bash.timed_out && let Some(wait_ms) = positive_block_ms {
-                bash.output_for_prompt.push_str(&Self::stopped_after_wait_note(wait_ms));
+            if bash.timed_out
+                && let Some(wait_ms) = positive_block_ms
+            {
+                bash.output_for_prompt
+                    .push_str(&Self::stopped_after_wait_note(wait_ms));
             }
 
             // Bare `echo "<msg>"` usage (common model anti-pattern for "just output something").
@@ -2562,7 +2571,10 @@ mod tests {
         assert_eq!(unique_log_stem_in(&mut seen, 2, folder, "a"), "a");
         assert_eq!(unique_log_stem_in(&mut seen, 2, folder, "b"), "b");
         let over = unique_log_stem_in(&mut seen, 2, folder, "c");
-        assert!(over.starts_with("c-"), "past the cap every name is suffixed: {over}");
+        assert!(
+            over.starts_with("c-"),
+            "past the cap every name is suffixed: {over}"
+        );
         assert_eq!(seen.len(), 2, "nothing more is recorded past the cap");
     }
     #[test]
@@ -3687,9 +3699,12 @@ mod tests {
         // No Terminal inserted
         let tool = BashTool;
 
-        let result =
-            fuigo_tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), make_input("ls"))
-                .await;
+        let result = fuigo_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_input("ls"),
+        )
+        .await;
         assert!(result.is_err());
         assert!(
             result
@@ -4508,7 +4523,9 @@ mod tests {
         fn budget_none_when_auto_bg_off() {
             let params = BashParams::default();
             assert!(!params.auto_background_on_timeout);
-            assert!(BashTool::effective_foreground_block_budget(&params, DEFAULT_TIMEOUT).is_none());
+            assert!(
+                BashTool::effective_foreground_block_budget(&params, DEFAULT_TIMEOUT).is_none()
+            );
             assert!(BashTool::effective_auto_bg_wait_ms(&params).is_none());
         }
 
@@ -4577,8 +4594,16 @@ mod tests {
             );
             // Auto-background off (the struct default): the wait stops the command, and the text says so.
             let off = BashTool::rendered_description(None, &renderer, &BashParams::default());
-            assert!(off.contains("is stopped; to let a command outlast the wait, run it in the background"), "{off}");
-            assert!(!off.contains("keeps running in the background and you get a task id"), "{off}");
+            assert!(
+                off.contains(
+                    "is stopped; to let a command outlast the wait, run it in the background"
+                ),
+                "{off}"
+            );
+            assert!(
+                !off.contains("keeps running in the background and you get a task id"),
+                "{off}"
+            );
         }
 
         #[test]
@@ -4637,7 +4662,10 @@ mod tests {
             assert!(schema["properties"].get("is_background").is_none());
             let block = &schema["properties"]["block_until_ms"];
             let desc = block["description"].as_str().expect("block description");
-            assert!(desc.contains("Defaults to 20000ms, at most 60000ms"), "{desc}");
+            assert!(
+                desc.contains("Defaults to 20000ms, at most 60000ms"),
+                "{desc}"
+            );
             assert_eq!(block["maximum"].as_u64(), Some(60_000));
             assert_eq!(block["minimum"].as_u64(), Some(0));
             // The ceiling is also lowered by `max_block_until_ms` and by the operator's foreground budget.
@@ -4654,9 +4682,15 @@ mod tests {
             assert_eq!(BashTool::block_until_ceiling_ms(&budget), 2_000);
             assert_eq!(BashTool::effective_default_block_until_ms(&budget), 2_000);
             // The default block ceiling is the transport cap, 5 minutes.
-            assert_eq!(BashTool::block_until_ceiling_ms(&BashParams::default()), 300_000);
+            assert_eq!(
+                BashTool::block_until_ceiling_ms(&BashParams::default()),
+                300_000
+            );
             // The default wait is the old default foreground timeout (120s).
-            assert_eq!(BashTool::effective_default_block_until_ms(&BashParams::default()), 120_000);
+            assert_eq!(
+                BashTool::effective_default_block_until_ms(&BashParams::default()),
+                120_000
+            );
 
             // Background disabled: no block knob, the old `timeout` description and maximum.
             let no_bg = BashParams {
@@ -4668,8 +4702,14 @@ mod tests {
             let schema = BashTool::exported_input_schema(&base_schema(), &no_bg, "timeout");
             assert!(schema["properties"].get("block_until_ms").is_none());
             let tdesc = timeout_desc(&no_bg);
-            assert!(tdesc.contains("max 60000") && tdesc.contains("Default: 30000"), "{tdesc}");
-            assert_eq!(schema["properties"]["timeout"]["maximum"].as_u64(), Some(60_000));
+            assert!(
+                tdesc.contains("max 60000") && tdesc.contains("Default: 30000"),
+                "{tdesc}"
+            );
+            assert_eq!(
+                schema["properties"]["timeout"]["maximum"].as_u64(),
+                Some(60_000)
+            );
         }
 
         /// Property description must track rename after `remap_schema_properties`
@@ -4754,8 +4794,14 @@ mod tests {
                 ..BashParams::default()
             };
             let desc = tool_desc(&params);
-            assert!(desc.contains("up to 90000ms"), "tool desc max must track config: {desc}");
-            assert!(desc.contains("default 45000ms"), "tool desc default must track config: {desc}");
+            assert!(
+                desc.contains("up to 90000ms"),
+                "tool desc max must track config: {desc}"
+            );
+            assert!(
+                desc.contains("default 45000ms"),
+                "tool desc default must track config: {desc}"
+            );
         }
 
         #[test]
@@ -4792,11 +4838,17 @@ mod tests {
         fn old_and_new_call_shapes_map_onto_one_block() {
             let p = BashParams::default;
             // New field.
-            let (i, params) = folded(r#"{"command":"x","description":"d","block_until_ms":0}"#, p());
+            let (i, params) = folded(
+                r#"{"command":"x","description":"d","block_until_ms":0}"#,
+                p(),
+            );
             assert!(i.is_background && i.block_until_ms == Some(0));
             // The user's setting is never switched on by the model's call.
             assert!(!params.auto_background_on_timeout);
-            let (i, _) = folded(r#"{"command":"x","description":"d","block_until_ms":5000}"#, p());
+            let (i, _) = folded(
+                r#"{"command":"x","description":"d","block_until_ms":5000}"#,
+                p(),
+            );
             assert!(!i.is_background && i.timeout == Some(5000));
             // Omitted: left exactly as before the port (the runner applies its 120s default foreground timeout).
             let (i, _) = folded(r#"{"command":"x","description":"d"}"#, p());
@@ -4808,7 +4860,10 @@ mod tests {
                 r#"{"command":"x","description":"d","is_background":"yes"}"#,
             ] {
                 let (i, _) = folded(json, p());
-                assert!(i.is_background && BashTool::requests_background(&i), "{json}");
+                assert!(
+                    i.is_background && BashTool::requests_background(&i),
+                    "{json}"
+                );
             }
             // Retired blocking call: `timeout` is the wait; `timeout: 0` was the default, never the background.
             let (i, _) = folded(r#"{"command":"x","description":"d","timeout":60000}"#, p());
@@ -4848,10 +4903,14 @@ mod tests {
         fn lenient_numbers_and_a_resumed_transcript_never_error() {
             // String numbers parse; a resumed transcript with only the retired fields parses; unknown keys are ignored.
             assert_eq!(
-                parse(r#"{"command":"x","description":"d","block_until_ms":"1500"}"#).block_until_ms,
+                parse(r#"{"command":"x","description":"d","block_until_ms":"1500"}"#)
+                    .block_until_ms,
                 Some(1500)
             );
-            assert!(parse(r#"{"command":"x","description":"d","is_background":true,"extra":1}"#).is_background);
+            assert!(
+                parse(r#"{"command":"x","description":"d","is_background":true,"extra":1}"#)
+                    .is_background
+            );
             assert_eq!(
                 parse(r#"{"command":"x","description":"d","block_until_ms":null}"#).block_until_ms,
                 None
@@ -4864,9 +4923,15 @@ mod tests {
                 max_block_until_ms: Some(10_000),
                 ..BashParams::default()
             };
-            let (i, _) = folded(r#"{"command":"x","description":"d","block_until_ms":99999999}"#, params.clone());
+            let (i, _) = folded(
+                r#"{"command":"x","description":"d","block_until_ms":99999999}"#,
+                params.clone(),
+            );
             assert_eq!(i.timeout, Some(10_000));
-            let (i, _) = folded(r#"{"command":"x","description":"d","block_until_ms":0}"#, params);
+            let (i, _) = folded(
+                r#"{"command":"x","description":"d","block_until_ms":0}"#,
+                params,
+            );
             assert!(i.is_background);
             // Never above the 5 minute default foreground ceiling, whatever the model asks.
             let (i, _) = folded(
@@ -4890,18 +4955,26 @@ mod tests {
             );
             assert_eq!(i.timeout, Some(7000));
             assert!(!i.is_background && !p.auto_background_on_timeout);
-            let (i, _) = folded(r#"{"command":"x","description":"d","block_until_ms":0}"#, params);
-            assert!(i.is_background, "refused later with \"Background execution is disabled.\"");
+            let (i, _) = folded(
+                r#"{"command":"x","description":"d","block_until_ms":0}"#,
+                params,
+            );
+            assert!(
+                i.is_background,
+                "refused later with \"Background execution is disabled.\""
+            );
         }
 
         #[tokio::test]
         async fn block_until_ms_zero_runs_in_the_background_and_disabled_refuses() {
-            let resources = make_resources_with_params(MockTerminal::success("", 0), BashParams::default());
+            let resources =
+                make_resources_with_params(MockTerminal::success("", 0), BashParams::default());
             let mut input = make_input("sleep 5");
             input.block_until_ms = Some(0);
-            let out = fuigo_tool_runtime::Tool::run(&BashTool, test_ctx(resources.into_shared()), input)
-                .await
-                .expect("background start");
+            let out =
+                fuigo_tool_runtime::Tool::run(&BashTool, test_ctx(resources.into_shared()), input)
+                    .await
+                    .expect("background start");
             assert!(matches!(out, BashToolOutput::Background(_)), "{out:?}");
 
             let resources = make_resources_with_params(
@@ -4913,10 +4986,11 @@ mod tests {
             );
             let mut input = make_input("sleep 5");
             input.block_until_ms = Some(0);
-            let err = fuigo_tool_runtime::Tool::run(&BashTool, test_ctx(resources.into_shared()), input)
-                .await
-                .unwrap_err()
-                .to_string();
+            let err =
+                fuigo_tool_runtime::Tool::run(&BashTool, test_ctx(resources.into_shared()), input)
+                    .await
+                    .unwrap_err()
+                    .to_string();
             assert_eq!(err, "Background execution is disabled.");
         }
 
@@ -4925,13 +4999,18 @@ mod tests {
             params: BashParams,
             block: Option<u64>,
             timeout: Option<u64>,
-        ) -> (Result<BashToolOutput, fuigo_tool_runtime::ToolError>, TerminalRunRequest) {
+        ) -> (
+            Result<BashToolOutput, fuigo_tool_runtime::ToolError>,
+            TerminalRunRequest,
+        ) {
             let (mock, captured) = mock.capturing_foreground();
             let resources = make_resources_with_params(mock, params);
             let mut input = make_input("sleep 5");
             input.block_until_ms = block;
             input.timeout = timeout;
-            let out = fuigo_tool_runtime::Tool::run(&BashTool, test_ctx(resources.into_shared()), input).await;
+            let out =
+                fuigo_tool_runtime::Tool::run(&BashTool, test_ctx(resources.into_shared()), input)
+                    .await;
             let req = captured.lock().unwrap().take().expect("foreground request");
             (out, req)
         }
@@ -4940,28 +5019,59 @@ mod tests {
         /// user's auto-background setting untouched, no stop note.
         #[tokio::test]
         async fn a_call_with_no_arguments_behaves_as_before() {
-            let (out, req) = run_fg(MockTerminal::timed_out("partial"), BashParams::default(), None, None).await;
+            let (out, req) = run_fg(
+                MockTerminal::timed_out("partial"),
+                BashParams::default(),
+                None,
+                None,
+            )
+            .await;
             assert_eq!(req.timeout, Duration::from_secs(120));
             assert!(!req.auto_background_on_timeout && req.foreground_block_budget.is_none());
-            let BashToolOutput::Foreground(b) = out.unwrap() else { panic!("foreground") };
-            assert!(b.timed_out && !b.output_for_prompt.contains("block_until_ms"), "{}", b.output_for_prompt);
+            let BashToolOutput::Foreground(b) = out.unwrap() else {
+                panic!("foreground")
+            };
+            assert!(
+                b.timed_out && !b.output_for_prompt.contains("block_until_ms"),
+                "{}",
+                b.output_for_prompt
+            );
             // The retired `timeout` keeps its meaning too, and equals the new default wait.
-            let (_, req) = run_fg(MockTerminal::success("", 0), BashParams::default(), None, Some(45_000)).await;
+            let (_, req) = run_fg(
+                MockTerminal::success("", 0),
+                BashParams::default(),
+                None,
+                Some(45_000),
+            )
+            .await;
             assert_eq!(req.timeout, Duration::from_millis(45_000));
-            assert_eq!(BashTool::effective_default_block_until_ms(&BashParams::default()), 120_000);
+            assert_eq!(
+                BashTool::effective_default_block_until_ms(&BashParams::default()),
+                120_000
+            );
         }
 
         /// A positive wait is the foreground timeout. Setting off (default): the command is stopped and the result
         /// says so; the request carries no auto-background.
         #[tokio::test]
         async fn a_positive_wait_that_expires_stops_the_command_by_default() {
-            let (out, req) =
-                run_fg(MockTerminal::timed_out("partial"), BashParams::default(), Some(5_000), None).await;
+            let (out, req) = run_fg(
+                MockTerminal::timed_out("partial"),
+                BashParams::default(),
+                Some(5_000),
+                None,
+            )
+            .await;
             assert_eq!(req.timeout, Duration::from_millis(5_000));
             assert!(!req.auto_background_on_timeout && req.foreground_block_budget.is_none());
-            let BashToolOutput::Foreground(b) = out.unwrap() else { panic!("foreground") };
+            let BashToolOutput::Foreground(b) = out.unwrap() else {
+                panic!("foreground")
+            };
             assert!(b.timed_out);
-            assert!(b.output_for_prompt.contains("was stopped") && b.output_for_prompt.contains("block_until_ms: 0"));
+            assert!(
+                b.output_for_prompt.contains("was stopped")
+                    && b.output_for_prompt.contains("block_until_ms: 0")
+            );
         }
 
         /// With the user's `auto_background_on_timeout` on, the same wait continues in the background exactly as that
@@ -4974,7 +5084,10 @@ mod tests {
             };
             let (_, req) = run_fg(MockTerminal::success("", 0), params, Some(5_000), None).await;
             assert!(req.auto_background_on_timeout);
-            assert_eq!(req.foreground_block_budget, Some(Duration::from_millis(5_000)));
+            assert_eq!(
+                req.foreground_block_budget,
+                Some(Duration::from_millis(5_000))
+            );
         }
 
         /// The one decision hooks and the pager share: a background task only for `block_until_ms: 0` (or the retired
@@ -5007,9 +5120,24 @@ mod tests {
             let off = BashParams::default();
             let cases = [
                 (r#"{"block_until_ms":0}"#, true, false, false),
-                (r#"{"block_until_ms":0,"is_background":false}"#, true, false, false),
-                (r#"{"block_until_ms":0,"is_background":"false"}"#, true, false, false),
-                (r#"{"block_until_ms":1,"is_background":true}"#, false, false, true),
+                (
+                    r#"{"block_until_ms":0,"is_background":false}"#,
+                    true,
+                    false,
+                    false,
+                ),
+                (
+                    r#"{"block_until_ms":0,"is_background":"false"}"#,
+                    true,
+                    false,
+                    false,
+                ),
+                (
+                    r#"{"block_until_ms":1,"is_background":true}"#,
+                    false,
+                    false,
+                    true,
+                ),
                 (r#"{"block_until_ms":2500}"#, false, false, true),
                 (r#"{"is_background":true}"#, true, false, false),
                 (r#"{"background":"yes"}"#, true, false, false),
@@ -5017,11 +5145,21 @@ mod tests {
                 (r#"{}"#, false, false, true),
             ];
             for (json, bg, may_off, may_on) in cases {
-                let full = json.replacen('{', r#"{"command":"x","description":"d","#, 1).replace(",}", "}");
+                let full = json
+                    .replacen('{', r#"{"command":"x","description":"d","#, 1)
+                    .replace(",}", "}");
                 let input = parse(&full);
                 assert_eq!(BashTool::will_run_in_background(&input), bg, "{json}");
-                assert_eq!(BashTool::may_background_after_wait(&input, &off), may_off, "{json} off");
-                assert_eq!(BashTool::may_background_after_wait(&input, &on), may_on, "{json} on");
+                assert_eq!(
+                    BashTool::may_background_after_wait(&input, &off),
+                    may_off,
+                    "{json} off"
+                );
+                assert_eq!(
+                    BashTool::may_background_after_wait(&input, &on),
+                    may_on,
+                    "{json} on"
+                );
             }
         }
 
@@ -5034,7 +5172,6 @@ mod tests {
             assert!(props.contains_key("timeout") && props.contains_key("command"));
         }
     }
-
 
     // ─── wrapper_matching_pkill_pattern unit tests ───
 

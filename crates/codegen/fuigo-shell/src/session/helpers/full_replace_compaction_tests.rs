@@ -27,7 +27,8 @@ fn compact_failure_maps_onto_engine_error_classes() {
 #[test]
 fn sampler_state_keeps_exact_latest_prepared_items() {
     let mut state = SamplerState::default();
-    let first = build_compaction_chat_history(vec![ConversationItem::user("first")], None, true, None, 0);
+    let first =
+        build_compaction_chat_history(vec![ConversationItem::user("first")], None, true, None, 0);
     let second =
         build_compaction_chat_history(vec![ConversationItem::user("second")], None, true, None, 0);
     state.record_attempt(&first);

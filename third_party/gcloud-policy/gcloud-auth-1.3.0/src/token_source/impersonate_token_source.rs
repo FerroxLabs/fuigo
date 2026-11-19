@@ -1,5 +1,5 @@
-use google_cloud_metadata::transport::RequestPolicyExt;
 use async_trait::async_trait;
+use google_cloud_metadata::transport::RequestPolicyExt;
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 
@@ -59,7 +59,10 @@ impl TokenSource for ImpersonateTokenSource {
             .await?;
         let response = if !response.status().is_success() {
             let status = response.status().as_u16();
-            return Err(Error::UnexpectedImpersonateTokenResponse(status, response.text().await?));
+            return Err(Error::UnexpectedImpersonateTokenResponse(
+                status,
+                response.text().await?,
+            ));
         } else {
             response.json::<ImpersonateTokenResponse>().await?
         };

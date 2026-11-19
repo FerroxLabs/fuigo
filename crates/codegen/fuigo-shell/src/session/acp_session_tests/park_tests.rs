@@ -35,7 +35,10 @@ async fn test_actor() -> std::sync::Arc<SessionActor> {
 fn park(session_id: &str) -> quiesce::ParkOp {
     let op = quiesce::begin_park(session_id, ParkMode::Hold).expect("not parked yet");
     assert!(quiesce::complete_park(session_id, op));
-    quiesce::ParkOp { session: session_id.into(), op }
+    quiesce::ParkOp {
+        session: session_id.into(),
+        op,
+    }
 }
 
 /// A background command's completion wake, a subagent's completion wake and a scheduler fire queued while
@@ -74,7 +77,10 @@ async fn parked_session_starts_no_self_started_turn_until_unpark() {
             SessionActor::maybe_drain_notifications(actor.clone(), completion_tx.clone()).await;
             {
                 let state = actor.state.lock().await;
-                assert!(state.running_task.is_none(), "a parked session started a turn");
+                assert!(
+                    state.running_task.is_none(),
+                    "a parked session started a turn"
+                );
                 assert_eq!(state.pending_inputs.len(), 3);
                 assert_eq!(
                     state.pending_notifications.len(),
@@ -145,7 +151,8 @@ async fn a_parked_roots_subagent_waits_at_its_model_call() {
             let _link = quiesce::SessionGuard::new(&child_id, Some(&root_id));
             park(&root_id);
             assert!(!quiesce::is_self_quiesced(&child_id));
-            let call = actor.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side);
+            let call =
+                actor.prepare_chat_completion(false, crate::session::acp_session::CallRole::Side);
             tokio::pin!(call);
             assert!(
                 tokio::time::timeout(std::time::Duration::from_millis(300), &mut call)
@@ -205,11 +212,15 @@ async fn a_queued_stop_probe_does_nothing_once_withdrawn() {
             let actor = test_actor().await;
             let session_id = actor.session_info.id.0.to_string();
             let p = park(&session_id);
-            *actor.title_refresh_task.borrow_mut() = Some(tokio::task::spawn_local(std::future::pending::<()>()));
+            *actor.title_refresh_task.borrow_mut() =
+                Some(tokio::task::spawn_local(std::future::pending::<()>()));
             assert!(quiesce::withdraw(&session_id, p.op).is_some());
             let _q = park(&session_id);
             let _ = actor.quiesce_probe(&p, true).await;
-            assert!(actor.title_refresh_task.borrow().is_some(), "a stale probe aborted the title refresh");
+            assert!(
+                actor.title_refresh_task.borrow().is_some(),
+                "a stale probe aborted the title refresh"
+            );
             assert!(
                 !quiesce::entry(&session_id).expect("Q").owed.title_refresh,
                 "a stale probe recorded a debt on the replacement park"
@@ -233,8 +244,12 @@ impl Drop for UnparkOnDrop {
 async fn run_loop_actor(
     gateway_tx: tokio::sync::mpsc::UnboundedSender<fuigo_acp_lib::AcpClientMessage>,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
-) -> (SessionActor, tokio::sync::mpsc::UnboundedReceiver<SessionEvent>) {
-    let (mut actor, event_rx) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+) -> (
+    SessionActor,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+) {
+    let (mut actor, event_rx) =
+        create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
     actor.session_info.id = acp::SessionId::new(format!("p189-actor-{}", uuid::Uuid::new_v4()));
     (actor, event_rx)
 }
@@ -308,13 +323,21 @@ async fn a_queued_kill_is_dropped_once_its_park_is_withdrawn() {
                 .await
                 .expect("answered")
                 .expect("reply");
-            assert_ne!(live.err().as_deref(), Some("park no longer current"), "a current park's kill was dropped");
+            assert_ne!(
+                live.err().as_deref(),
+                Some("park no longer current"),
+                "a current park's kill was dropped"
+            );
             assert!(quiesce::withdraw(&session_id, p.op).is_some());
             let stale = tokio::time::timeout(std::time::Duration::from_secs(5), kill(p))
                 .await
                 .expect("answered")
                 .expect("reply");
-            assert_eq!(stale.err().as_deref(), Some("park no longer current"), "a withdrawn park's kill ran");
+            assert_eq!(
+                stale.err().as_deref(),
+                Some("park no longer current"),
+                "a withdrawn park's kill ran"
+            );
         })
         .await;
 }
@@ -323,7 +346,9 @@ async fn a_queued_kill_is_dropped_once_its_park_is_withdrawn() {
 // P189 A2: peer messages and a held session. Every test uses its own session ids and unparks on drop.
 // ---------------------------------------------------------------------------------------------------------
 
-use crate::session::peer_message::{PeerAdmission, PeerRefusal, force_peer_messaging_for_test, test_envelope};
+use crate::session::peer_message::{
+    PeerAdmission, PeerRefusal, force_peer_messaging_for_test, test_envelope,
+};
 
 fn fresh(tag: &str) -> String {
     format!("p189a2-{tag}-{}", uuid::Uuid::new_v4())
@@ -363,11 +388,22 @@ async fn a_peer_message_to_a_held_session_queues_starts_nothing_and_runs_at_unpa
             park(&id);
             let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
             let outcome = actor
-                .admit_peer_message_for_test(test_envelope("m1", "lane a", "hi"), completion_tx.clone())
+                .admit_peer_message_for_test(
+                    test_envelope("m1", "lane a", "hi"),
+                    completion_tx.clone(),
+                )
                 .await;
-            assert_eq!(outcome, PeerAdmission::Admitted { prompt_id: "peer-message-m1".into() });
+            assert_eq!(
+                outcome,
+                PeerAdmission::Admitted {
+                    prompt_id: "peer-message-m1".into()
+                }
+            );
             assert_eq!(queued_peer_ids(&actor).await, ["peer-message-m1"]);
-            assert!(actor.state.lock().await.running_task.is_none(), "a peer message woke a held session");
+            assert!(
+                actor.state.lock().await.running_task.is_none(),
+                "a peer message woke a held session"
+            );
             assert!(
                 quiesce::entry(&id).is_some_and(|e| e.phase == quiesce::ParkPhase::Parked),
                 "the park is no longer in force"
@@ -402,7 +438,10 @@ async fn the_peer_recheck_still_applies_when_the_held_row_starts_at_unpark() {
             park(&id);
             let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
             actor
-                .admit_peer_message_for_test(test_envelope("m1", "lane a", "hi"), completion_tx.clone())
+                .admit_peer_message_for_test(
+                    test_envelope("m1", "lane a", "hi"),
+                    completion_tx.clone(),
+                )
                 .await;
             assert_eq!(queued_peer_ids(&actor).await.len(), 1);
             actor.peer_admission.configure(PeerAdmissionConfig {
@@ -413,8 +452,14 @@ async fn the_peer_recheck_still_applies_when_the_held_row_starts_at_unpark() {
             });
             quiesce::unpark(&id);
             SessionActor::maybe_start_running_task(actor.clone(), completion_tx).await;
-            assert!(actor.state.lock().await.running_task.is_none(), "a row that no longer qualifies started");
-            assert!(queued_peer_ids(&actor).await.is_empty(), "the unqualified row stayed queued");
+            assert!(
+                actor.state.lock().await.running_task.is_none(),
+                "a row that no longer qualifies started"
+            );
+            assert!(
+                queued_peer_ids(&actor).await.is_empty(),
+                "the unqualified row stayed queued"
+            );
         })
         .await;
 }
@@ -454,7 +499,9 @@ async fn a_parking_session_does_not_promote_a_peer_row_into_the_turn_it_waits_fo
             let _unpark = UnparkOnDrop(id.clone());
             {
                 let mut state = actor.state.lock().await;
-                state.pending_inputs.push_back(user_item("running", "owner"));
+                state
+                    .pending_inputs
+                    .push_back(user_item("running", "owner"));
                 state.running_task = Some(running_task_stub("running"));
             }
             let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -462,21 +509,34 @@ async fn a_parking_session_does_not_promote_a_peer_row_into_the_turn_it_waits_fo
             actor
                 .admit_peer_message_for_test(test_envelope("m1", "lane a", "hi"), completion_tx)
                 .await;
-            assert!(!actor.drain_interjections_at_safe_point().await, "a peer row entered the parked-for turn");
+            assert!(
+                !actor.drain_interjections_at_safe_point().await,
+                "a peer row entered the parked-for turn"
+            );
             assert_eq!(queued_peer_ids(&actor).await, ["peer-message-m1"]);
             // Park completes with the row still queued (the turn ended); it then runs at unpark.
             actor.state.lock().await.running_task = None;
-            actor.state.lock().await.pending_inputs.retain(|i| i.prompt_id != "running");
+            actor
+                .state
+                .lock()
+                .await
+                .pending_inputs
+                .retain(|i| i.prompt_id != "running");
             assert!(quiesce::complete_park(&id, op));
             assert_eq!(queued_peer_ids(&actor).await.len(), 1);
             quiesce::unpark(&id);
             // Control: no park, the same state promotes the row.
             {
                 let mut state = actor.state.lock().await;
-                state.pending_inputs.push_front(user_item("running2", "owner"));
+                state
+                    .pending_inputs
+                    .push_front(user_item("running2", "owner"));
                 state.running_task = Some(running_task_stub("running2"));
             }
-            assert!(actor.drain_interjections_at_safe_point().await, "without a park the row is promoted");
+            assert!(
+                actor.drain_interjections_at_safe_point().await,
+                "without a park the row is promoted"
+            );
         })
         .await;
 }
@@ -499,7 +559,12 @@ async fn a_peer_message_to_a_child_of_a_held_root_waits_for_the_root() {
             let outcome = actor
                 .admit_peer_message_for_test(test_envelope("m1", "lane a", "hi"), completion_tx)
                 .await;
-            assert_eq!(outcome, PeerAdmission::Admitted { prompt_id: "peer-message-m1".into() });
+            assert_eq!(
+                outcome,
+                PeerAdmission::Admitted {
+                    prompt_id: "peer-message-m1".into()
+                }
+            );
             assert_eq!(queued_peer_ids(&actor).await.len(), 1);
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             assert!(
@@ -518,7 +583,10 @@ async fn a_peer_message_to_a_child_of_a_held_root_waits_for_the_root() {
                 }
             })
             .await;
-            assert!(started.is_ok(), "the child never started the queued peer message after the root unparked");
+            assert!(
+                started.is_ok(),
+                "the child never started the queued peer message after the root unparked"
+            );
         })
         .await;
 }
@@ -537,7 +605,9 @@ async fn a_child_of_a_parking_root_does_not_promote_a_peer_row() {
             let _unpark = UnparkOnDrop(root.clone());
             {
                 let mut state = actor.state.lock().await;
-                state.pending_inputs.push_back(user_item("running", "owner"));
+                state
+                    .pending_inputs
+                    .push_back(user_item("running", "owner"));
                 state.running_task = Some(running_task_stub("running"));
             }
             let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -579,13 +649,24 @@ async fn a_peer_row_admitted_before_the_root_parked_starts_after_the_root_unpark
             let _unpark = UnparkOnDrop(root.clone());
             actor.state.lock().await.running_task = Some(running_task_stub("busy"));
             let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
-            actor.admit_peer_message_for_test(test_envelope("wa", "lane a", "hi"), completion_tx.clone()).await;
+            actor
+                .admit_peer_message_for_test(
+                    test_envelope("wa", "lane a", "hi"),
+                    completion_tx.clone(),
+                )
+                .await;
             quiesce::begin_park(&root, ParkMode::Hold).expect("root parking");
             actor.state.lock().await.running_task = None; // the child's turn ended
             SessionActor::maybe_start_running_task(actor.clone(), completion_tx).await;
-            assert!(actor.state.lock().await.running_task.is_none(), "a peer row started under a parking root");
+            assert!(
+                actor.state.lock().await.running_task.is_none(),
+                "a peer row started under a parking root"
+            );
             quiesce::unpark(&root);
-            assert!(wait_running(&actor).await, "the blocked peer row never started: no waiter was armed at the block");
+            assert!(
+                wait_running(&actor).await,
+                "the blocked peer row never started: no waiter was armed at the block"
+            );
         })
         .await;
 }
@@ -604,16 +685,24 @@ async fn a_peer_row_whose_root_is_reparked_before_the_start_check_still_starts_l
             let _unpark = UnparkOnDrop(root.clone());
             park(&root);
             let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
-            actor.admit_peer_message_for_test(test_envelope("wb", "lane a", "hi"), completion_tx).await;
+            actor
+                .admit_peer_message_for_test(test_envelope("wb", "lane a", "hi"), completion_tx)
+                .await;
             let guard = actor.state.lock().await; // the waiter's restart parks on this lock
             quiesce::unpark(&root);
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             park(&root); // re-parked before the start-time check
             drop(guard);
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            assert!(actor.state.lock().await.running_task.is_none(), "started under a re-parked root");
+            assert!(
+                actor.state.lock().await.running_task.is_none(),
+                "started under a re-parked root"
+            );
             quiesce::unpark(&root);
-            assert!(wait_running(&actor).await, "the waiter was lost by the re-park");
+            assert!(
+                wait_running(&actor).await,
+                "the waiter was lost by the re-park"
+            );
         })
         .await;
 }
@@ -634,12 +723,29 @@ async fn a_non_peer_row_behind_a_blocked_peer_row_still_starts() {
             actor.state.lock().await.running_task = Some(running_task_stub("busy"));
             let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
             quiesce::begin_park(&root, ParkMode::Hold).expect("root parking");
-            actor.admit_peer_message_for_test(test_envelope("ws", "lane a", "hi"), completion_tx.clone()).await;
-            actor.state.lock().await.pending_inputs.push_back(user_item("from-parent", "parent says"));
+            actor
+                .admit_peer_message_for_test(
+                    test_envelope("ws", "lane a", "hi"),
+                    completion_tx.clone(),
+                )
+                .await;
+            actor
+                .state
+                .lock()
+                .await
+                .pending_inputs
+                .push_back(user_item("from-parent", "parent says"));
             actor.state.lock().await.running_task = None;
             SessionActor::maybe_start_running_task(actor.clone(), completion_tx).await;
-            assert!(wait_running(&actor).await, "the non-peer row behind the peer row never started");
-            assert_eq!(queued_peer_ids(&actor).await.len(), 1, "the peer row must stay queued");
+            assert!(
+                wait_running(&actor).await,
+                "the non-peer row behind the peer row never started"
+            );
+            assert_eq!(
+                queued_peer_ids(&actor).await.len(),
+                1,
+                "the peer row must stay queued"
+            );
         })
         .await;
 }
@@ -670,7 +776,13 @@ fn spawn_run_loop(
 }
 
 fn release(op: u64, owed: quiesce::OwedWork, kick: bool) -> SessionCommand {
-    SessionCommand::QuiesceRelease { op, owed, reopen_spawns: false, kick, reminder: None }
+    SessionCommand::QuiesceRelease {
+        op,
+        owed,
+        reopen_spawns: false,
+        kick,
+        reminder: None,
+    }
 }
 
 /// Returns once the session loop has handled everything sent before it (the kill of a task that does not exist is
@@ -685,7 +797,9 @@ async fn barrier(cmd_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>) {
             respond_to: tx,
         })
         .expect("loop receiving");
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await.expect("answered");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+        .await
+        .expect("answered");
 }
 
 /// The `QuiesceRelease` handler of an unpark starts a queued peer message (the rechecks run at that start).
@@ -698,7 +812,8 @@ async fn the_unpark_release_starts_a_queued_peer_message() {
             let id = fresh("release-peer");
             let (gateway_tx, _g) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _p) = tokio::sync::mpsc::unbounded_channel();
-            let (mut actor, event_rx) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let (mut actor, event_rx) =
+                create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor.session_info.id = acp::SessionId::new(id.clone());
             let actor = std::sync::Arc::new(actor);
             let _unpark = UnparkOnDrop(id.clone());
@@ -709,11 +824,19 @@ async fn the_unpark_release_starts_a_queued_peer_message() {
                 .admit_peer_message_for_test(test_envelope("m1", "lane a", "hi"), completion_tx)
                 .await;
             barrier(&cmd_tx).await;
-            assert!(actor.state.lock().await.running_task.is_none(), "a held session started a turn");
+            assert!(
+                actor.state.lock().await.running_task.is_none(),
+                "a held session started a turn"
+            );
             quiesce::unpark(&id);
-            cmd_tx.send(release(p.op, quiesce::OwedWork::default(), true)).expect("send");
+            cmd_tx
+                .send(release(p.op, quiesce::OwedWork::default(), true))
+                .expect("send");
             barrier(&cmd_tx).await; // the release has been handled once this answers
-            assert_eq!(actor.state.lock().await.running_prompt_id(), Some("peer-message-m1"));
+            assert_eq!(
+                actor.state.lock().await.running_prompt_id(),
+                Some("peer-message-m1")
+            );
         })
         .await;
 }
@@ -729,7 +852,8 @@ async fn a_stale_release_neither_kicks_nor_runs_owed_work_under_the_replacement_
             let id = fresh("stale-release");
             let (gateway_tx, _g) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _p) = tokio::sync::mpsc::unbounded_channel();
-            let (mut actor, event_rx) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let (mut actor, event_rx) =
+                create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor.session_info.id = acp::SessionId::new(id.clone());
             let actor = std::sync::Arc::new(actor);
             let _unpark = UnparkOnDrop(id.clone());
@@ -745,11 +869,18 @@ async fn a_stale_release_neither_kicks_nor_runs_owed_work_under_the_replacement_
             let owed = quiesce::OwedWork {
                 turn_summary: None,
                 title_refresh: true,
-                family_switch_compact: Some(quiesce::FamilyDebt { origin_family: "a".into() }),
+                family_switch_compact: Some(quiesce::FamilyDebt {
+                    origin_family: "a".into(),
+                }),
             };
-            cmd_tx.send(release(p.op, owed.clone(), true)).expect("send");
+            cmd_tx
+                .send(release(p.op, owed.clone(), true))
+                .expect("send");
             barrier(&cmd_tx).await;
-            assert!(actor.state.lock().await.running_task.is_none(), "P's release started a turn under Q");
+            assert!(
+                actor.state.lock().await.running_task.is_none(),
+                "P's release started a turn under Q"
+            );
             let entry = quiesce::entry(&id).expect("Q still holds");
             assert_eq!(entry.op, q.op);
             assert_eq!(entry.owed, owed, "P's owed work moved to Q");
@@ -761,11 +892,18 @@ async fn a_stale_release_neither_kicks_nor_runs_owed_work_under_the_replacement_
 // P189 A2 round 3: only the client prompt that began an un-park finishes it; a scheduled fire waits behind it.
 // ---------------------------------------------------------------------------------------------------------
 
-fn fire_prompt(prompt_id: &str) -> (SessionCommand, tokio::sync::oneshot::Receiver<crate::session::commands::PromptTurnResult>) {
+fn fire_prompt(
+    prompt_id: &str,
+) -> (
+    SessionCommand,
+    tokio::sync::oneshot::Receiver<crate::session::commands::PromptTurnResult>,
+) {
     let (respond_to, rx) = tokio::sync::oneshot::channel();
     let cmd = SessionCommand::Prompt {
         prompt_id: prompt_id.into(),
-        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new("scheduled job"))],
+        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+            "scheduled job",
+        ))],
         prompt_mode: PromptMode::Agent,
         artifact_upload_ctx: None,
         client_identifier: None,
@@ -785,7 +923,10 @@ fn fire_prompt(prompt_id: &str) -> (SessionCommand, tokio::sync::oneshot::Receiv
     (cmd, rx)
 }
 
-async fn spawn_loop(actor: std::sync::Arc<SessionActor>, event_rx: tokio::sync::mpsc::UnboundedReceiver<SessionEvent>) -> tokio::sync::mpsc::UnboundedSender<SessionCommand> {
+async fn spawn_loop(
+    actor: std::sync::Arc<SessionActor>,
+    event_rx: tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+) -> tokio::sync::mpsc::UnboundedSender<SessionCommand> {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SessionCommand>();
     let (chat_tx, chat_rx) = tokio::sync::mpsc::unbounded_channel();
     std::mem::forget(chat_tx);
@@ -795,7 +936,9 @@ async fn spawn_loop(actor: std::sync::Arc<SessionActor>, event_rx: tokio::sync::
         chat_rx,
         event_rx,
         None,
-        std::sync::Arc::new(parking_lot::Mutex::new(fuigo_workspace::file_system::CodebaseIndexManager::new())),
+        std::sync::Arc::new(parking_lot::Mutex::new(
+            fuigo_workspace::file_system::CodebaseIndexManager::new(),
+        )),
         std::path::PathBuf::from("/tmp"),
         crate::session::fs_watch::FsWatchCapabilities::none(),
     ));
@@ -822,14 +965,24 @@ async fn a_scheduled_fire_during_unparking_neither_finishes_the_unpark_nor_start
             let (cmd, _rx) = fire_prompt("scheduler-fired-root-1");
             cmd_tx.send(cmd).expect("loop receiving");
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-            assert_eq!(quiesce::entry(&id).map(|e| e.phase), Some(quiesce::ParkPhase::Unparking), "the fire finished the un-park");
+            assert_eq!(
+                quiesce::entry(&id).map(|e| e.phase),
+                Some(quiesce::ParkPhase::Unparking),
+                "the fire finished the un-park"
+            );
             {
                 let state = actor.state.lock().await;
-                assert!(state.running_task.is_none(), "the fire's turn started while the session was Unparking");
+                assert!(
+                    state.running_task.is_none(),
+                    "the fire's turn started while the session was Unparking"
+                );
                 assert_eq!(state.pending_inputs.len(), 1, "the fire row is kept queued");
             }
             assert!(quiesce::finish_unpark(&id, p.op));
-            assert!(wait_running(&actor).await, "the queued fire never started after the un-park finished");
+            assert!(
+                wait_running(&actor).await,
+                "the queued fire never started after the un-park finished"
+            );
         })
         .await;
 }
@@ -857,11 +1010,17 @@ async fn a_scheduled_fire_on_a_child_of_an_unparking_root_waits_for_the_entry_to
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             {
                 let state = actor.state.lock().await;
-                assert!(state.running_task.is_none(), "a child fire started a turn under an Unparking root");
+                assert!(
+                    state.running_task.is_none(),
+                    "a child fire started a turn under an Unparking root"
+                );
                 assert_eq!(state.pending_inputs.len(), 1, "the fire row is kept queued");
             }
             assert!(quiesce::finish_unpark(&root, p.op));
-            assert!(wait_running(&actor).await, "the child never started the queued fire after the root's entry went");
+            assert!(
+                wait_running(&actor).await,
+                "the child never started the queued fire after the root's entry went"
+            );
         })
         .await;
 }

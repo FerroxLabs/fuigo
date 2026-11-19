@@ -1,5 +1,5 @@
-use google_cloud_metadata::transport::RequestPolicyExt;
 use async_trait::async_trait;
+use google_cloud_metadata::transport::RequestPolicyExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use url::Url;
@@ -22,7 +22,11 @@ impl UrlSubjectTokenSource {
         let headers = value.headers.ok_or(Error::MissingHeaders)?;
         let format = value.format.ok_or(Error::MissingFormat)?;
 
-        Ok(Self { url, headers, format })
+        Ok(Self {
+            url,
+            headers,
+            format,
+        })
     }
 
     async fn create_subject_token(&self) -> Result<String, Error> {
@@ -33,10 +37,15 @@ impl UrlSubjectTokenSource {
             request = request.header(key, val);
         }
 
-        let response = request.send_guarded().await.map_err(Error::TransportPolicy)?;
+        let response = request
+            .send_guarded()
+            .await
+            .map_err(Error::TransportPolicy)?;
 
         if !response.status().is_success() {
-            return Err(Error::UnexpectedStatusOnGetSessionToken(response.status().as_u16()));
+            return Err(Error::UnexpectedStatusOnGetSessionToken(
+                response.status().as_u16(),
+            ));
         }
 
         let body = response.text_with_charset("utf-8").await?;

@@ -249,11 +249,15 @@ pub(super) async fn read_json_response(
 /// ignored, so a hostile claim cannot reach the terminal.
 pub(super) fn display_identity(body: &serde_json::Value) -> Option<String> {
     let id = claims(body.get("id_token")?.as_str()?)?;
-    ["email", "name", "preferred_username"].into_iter().find_map(|key| {
-        let value = id.get(key)?.as_str()?.trim();
-        (!value.is_empty() && value.chars().count() <= 120 && !value.chars().any(char::is_control))
+    ["email", "name", "preferred_username"]
+        .into_iter()
+        .find_map(|key| {
+            let value = id.get(key)?.as_str()?.trim();
+            (!value.is_empty()
+                && value.chars().count() <= 120
+                && !value.chars().any(char::is_control))
             .then(|| value.to_owned())
-    })
+        })
 }
 fn parse_credential(provider: SubscriptionProvider, body: serde_json::Value) -> Result<Credential> {
     let access = body

@@ -140,8 +140,17 @@ async fn a_denied_headless_run_exits_three_and_says_why() {
         result.stderr
     );
     // One line per refusal, carrying the remedy: no second "blocked" summary line.
-    let lines: Vec<&str> = result.stderr.lines().filter(|l| l.starts_with("fuigo: ")).collect();
-    assert_eq!(lines.len(), 1, "exactly one stderr line per refusal: {}", result.stderr);
+    let lines: Vec<&str> = result
+        .stderr
+        .lines()
+        .filter(|l| l.starts_with("fuigo: "))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one stderr line per refusal: {}",
+        result.stderr
+    );
     assert!(
         lines[0].starts_with("fuigo: refused") && lines[0].contains("Remedy:"),
         "the one line is the refusal with its remedy: {}",

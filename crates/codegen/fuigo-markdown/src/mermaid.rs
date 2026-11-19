@@ -3717,7 +3717,8 @@ mod tests {
             assert!(!art.contains("<br"), "{art}");
             assert!(!art.contains("\\n"), "{art}");
             assert!(
-                art.lines().all(|l| !(l.contains("alpha") && l.contains("beta"))),
+                art.lines()
+                    .all(|l| !(l.contains("alpha") && l.contains("beta"))),
                 "alpha and beta must not share a row:\n{art}"
             );
         }

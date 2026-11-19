@@ -41,8 +41,11 @@ fn commit_reads_message_file(args: &[String]) -> bool {
             break;
         }
         if word.starts_with("--") {
-            let (name, value) = word.split_once('=').map_or((word.as_str(), None), |(n, v)| (n, Some(v)));
-            if (is_accepted_long_option_prefix(name, "--file", 5) || is_accepted_long_option_prefix(name, "--template", 4))
+            let (name, value) = word
+                .split_once('=')
+                .map_or((word.as_str(), None), |(n, v)| (n, Some(v)));
+            if (is_accepted_long_option_prefix(name, "--file", 5)
+                || is_accepted_long_option_prefix(name, "--template", 4))
                 && value.or(args.get(i).map(String::as_str)) != Some("-")
             {
                 return true;
@@ -56,7 +59,11 @@ fn commit_reads_message_file(args: &[String]) -> bool {
             let rest = &cluster[at + letter.len_utf8()..];
             match letter {
                 'F' | 't' => {
-                    let value = if rest.is_empty() { args.get(i).map(String::as_str) } else { Some(rest) };
+                    let value = if rest.is_empty() {
+                        args.get(i).map(String::as_str)
+                    } else {
+                        Some(rest)
+                    };
                     if value != Some("-") {
                         return true;
                     }

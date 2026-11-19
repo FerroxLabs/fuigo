@@ -1370,9 +1370,9 @@ pub fn clear_for_tests() {
 
 #[cfg(test)]
 mod tests {
+    use super::REGISTRY_TEST_LOCK as LOCK;
     use super::*;
     use std::io::Write as _;
-    use super::REGISTRY_TEST_LOCK as LOCK;
 
     const KEY: &str = "p70b-key-Xq7Lm2Vz";
 

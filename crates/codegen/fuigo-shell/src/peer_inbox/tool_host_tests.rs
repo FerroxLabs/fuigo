@@ -11,7 +11,12 @@ impl PeerHost for Fake {
         PeerInboxStatus::Ready
     }
     fn this_session(&self) -> Option<SelfInfo> {
-        Some(SelfInfo { address: Address::new(H, "me", 1).unwrap(), name: "me".into(), session_ref: "mmmmmmmm".into(), is_subagent: false })
+        Some(SelfInfo {
+            address: Address::new(H, "me", 1).unwrap(),
+            name: "me".into(),
+            session_ref: "mmmmmmmm".into(),
+            is_subagent: false,
+        })
     }
     fn list(&self, _p: u32) -> HostFuture<'_, Result<PeerPage, PeerHostError>> {
         Box::pin(async {
@@ -26,7 +31,10 @@ impl PeerHost for Fake {
             })
         })
     }
-    fn send(&self, _r: SendRequest) -> HostFuture<'_, Result<fuigo_peer::DeliveryOutcome, PeerHostError>> {
+    fn send(
+        &self,
+        _r: SendRequest,
+    ) -> HostFuture<'_, Result<fuigo_peer::DeliveryOutcome, PeerHostError>> {
         Box::pin(async { Err(PeerHostError::Failed) })
     }
 }
@@ -45,7 +53,10 @@ async fn peers_status_and_list_give_the_typed_reason_when_unavailable() {
     assert!(peers_command("status", &*host).await.contains(NOT_STARTED));
     assert!(peers_command("list", &*host).await.contains(NOT_STARTED));
     let sym = UnavailableHost::new("the Fuigo home is a symbolic link");
-    assert_eq!(peers_command("status", &sym).await, "Peer inbox: unavailable (the Fuigo home is a symbolic link).");
+    assert_eq!(
+        peers_command("status", &sym).await,
+        "Peer inbox: unavailable (the Fuigo home is a symbolic link)."
+    );
 }
 
 #[tokio::test]
@@ -57,14 +68,31 @@ mod p9b_conversation {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    fn host(turn: Arc<Mutex<Option<(String, u32)>>>, ring: fuigo_workspace::permission::DenialLog) -> SessionPeerHost {
-        let mode = Arc::new(|| fuigo_peer::PeerMode::new(false, fuigo_peer::PeerBase::AcceptEdits, false));
+    fn host(
+        turn: Arc<Mutex<Option<(String, u32)>>>,
+        ring: fuigo_workspace::permission::DenialLog,
+    ) -> SessionPeerHost {
+        let mode =
+            Arc::new(|| fuigo_peer::PeerMode::new(false, fuigo_peer::PeerBase::AcceptEdits, false));
         let conv = Arc::new(move || turn.lock().unwrap().clone());
-        SessionPeerHost::new("sess".into(), ring, mode, conv, Arc::new(|| fuigo_peer::OperatorKind::Human))
+        SessionPeerHost::new(
+            "sess".into(),
+            ring,
+            mode,
+            conv,
+            Arc::new(|| fuigo_peer::OperatorKind::Human),
+        )
     }
 
     fn build(h: &SessionPeerHost, id: &str) -> fuigo_peer::Envelope {
-        h.build_envelope(Address::new(H, "sess", 1).unwrap(), "me".into(), "3f2a9c10".into(), id.into(), 1, "hi".into())
+        h.build_envelope(
+            Address::new(H, "sess", 1).unwrap(),
+            "me".into(),
+            "3f2a9c10".into(),
+            id.into(),
+            1,
+            "hi".into(),
+        )
     }
 
     /// S5.6: a human-started turn starts a new conversation at hop 0; a peer-started turn continues the received conversation
@@ -74,14 +102,25 @@ mod p9b_conversation {
         let turn = Arc::new(Mutex::new(None));
         let h = host(turn.clone(), Default::default());
         let first = build(&h, "m1");
-        assert_eq!((first.hop, first.conversation_id.as_str()), (0, "m1"), "human turn: new conversation, hop 0");
+        assert_eq!(
+            (first.hop, first.conversation_id.as_str()),
+            (0, "m1"),
+            "human turn: new conversation, hop 0"
+        );
         *turn.lock().unwrap() = Some(("conv-a".into(), 0));
         let reply = build(&h, "m2");
-        assert_eq!((reply.hop, reply.conversation_id.as_str()), (1, "conv-a"), "peer-started turn: same conversation, hop + 1");
+        assert_eq!(
+            (reply.hop, reply.conversation_id.as_str()),
+            (1, "conv-a"),
+            "peer-started turn: same conversation, hop + 1"
+        );
         *turn.lock().unwrap() = Some(("conv-a".into(), 7));
         let last = build(&h, "m3");
         assert_eq!(last.hop, 8);
-        assert!(fuigo_peer::hop_exhausted(last.hop), "the receiver holds it at the hop budget");
+        assert!(
+            fuigo_peer::hop_exhausted(last.hop),
+            "the receiver holds it at the hop budget"
+        );
         assert!(!fuigo_peer::hop_exhausted(reply.hop));
         *turn.lock().unwrap() = Some(("conv-a".into(), u32::MAX));
         assert_eq!(build(&h, "m4").hop, u32::MAX, "no overflow");
@@ -93,7 +132,10 @@ mod p9b_conversation {
         for field in ["hop", "conversation_id", "conversation", "notify_when_idle"] {
             let input = serde_json::json!({ "to": "x", "message": "m", field: 1 });
             assert!(
-                serde_json::from_value::<fuigo_tools::implementations::fuigo_build::peer_tools::SendMessageInput>(input).is_err(),
+                serde_json::from_value::<
+                    fuigo_tools::implementations::fuigo_build::peer_tools::SendMessageInput,
+                >(input)
+                .is_err(),
                 "{field} must be an unknown field"
             );
         }
@@ -104,8 +146,17 @@ mod p9b_conversation {
     fn an_outgoing_envelope_is_stamped_when_the_sender_has_a_recent_denial() {
         let ring = fuigo_workspace::permission::DenialLog::default();
         let h = host(Arc::new(Mutex::new(None)), ring.clone());
-        assert!(build(&h, "a").denied_recently.is_empty(), "no denial: no stamp");
-        ring.record(fuigo_workspace::permission::DenialKey { kind: "edit".into(), hash: "abc".into() }, fuigo_workspace::permission::mono_secs());
+        assert!(
+            build(&h, "a").denied_recently.is_empty(),
+            "no denial: no stamp"
+        );
+        ring.record(
+            fuigo_workspace::permission::DenialKey {
+                kind: "edit".into(),
+                hash: "abc".into(),
+            },
+            fuigo_workspace::permission::mono_secs(),
+        );
         let env = build(&h, "b");
         assert_eq!(env.denied_recently.len(), 1);
         assert_eq!(env.denied_recently[0].tool_kind, "edit");
@@ -115,15 +166,36 @@ mod p9b_conversation {
     /// also offered the send tool, and the receiver's admission compares (mode, operator)).
     #[test]
     fn from_operator_is_the_sessions_real_operator_kind() {
-        use crate::session::peer_admission::{OperatorPresence, PeerAdmissionConfig, PeerAdmissionState};
+        use crate::session::peer_admission::{
+            OperatorPresence, PeerAdmissionConfig, PeerAdmissionState,
+        };
         for presence in OperatorPresence::ALL {
             let state = PeerAdmissionState::unmetered();
             // A session no host configured fails closed to `None`.
-            assert_eq!((state.operator_kind_handle())(), fuigo_peer::OperatorKind::None);
-            state.configure(PeerAdmissionConfig { opted_in: true, operator: presence, ..Default::default() });
-            let mode = Arc::new(|| fuigo_peer::PeerMode::new(false, fuigo_peer::PeerBase::AcceptEdits, false));
-            let h = SessionPeerHost::new("sess".into(), Default::default(), mode, Arc::new(|| None), state.operator_kind_handle());
-            assert_eq!(build(&h, "m").from_operator, presence.kind(), "{presence:?}");
+            assert_eq!(
+                (state.operator_kind_handle())(),
+                fuigo_peer::OperatorKind::None
+            );
+            state.configure(PeerAdmissionConfig {
+                opted_in: true,
+                operator: presence,
+                ..Default::default()
+            });
+            let mode = Arc::new(|| {
+                fuigo_peer::PeerMode::new(false, fuigo_peer::PeerBase::AcceptEdits, false)
+            });
+            let h = SessionPeerHost::new(
+                "sess".into(),
+                Default::default(),
+                mode,
+                Arc::new(|| None),
+                state.operator_kind_handle(),
+            );
+            assert_eq!(
+                build(&h, "m").from_operator,
+                presence.kind(),
+                "{presence:?}"
+            );
         }
     }
 
@@ -151,15 +223,37 @@ mod p9c_remote_attached {
     #[tokio::test]
     async fn send_and_list_from_a_session_are_refused_with_the_typed_reason_while_attached() {
         let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
-        let mode = std::sync::Arc::new(|| fuigo_peer::PeerMode::new(false, fuigo_peer::PeerBase::AcceptEdits, false));
-        let h = SessionPeerHost::new("sess".into(), Default::default(), mode, std::sync::Arc::new(|| None), std::sync::Arc::new(|| fuigo_peer::OperatorKind::Human));
-        let req = || SendRequest { to: Address::new(H, "other", 1).unwrap(), message: "hi".into(), summary: None, watch: false };
+        let mode = std::sync::Arc::new(|| {
+            fuigo_peer::PeerMode::new(false, fuigo_peer::PeerBase::AcceptEdits, false)
+        });
+        let h = SessionPeerHost::new(
+            "sess".into(),
+            Default::default(),
+            mode,
+            std::sync::Arc::new(|| None),
+            std::sync::Arc::new(|| fuigo_peer::OperatorKind::Human),
+        );
+        let req = || SendRequest {
+            to: Address::new(H, "other", 1).unwrap(),
+            message: "hi".into(),
+            summary: None,
+            watch: false,
+        };
         let g = crate::peer_inbox::driver::attach_remote();
-        assert!(matches!(h.send(req()).await, Err(PeerHostError::Unavailable(r)) if r == REMOTE_ATTACHED));
-        assert!(matches!(h.list(0).await, Err(PeerHostError::Unavailable(r)) if r == REMOTE_ATTACHED));
-        assert_eq!(h.status(), PeerInboxStatus::Unavailable(REMOTE_ATTACHED.to_owned()));
+        assert!(
+            matches!(h.send(req()).await, Err(PeerHostError::Unavailable(r)) if r == REMOTE_ATTACHED)
+        );
+        assert!(
+            matches!(h.list(0).await, Err(PeerHostError::Unavailable(r)) if r == REMOTE_ATTACHED)
+        );
+        assert_eq!(
+            h.status(),
+            PeerInboxStatus::Unavailable(REMOTE_ATTACHED.to_owned())
+        );
         drop(g);
         // Cleared: the refusal is gone (what is left is the ordinary "not started" answer of a test process).
-        assert!(!matches!(h.send(req()).await, Err(PeerHostError::Unavailable(r)) if r == REMOTE_ATTACHED));
+        assert!(
+            !matches!(h.send(req()).await, Err(PeerHostError::Unavailable(r)) if r == REMOTE_ATTACHED)
+        );
     }
 }

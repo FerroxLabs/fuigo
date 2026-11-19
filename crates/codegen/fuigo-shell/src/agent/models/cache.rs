@@ -309,7 +309,10 @@ impl ModelsCacheManager {
         tracing::debug!("models cache TTL renewed");
     }
 
-    #[allow(clippy::disallowed_methods, reason = "models cache under FUIGO_HOME; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "models cache under FUIGO_HOME; not inside a session folder"
+    )]
     pub(crate) fn invalidate(&self) {
         match std::fs::remove_file(&self.path) {
             Ok(()) => tracing::info!("models disk cache invalidated"),
@@ -346,7 +349,10 @@ impl ModelsCacheManager {
     /// The write itself. The caller must already hold [`Self::lock_for_write`].
     /// Also the seam tests use to simulate a writer on a filesystem where the
     /// lock could not be taken.
-    #[allow(clippy::disallowed_methods, reason = "models cache under FUIGO_HOME; not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "models cache under FUIGO_HOME; not inside a session folder"
+    )]
     pub(in crate::agent::models) fn write_locked(&self, cache: &ModelsCache) {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -387,7 +393,10 @@ pub(crate) fn unique_tmp_path(path: &std::path::Path) -> std::path::PathBuf {
     path.with_extension(format!("json.tmp.{}.{n}", std::process::id()))
 }
 
-#[allow(clippy::disallowed_methods, reason = "models cache under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "models cache under FUIGO_HOME; not inside a session folder"
+)]
 pub(crate) fn sweep_stale_tmp(path: &std::path::Path, ttl: std::time::Duration) {
     let (Some(parent), Some(stem)) = (path.parent(), path.file_name().and_then(|s| s.to_str()))
     else {
@@ -417,7 +426,10 @@ pub(crate) fn sweep_stale_tmp(path: &std::path::Path, ttl: std::time::Duration) 
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "models cache under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "models cache under FUIGO_HOME; not inside a session folder"
+)]
 pub(crate) fn write_private_atomic(path: &std::path::Path, ttl: std::time::Duration, bytes: &[u8]) {
     let Some(parent) = path.parent() else {
         return;

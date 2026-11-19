@@ -103,7 +103,10 @@ impl TryFrom<RefusePeerMessageArgsRaw> for RefusePeerMessageArgs {
     type Error = BoundsError;
 
     fn try_from(r: RefusePeerMessageArgsRaw) -> Result<Self, BoundsError> {
-        let a = Self { message_id: r.message_id, reason: r.reason };
+        let a = Self {
+            message_id: r.message_id,
+            reason: r.reason,
+        };
         a.validate()?;
         Ok(a)
     }

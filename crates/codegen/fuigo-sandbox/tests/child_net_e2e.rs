@@ -87,10 +87,8 @@ fn filtered_child_cannot_connect_to_socket_created_after_launch() {
 /// This covers the degraded state (Landlock unavailable, apply failed) where the per-spawn filter is the only remaining child-network control.
 #[test]
 fn restrict_child_network_std_arms_from_config_without_apply() {
-    let manager = fuigo_sandbox::SandboxManager::new(
-        fuigo_sandbox::ProfileName::ReadOnly,
-        Path::new("/tmp"),
-    );
+    let manager =
+        fuigo_sandbox::SandboxManager::new(fuigo_sandbox::ProfileName::ReadOnly, Path::new("/tmp"));
     assert!(!manager.is_applied(), "no kernel apply in this test");
     manager.install();
     assert!(

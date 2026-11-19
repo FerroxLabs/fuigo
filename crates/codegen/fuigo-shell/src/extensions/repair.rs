@@ -122,7 +122,8 @@ async fn repair_on_disk(
     let session_writer = if dry_run {
         None
     } else {
-        let dir = crate::util::fuigo_home::sessions_cwd_dir_in(fuigo_root, &info.cwd).join(info.id.to_string());
+        let dir = crate::util::fuigo_home::sessions_cwd_dir_in(fuigo_root, &info.cwd)
+            .join(info.id.to_string());
         Some(crate::session::session_writer_lock::claim_writer(&info.id.0, dir).await?)
     };
     let access = match &session_writer {
@@ -144,15 +145,21 @@ async fn repair_on_disk(
     if report.changed()
         && let Some(writer) = &session_writer
     {
-        let (adapter, writer, rewrite_info, history) =
-            (storage.clone(), writer.clone(), info.clone(), chat_history.clone());
-        tokio::task::spawn_blocking(move || adapter.replace_chat_history_through(&writer, &rewrite_info, &history))
-            .await
-            .map_err(std::io::Error::other)
-            .and_then(|written| written)
-            .map_err(|e| {
-                crate::acp_error::session_storage(format!("failed to write repaired history: {e}"))
-            })?;
+        let (adapter, writer, rewrite_info, history) = (
+            storage.clone(),
+            writer.clone(),
+            info.clone(),
+            chat_history.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            adapter.replace_chat_history_through(&writer, &rewrite_info, &history)
+        })
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(|written| written)
+        .map_err(|e| {
+            crate::acp_error::session_storage(format!("failed to write repaired history: {e}"))
+        })?;
         tracing::warn!(
             session_id,
             duplicates_removed = report.duplicates_removed,
@@ -166,7 +173,10 @@ async fn repair_on_disk(
     to_raw_response(&RepairSessionResponse::new(report, dry_run, false))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,7 +325,8 @@ mod tests {
     async fn disk_repair_is_refused_while_the_session_is_open_in_another_window() {
         let tmp = TempDir::new().unwrap();
         let (adapter, info) = seed_session(tmp.path(), &corrupted_history()).await;
-        let dir = crate::util::fuigo_home::sessions_cwd_dir_in(tmp.path(), &info.cwd).join(info.id.to_string());
+        let dir = crate::util::fuigo_home::sessions_cwd_dir_in(tmp.path(), &info.cwd)
+            .join(info.id.to_string());
         let window_a = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -323,21 +334,39 @@ mod tests {
             .truncate(false)
             .open(dir.join(crate::session::session_writer_lock::SESSION_WRITER_LOCK_FILE))
             .unwrap();
-        window_a.try_lock().expect("the other window takes the session");
+        window_a
+            .try_lock()
+            .expect("the other window takes the session");
         let chat_before = std::fs::read(dir.join("chat_history.jsonl")).unwrap();
 
-        let err = repair_on_disk(tmp.path(), SESSION_ID, false).await.expect_err("repaired a session open elsewhere");
-        assert!(format!("{err:?}").contains(crate::session::session_writer_lock::HELD_ELSEWHERE), "{err:?}");
-        assert_eq!(std::fs::read(dir.join("chat_history.jsonl")).unwrap(), chat_before);
+        let err = repair_on_disk(tmp.path(), SESSION_ID, false)
+            .await
+            .expect_err("repaired a session open elsewhere");
+        assert!(
+            format!("{err:?}").contains(crate::session::session_writer_lock::HELD_ELSEWHERE),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("chat_history.jsonl")).unwrap(),
+            chat_before
+        );
 
         // A dry run only reads, so it is allowed.
-        let v = parse(&repair_on_disk(tmp.path(), SESSION_ID, true).await.expect("dry run reads only"));
+        let v = parse(
+            &repair_on_disk(tmp.path(), SESSION_ID, true)
+                .await
+                .expect("dry run reads only"),
+        );
         assert_eq!(v["repaired"], true);
         assert_eq!(v["dryRun"], true);
 
         window_a.unlock().unwrap();
         drop(window_a);
-        let v = parse(&repair_on_disk(tmp.path(), SESSION_ID, false).await.expect("free session"));
+        let v = parse(
+            &repair_on_disk(tmp.path(), SESSION_ID, false)
+                .await
+                .expect("free session"),
+        );
         assert_eq!(v["repaired"], true);
         let _ = adapter;
     }

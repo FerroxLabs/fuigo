@@ -642,9 +642,15 @@ mod tests {
             errors.push(format!("{err:#}"));
         }
         let logged = capture.text();
-        assert!(logged.contains("Opening TCP to proxy"), "control: the dial is logged: {logged}");
+        assert!(
+            logged.contains("Opening TCP to proxy"),
+            "control: the dial is logged: {logged}"
+        );
         for text in errors.iter().chain([&logged]) {
-            assert!(!text.contains(P113_PASSWORD) && !text.contains("p113user"), "userinfo disclosed: {text}");
+            assert!(
+                !text.contains(P113_PASSWORD) && !text.contains("p113user"),
+                "userinfo disclosed: {text}"
+            );
         }
     }
 
@@ -652,18 +658,51 @@ mod tests {
     #[test]
     fn p113_parse_proxy_url_drops_userinfo() {
         for (url, host, port) in [
-            ("http://u:pw-p113@proxy.example.com:3128", "proxy.example.com", 3128),
-            ("http://u:pw-p113@proxy.example.com", "proxy.example.com", 80),
-            ("u:pw-p113@proxy.example.com:8080", "proxy.example.com", 8080),
-            ("http://u:pw-p113@proxy.example.com:3128/some/path", "proxy.example.com", 3128),
-            ("http://u:pw-p113@proxy.example.com?token=q-p113", "proxy.example.com", 80),
-            ("http://u:pw-p113@proxy.example.com:3128#frag-p113", "proxy.example.com", 3128),
+            (
+                "http://u:pw-p113@proxy.example.com:3128",
+                "proxy.example.com",
+                3128,
+            ),
+            (
+                "http://u:pw-p113@proxy.example.com",
+                "proxy.example.com",
+                80,
+            ),
+            (
+                "u:pw-p113@proxy.example.com:8080",
+                "proxy.example.com",
+                8080,
+            ),
+            (
+                "http://u:pw-p113@proxy.example.com:3128/some/path",
+                "proxy.example.com",
+                3128,
+            ),
+            (
+                "http://u:pw-p113@proxy.example.com?token=q-p113",
+                "proxy.example.com",
+                80,
+            ),
+            (
+                "http://u:pw-p113@proxy.example.com:3128#frag-p113",
+                "proxy.example.com",
+                3128,
+            ),
             ("http://u%40corp:pw-p113@[::1]:3128", "[::1]", 3128),
         ] {
-            assert_eq!(parse_proxy_url(url).unwrap(), (host.to_string(), port), "{url}");
+            assert_eq!(
+                parse_proxy_url(url).unwrap(),
+                (host.to_string(), port),
+                "{url}"
+            );
         }
-        let err = parse_proxy_url("http://u:pw-p113@proxy.example.com:bad").unwrap_err().to_string();
-        assert!(!err.contains("pw-p113") && err.contains("proxy.example.com"), "{err}");
+        let err = parse_proxy_url("http://u:pw-p113@proxy.example.com:bad")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.contains("pw-p113") && err.contains("proxy.example.com"),
+            "{err}"
+        );
         // Astra r1 #6: an `@` after a `/` is refused, so neither reading dials a guessed host.
         for url in [
             "http://u:pw/p113-secret@proxy.example.com:3128",
@@ -672,7 +711,10 @@ mod tests {
             "http://proxy.example.com:3128#x@other.example:8080",
         ] {
             let err = parse_proxy_url(url).unwrap_err().to_string();
-            assert!(!err.contains("p113-secret") && !err.contains("other.example"), "{err}");
+            assert!(
+                !err.contains("p113-secret") && !err.contains("other.example"),
+                "{err}"
+            );
         }
     }
 
@@ -688,13 +730,25 @@ mod tests {
             format!("http://p113user:{P113_PASSWORD}@proxy.example"),
             format!("http://p113user:{P113_PASSWORD}@proxy.example:3128?token=q{P113_PASSWORD}"),
         ] {
-            let chosen = crate::agent::relay::relay_proxy_for("wss://relay.example/ws", |_| Some(proxy.clone()));
-            assert_eq!(chosen.as_deref(), Some(proxy.as_str()), "control: the URL handed on is unchanged");
+            let chosen = crate::agent::relay::relay_proxy_for("wss://relay.example/ws", |_| {
+                Some(proxy.clone())
+            });
+            assert_eq!(
+                chosen.as_deref(),
+                Some(proxy.as_str()),
+                "control: the URL handed on is unchanged"
+            );
         }
         let logged = capture.text();
-        assert!(logged.contains("Using HTTP CONNECT proxy"), "control: {logged}");
+        assert!(
+            logged.contains("Using HTTP CONNECT proxy"),
+            "control: {logged}"
+        );
         for fragment in [P113_PASSWORD, "p113user", "1234"] {
-            assert!(!logged.contains(fragment), "the relay log holds {fragment:?}: {logged}");
+            assert!(
+                !logged.contains(fragment),
+                "the relay log holds {fragment:?}: {logged}"
+            );
         }
     }
 }

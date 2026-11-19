@@ -335,7 +335,8 @@ fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
         .stderr(std::process::Stdio::null());
     fuigo_tty_utils::detach_std_command(&mut sips_cmd);
     // Bounded: this runs on the draw path (audit S9-F2)
-    let status = crate::bounded_command::run_bounded(sips_cmd, std::time::Duration::from_secs(15), 0).ok();
+    let status =
+        crate::bounded_command::run_bounded(sips_cmd, std::time::Duration::from_secs(15), 0).ok();
 
     let _ = std::fs::remove_file(&src);
 

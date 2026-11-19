@@ -108,7 +108,10 @@ impl InstalledRepo {
 
     /// Whether this checkout, with symlinks resolved, lies strictly inside `install_dir`.
     pub fn is_confined_to(&self, install_dir: &Path) -> bool {
-        match (dunce::canonicalize(install_dir), dunce::canonicalize(&self.path)) {
+        match (
+            dunce::canonicalize(install_dir),
+            dunce::canonicalize(&self.path),
+        ) {
             (Ok(root), Ok(path)) => path != root && path.starts_with(&root),
             _ => false,
         }
@@ -382,11 +385,10 @@ impl InstallRegistry {
                     }
                 }
                 disk.version = disk.version.max(self.version);
-                let contents = serde_json::to_string_pretty(&disk).map_err(|e| {
-                    InstallError::Json {
+                let contents =
+                    serde_json::to_string_pretty(&disk).map_err(|e| InstallError::Json {
                         detail: e.to_string(),
-                    }
-                })?;
+                    })?;
                 Ok(Edit::Replace {
                     contents: contents.into_bytes(),
                     value: (),
@@ -667,8 +669,11 @@ mod tests {
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
         let threads: Vec<_> = (0..N)
             .map(|t| {
-                let (install_dir, barrier, base) =
-                    (install_dir.clone(), barrier.clone(), dir.path().to_path_buf());
+                let (install_dir, barrier, base) = (
+                    install_dir.clone(),
+                    barrier.clone(),
+                    dir.path().to_path_buf(),
+                );
                 std::thread::spawn(move || {
                     // All load the same version...
                     let mut reg = InstallRegistry::try_load_from(install_dir).unwrap();
@@ -704,7 +709,11 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, ["registry.json"], "no temp or lock in the install dir");
+        assert_eq!(
+            names,
+            ["registry.json"],
+            "no temp or lock in the install dir"
+        );
     }
 
     /// A save with no change does not rewrite an existing file; a registry
@@ -720,8 +729,14 @@ mod tests {
         let path = install_dir.join("registry.json");
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        InstallRegistry::try_load_from(install_dir.clone()).unwrap().save().unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+        InstallRegistry::try_load_from(install_dir.clone())
+            .unwrap()
+            .save()
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
         std::fs::write(&path, "{ not json").unwrap();
         let mut fresh = InstallRegistry::load_from(install_dir.clone());
         fresh.insert("b".into(), local_repo(dir.path(), "b"));

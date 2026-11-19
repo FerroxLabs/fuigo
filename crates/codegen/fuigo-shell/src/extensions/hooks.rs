@@ -29,7 +29,10 @@ pub(crate) fn current_hook_infos(
     };
     let disabled = fuigo_hooks::trust::DisabledHooks::load();
     let registered = crate::config::registered_hook_paths();
-    let health = HealthScope { session_id, workspace_root };
+    let health = HealthScope {
+        session_id,
+        workspace_root,
+    };
     hook_specs_to_infos(&registry.all_hooks(), &disabled, &registered, &health)
 }
 
@@ -41,12 +44,13 @@ pub fn standalone_hook_infos(cwd: &std::path::Path) -> Vec<HookInfo> {
     let disk_cfg = crate::config::resolve_effective_plugins_config(cwd).to_discovery_config();
     let plugins = handle.build_for_cwd(cwd, &disk_cfg, &[], trusted);
     let compat = fuigo_tools::types::compat::CompatConfig::default();
-    let (registry, _errors) = crate::session::acp_session::SessionActor::build_session_hook_registry(
-        cwd,
-        &compat,
-        plugins.as_deref(),
-        trusted,
-    );
+    let (registry, _errors) =
+        crate::session::acp_session::SessionActor::build_session_hook_registry(
+            cwd,
+            &compat,
+            plugins.as_deref(),
+            trusted,
+        );
     current_hook_infos(Some(&registry), "doctor", &cwd.display().to_string())
 }
 
@@ -324,7 +328,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_scope() -> HealthScope<'static> {
-        HealthScope { session_id: "hooks-info-tests", workspace_root: "/tmp" }
+        HealthScope {
+            session_id: "hooks-info-tests",
+            workspace_root: "/tmp",
+        }
     }
 
     fn make_spec(
@@ -458,7 +465,12 @@ mod tests {
     #[test]
     fn hooks_list_reports_source_state_reason_and_fix_hint() {
         use fuigo_hooks_plugins_types::HookState;
-        let mut broken = make_spec(Some("compat-missing-bin-xyz"), Some("compat-missing-bin-xyz"), None, None);
+        let mut broken = make_spec(
+            Some("compat-missing-bin-xyz"),
+            Some("compat-missing-bin-xyz"),
+            None,
+            None,
+        );
         broken.name = "plugin/stripe/hooks:session_start[0].hooks[0]".into();
         broken.layer = fuigo_hooks::config::HookProvenance::Plugin;
         let mut fine = make_spec(Some("echo hi"), Some("echo hi"), None, None);
@@ -470,21 +482,37 @@ mod tests {
             &[&broken, &fine, &off],
             &disabled,
             &HashSet::new(),
-            &HealthScope { session_id: "hooks-list-test", workspace_root: "/tmp" },
+            &HealthScope {
+                session_id: "hooks-list-test",
+                workspace_root: "/tmp",
+            },
         );
 
         assert_eq!(infos[0].health.source, "stripe");
         assert_eq!(infos[0].health.state, HookState::Skipped);
         let reason = infos[0].health.reason.as_deref().unwrap_or_default();
-        assert!(reason.contains("compat-missing-bin-xyz") && reason.contains("not found"), "{reason:?}");
-        assert!(infos[0].health.fix_hint.is_some(), "a skipped hook says what to do");
+        assert!(
+            reason.contains("compat-missing-bin-xyz") && reason.contains("not found"),
+            "{reason:?}"
+        );
+        assert!(
+            infos[0].health.fix_hint.is_some(),
+            "a skipped hook says what to do"
+        );
 
         assert_eq!(infos[1].health.source, "global");
         assert_eq!(infos[1].health.state, HookState::Ok);
         assert!(infos[1].health.reason.is_none());
 
         assert_eq!(infos[2].health.state, HookState::Skipped);
-        assert!(infos[2].health.reason.as_deref().unwrap_or_default().contains("disabled"));
+        assert!(
+            infos[2]
+                .health
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("disabled")
+        );
     }
 
     /// 1.0.32 HOOKS-COMPAT: a hook that ran and failed lists as failing with its last error, and healthy again after a good run.
@@ -494,16 +522,35 @@ mod tests {
         let mut spec = make_spec(Some("echo hi"), Some("echo hi"), None, None);
         spec.name = "plugin/acme/hooks:stop[0].hooks[0]".into();
         spec.layer = fuigo_hooks::config::HookProvenance::Plugin;
-        let scope = HealthScope { session_id: "hooks-list-failing", workspace_root: "/tmp" };
+        let scope = HealthScope {
+            session_id: "hooks-list-failing",
+            workspace_root: "/tmp",
+        };
         let list = |spec: &HookSpec| {
-            hook_specs_to_infos(&[spec], &fuigo_hooks::trust::DisabledHooks::from_names([]), &HashSet::new(), &scope).remove(0)
+            hook_specs_to_infos(
+                &[spec],
+                &fuigo_hooks::trust::DisabledHooks::from_names([]),
+                &HashSet::new(),
+                &scope,
+            )
+            .remove(0)
         };
         assert_eq!(list(&spec).health.state, HookState::Ok);
-        fuigo_hooks::health::record_runtime_failure("hooks-list-failing", &spec.name, "exit 3: it broke");
+        fuigo_hooks::health::record_runtime_failure(
+            "hooks-list-failing",
+            &spec.name,
+            "exit 3: it broke",
+        );
         let info = list(&spec);
         assert_eq!(info.health.state, HookState::Failing);
         assert_eq!(info.health.source, "acme");
-        assert!(info.health.reason.as_deref().unwrap_or_default().contains("it broke"));
+        assert!(
+            info.health
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("it broke")
+        );
         assert!(info.health.fix_hint.is_some());
         fuigo_hooks::health::reset_session("hooks-list-failing");
         assert_eq!(list(&spec).health.state, HookState::Ok);

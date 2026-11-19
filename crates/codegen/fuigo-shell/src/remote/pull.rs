@@ -55,12 +55,11 @@ pub async fn pull_session_to_local(
     let writer = match owner {
         Some(owner) if owner.id() == session_id && owner.dir() == dir => owner,
         _ => {
-            claimed = fuigo_session_writer::SessionWriter::try_claim(session_id, dir.clone()).map_err(|_busy| {
-                BackendError::Hydration {
+            claimed = fuigo_session_writer::SessionWriter::try_claim(session_id, dir.clone())
+                .map_err(|_busy| BackendError::Hydration {
                     path: dir.clone(),
                     source: std::io::Error::other(crate::session::session_writer_lock::OPEN_HERE),
-                }
-            })?;
+                })?;
             &claimed
         }
     };
@@ -208,7 +207,9 @@ pub(crate) mod hydrate {
         }
 
         let json = serde_json::to_string_pretty(&summary)?;
-        writer.replace_atomic_sync(SUMMARY_FILE, json.as_bytes()).map_err(|e| io_err(&writer.dir().join(SUMMARY_FILE), e))
+        writer
+            .replace_atomic_sync(SUMMARY_FILE, json.as_bytes())
+            .map_err(|e| io_err(&writer.dir().join(SUMMARY_FILE), e))
     }
 
     /// Convert backend JSON-RPC messages to local updates.jsonl (replayable methods only).
@@ -247,7 +248,9 @@ pub(crate) mod hydrate {
             }
         }
 
-        writer.replace_atomic_sync(UPDATES_FILE, &w).map_err(|e| io_err(&path, e))
+        writer
+            .replace_atomic_sync(UPDATES_FILE, &w)
+            .map_err(|e| io_err(&path, e))
     }
 
     fn write_remote_origin_marker(writer: &fuigo_session_writer::SessionWriter) {
@@ -302,7 +305,9 @@ pub(crate) mod hydrate {
     fn is_safe_checkpoint_id(id: &str) -> bool {
         !id.is_empty()
             && id.len() <= 128
-            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     }
 
     /// Write the uploaded checkpoint file under `compaction_checkpoints/` and return the `updates.jsonl` line for its
@@ -324,7 +329,9 @@ pub(crate) mod hydrate {
             return None;
         };
         if !is_safe_checkpoint_id(&file.checkpoint_id) || info.checkpoint_id != file.checkpoint_id {
-            tracing::warn!("Pull: ignoring a compaction checkpoint with an unsafe or mismatched id");
+            tracing::warn!(
+                "Pull: ignoring a compaction checkpoint with an unsafe or mismatched id"
+            );
             return None;
         }
         let rel = format!("compaction_checkpoints/{}.json", file.checkpoint_id);
@@ -370,12 +377,16 @@ pub(crate) mod hydrate {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     /// A writer for `dir` under a fresh id (the hydration writes only through one).
     fn test_writer(dir: &std::path::Path) -> fuigo_session_writer::SessionWriter {
-        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).unwrap()
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .unwrap()
     }
 
     use crate::remote::client::LoadedMessage;
@@ -818,7 +829,9 @@ mod tests {
         );
     }
 
-    fn checkpoint_response(messages: Vec<LoadedMessage>) -> crate::remote::client::LoadDataResponse {
+    fn checkpoint_response(
+        messages: Vec<LoadedMessage>,
+    ) -> crate::remote::client::LoadDataResponse {
         crate::remote::client::LoadDataResponse {
             messages: Some(messages),
             session: Some(crate::remote::client::SessionInfo {
@@ -836,15 +849,32 @@ mod tests {
     fn acp_msg(user: bool, text: &str) -> LoadedMessage {
         use agent_client_protocol::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
         let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text.to_string())));
-        let update = if user { SessionUpdate::UserMessageChunk(chunk) } else { SessionUpdate::AgentMessageChunk(chunk) };
-        let n = agent_client_protocol::SessionNotification::new(agent_client_protocol::SessionId::new("cp-pull"), update);
-        LoadedMessage { id: "x".into(), content: crate::session::export::ExportedMessage::from_notification(&n).content, timestamp: None }
+        let update = if user {
+            SessionUpdate::UserMessageChunk(chunk)
+        } else {
+            SessionUpdate::AgentMessageChunk(chunk)
+        };
+        let n = agent_client_protocol::SessionNotification::new(
+            agent_client_protocol::SessionId::new("cp-pull"),
+            update,
+        );
+        LoadedMessage {
+            id: "x".into(),
+            content: crate::session::export::ExportedMessage::from_notification(&n).content,
+            timestamp: None,
+        }
     }
 
     fn checkpoint_msg(id: &str, text: &str) -> LoadedMessage {
-        let (marker, file) = crate::session::export::checkpoint_upload_tests::marker_and_file(id, text);
-        let exported = crate::session::export::ExportedMessage::compaction_checkpoint(&marker, &file).unwrap();
-        LoadedMessage { id: "c".into(), content: exported.content, timestamp: None }
+        let (marker, file) =
+            crate::session::export::checkpoint_upload_tests::marker_and_file(id, text);
+        let exported =
+            crate::session::export::ExportedMessage::compaction_checkpoint(&marker, &file).unwrap();
+        LoadedMessage {
+            id: "c".into(),
+            content: exported.content,
+            timestamp: None,
+        }
     }
 
     fn chat_texts(dir: &std::path::Path) -> String {
@@ -856,7 +886,10 @@ mod tests {
         let data = checkpoint_response(vec![
             acp_msg(true, "old question"),
             acp_msg(false, "old answer"),
-            checkpoint_msg("11111111-1111-1111-1111-111111111111", "SUMMARY-OF-OLD-WORK"),
+            checkpoint_msg(
+                "11111111-1111-1111-1111-111111111111",
+                "SUMMARY-OF-OLD-WORK",
+            ),
             acp_msg(true, "new question"),
             acp_msg(false, "new answer"),
         ]);
@@ -864,10 +897,19 @@ mod tests {
         let dir = tmp.path().join("s");
         super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
         let chat = chat_texts(&dir);
-        assert!(chat.contains("SUMMARY-OF-OLD-WORK"), "summary missing: {chat}");
-        assert!(!chat.contains("old question"), "pre-compaction turns must be replaced by the summary");
+        assert!(
+            chat.contains("SUMMARY-OF-OLD-WORK"),
+            "summary missing: {chat}"
+        );
+        assert!(
+            !chat.contains("old question"),
+            "pre-compaction turns must be replaced by the summary"
+        );
         assert!(chat.contains("new question") && chat.contains("new answer"));
-        assert!(dir.join("compaction_checkpoints/11111111-1111-1111-1111-111111111111.json").is_file());
+        assert!(
+            dir.join("compaction_checkpoints/11111111-1111-1111-1111-111111111111.json")
+                .is_file()
+        );
     }
 
     /// P132: the restored checkpoint holds the compaction summary (conversation text), so it is owner-only like every
@@ -877,7 +919,10 @@ mod tests {
     fn pulled_checkpoint_file_is_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
         let id = "33333333-3333-3333-3333-333333333333";
-        let data = checkpoint_response(vec![acp_msg(true, "q"), checkpoint_msg(id, "SUMMARY-PRIVATE")]);
+        let data = checkpoint_response(vec![
+            acp_msg(true, "q"),
+            checkpoint_msg(id, "SUMMARY-PRIVATE"),
+        ]);
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("s");
         let file = dir.join(format!("compaction_checkpoints/{id}.json"));
@@ -887,7 +932,11 @@ mod tests {
         // A pull over an existing loose file tightens it.
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
-        assert_eq!(mode(&file), 0o600, "an existing loose checkpoint file must be tightened");
+        assert_eq!(
+            mode(&file),
+            0o600,
+            "an existing loose checkpoint file must be tightened"
+        );
     }
 
     #[test]
@@ -913,21 +962,32 @@ mod tests {
         assert!(!tmp.path().join("a/escaped.json").exists());
         assert!(!tmp.path().join("escaped.json").exists());
         let entries: Vec<_> = walk(tmp.path());
-        assert!(entries.iter().all(|p| p.starts_with(&dir)), "files outside session dir: {entries:?}");
+        assert!(
+            entries.iter().all(|p| p.starts_with(&dir)),
+            "files outside session dir: {entries:?}"
+        );
     }
 
     fn walk(p: &std::path::Path) -> Vec<std::path::PathBuf> {
         let mut out = vec![];
         for e in std::fs::read_dir(p).unwrap().flatten() {
             let path = e.path();
-            if path.is_dir() { out.extend(walk(&path)); } else { out.push(path); }
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
         }
         out
     }
 
     #[test]
     fn malformed_checkpoint_message_is_skipped_not_fatal() {
-        let bad = LoadedMessage { id: "c".into(), content: r#"{"method":"_fuigo/compaction_checkpoint","params":{"nope":1}}"#.into(), timestamp: None };
+        let bad = LoadedMessage {
+            id: "c".into(),
+            content: r#"{"method":"_fuigo/compaction_checkpoint","params":{"nope":1}}"#.into(),
+            timestamp: None,
+        };
         let data = checkpoint_response(vec![acp_msg(true, "q"), bad, acp_msg(false, "a")]);
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("s");
@@ -939,7 +999,10 @@ mod tests {
     fn remote_marker_file_path_is_never_trusted() {
         let id = "22222222-2222-2222-2222-222222222222";
         let mut msg = checkpoint_msg(id, "SUMMARY-X");
-        msg.content = msg.content.replace(&format!("compaction_checkpoints/{id}.json"), "../../../outside.json");
+        msg.content = msg.content.replace(
+            &format!("compaction_checkpoints/{id}.json"),
+            "../../../outside.json",
+        );
         assert!(msg.content.contains("../../../outside.json"));
         let data = checkpoint_response(vec![acp_msg(true, "q"), msg, acp_msg(true, "after")]);
         let tmp = tempfile::TempDir::new().unwrap();
@@ -947,41 +1010,65 @@ mod tests {
         super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
         assert!(chat_texts(&dir).contains("SUMMARY-X"));
         let updates = std::fs::read_to_string(dir.join("updates.jsonl")).unwrap();
-        assert!(!updates.contains("outside.json"), "marker kept the remote path: {updates}");
+        assert!(
+            !updates.contains("outside.json"),
+            "marker kept the remote path: {updates}"
+        );
     }
 
     fn marker_update_msg(id: &str, file: &str) -> LoadedMessage {
-        let (mut marker, _) = crate::session::export::checkpoint_upload_tests::marker_and_file(id, "x");
-        if let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) = &mut marker.update {
+        let (mut marker, _) =
+            crate::session::export::checkpoint_upload_tests::marker_and_file(id, "x");
+        if let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) =
+            &mut marker.update
+        {
             info.checkpoint_file = file.into();
         }
         let m = crate::session::export::ExportedMessage::from_fuigo_notification(&marker);
-        LoadedMessage { id: "m".into(), content: m.content, timestamp: None }
+        LoadedMessage {
+            id: "m".into(),
+            content: m.content,
+            timestamp: None,
+        }
     }
 
     #[test]
     fn pulled_session_update_marker_path_is_rewritten_to_the_local_file() {
         let id = "33333333-3333-3333-3333-333333333333";
         for hostile in ["../../../etc/passwd", "/etc/passwd", "C:\\x\\y.json"] {
-            let data = checkpoint_response(vec![acp_msg(true, "q"), marker_update_msg(id, hostile)]);
+            let data =
+                checkpoint_response(vec![acp_msg(true, "q"), marker_update_msg(id, hostile)]);
             let tmp = tempfile::TempDir::new().unwrap();
             let dir = tmp.path().join("a/b/s");
             super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
             let updates = std::fs::read_to_string(dir.join("updates.jsonl")).unwrap();
-            assert!(!updates.contains(hostile.replace('\\', "\\\\").as_str()) && !updates.contains("passwd"), "{hostile}: {updates}");
-            assert!(updates.contains(&format!("compaction_checkpoints/{id}.json")), "{updates}");
+            assert!(
+                !updates.contains(hostile.replace('\\', "\\\\").as_str())
+                    && !updates.contains("passwd"),
+                "{hostile}: {updates}"
+            );
+            assert!(
+                updates.contains(&format!("compaction_checkpoints/{id}.json")),
+                "{updates}"
+            );
         }
     }
 
     #[test]
     fn pulled_session_update_marker_with_unsafe_id_is_dropped() {
         for bad in ["../../escape", "/abs/path", "a/b", ""] {
-            let data = checkpoint_response(vec![acp_msg(true, "q"), marker_update_msg(bad, "compaction_checkpoints/x.json")]);
+            let data = checkpoint_response(vec![
+                acp_msg(true, "q"),
+                marker_update_msg(bad, "compaction_checkpoints/x.json"),
+            ]);
             let tmp = tempfile::TempDir::new().unwrap();
             let dir = tmp.path().join("s");
             super::hydrate::write_to_dir(&test_writer(&dir), &data).unwrap();
             let updates = std::fs::read_to_string(dir.join("updates.jsonl")).unwrap();
-            assert!(!updates.contains("compaction_checkpoint"), "{bad:?} kept: {updates}");
+            assert!(
+                !updates.contains("compaction_checkpoint"),
+                "{bad:?} kept: {updates}"
+            );
         }
     }
 }

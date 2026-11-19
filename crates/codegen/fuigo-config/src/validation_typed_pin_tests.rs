@@ -21,7 +21,10 @@ fn requirements_wrong_typed_pin_locks_down_once_and_lifts_p186c() {
     let sys = tempfile::tempdir().unwrap();
     let path = sys.path().join("requirements.toml");
     put(&path, LAX);
-    assert_eq!(load_admin_requirements_layer(&path).unwrap()["ui"]["yolo"].as_bool(), Some(true));
+    assert_eq!(
+        load_admin_requirements_layer(&path).unwrap()["ui"]["yolo"].as_bool(),
+        Some(true)
+    );
     // (a) the new version breaks only on a wrong-typed pin: the lock-down, same as the no-copy path
     put(&path, BROKEN);
     let locked = load_admin_requirements_layer(&path).unwrap();
@@ -32,19 +35,34 @@ fn requirements_wrong_typed_pin_locks_down_once_and_lifts_p186c() {
     assert_eq!(locked, admin_lockdown_requirements());
     let n = notices(&path);
     assert_eq!(n.len(), 1, "{n:?}");
-    assert!(n[0].contains(&path.display().to_string()) && n[0].contains("ui.yolo"), "{n:?}");
+    assert!(
+        n[0].contains(&path.display().to_string()) && n[0].contains("ui.yolo"),
+        "{n:?}"
+    );
     // (b) the same broken version again: still locked, no repeat
-    assert_eq!(load_admin_requirements_layer(&path).unwrap(), admin_lockdown_requirements());
-    assert_eq!(load_admin_requirements_layer(&path).unwrap(), admin_lockdown_requirements());
+    assert_eq!(
+        load_admin_requirements_layer(&path).unwrap(),
+        admin_lockdown_requirements()
+    );
+    assert_eq!(
+        load_admin_requirements_layer(&path).unwrap(),
+        admin_lockdown_requirements()
+    );
     assert_eq!(notices(&path).len(), 1);
     // (c) a valid version lifts it: the file's own policy, no stale lock-down key
     put(&path, FIXED);
     let v = load_admin_requirements_layer(&path).unwrap();
     assert_eq!(v["sandbox"]["profile"].as_str(), Some("strict"));
-    assert!(v.get("models").is_none() && v.get("permission").is_none() && v.get("ui").is_none(), "{v:?}");
+    assert!(
+        v.get("models").is_none() && v.get("permission").is_none() && v.get("ui").is_none(),
+        "{v:?}"
+    );
     // (d) broken again: locked again, shown again
     put(&path, BROKEN);
-    assert_eq!(load_admin_requirements_layer(&path).unwrap(), admin_lockdown_requirements());
+    assert_eq!(
+        load_admin_requirements_layer(&path).unwrap(),
+        admin_lockdown_requirements()
+    );
     assert_eq!(notices(&path).len(), 2);
 }
 
@@ -58,14 +76,20 @@ fn managed_config_wrong_typed_pin_locks_down_once_and_lifts_p186c() {
     let locked = crate::loader::load_admin_config_file(&path).unwrap();
     assert_eq!(locked, admin_lockdown_managed_config());
     assert_eq!(notices(&path).len(), 1);
-    assert_eq!(crate::loader::load_admin_config_file(&path).unwrap(), admin_lockdown_managed_config());
+    assert_eq!(
+        crate::loader::load_admin_config_file(&path).unwrap(),
+        admin_lockdown_managed_config()
+    );
     assert_eq!(notices(&path).len(), 1);
     put(&path, FIXED);
     let v = crate::loader::load_admin_config_file(&path).unwrap();
     assert_eq!(v["sandbox"]["profile"].as_str(), Some("strict"));
     assert!(v.get("permission").is_none(), "{v:?}");
     put(&path, BROKEN);
-    assert_eq!(crate::loader::load_admin_config_file(&path).unwrap(), admin_lockdown_managed_config());
+    assert_eq!(
+        crate::loader::load_admin_config_file(&path).unwrap(),
+        admin_lockdown_managed_config()
+    );
     assert_eq!(notices(&path).len(), 2);
 }
 
@@ -74,21 +98,39 @@ fn claude_json_wrong_typed_key_locks_down_once_and_lifts_p186c() {
     let sys = tempfile::tempdir().unwrap();
     let path = sys.path().join("managed-settings.json");
     put(&path, r#"{"permissions":{"deny":["Bash"]}}"#);
-    assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Loaded(_)));
-    put(&path, r#"{"permissions":{"deny":"Bash"},"deniedMcpServers":[{"serverName":"x"}]}"#);
+    assert!(matches!(
+        managed_settings_json(&path),
+        ManagedSettingsJson::Loaded(_)
+    ));
+    put(
+        &path,
+        r#"{"permissions":{"deny":"Bash"},"deniedMcpServers":[{"serverName":"x"}]}"#,
+    );
     match managed_settings_json(&path) {
         ManagedSettingsJson::Broken(d) => assert!(d.contains("permissions.deny"), "{d}"),
         other => panic!("expected the lock-down, got {other:?}"),
     }
     let n = notices(&path);
     assert_eq!(n.len(), 1, "{n:?}");
-    assert!(n[0].contains(&path.display().to_string()) && n[0].contains("permissions.deny"), "{n:?}");
-    assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Broken(_)));
+    assert!(
+        n[0].contains(&path.display().to_string()) && n[0].contains("permissions.deny"),
+        "{n:?}"
+    );
+    assert!(matches!(
+        managed_settings_json(&path),
+        ManagedSettingsJson::Broken(_)
+    ));
     assert_eq!(notices(&path).len(), 1);
     put(&path, r#"{"permissions":{"deny":["Bash","Write"]}}"#);
-    assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Loaded(_)));
+    assert!(matches!(
+        managed_settings_json(&path),
+        ManagedSettingsJson::Loaded(_)
+    ));
     put(&path, r#"{"permissions":{"deny":"Bash"}}"#);
-    assert!(matches!(managed_settings_json(&path), ManagedSettingsJson::Broken(_)));
+    assert!(matches!(
+        managed_settings_json(&path),
+        ManagedSettingsJson::Broken(_)
+    ));
     assert_eq!(notices(&path).len(), 2);
 }
 
@@ -104,20 +146,35 @@ fn other_error_classes_keep_the_copy_p186c() {
         ("half-written", "[ui]\nyolo = tr"),
     ] {
         put(&path, text);
-        let kept = admin_requirements_source_checked(&path).unwrap_or_else(|e| panic!("{name}: {e}")).unwrap();
+        let kept = admin_requirements_source_checked(&path)
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .unwrap();
         assert_eq!(kept, LAX, "{name}");
-        assert_eq!(load_admin_requirements_layer(&path).unwrap()["ui"]["yolo"].as_bool(), Some(true), "{name}");
+        assert_eq!(
+            load_admin_requirements_layer(&path).unwrap()["ui"]["yolo"].as_bool(),
+            Some(true),
+            "{name}"
+        );
     }
     std::fs::remove_file(&path).unwrap();
-    assert_eq!(admin_requirements_source_checked(&path).unwrap().unwrap(), LAX);
+    assert_eq!(
+        admin_requirements_source_checked(&path).unwrap().unwrap(),
+        LAX
+    );
     assert!(notices(&path).is_empty());
     // wrong-typed pin with NO copy: the lock-down, as today
     let fresh = sys.path().join("fresh").join("requirements.toml");
     std::fs::create_dir_all(fresh.parent().unwrap()).unwrap();
     put(&fresh, BROKEN);
     assert!(admin_requirements_source_checked(&fresh).is_err());
-    assert_eq!(load_admin_requirements_layer(&fresh), Some(admin_lockdown_requirements()));
+    assert_eq!(
+        load_admin_requirements_layer(&fresh),
+        Some(admin_lockdown_requirements())
+    );
     // a fully valid new version is applied
     put(&path, FIXED);
-    assert_eq!(load_admin_requirements_layer(&path).unwrap()["sandbox"]["profile"].as_str(), Some("strict"));
+    assert_eq!(
+        load_admin_requirements_layer(&path).unwrap()["sandbox"]["profile"].as_str(),
+        Some("strict")
+    );
 }

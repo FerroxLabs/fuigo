@@ -169,7 +169,10 @@ mod tests {
     #[test]
     fn set_keys_vim_at_creates_a_missing_file() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("nested").join(fuigo_config::USER_CONFIG_FILENAME);
+        let path = dir
+            .path()
+            .join("nested")
+            .join(fuigo_config::USER_CONFIG_FILENAME);
         set_keys_vim_at(&path, "nav").unwrap();
         let doc = read_config_document_for_edit(&path).expect("parse");
         assert_eq!(doc["keys"]["vim"].as_str(), Some("nav"));

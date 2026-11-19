@@ -340,7 +340,10 @@ mod tests {
                     provider.id
                 );
                 let max = provider.max_completion_tokens.unwrap_or_else(|| {
-                    panic!("{} speaks messages but states no max_completion_tokens", provider.id)
+                    panic!(
+                        "{} speaks messages but states no max_completion_tokens",
+                        provider.id
+                    )
                 });
                 assert!(
                     max <= 32_000,

@@ -12,15 +12,23 @@ use std::os::windows::io::FromRawHandle;
 use std::path::Path;
 
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
-use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows::Win32::Storage::FileSystem::{CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_MODE};
+use windows::Win32::Storage::FileSystem::{
+    CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE,
+    FILE_SHARE_MODE,
+};
 use windows::core::PCWSTR;
 
 use crate::sys::code;
 
 fn wide(p: &Path) -> Vec<u16> {
-    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    p.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn win_err(e: &windows::core::Error) -> io::Error {
@@ -35,8 +43,15 @@ impl Descriptor {
         let text: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
         let mut sd = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `text` is NUL-terminated; `sd` receives a LocalAlloc'd descriptor freed in `Drop`.
-        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(text.as_ptr()), SDDL_REVISION_1, &mut sd, None) }
-            .map_err(|e| win_err(&e))?;
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(text.as_ptr()),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+        }
+        .map_err(|e| win_err(&e))?;
         Ok(Self(sd))
     }
 
@@ -67,7 +82,15 @@ pub fn write_file_with_sddl(path: &Path, sddl: &str, bytes: &[u8]) -> io::Result
     let wide_path = wide(path);
     // SAFETY: `wide_path` is NUL-terminated; `attrs` points at a descriptor that lives until the end of this function.
     let handle = unsafe {
-        CreateFileW(PCWSTR(wide_path.as_ptr()), FILE_GENERIC_WRITE.0, FILE_SHARE_MODE(0), Some(&attrs), CREATE_NEW, FILE_ATTRIBUTE_NORMAL, None)
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            FILE_GENERIC_WRITE.0,
+            FILE_SHARE_MODE(0),
+            Some(&attrs),
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
     }
     .map_err(|e| win_err(&e))?;
     // SAFETY: CreateFileW succeeded, so `handle` is a fresh handle that nothing else owns.
@@ -86,21 +109,29 @@ pub fn create_dir_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
 
 /// A file only we can use: owner us, protected DACL, one ACE for us ([`crate::owner_only_sddl`]).
 pub fn write_owner_only_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let sddl = crate::owner_only_sddl(our_sid_text()?).ok_or_else(|| io::Error::other("our SID is not valid"))?;
+    let sddl = crate::owner_only_sddl(our_sid_text()?)
+        .ok_or_else(|| io::Error::other("our SID is not valid"))?;
     write_file_with_sddl(path, &sddl, bytes)
 }
 
 /// A file owned by us whose protected DACL also lets `trustee` read it (the shape the checker must refuse).
 pub fn write_file_also_readable_by(path: &Path, bytes: &[u8], trustee: &str) -> io::Result<()> {
     let sid = our_sid_text()?;
-    write_file_with_sddl(path, &format!("O:{sid}D:P(A;;GA;;;{sid})(A;;GR;;;{trustee})"), bytes)
+    write_file_with_sddl(
+        path,
+        &format!("O:{sid}D:P(A;;GA;;;{sid})(A;;GR;;;{trustee})"),
+        bytes,
+    )
 }
 
 /// A folder (protected DACL: nothing comes from ITS parent) that grants us everything and `trustee` read access, both
 /// inheritable. A file created inside with default security INHERITS the `trustee` ACE.
 pub fn create_dir_inheriting_read_for(path: &Path, trustee: &str) -> io::Result<()> {
     let sid = our_sid_text()?;
-    create_dir_with_sddl(path, &format!("O:{sid}D:P(A;OICI;GA;;;{sid})(A;OICI;GR;;;{trustee})"))
+    create_dir_with_sddl(
+        path,
+        &format!("O:{sid}D:P(A;OICI;GA;;;{sid})(A;OICI;GR;;;{trustee})"),
+    )
 }
 
 /// A folder that grants only us, inheritable: a file created inside with default security inherits just our ACE.

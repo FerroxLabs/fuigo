@@ -27,7 +27,11 @@ fn snap(status: TrustStatus, rows: &[(&str, bool, bool)]) -> TrustSnapshot {
 fn list() -> TrustSnapshot {
     snap(
         TrustStatus::Trusted,
-        &[("/work/app", false, true), ("/work/old", true, false), ("/work/other", false, false)],
+        &[
+            ("/work/app", false, true),
+            ("/work/old", true, false),
+            ("/work/other", false, false),
+        ],
     )
 }
 
@@ -46,7 +50,9 @@ fn render(state: &mut TrustModalState) -> String {
     render_trust_modal(&mut buf, area, state, false);
     let mut rows: Vec<String> = (0..area.height)
         .map(|y| {
-            let row: String = (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            let row: String = (0..area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
             row.trim_end().to_owned()
         })
         .collect();
@@ -66,7 +72,10 @@ fn f11_render_this_folder_trusted() {
 
 #[test]
 fn f11_render_this_folder_undecided() {
-    insta::assert_snapshot!(render(&mut TrustModalState::new(snap(TrustStatus::Undecided, &[]))));
+    insta::assert_snapshot!(render(&mut TrustModalState::new(snap(
+        TrustStatus::Undecided,
+        &[]
+    ))));
 }
 
 #[test]
@@ -79,7 +88,10 @@ fn f11_render_this_folder_never() {
 
 #[test]
 fn f11_render_this_folder_off() {
-    insta::assert_snapshot!(render(&mut TrustModalState::new(snap(TrustStatus::Off, &[]))));
+    insta::assert_snapshot!(render(&mut TrustModalState::new(snap(
+        TrustStatus::Off,
+        &[]
+    ))));
 }
 
 #[test]
@@ -100,7 +112,10 @@ fn f11_render_trusted_folders_empty() {
 #[test]
 fn f11_render_grant_confirm() {
     let mut state = TrustModalState::new(snap(TrustStatus::Declined, &[]));
-    assert_eq!(handle_trust_key(&mut state, &ch('t')), TrustKeyOutcome::Changed);
+    assert_eq!(
+        handle_trust_key(&mut state, &ch('t')),
+        TrustKeyOutcome::Changed
+    );
     insta::assert_snapshot!(render(&mut state));
 }
 
@@ -116,9 +131,15 @@ fn f11_render_revoke_other_confirm() {
 #[test]
 fn f11_key_grant_needs_confirm_then_sends_grant() {
     let mut state = TrustModalState::new(snap(TrustStatus::Undecided, &[]));
-    assert_eq!(handle_trust_key(&mut state, &ch('t')), TrustKeyOutcome::Changed);
+    assert_eq!(
+        handle_trust_key(&mut state, &ch('t')),
+        TrustKeyOutcome::Changed
+    );
     assert_eq!(state.confirm, Some(Confirm::Grant));
-    assert_eq!(handle_trust_key(&mut state, &ch('y')), TrustKeyOutcome::Grant);
+    assert_eq!(
+        handle_trust_key(&mut state, &ch('y')),
+        TrustKeyOutcome::Grant
+    );
     assert_eq!(state.confirm, None);
 }
 
@@ -126,18 +147,32 @@ fn f11_key_grant_needs_confirm_then_sends_grant() {
 fn f11_key_confirm_cancels_on_any_other_key() {
     let mut state = TrustModalState::new(snap(TrustStatus::SettingsOnly, &[]));
     handle_trust_key(&mut state, &ch('t'));
-    assert_eq!(handle_trust_key(&mut state, &ch('n')), TrustKeyOutcome::Changed);
+    assert_eq!(
+        handle_trust_key(&mut state, &ch('n')),
+        TrustKeyOutcome::Changed
+    );
     assert_eq!(state.confirm, None);
     handle_trust_key(&mut state, &ch('t'));
-    assert_eq!(handle_trust_key(&mut state, &key(KeyCode::Esc)), TrustKeyOutcome::Changed, "Esc cancels the confirm only");
-    assert_eq!(handle_trust_key(&mut state, &key(KeyCode::Esc)), TrustKeyOutcome::Close);
+    assert_eq!(
+        handle_trust_key(&mut state, &key(KeyCode::Esc)),
+        TrustKeyOutcome::Changed,
+        "Esc cancels the confirm only"
+    );
+    assert_eq!(
+        handle_trust_key(&mut state, &key(KeyCode::Esc)),
+        TrustKeyOutcome::Close
+    );
 }
 
 #[test]
 fn f11_key_no_grant_when_trusted_never_or_off() {
     for status in [TrustStatus::Trusted, TrustStatus::Never, TrustStatus::Off] {
         let mut state = TrustModalState::new(snap(status, &[]));
-        assert_eq!(handle_trust_key(&mut state, &ch('t')), TrustKeyOutcome::Unchanged, "{status:?}");
+        assert_eq!(
+            handle_trust_key(&mut state, &ch('t')),
+            TrustKeyOutcome::Unchanged,
+            "{status:?}"
+        );
         assert_eq!(state.confirm, None);
     }
 }
@@ -145,10 +180,20 @@ fn f11_key_no_grant_when_trusted_never_or_off() {
 #[test]
 fn f11_key_revoke_this_folder() {
     let mut state = TrustModalState::new(list());
-    assert_eq!(handle_trust_key(&mut state, &ch('u')), TrustKeyOutcome::Changed);
-    assert_eq!(handle_trust_key(&mut state, &ch('y')), TrustKeyOutcome::RevokeCurrent);
+    assert_eq!(
+        handle_trust_key(&mut state, &ch('u')),
+        TrustKeyOutcome::Changed
+    );
+    assert_eq!(
+        handle_trust_key(&mut state, &ch('y')),
+        TrustKeyOutcome::RevokeCurrent
+    );
     let mut untrusted = TrustModalState::new(snap(TrustStatus::Declined, &[]));
-    assert_eq!(handle_trust_key(&mut untrusted, &ch('u')), TrustKeyOutcome::Unchanged, "nothing to revoke");
+    assert_eq!(
+        handle_trust_key(&mut untrusted, &ch('u')),
+        TrustKeyOutcome::Unchanged,
+        "nothing to revoke"
+    );
 }
 
 #[test]
@@ -157,11 +202,19 @@ fn f11_key_tabs_and_selection() {
     assert_eq!(state.tab(), 0);
     handle_trust_key(&mut state, &key(KeyCode::Tab));
     assert_eq!(state.tab(), 1);
-    assert_eq!(handle_trust_key(&mut state, &key(KeyCode::Up)), TrustKeyOutcome::Unchanged, "top row");
+    assert_eq!(
+        handle_trust_key(&mut state, &key(KeyCode::Up)),
+        TrustKeyOutcome::Unchanged,
+        "top row"
+    );
     handle_trust_key(&mut state, &key(KeyCode::Down));
     handle_trust_key(&mut state, &ch('j'));
     assert_eq!(state.selected, 2);
-    assert_eq!(handle_trust_key(&mut state, &key(KeyCode::Down)), TrustKeyOutcome::Unchanged, "last row");
+    assert_eq!(
+        handle_trust_key(&mut state, &key(KeyCode::Down)),
+        TrustKeyOutcome::Unchanged,
+        "last row"
+    );
     handle_trust_key(&mut state, &ch('k'));
     assert_eq!(state.selected, 1);
     handle_trust_key(&mut state, &key(KeyCode::BackTab));
@@ -182,7 +235,10 @@ fn f11_key_revoke_rows() {
     state.selected = 0;
     handle_trust_key(&mut state, &key(KeyCode::Delete));
     // Review r1 M1: only `y` confirms (Enter cancels), see `r1m1_enter_does_not_confirm_a_grant`.
-    assert_eq!(handle_trust_key(&mut state, &ch('y')), TrustKeyOutcome::RevokeCurrent);
+    assert_eq!(
+        handle_trust_key(&mut state, &ch('y')),
+        TrustKeyOutcome::RevokeCurrent
+    );
 }
 
 #[test]

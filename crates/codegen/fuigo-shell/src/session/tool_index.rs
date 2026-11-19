@@ -135,7 +135,11 @@ impl Bm25ToolSearchIndex {
 
 impl ToolSearchIndex for Bm25ToolSearchIndex {
     fn discover_native(&self, query: &str, limit: usize) -> serde_json::Value {
-        self.snapshot.lock().unwrap().native_presentation.discover(query, limit)
+        self.snapshot
+            .lock()
+            .unwrap()
+            .native_presentation
+            .discover(query, limit)
     }
     fn search_snapshot(&self, query: &str, limit: usize) -> SearchSnapshot {
         let snapshot = self.snapshot.lock().unwrap().clone();

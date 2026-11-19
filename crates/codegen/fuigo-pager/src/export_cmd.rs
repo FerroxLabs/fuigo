@@ -45,17 +45,24 @@ fn drop_tool_output(update: &mut acp::SessionUpdate) {
 
 /// The session's transcript as markdown, built by streaming its updates off disk one at a time (no list of every
 /// update, no full scrollback of shell output). `Ok(None)` when the session has nothing to replay.
-fn transcript_markdown_at(session_id: &str, fuigo_home: &std::path::Path) -> Result<Option<String>> {
+fn transcript_markdown_at(
+    session_id: &str,
+    fuigo_home: &std::path::Path,
+) -> Result<Option<String>> {
     let mut tracker = AcpUpdateTracker::new();
     let mut scrollback = ScrollbackState::new();
     let replay_meta = NotificationMeta {
         is_replay: true,
         ..Default::default()
     };
-    let emission = fuigo_shell::session::storage::stream_replay_updates_at(session_id, fuigo_home, |mut update| {
-        drop_tool_output(&mut update);
-        tracker.handle_update(update, &replay_meta, &mut scrollback);
-    })?;
+    let emission = fuigo_shell::session::storage::stream_replay_updates_at(
+        session_id,
+        fuigo_home,
+        |mut update| {
+            drop_tool_output(&mut update);
+            tracker.handle_update(update, &replay_meta, &mut scrollback);
+        },
+    )?;
     if emission == fuigo_shell::session::storage::ReplayEmission::Empty {
         return Ok(None);
     }
@@ -68,7 +75,10 @@ fn transcript_markdown_at(session_id: &str, fuigo_home: &std::path::Path) -> Res
 pub fn run(args: ExportArgs) -> Result<()> {
     tracing::info!(session_id = %args.session_id, "export_cmd: starting session export");
 
-    let md = match transcript_markdown_at(&args.session_id, &fuigo_shell::util::fuigo_home::fuigo_home())? {
+    let md = match transcript_markdown_at(
+        &args.session_id,
+        &fuigo_shell::util::fuigo_home::fuigo_home(),
+    )? {
         Some(md) => md,
         None if fuigo_shell::session::resolve_local_session_any_cwd(&args.session_id).is_none() => {
             anyhow::bail!("Session '{}' not found.", args.session_id)

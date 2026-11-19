@@ -387,7 +387,10 @@ fn a_child_session_error_has_sent_credentials_replaced_at_its_source() {
         "partial",
         false,
     );
-    let shown = reduced.result.error.expect("a failed child reports an error");
+    let shown = reduced
+        .result
+        .error
+        .expect("a failed child reports an error");
     assert!(!shown.contains(CRED), "{shown}");
     assert!(shown.starts_with("Session error: "), "{shown}");
     assert!(shown.contains("bad key <redacted>"), "{shown}");

@@ -304,7 +304,9 @@ async fn explicit_sampler_threshold_disables_subagent_wait_budget() {
             config.rate_limit_retry_threshold = Some(4);
             actor.chat_state_handle.update_sampling_config(config);
 
-            let reconstructed = actor.reconstruct_full_config(crate::session::acp_session::CallRole::Main).await;
+            let reconstructed = actor
+                .reconstruct_full_config(crate::session::acp_session::CallRole::Main)
+                .await;
             assert_eq!(
                 reconstructed.max_retries,
                 Some(3),

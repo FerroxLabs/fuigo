@@ -3,12 +3,10 @@ use crate::capability::CapabilityMode;
 use crate::handle::tests::{
     background_capable_cfg, make_confining_handle, make_handle, start_background_sleep,
 };
-use std::sync::Arc;
-use fuigo_tools::implementations::fuigo_build::scheduler::types::{
-    ScheduledTask, SchedulerState,
-};
-use fuigo_tools::types::resources::State;
 use fuigo_tool_protocol::turn_hook;
+use fuigo_tools::implementations::fuigo_build::scheduler::types::{ScheduledTask, SchedulerState};
+use fuigo_tools::types::resources::State;
+use std::sync::Arc;
 async fn next_item(
     stream: &mut ToolStream<TypedToolOutput>,
 ) -> Option<fuigo_tool_runtime::ToolStreamItem<TypedToolOutput>> {
@@ -2311,8 +2309,8 @@ async fn dispatch_knows_every_typed_method() {
 #[tokio::test]
 async fn dispatch_stamps_client_rpc_activity_for_mutations_only() {
     use crate::file_system::{FsListReq, FsWriteFileReq};
-    use fuigo_workspace_types::rpc::workspace::DropSessionReq;
     use fuigo_tool_protocol::IdleWithholdReason;
+    use fuigo_workspace_types::rpc::workspace::DropSessionReq;
     let handler = WorkspaceRpcHandler::new(make_handle());
     let tracker = handler.workspace.activity_tracker().clone();
     assert_eq!(tracker.snapshot().withhold_reason, None);
@@ -2355,8 +2353,8 @@ async fn dispatch_stamps_client_rpc_activity_for_mutations_only() {
 }
 #[tokio::test]
 async fn presence_note_stamps_only_visible_notes_for_live_sessions() {
-    use fuigo_workspace_types::rpc::presence::PresenceNoteReq;
     use fuigo_tool_protocol::IdleWithholdReason;
+    use fuigo_workspace_types::rpc::presence::PresenceNoteReq;
     let handle = crate::handle::tests::make_handle_with_status_config(crate::StatusConfig {
         presence_keepalive_enabled: true,
         ..crate::StatusConfig::default()
@@ -2444,13 +2442,34 @@ async fn t2_hub_project_discovery_follows_folder_trust() {
     };
     {
         let _untrusted = crate::folder_trust::TestFolderTrust::untrusted();
-        let config = handler.dispatch("workspace.load_project_config", Value::Null, None).await.unwrap();
-        assert!(config.is_null(), "untrusted: no project config, got {config}");
-        let files = handler.dispatch("workspace.discover_agents_md", Value::Null, None).await.unwrap();
-        assert!(!names_project_file(&files), "untrusted: no project AGENTS.md, got {files}");
+        let config = handler
+            .dispatch("workspace.load_project_config", Value::Null, None)
+            .await
+            .unwrap();
+        assert!(
+            config.is_null(),
+            "untrusted: no project config, got {config}"
+        );
+        let files = handler
+            .dispatch("workspace.discover_agents_md", Value::Null, None)
+            .await
+            .unwrap();
+        assert!(
+            !names_project_file(&files),
+            "untrusted: no project AGENTS.md, got {files}"
+        );
     }
-    let config = handler.dispatch("workspace.load_project_config", Value::Null, None).await.unwrap();
+    let config = handler
+        .dispatch("workspace.load_project_config", Value::Null, None)
+        .await
+        .unwrap();
     assert!(!config.is_null(), "trusted: the project config is returned");
-    let files = handler.dispatch("workspace.discover_agents_md", Value::Null, None).await.unwrap();
-    assert!(names_project_file(&files), "trusted: the project AGENTS.md is read, got {files}");
+    let files = handler
+        .dispatch("workspace.discover_agents_md", Value::Null, None)
+        .await
+        .unwrap();
+    assert!(
+        names_project_file(&files),
+        "trusted: the project AGENTS.md is read, got {files}"
+    );
 }

@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use fuigo_acp_lib::{
-    AcpAgentGatewaySender as GatewaySender,
-};
+use fuigo_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, simplex};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -39,10 +37,11 @@ pub fn spawn_agent(
         );
         tokio::task::spawn_local(
             fuigo_acp_lib::AcpGatewayReceiver::<agent_client_protocol::AgentSide, _>::new(
-            gateway_rx,
-            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold))
-                .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)
-                .run(),
+                gateway_rx,
+                crate::agent::park_hold::ParkHoldClient::new(conn, park_hold),
+            )
+            .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)
+            .run(),
         );
         let _ = handle_io.await;
     });

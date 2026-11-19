@@ -31,8 +31,11 @@ async fn saved_session_is_neither_indexed_nor_found_with_search_off() {
     };
     // A session folder is written only by its writer (design F5 §5.5); the seed holds it until it returns.
     let storage = JsonlStorageAdapter::with_root(root.to_path_buf());
-    let writer = fuigo_session_writer::SessionWriter::try_claim(info.id.0.to_string(), storage.session_dir(&info))
-        .expect("claim the seed's session writer");
+    let writer = fuigo_session_writer::SessionWriter::try_claim(
+        info.id.0.to_string(),
+        storage.session_dir(&info),
+    )
+    .expect("claim the seed's session writer");
     let storage = storage.with_writer(writer);
     storage
         .init_session(&info, acp::ModelId::new("test-model"))

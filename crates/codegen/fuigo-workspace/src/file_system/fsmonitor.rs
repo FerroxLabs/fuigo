@@ -58,12 +58,14 @@ impl FsmonitorProbeRunner for GitProbeRunner<'_> {
         args: &[&str],
     ) -> impl std::future::Future<Output = Option<Vec<u8>>> + Send {
         // Untrusted folder: no probe runs (unknown, so fsmonitor stays disabled).
-        let cmd = fuigo_tty_utils::git_command_in(self.cwd).ok().map(|mut cmd| {
-            cmd.args(args)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null());
-            cmd
-        });
+        let cmd = fuigo_tty_utils::git_command_in(self.cwd)
+            .ok()
+            .map(|mut cmd| {
+                cmd.args(args)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null());
+                cmd
+            });
         async move {
             let output = super::process::output_killing_group_on_drop(cmd?)
                 .await

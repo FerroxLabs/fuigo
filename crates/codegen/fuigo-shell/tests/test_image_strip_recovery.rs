@@ -37,8 +37,11 @@ async fn seed_poisoned_session(cwd: &std::path::Path, image_url: &str) -> Info {
     // Same adapter `session/load` uses.
     // A session folder is written only by its writer (design F5 §5.5); the seed holds it until it returns.
     let storage = JsonlStorageAdapter::new();
-    let writer = fuigo_session_writer::SessionWriter::try_claim(info.id.0.to_string(), storage.session_dir(&info))
-        .expect("claim the seed's session writer");
+    let writer = fuigo_session_writer::SessionWriter::try_claim(
+        info.id.0.to_string(),
+        storage.session_dir(&info),
+    )
+    .expect("claim the seed's session writer");
     let storage = storage.with_writer(writer);
     storage
         .init_session(&info, acp::ModelId::new("test-model"))

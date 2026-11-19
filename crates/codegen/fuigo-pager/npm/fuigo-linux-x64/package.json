@@ -1,6 +1,6 @@
 {
     "name": "@fuigo/linux-x64",
-    "version": "1.0.45",
+    "version": "1.0.46",
     "description": "linux-x64 binary for fuigo. Do not install directly; install fuigo instead.",
     "license": "Apache-2.0",
     "repository": {

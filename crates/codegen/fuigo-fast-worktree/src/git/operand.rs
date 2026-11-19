@@ -57,12 +57,22 @@ mod tests {
         for bad in ["-x", "--upload-pack=a", "  -b", "-", "a\0b", "", "   "] {
             assert!(validate_git_ref(bad).is_err(), "{bad:?}");
         }
-        assert_eq!(validate_git_ref("-x").unwrap_err(), "git ref may not begin with '-'");
+        assert_eq!(
+            validate_git_ref("-x").unwrap_err(),
+            "git ref may not begin with '-'"
+        );
     }
 
     #[test]
     fn accepts_ordinary_refs_trimmed() {
-        for ok in ["main", " origin/main ", "v1.2.3", "refs/heads/a-b", "HEAD~2", "feature/caf\u{e9}"] {
+        for ok in [
+            "main",
+            " origin/main ",
+            "v1.2.3",
+            "refs/heads/a-b",
+            "HEAD~2",
+            "feature/caf\u{e9}",
+        ] {
             assert!(validate_git_ref(ok).is_ok(), "{ok:?}");
         }
         assert_eq!(validate_git_ref(" main ").unwrap(), "main");

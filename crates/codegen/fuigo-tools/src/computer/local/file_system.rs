@@ -56,7 +56,10 @@ fn is_test_transient_write_lock_error(e: &io::Error) -> bool {
 /// Replace the file's contents without ever exposing a truncated one: the new bytes go to a temp file beside it, which
 /// is renamed over the target only once written. A write that fails (disk full, size limit, permission) leaves the previous
 /// file exactly as it was. Symlinks are written through and the existing mode is kept (see `fuigo_config::write_through`).
-#[allow(clippy::disallowed_methods, reason = "file tool replace of a model/user-chosen path (user content, design F5 5.6); not a session-folder write by Fuigo")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "file tool replace of a model/user-chosen path (user content, design F5 5.6); not a session-folder write by Fuigo"
+)]
 async fn replace_file(path: &Path, data: &[u8]) -> io::Result<()> {
     let path = path.to_path_buf();
     let data = data.to_vec();
@@ -184,7 +187,10 @@ impl AsyncFileSystem for LocalFs {
     }
 
     #[tracing::instrument(name = "fs.write_file", skip_all)]
-    #[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "file tool write of a model/user-chosen path (user content); not inside a session folder"
+    )]
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
         // implicitly creates the missing directories if any
         if let Some(dir) = path.parent()
@@ -214,7 +220,10 @@ impl AsyncFileSystem for LocalFs {
     }
 
     #[tracing::instrument(name = "fs.delete_file", skip_all)]
-    #[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "file tool write of a model/user-chosen path (user content); not inside a session folder"
+    )]
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError> {
         if let Err(e) = fs::remove_file(path).await {
             if is_permission_error(&e) {
@@ -226,7 +235,10 @@ impl AsyncFileSystem for LocalFs {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,7 +268,10 @@ mod tests {
             assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
         }
         let outcome = LocalFs
-            .write_file(&path, "replacement contents that are too large to be written".as_bytes())
+            .write_file(
+                &path,
+                "replacement contents that are too large to be written".as_bytes(),
+            )
             .await;
         assert!(outcome.is_err(), "the write must fail under the size limit");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), previous);
@@ -264,7 +279,11 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(leftovers, vec![std::ffi::OsString::from("notes.txt")], "no temp file is left behind");
+        assert_eq!(
+            leftovers,
+            vec![std::ffi::OsString::from("notes.txt")],
+            "no temp file is left behind"
+        );
     }
 
     /// A successful write replaces the contents and keeps what the file already had: its mode, and the symlink it is reached through.
@@ -280,8 +299,16 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         LocalFs.write_file(&link, b"new contents").await.unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new contents");
-        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o750);
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]

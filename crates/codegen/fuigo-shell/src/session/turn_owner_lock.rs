@@ -35,13 +35,20 @@ pub(crate) const OWNER_WAIT_LIMIT: Duration = Duration::from_secs(60);
 pub(crate) const RECOVERY_APPEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Owner-only like every other session file (P145: it kept the folder's inherited ACL on Windows).
-#[allow(clippy::disallowed_methods, reason = "lock sidecar (§5.6): turn_owner.lock")]
-fn open_lock_file(session_dir: &Path, writer: Option<&fuigo_session_writer::SessionWriter>) -> std::io::Result<std::fs::File> {
+#[allow(
+    clippy::disallowed_methods,
+    reason = "lock sidecar (§5.6): turn_owner.lock"
+)]
+fn open_lock_file(
+    session_dir: &Path,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+) -> std::io::Result<std::fs::File> {
     // Through the writer only into an existing folder: a missing one stays NotFound, as on the by-path open.
     if let Some(writer) = writer.filter(|_| session_dir.is_dir()) {
         return writer.open_lock(TURN_OWNER_LOCK_FILE);
     }
-    crate::session::storage::owner_only::open( // F5-A: lock sidecar (§5.6): turn_owner.lock
+    crate::session::storage::owner_only::open(
+        // F5-A: lock sidecar (§5.6): turn_owner.lock
         std::fs::OpenOptions::new()
             .read(true)
             .write(true) // F5-A: lock sidecar (§5.6): turn_owner.lock
@@ -289,7 +296,10 @@ pub(crate) fn try_recovery_lock_as(writer: &fuigo_session_writer::SessionWriter)
     try_recovery_lock_with(writer.dir(), Some(writer))
 }
 
-fn try_recovery_lock_with(session_dir: &Path, writer: Option<&fuigo_session_writer::SessionWriter>) -> RecoveryLock {
+fn try_recovery_lock_with(
+    session_dir: &Path,
+    writer: Option<&fuigo_session_writer::SessionWriter>,
+) -> RecoveryLock {
     let file = match open_lock_file(session_dir, writer) {
         Ok(file) => file,
         Err(error) => return RecoveryLock::Unknown(error),
@@ -303,7 +313,10 @@ fn try_recovery_lock_with(session_dir: &Path, writer: Option<&fuigo_session_writ
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "turn_owner_lock_tests.rs"]
 mod tests;

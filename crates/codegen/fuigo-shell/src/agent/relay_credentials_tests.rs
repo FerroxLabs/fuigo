@@ -1,6 +1,8 @@
 //! P82 tests: the request gate and the response backstop on their own, then through the real relay socket session.
 use super::*;
-use crate::agent::relay::{RelayBodyIdentity, SessionEndReason, relay_outbound_frame, run_websocket_session};
+use crate::agent::relay::{
+    RelayBodyIdentity, SessionEndReason, relay_outbound_frame, run_websocket_session,
+};
 use agent_client_protocol as acp;
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -17,7 +19,10 @@ const ENV_SECRET: &str = "p82-env-secret-hunter2";
 const MCP_SECRET: &str = "ghp_p82mcpsecret0123456789";
 const HOOK_SECRET: &str = "p82-hook-secret-0123";
 
-const FLUXROUTER_RELAYS: [&str; 2] = ["wss://api.fluxrouter.ai/ws/relay", "WSS://API.FluxRouter.AI:443/other"];
+const FLUXROUTER_RELAYS: [&str; 2] = [
+    "wss://api.fluxrouter.ai/ws/relay",
+    "WSS://API.FluxRouter.AI:443/other",
+];
 const OTHER_RELAYS: [&str; 5] = [
     "wss://relay.example/ws",
     "ws://api.fluxrouter.ai/ws/relay",
@@ -50,8 +55,14 @@ fn assert_refusal(answer: &str, id: &Value, method: &str) {
     assert_eq!(&answer["id"], id, "{answer}");
     assert_eq!(answer["error"]["code"], -32600, "{answer}");
     let message = answer["error"]["message"].as_str().unwrap();
-    assert!(message.contains(method) && message.contains("FluxRouter-operated relay"), "{answer}");
-    assert_eq!(answer["error"]["data"]["error_kind"], "invalid_request", "{answer}");
+    assert!(
+        message.contains(method) && message.contains("FluxRouter-operated relay"),
+        "{answer}"
+    );
+    assert_eq!(
+        answer["error"]["data"]["error_kind"], "invalid_request",
+        "{answer}"
+    );
     assert_eq!(answer["error"]["data"]["message"], message, "{answer}");
     assert!(answer.get("result").is_none(), "{answer}");
 }
@@ -62,10 +73,19 @@ fn assert_refusal(answer: &str, id: &Value, method: &str) {
 /// with an error carrying its own id, whatever the id; a notification for one is dropped; the agent never sees either.
 #[test]
 fn p82_gate_refuses_every_credential_method() {
-    assert_eq!(CREDENTIAL_METHODS, ["fuigo/auth/getBearerToken", "fuigo/getApiKey"]);
+    assert_eq!(
+        CREDENTIAL_METHODS,
+        ["fuigo/auth/getBearerToken", "fuigo/getApiKey"]
+    );
     for method in CREDENTIAL_METHODS {
         let wire = format!("_{method}");
-        for id in [json!(7), json!("3|1"), json!(null), json!(-1.5), json!({ "nested": [1] })] {
+        for id in [
+            json!(7),
+            json!("3|1"),
+            json!(null),
+            json!(-1.5),
+            json!({ "nested": [1] }),
+        ] {
             let request = json!({ "jsonrpc": "2.0", "id": id, "method": wire, "params": {} });
             match gate_relay_message(&request) {
                 RelayMessage::Refuse(answer) => assert_refusal(&answer, &id, &wire),
@@ -74,18 +94,39 @@ fn p82_gate_refuses_every_credential_method() {
         }
         // Without params, without `jsonrpc`, without the `_` (the agent's reader would not route that name, but it
         // is refused all the same), with several.
-        for spelling in [wire.clone(), method.to_owned(), format!("__{method}"), format!("___{method}")] {
+        for spelling in [
+            wire.clone(),
+            method.to_owned(),
+            format!("__{method}"),
+            format!("___{method}"),
+        ] {
             let request = json!({ "id": 1, "method": spelling });
-            assert!(matches!(gate_relay_message(&request), RelayMessage::Refuse(_)), "{request}");
+            assert!(
+                matches!(gate_relay_message(&request), RelayMessage::Refuse(_)),
+                "{request}"
+            );
         }
         // A notification: nothing to answer, nothing handed to the agent.
-        for sibling in [json!({ "result": {} }), json!({ "error": { "code": 1, "message": "m" } })] {
+        for sibling in [
+            json!({ "result": {} }),
+            json!({ "error": { "code": 1, "message": "m" } }),
+        ] {
             let mut request = json!({ "jsonrpc": "2.0", "id": 9, "method": wire });
-            request.as_object_mut().unwrap().extend(sibling.as_object().unwrap().clone());
-            assert!(matches!(gate_relay_message(&request), RelayMessage::Refuse(_)), "{request}");
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(sibling.as_object().unwrap().clone());
+            assert!(
+                matches!(gate_relay_message(&request), RelayMessage::Refuse(_)),
+                "{request}"
+            );
         }
         let notification = json!({ "jsonrpc": "2.0", "method": wire, "params": {} });
-        assert_eq!(gate_relay_message(&notification), RelayMessage::Drop, "{notification}");
+        assert_eq!(
+            gate_relay_message(&notification),
+            RelayMessage::Drop,
+            "{notification}"
+        );
     }
 }
 
@@ -102,7 +143,10 @@ fn p82_gate_decides_on_the_parsed_message_and_forwards_only_that() {
     ] {
         let text = esc(text);
         assert!(text.contains("\\u0"), "positive control: an escape: {text}");
-        assert!(matches!(gate_relay_message(&parse(&text)), RelayMessage::Refuse(_)), "{text}");
+        assert!(
+            matches!(gate_relay_message(&parse(&text)), RelayMessage::Refuse(_)),
+            "{text}"
+        );
     }
     for text in [
         // Duplicate keys: the reader keeps the last, and so would the agent's (it rejects a duplicate field, so it
@@ -111,16 +155,27 @@ fn p82_gate_decides_on_the_parsed_message_and_forwards_only_that() {
         // A raw newline inside the message: the agent's reader would split the relay's bytes there.
         "{\"jsonrpc\":\"2.0\",\n\"id\":1,\n\"method\":\"_fuigo/getApiKey\"}",
     ] {
-        assert!(matches!(gate_relay_message(&parse(text)), RelayMessage::Refuse(_)), "{text}");
+        assert!(
+            matches!(gate_relay_message(&parse(text)), RelayMessage::Refuse(_)),
+            "{text}"
+        );
     }
     // The other order: the last method wins, and the forwarded line names ONLY it.
-    let text = r#"{"jsonrpc":"2.0","id":1,"method":"_fuigo/getApiKey","method":"_fuigo/session/list"}"#;
-    let RelayMessage::Forward(line) = gate_relay_message(&parse(text)) else { panic!("{text}") };
-    assert_eq!(line, r#"{"jsonrpc":"2.0","id":1,"method":"_fuigo/session/list"}"#);
+    let text =
+        r#"{"jsonrpc":"2.0","id":1,"method":"_fuigo/getApiKey","method":"_fuigo/session/list"}"#;
+    let RelayMessage::Forward(line) = gate_relay_message(&parse(text)) else {
+        panic!("{text}")
+    };
+    assert_eq!(
+        line,
+        r#"{"jsonrpc":"2.0","id":1,"method":"_fuigo/session/list"}"#
+    );
     // A message split over lines, or carrying escapes, reaches the agent as one line without them; key order and
     // every value are kept.
     let text = "{\"jsonrpc\":\"2.0\",\n \"id\":2,\n \"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"type\":\"text\",\"text\":\"caf\\u00e9 \\n x\"}],\"n\":1.5}}";
-    let RelayMessage::Forward(line) = gate_relay_message(&parse(text)) else { panic!("{text}") };
+    let RelayMessage::Forward(line) = gate_relay_message(&parse(text)) else {
+        panic!("{text}")
+    };
     assert_eq!(
         line,
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"prompt\":[{\"type\":\"text\",\"text\":\"café \\n x\"}],\"n\":1.5}}"
@@ -141,7 +196,11 @@ fn p82_gate_decides_on_the_parsed_message_and_forwards_only_that() {
         "initialize",
     ] {
         let request = json!({ "jsonrpc": "2.0", "id": 3, "method": method, "params": { "fuigo/getApiKey": true } });
-        assert_eq!(gate_relay_message(&request), RelayMessage::Forward(request.to_string()), "{method}");
+        assert_eq!(
+            gate_relay_message(&request),
+            RelayMessage::Forward(request.to_string()),
+            "{method}"
+        );
     }
     // Responses and errors the relay sends the agent (answers to the agent's own requests) are forwarded.
     for message in [
@@ -150,7 +209,11 @@ fn p82_gate_decides_on_the_parsed_message_and_forwards_only_that() {
         json!({ "jsonrpc": "2.0", "id": 6, "error": { "code": -32603, "message": "client failed" } }),
         json!({ "jsonrpc": "2.0", "id": 7, "error": { "code": -32000, "message": "x" }, "method": "session/cancel" }),
     ] {
-        assert_eq!(gate_relay_message(&message), RelayMessage::Forward(message.to_string()), "{message}");
+        assert_eq!(
+            gate_relay_message(&message),
+            RelayMessage::Forward(message.to_string()),
+            "{message}"
+        );
     }
     // Not a JSON object: never handed to the agent. Its reader takes a positional array as a request.
     for message in [
@@ -162,7 +225,11 @@ fn p82_gate_decides_on_the_parsed_message_and_forwards_only_that() {
         json!(1),
         json!(null),
     ] {
-        assert_eq!(gate_relay_message(&message), RelayMessage::Drop, "{message}");
+        assert_eq!(
+            gate_relay_message(&message),
+            RelayMessage::Drop,
+            "{message}"
+        );
     }
 }
 
@@ -171,17 +238,36 @@ fn p82_gate_decides_on_the_parsed_message_and_forwards_only_that() {
 /// The answers of the credential producers, built as they build them, in a leader-namespaced response.
 fn credential_responses() -> Vec<(&'static str, String, String)> {
     use crate::session::ExtMethodResult;
-    let frame = |id: &str, result: String| format!(r#"{{"jsonrpc":"2.0","id":"{id}","result":{result}}}"#);
+    let frame =
+        |id: &str, result: String| format!(r#"{{"jsonrpc":"2.0","id":"{id}","result":{result}}}"#);
     // `extensions/auth.rs`: `ExtMethodResult::success(json!({ "token": token }))`, `json!({ "key": key })`.
-    let bearer = serde_json::to_string(&ExtMethodResult::success(json!({ "token": BEARER }))).unwrap();
-    let api_key = serde_json::to_string(&ExtMethodResult::success(json!({ "key": API_KEY }))).unwrap();
+    let bearer =
+        serde_json::to_string(&ExtMethodResult::success(json!({ "token": BEARER }))).unwrap();
+    let api_key =
+        serde_json::to_string(&ExtMethodResult::success(json!({ "key": API_KEY }))).unwrap();
     let none = serde_json::to_string(&ExtMethodResult::success(json!({ "token": null }))).unwrap();
     let no_key = serde_json::to_string(&ExtMethodResult::success(json!({ "key": null }))).unwrap();
     vec![
-        ("getBearerToken", frame("3|1", bearer), frame("3|1", r#"{"result":{}}"#.to_owned())),
-        ("getApiKey", frame("3|2", api_key), frame("3|2", r#"{"result":{}}"#.to_owned())),
-        ("getBearerToken, no token", frame("3|3", none), frame("3|3", r#"{"result":{}}"#.to_owned())),
-        ("getApiKey, no key", frame("3|4", no_key), frame("3|4", r#"{"result":{}}"#.to_owned())),
+        (
+            "getBearerToken",
+            frame("3|1", bearer),
+            frame("3|1", r#"{"result":{}}"#.to_owned()),
+        ),
+        (
+            "getApiKey",
+            frame("3|2", api_key),
+            frame("3|2", r#"{"result":{}}"#.to_owned()),
+        ),
+        (
+            "getBearerToken, no token",
+            frame("3|3", none),
+            frame("3|3", r#"{"result":{}}"#.to_owned()),
+        ),
+        (
+            "getApiKey, no key",
+            frame("3|4", no_key),
+            frame("3|4", r#"{"result":{}}"#.to_owned()),
+        ),
     ]
 }
 
@@ -189,7 +275,9 @@ fn credential_responses() -> Vec<(&'static str, String, String)> {
 /// not FluxRouter-operated receives from the credential filter: every secret's and variable's value, and the scripts,
 /// withheld; the names and everything else kept.
 fn environment_responses() -> Vec<(&'static str, String, String)> {
-    use crate::remote::{SandboxEnvironment, SandboxEnvironmentVariable, SandboxEnvironmentWithMetadata};
+    use crate::remote::{
+        SandboxEnvironment, SandboxEnvironmentVariable, SandboxEnvironmentWithMetadata,
+    };
     let variable = |key: &str, value: Option<&str>| SandboxEnvironmentVariable {
         key: Some(key.to_owned()),
         value: value.map(str::to_owned),
@@ -198,21 +286,40 @@ fn environment_responses() -> Vec<(&'static str, String, String)> {
         environment: Some(SandboxEnvironment {
             environment_id: Some(id.to_owned()),
             name: Some("build box".to_owned()),
-            setup_script: Some(format!("curl -H 'Authorization: Bearer {ENV_SECRET}' https://x")),
+            setup_script: Some(format!(
+                "curl -H 'Authorization: Bearer {ENV_SECRET}' https://x"
+            )),
             maintenance_script: Some("./maintain.sh".to_owned()),
             ..Default::default()
         }),
-        environment_variables: vec![variable("NODE_ENV", Some("production")), variable("API_KEY", Some(ENV_SECRET))],
-        secrets: vec![variable("DB_PASSWORD", Some(ENV_SECRET)), variable("EMPTY", None), variable("TOKEN", Some("v2"))],
+        environment_variables: vec![
+            variable("NODE_ENV", Some("production")),
+            variable("API_KEY", Some(ENV_SECRET)),
+        ],
+        secrets: vec![
+            variable("DB_PASSWORD", Some(ENV_SECRET)),
+            variable("EMPTY", None),
+            variable("TOKEN", Some("v2")),
+        ],
         user_role: Some("OWNER".to_owned()),
     };
     let rows = vec![
         environment("env-1"),
-        SandboxEnvironmentWithMetadata { secrets: Vec::new(), environment: None, ..environment("env-2") },
+        SandboxEnvironmentWithMetadata {
+            secrets: Vec::new(),
+            environment: None,
+            ..environment("env-2")
+        },
         environment("env-3"),
     ];
-    let list = format!(r#"{{"jsonrpc":"2.0","id":7,"result":{}}}"#, json!({ "environments": rows }));
-    let one = format!(r#"{{"jsonrpc":"2.0","id":8,"result":{}}}"#, json!({ "environment": rows[0] }));
+    let list = format!(
+        r#"{{"jsonrpc":"2.0","id":7,"result":{}}}"#,
+        json!({ "environments": rows })
+    );
+    let one = format!(
+        r#"{{"jsonrpc":"2.0","id":8,"result":{}}}"#,
+        json!({ "environment": rows[0] })
+    );
     let withhold = |row: &mut Value| {
         for list in ["secrets", "environmentVariables"] {
             for entry in row[list].as_array_mut().unwrap() {
@@ -220,17 +327,30 @@ fn environment_responses() -> Vec<(&'static str, String, String)> {
             }
         }
         if let Some(environment) = row["environment"].as_object_mut() {
-            assert!(environment.shift_remove("setupScript").is_some() && environment.shift_remove("maintenanceScript").is_some());
+            assert!(
+                environment.shift_remove("setupScript").is_some()
+                    && environment.shift_remove("maintenanceScript").is_some()
+            );
         }
     };
     let mut list_withheld = parse(&list);
-    for row in list_withheld["result"]["environments"].as_array_mut().unwrap() {
+    for row in list_withheld["result"]["environments"]
+        .as_array_mut()
+        .unwrap()
+    {
         withhold(row);
     }
     let mut one_withheld = parse(&one);
     withhold(&mut one_withheld["result"]["environment"]);
-    assert_eq!(parse(&list).to_string(), list, "positive control: the frame round-trips byte for byte");
-    vec![("env list", list, list_withheld.to_string()), ("env create / update", one, one_withheld.to_string())]
+    assert_eq!(
+        parse(&list).to_string(),
+        list,
+        "positive control: the frame round-trips byte for byte"
+    );
+    vec![
+        ("env list", list, list_withheld.to_string()),
+        ("env create / update", one, one_withheld.to_string()),
+    ]
 }
 
 /// The MCP catalog from the REAL producer (`build_mcp_catalog`), as `fuigo/mcp/list` answers it
@@ -240,7 +360,10 @@ fn mcp_frames() -> Vec<(&'static str, String, String)> {
     use crate::extensions::mcp::{McpServersUpdated, build_mcp_catalog};
     let servers = [
         acp::McpServer::Stdio(acp::McpServerStdio::new("plain", "/usr/bin/plain")),
-        acp::McpServer::Http(acp::McpServerHttp::new("remote", format!("https://mcp.example/sse?api_key={MCP_SECRET}"))),
+        acp::McpServer::Http(acp::McpServerHttp::new(
+            "remote",
+            format!("https://mcp.example/sse?api_key={MCP_SECRET}"),
+        )),
         acp::McpServer::Stdio(
             acp::McpServerStdio::new("github", "/usr/bin/github-mcp")
                 .args(vec!["--stdio".to_owned(), format!("--token={MCP_SECRET}")])
@@ -254,23 +377,41 @@ fn mcp_frames() -> Vec<(&'static str, String, String)> {
     let catalog = build_mcp_catalog(&servers);
     let list = format!(
         r#"{{"jsonrpc":"2.0","id":9,"result":{}}}"#,
-        serde_json::to_string(&crate::session::ExtMethodResult::success(json!({ "servers": catalog }))).unwrap()
+        serde_json::to_string(&crate::session::ExtMethodResult::success(
+            json!({ "servers": catalog })
+        ))
+        .unwrap()
     );
     let updated = format!(
         r#"{{"jsonrpc":"2.0","method":"_fuigo/mcp/servers_updated","params":{}}}"#,
-        serde_json::to_string(&McpServersUpdated { mcp_servers: catalog }).unwrap()
+        serde_json::to_string(&McpServersUpdated {
+            mcp_servers: catalog
+        })
+        .unwrap()
     );
     let withheld = |frame: &str| {
         frame
             .replace(r#","command":"/usr/bin/plain""#, "")
             .replace(r#","command":"/usr/bin/github-mcp""#, "")
-            .replace(&format!(r#","url":"https://mcp.example/sse?api_key={MCP_SECRET}""#), "")
-            .replace(&format!(r#","args":["--stdio","--token={MCP_SECRET}"]"#), "")
+            .replace(
+                &format!(r#","url":"https://mcp.example/sse?api_key={MCP_SECRET}""#),
+                "",
+            )
+            .replace(
+                &format!(r#","args":["--stdio","--token={MCP_SECRET}"]"#),
+                "",
+            )
             .replace(r#"{"name":"LOG","value":"debug"}"#, r#"{"name":"LOG"}"#)
             .replace(r#"{"name":"REGION","value":"eu"}"#, r#"{"name":"REGION"}"#)
-            .replace(&format!(r#"{{"name":"GITHUB_TOKEN","value":"{MCP_SECRET}"}}"#), r#"{"name":"GITHUB_TOKEN"}"#)
+            .replace(
+                &format!(r#"{{"name":"GITHUB_TOKEN","value":"{MCP_SECRET}"}}"#),
+                r#"{"name":"GITHUB_TOKEN"}"#,
+            )
     };
-    vec![("mcp/list", list.clone(), withheld(&list)), ("mcp/servers_updated", updated.clone(), withheld(&updated))]
+    vec![
+        ("mcp/list", list.clone(), withheld(&list)),
+        ("mcp/servers_updated", updated.clone(), withheld(&updated)),
+    ]
 }
 
 /// The hooks from the REAL wire types, as `fuigo/hooks/list` answers them (`to_ext_response(Ok(HooksListResponse))`)
@@ -282,7 +423,11 @@ fn hook_frames() -> Vec<(&'static str, String, String)> {
     let hook = |name: &str, command: Option<String>, url: Option<String>| HookInfo {
         name: name.to_owned(),
         event: HookEvent::PreToolUse,
-        handler_type: if url.is_some() { HookHandlerType::Http } else { HookHandlerType::Command },
+        handler_type: if url.is_some() {
+            HookHandlerType::Http
+        } else {
+            HookHandlerType::Command
+        },
         matcher: Some("Bash".to_owned()),
         command,
         url,
@@ -294,24 +439,42 @@ fn hook_frames() -> Vec<(&'static str, String, String)> {
         health: Default::default(),
     };
     let hooks = vec![
-        hook("global/fmt:pre_tool_use[0].hooks[0]", Some("./fmt.sh".to_owned()), None),
-        hook("global/notify:pre_tool_use[0].hooks[1]", Some(format!("curl -H 'Authorization: Bearer {HOOK_SECRET}' x")), None),
-        hook("global/audit:pre_tool_use[0].hooks[2]", None, Some(format!("https://hooks.example/run?token={HOOK_SECRET}"))),
+        hook(
+            "global/fmt:pre_tool_use[0].hooks[0]",
+            Some("./fmt.sh".to_owned()),
+            None,
+        ),
+        hook(
+            "global/notify:pre_tool_use[0].hooks[1]",
+            Some(format!("curl -H 'Authorization: Bearer {HOOK_SECRET}' x")),
+            None,
+        ),
+        hook(
+            "global/audit:pre_tool_use[0].hooks[2]",
+            None,
+            Some(format!("https://hooks.example/run?token={HOOK_SECRET}")),
+        ),
     ];
     let list = format!(
         r#"{{"jsonrpc":"2.0","id":10,"result":{}}}"#,
-        serde_json::to_string(&crate::session::ExtMethodResult::success(HooksListResponse {
-            hooks: hooks.clone(),
-            project_trusted: true,
-            load_errors: Vec::new(),
-        }))
+        serde_json::to_string(&crate::session::ExtMethodResult::success(
+            HooksListResponse {
+                hooks: hooks.clone(),
+                project_trusted: true,
+                load_errors: Vec::new(),
+            }
+        ))
         .unwrap()
     );
     let changed = format!(
         r#"{{"jsonrpc":"2.0","method":"_fuigo/session_notification","params":{}}}"#,
         serde_json::to_string(&SessionNotification {
             session_id: acp::SessionId::new("s-1"),
-            update: SessionUpdate::HooksChanged { hooks, project_trusted: true, load_errors: Vec::new() },
+            update: SessionUpdate::HooksChanged {
+                hooks,
+                project_trusted: true,
+                load_errors: Vec::new()
+            },
             meta: None,
         })
         .unwrap()
@@ -319,10 +482,23 @@ fn hook_frames() -> Vec<(&'static str, String, String)> {
     let withheld = |frame: &str| {
         frame
             .replace(r#""command":"./fmt.sh","url":null,"#, "")
-            .replace(&format!(r#""command":"curl -H 'Authorization: Bearer {HOOK_SECRET}' x","url":null,"#), "")
-            .replace(&format!(r#""command":null,"url":"https://hooks.example/run?token={HOOK_SECRET}","#), "")
+            .replace(
+                &format!(
+                    r#""command":"curl -H 'Authorization: Bearer {HOOK_SECRET}' x","url":null,"#
+                ),
+                "",
+            )
+            .replace(
+                &format!(
+                    r#""command":null,"url":"https://hooks.example/run?token={HOOK_SECRET}","#
+                ),
+                "",
+            )
     };
-    vec![("hooks/list", list.clone(), withheld(&list)), ("hooks_changed", changed.clone(), withheld(&changed))]
+    vec![
+        ("hooks/list", list.clone(), withheld(&list)),
+        ("hooks_changed", changed.clone(), withheld(&changed)),
+    ]
 }
 
 /// The agent's own `terminal/create` request to its client (`fuigo-shell-terminal`: `acp::CreateTerminalRequest` with
@@ -330,7 +506,10 @@ fn hook_frames() -> Vec<(&'static str, String, String)> {
 fn terminal_frames() -> Vec<(&'static str, String, String)> {
     let request = acp::CreateTerminalRequest::new(acp::SessionId::new("s-1"), "pwd")
         .args(vec![])
-        .env(vec![acp::EnvVariable::new("LANG", "C"), acp::EnvVariable::new("GITHUB_TOKEN", MCP_SECRET)])
+        .env(vec![
+            acp::EnvVariable::new("LANG", "C"),
+            acp::EnvVariable::new("GITHUB_TOKEN", MCP_SECRET),
+        ])
         .cwd(Some(std::path::PathBuf::from("/work")))
         .output_byte_limit(Some(4096));
     let frame = format!(
@@ -338,7 +517,14 @@ fn terminal_frames() -> Vec<(&'static str, String, String)> {
         serde_json::to_string(&request).unwrap()
     );
     let mut withheld: Value = parse(&frame);
-    assert!(withheld["params"].as_object_mut().unwrap().shift_remove("env").is_some(), "positive control: {frame}");
+    assert!(
+        withheld["params"]
+            .as_object_mut()
+            .unwrap()
+            .shift_remove("env")
+            .is_some(),
+        "positive control: {frame}"
+    );
     vec![("terminal/create", frame, withheld.to_string())]
 }
 
@@ -357,10 +543,21 @@ fn all_credential_frames() -> Vec<(&'static str, String, String)> {
 #[test]
 fn p82_withhold_credentials_from_every_producer() {
     for (name, frame, withheld) in all_credential_frames() {
-        assert_ne!(frame, withheld, "{name}: positive control, the fields are where the replace looks: {frame}");
+        assert_ne!(
+            frame, withheld,
+            "{name}: positive control, the fields are where the replace looks: {frame}"
+        );
         for relay in FLUXROUTER_RELAYS {
-            assert_eq!(withhold_credentials(disclosure(relay), frame.clone()), frame, "{name} {relay}");
-            assert_eq!(relay_outbound_frame(&decision(relay), frame.clone()), frame, "{name} {relay}");
+            assert_eq!(
+                withhold_credentials(disclosure(relay), frame.clone()),
+                frame,
+                "{name} {relay}"
+            );
+            assert_eq!(
+                relay_outbound_frame(&decision(relay), frame.clone()),
+                frame,
+                "{name} {relay}"
+            );
         }
         for relay in OTHER_RELAYS {
             let sent = withhold_credentials(disclosure(relay), frame.clone());
@@ -368,33 +565,72 @@ fn p82_withhold_credentials_from_every_producer() {
             // The socket writer's whole filter: P81's identity filter on the frame without its credentials (the
             // environment fixtures' owner ids are null, and P81 withholds them whatever their value).
             let written = relay_outbound_frame(&decision(relay), frame.clone());
-            assert_eq!(written, relay_outbound_frame(&decision(relay), withheld.clone()), "{name} {relay}");
+            assert_eq!(
+                written,
+                relay_outbound_frame(&decision(relay), withheld.clone()),
+                "{name} {relay}"
+            );
             if !name.starts_with("env") {
                 assert_eq!(written, withheld, "{name} {relay}");
             }
-            for secret in [BEARER, API_KEY, ENV_SECRET, MCP_SECRET, HOOK_SECRET, "\"v2\"", "\"debug\"", "./fmt.sh", "production", "maintain.sh"] {
-                assert!(!written.contains(secret), "{name} {relay}: {secret} in {written}");
+            for secret in [
+                BEARER,
+                API_KEY,
+                ENV_SECRET,
+                MCP_SECRET,
+                HOOK_SECRET,
+                "\"v2\"",
+                "\"debug\"",
+                "./fmt.sh",
+                "production",
+                "maintain.sh",
+            ] {
+                assert!(
+                    !written.contains(secret),
+                    "{name} {relay}: {secret} in {written}"
+                );
                 assert!(!sent.contains(secret), "{name} {relay}: {secret} in {sent}");
             }
         }
     }
     // The kept parts, stated once.
     let (_, _, env_list) = &environment_responses()[0];
-    for kept in [r#""key":"NODE_ENV""#, r#""key":"API_KEY""#, r#""key":"DB_PASSWORD""#, r#""userRole":"OWNER""#, "env-3", r#""name":"build box""#] {
+    for kept in [
+        r#""key":"NODE_ENV""#,
+        r#""key":"API_KEY""#,
+        r#""key":"DB_PASSWORD""#,
+        r#""userRole":"OWNER""#,
+        "env-3",
+        r#""name":"build box""#,
+    ] {
         assert!(env_list.contains(kept), "{kept}: {env_list}");
     }
     let (_, _, mcp_list) = &mcp_frames()[0];
-    for kept in [r#""name":"GITHUB_TOKEN""#, r#""type":"stdio""#, r#""name":"plain""#, r#""type":"http""#, r#""name":"REGION""#] {
+    for kept in [
+        r#""name":"GITHUB_TOKEN""#,
+        r#""type":"stdio""#,
+        r#""name":"plain""#,
+        r#""type":"http""#,
+        r#""name":"REGION""#,
+    ] {
         assert!(mcp_list.contains(kept), "{kept}: {mcp_list}");
     }
     for gone in ["\"args\":", "\"url\":", "\"command\":"] {
         assert!(!mcp_list.contains(gone), "{gone}: {mcp_list}");
     }
     for (_, _, hooks) in hook_frames() {
-        for kept in ["global/audit:pre_tool_use[0].hooks[2]", r#""matcher":"Bash""#, r#""handlerType":"http""#, r#""removable":true"#] {
+        for kept in [
+            "global/audit:pre_tool_use[0].hooks[2]",
+            r#""matcher":"Bash""#,
+            r#""handlerType":"http""#,
+            r#""removable":true"#,
+        ] {
             assert!(hooks.contains(kept), "{kept}: {hooks}");
         }
-        assert!(!hooks.contains("\"command\":") && !hooks.contains("\"url\":"), "{hooks}");
+        assert!(
+            !hooks.contains("\"command\":") && !hooks.contains("\"url\":"),
+            "{hooks}"
+        );
     }
     // Every field on its own, whatever its value, and next to unrelated data that stays byte for byte (raw text).
     for (frame, withheld) in [
@@ -402,13 +638,22 @@ fn p82_withhold_credentials_from_every_producer() {
             r#"{"id":1,"result":{"result":{"a":1.50,"token":{"x":[1]},"b":"~u00e9","c":"é"}}}"#,
             r#"{"id":1,"result":{"result":{"a":1.50,"b":"~u00e9","c":"é"}}}"#,
         ),
-        (r#"{"id":1,"result":{"result":{"key":7}},"x":[ 1 ]}"#, r#"{"id":1,"result":{"result":{}},"x":[ 1 ]}"#),
-        (r#"{"id":1,"result":{"result":{"token":"t","key":"k","c":3}}}"#, r#"{"id":1,"result":{"result":{"c":3}}}"#),
+        (
+            r#"{"id":1,"result":{"result":{"key":7}},"x":[ 1 ]}"#,
+            r#"{"id":1,"result":{"result":{}},"x":[ 1 ]}"#,
+        ),
+        (
+            r#"{"id":1,"result":{"result":{"token":"t","key":"k","c":3}}}"#,
+            r#"{"id":1,"result":{"result":{"c":3}}}"#,
+        ),
         (
             r#"{"id":1,"result":{"environments":[{"secrets":[{"key":"A","value":true},3,{"value":[]}]},null,"s"]}}"#,
             r#"{"id":1,"result":{"environments":[{"secrets":[{"key":"A"},3,{}]},null,"s"]}}"#,
         ),
-        (r#"{"id":1,"result":{"environment":{"secrets":[{"value":"v"}]}}}"#, r#"{"id":1,"result":{"environment":{"secrets":[{}]}}}"#),
+        (
+            r#"{"id":1,"result":{"environment":{"secrets":[{"value":"v"}]}}}"#,
+            r#"{"id":1,"result":{"environment":{"secrets":[{}]}}}"#,
+        ),
         (
             r#"{"id":1,"result":{"result":{"servers":[{"env":[{"name":"A","value":"v"}]},{"type":"http"}]}}}"#,
             r#"{"id":1,"result":{"result":{"servers":[{"env":[{"name":"A"}]},{"type":"http"}]}}}"#,
@@ -496,7 +741,11 @@ fn p82_withhold_credentials_from_every_producer() {
         ),
     ] {
         for relay in OTHER_RELAYS {
-            assert_eq!(withhold_credentials(disclosure(relay), esc(frame)), esc(withheld), "{relay}: {frame}");
+            assert_eq!(
+                withhold_credentials(disclosure(relay), esc(frame)),
+                esc(withheld),
+                "{relay}: {frame}"
+            );
         }
     }
 }
@@ -522,8 +771,15 @@ fn p82_withhold_credentials_reads_every_row() {
     assert_eq!(frame.matches("SECRET").count(), 6, "positive control");
     for relay in OTHER_RELAYS {
         let sent = withhold_credentials(disclosure(relay), frame.clone());
-        assert!(!sent.is_empty() && !sent.contains("SECRET"), "{relay}: {sent}");
-        assert_eq!(sent.matches("\"n\":62").count(), 7, "{relay}: every filler row kept");
+        assert!(
+            !sent.is_empty() && !sent.contains("SECRET"),
+            "{relay}: {sent}"
+        );
+        assert_eq!(
+            sent.matches("\"n\":62").count(),
+            7,
+            "{relay}: every filler row kept"
+        );
     }
 }
 
@@ -535,30 +791,67 @@ fn p82_withhold_credentials_sees_through_escapes_and_fails_closed() {
     // Each escaped spelling contains none of the quoted keys the pre-check looks for: it is read because of the
     // escape, and the field is withheld.
     for (frame, withheld) in [
-        (r#"{"id":1,"result":{"result":{"t~u006fken":"SECRET"}}}"#, r#"{"id":1,"result":{"result":{}}}"#),
-        (r#"{"id":1,"result":{"result":{"~u006bey":"SECRET"}}}"#, r#"{"id":1,"result":{"result":{}}}"#),
-        (r#"{"id":1,"r~u0065sult":{"result":{"t~u006fken":"SECRET"}}}"#, r#"{"id":1,"result":{"result":{}}}"#),
-        (r#"{"id":1,"result":{"r~u0065sult":{"~u006bey":"SECRET"}}}"#, r#"{"id":1,"result":{"result":{}}}"#),
+        (
+            r#"{"id":1,"result":{"result":{"t~u006fken":"SECRET"}}}"#,
+            r#"{"id":1,"result":{"result":{}}}"#,
+        ),
+        (
+            r#"{"id":1,"result":{"result":{"~u006bey":"SECRET"}}}"#,
+            r#"{"id":1,"result":{"result":{}}}"#,
+        ),
+        (
+            r#"{"id":1,"r~u0065sult":{"result":{"t~u006fken":"SECRET"}}}"#,
+            r#"{"id":1,"result":{"result":{}}}"#,
+        ),
+        (
+            r#"{"id":1,"result":{"r~u0065sult":{"~u006bey":"SECRET"}}}"#,
+            r#"{"id":1,"result":{"result":{}}}"#,
+        ),
         (
             r#"{"id":1,"result":{"envir~u006fnments":[{"s~u0065crets":[{"v~u0061lue":"SECRET"}]}]}}"#,
             r#"{"id":1,"result":{"environments":[{"secrets":[{}]}]}}"#,
         ),
-        (r#"{"id":1,"result":{"envir~u006fnment":{"~u0073ecrets":[{"value":"SECRET"}]}}}"#, r#"{"id":1,"result":{"environment":{"secrets":[{}]}}}"#),
-        (r#"{"params":{"mcpServ~u0065rs":[{"~u0065nv":[{"value":"SECRET"}]}]}}"#, r#"{"params":{"mcpServers":[{"env":[{}]}]}}"#),
-        (r#"{"id":1,"result":{"result":{"s~u0065rvers":[{"e~u006ev":[{"value":"SECRET"}]}]}}}"#, r#"{"id":1,"result":{"result":{"servers":[{"env":[{}]}]}}}"#),
-        (r#"{"id":1,"result":{"result":{"h~u006foks":[{"~u0075rl":"SECRET"}]}}}"#, r#"{"id":1,"result":{"result":{"hooks":[{}]}}}"#),
-        (r#"{"params":{"upd~u0061te":{"~u0068ooks":[{"comm~u0061nd":"SECRET"}]}}}"#, r#"{"params":{"update":{"hooks":[{}]}}}"#),
+        (
+            r#"{"id":1,"result":{"envir~u006fnment":{"~u0073ecrets":[{"value":"SECRET"}]}}}"#,
+            r#"{"id":1,"result":{"environment":{"secrets":[{}]}}}"#,
+        ),
+        (
+            r#"{"params":{"mcpServ~u0065rs":[{"~u0065nv":[{"value":"SECRET"}]}]}}"#,
+            r#"{"params":{"mcpServers":[{"env":[{}]}]}}"#,
+        ),
+        (
+            r#"{"id":1,"result":{"result":{"s~u0065rvers":[{"e~u006ev":[{"value":"SECRET"}]}]}}}"#,
+            r#"{"id":1,"result":{"result":{"servers":[{"env":[{}]}]}}}"#,
+        ),
+        (
+            r#"{"id":1,"result":{"result":{"h~u006foks":[{"~u0075rl":"SECRET"}]}}}"#,
+            r#"{"id":1,"result":{"result":{"hooks":[{}]}}}"#,
+        ),
+        (
+            r#"{"params":{"upd~u0061te":{"~u0068ooks":[{"comm~u0061nd":"SECRET"}]}}}"#,
+            r#"{"params":{"update":{"hooks":[{}]}}}"#,
+        ),
     ] {
         let frame = esc(frame);
-        assert!(frame.contains("\\u00"), "positive control: an escape: {frame}");
-        assert!(!CREDENTIAL_KEYS.iter().any(|key| frame.contains(key)), "positive control: only the escape: {frame}");
+        assert!(
+            frame.contains("\\u00"),
+            "positive control: an escape: {frame}"
+        );
+        assert!(
+            !CREDENTIAL_KEYS.iter().any(|key| frame.contains(key)),
+            "positive control: only the escape: {frame}"
+        );
         for relay in OTHER_RELAYS {
             let sent = withhold_credentials(disclosure(relay), frame.clone());
             assert_eq!(sent, withheld, "{relay}: {frame}");
             assert!(!sent.contains("SECRET"), "{relay}: {sent}");
         }
         for relay in FLUXROUTER_RELAYS {
-            assert_eq!(withhold_credentials(disclosure(relay), frame.clone()), frame, "{relay}");
+            assert_eq!(
+                withhold_credentials(disclosure(relay), frame.clone()),
+                frame,
+                "{relay}"
+            );
         }
     }
     for undecidable in [
@@ -600,11 +893,23 @@ fn p82_withhold_credentials_sees_through_escapes_and_fails_closed() {
     ] {
         let undecidable = esc(undecidable);
         for relay in OTHER_RELAYS {
-            assert_eq!(withhold_credentials(disclosure(relay), undecidable.clone()), "", "{relay}: {undecidable}");
-            assert_eq!(relay_outbound_frame(&decision(relay), undecidable.clone()), "", "{relay}: {undecidable}");
+            assert_eq!(
+                withhold_credentials(disclosure(relay), undecidable.clone()),
+                "",
+                "{relay}: {undecidable}"
+            );
+            assert_eq!(
+                relay_outbound_frame(&decision(relay), undecidable.clone()),
+                "",
+                "{relay}: {undecidable}"
+            );
         }
         for relay in FLUXROUTER_RELAYS {
-            assert_eq!(relay_outbound_frame(&decision(relay), undecidable.clone()), undecidable, "{relay}");
+            assert_eq!(
+                relay_outbound_frame(&decision(relay), undecidable.clone()),
+                undecidable,
+                "{relay}"
+            );
         }
     }
 }
@@ -635,7 +940,11 @@ fn p82_withhold_credentials_leaves_everything_else_alone() {
     ] {
         let untouched = esc(untouched);
         for relay in OTHER_RELAYS.iter().chain(FLUXROUTER_RELAYS.iter()) {
-            assert_eq!(withhold_credentials(disclosure(relay), untouched.clone()), untouched, "{relay}: {untouched}");
+            assert_eq!(
+                withhold_credentials(disclosure(relay), untouched.clone()),
+                untouched,
+                "{relay}: {untouched}"
+            );
         }
     }
 }
@@ -648,8 +957,10 @@ async fn ws_pair() -> (
     tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
 ) {
     let (client, server) = tokio::io::duplex(256 * 1024);
-    let client_ws = tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-    let server_ws = tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+    let client_ws =
+        tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+    let server_ws =
+        tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
     (client_ws, server_ws)
 }
 
@@ -683,14 +994,25 @@ fn p82_relay_frames() -> Vec<Message> {
 /// Run one relay session: the relay side sends `frames`, the agent side emits `agent_frames`. Returns every line the
 /// agent was handed (the last relay frame is an ordinary request with id 11, so once it is handed every earlier frame
 /// has been read) and every text frame the relay side received, in order, until it has `answers` of them.
-async fn p82_session(relay: &str, frames: Vec<Message>, agent_frames: Vec<String>, answers: usize) -> (Vec<String>, Vec<String>) {
+async fn p82_session(
+    relay: &str,
+    frames: Vec<Message>,
+    agent_frames: Vec<String>,
+    answers: usize,
+) -> (Vec<String>, Vec<String>) {
     let (client_ws, server_ws) = ws_pair().await;
     let (mut server_tx, mut server_rx) = server_ws.split();
     let (to_agent_tx, mut to_agent_rx) = mpsc::unbounded_channel::<String>();
     let (agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
     let cancel = CancellationToken::new();
     let identity = decision(relay);
-    let session = run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, &identity);
+    let session = run_websocket_session(
+        client_ws,
+        &to_agent_tx,
+        &mut agent_out_rx,
+        &cancel,
+        &identity,
+    );
     let mut handed = Vec::new();
     let relay_side = async {
         for frame in frames {
@@ -699,10 +1021,15 @@ async fn p82_session(relay: &str, frames: Vec<Message>, agent_frames: Vec<String
         for frame in agent_frames {
             agent_out_tx.send(frame).unwrap();
         }
-        while !handed.last().is_some_and(|line: &String| line.contains(r#""id":11"#)) {
+        while !handed
+            .last()
+            .is_some_and(|line: &String| line.contains(r#""id":11"#))
+        {
             let line = tokio::time::timeout(Duration::from_secs(5), to_agent_rx.recv())
                 .await
-                .unwrap_or_else(|_| panic!("{relay}: the last relay request never reached the agent: {handed:?}"))
+                .unwrap_or_else(|_| {
+                    panic!("{relay}: the last relay request never reached the agent: {handed:?}")
+                })
                 .expect("the reader is running");
             handed.push(line);
         }
@@ -715,17 +1042,28 @@ async fn p82_session(relay: &str, frames: Vec<Message>, agent_frames: Vec<String
             }
         }
         // Nothing else arrives (a refusal or a frame too many would be here by now).
-        if let Ok(Some(Ok(Message::Text(extra)))) = tokio::time::timeout(Duration::from_millis(300), server_rx.next()).await {
+        if let Ok(Some(Ok(Message::Text(extra)))) =
+            tokio::time::timeout(Duration::from_millis(300), server_rx.next()).await
+        {
             panic!("{relay}: an extra frame reached the relay: {extra}");
         }
         cancel.cancel();
         got
     };
-    let (ended, got) = tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(session, relay_side) })
-        .await
-        .expect("test timed out");
-    assert_eq!(ended.expect("session ends cleanly on cancel"), SessionEndReason::Normal, "{relay}");
-    assert!(to_agent_rx.try_recv().is_err(), "{relay}: nothing after the last request");
+    let (ended, got) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(session, relay_side)
+    })
+    .await
+    .expect("test timed out");
+    assert_eq!(
+        ended.expect("session ends cleanly on cancel"),
+        SessionEndReason::Normal,
+        "{relay}"
+    );
+    assert!(
+        to_agent_rx.try_recv().is_err(),
+        "{relay}: nothing after the last request"
+    );
     (handed, got)
 }
 
@@ -735,10 +1073,26 @@ async fn p82_session(relay: &str, frames: Vec<Message>, agent_frames: Vec<String
 /// answers to a LOCAL client's credential request (leader mode). A FluxRouter relay: unchanged, byte for byte.
 #[tokio::test]
 async fn p82_ws_session_relay_messages_by_relay_operator() {
-    let local_answers: Vec<String> = all_credential_frames().into_iter().map(|(_, frame, _)| frame).collect();
-    let withheld_answers: Vec<String> = all_credential_frames().into_iter().map(|(_, _, withheld)| withheld).collect();
-    for relay in ["wss://relay.example/ws", "ws://api.fluxrouter.ai/ws/relay", ""] {
-        let (handed, got) = p82_session(relay, p82_relay_frames(), local_answers.clone(), 5 + local_answers.len()).await;
+    let local_answers: Vec<String> = all_credential_frames()
+        .into_iter()
+        .map(|(_, frame, _)| frame)
+        .collect();
+    let withheld_answers: Vec<String> = all_credential_frames()
+        .into_iter()
+        .map(|(_, _, withheld)| withheld)
+        .collect();
+    for relay in [
+        "wss://relay.example/ws",
+        "ws://api.fluxrouter.ai/ws/relay",
+        "",
+    ] {
+        let (handed, got) = p82_session(
+            relay,
+            p82_relay_frames(),
+            local_answers.clone(),
+            5 + local_answers.len(),
+        )
+        .await;
         assert_eq!(
             handed,
             [
@@ -749,8 +1103,13 @@ async fn p82_ws_session_relay_messages_by_relay_operator() {
             ],
             "{relay}: only the ordinary messages reach the agent, each as the one line that was decided on"
         );
-        assert!(handed.iter().all(|line| !line.contains('\n')), "{relay}: {handed:?}");
-        let (refusals, answers): (Vec<String>, Vec<String>) = got.into_iter().partition(|frame| frame.contains("\"error\""));
+        assert!(
+            handed.iter().all(|line| !line.contains('\n')),
+            "{relay}: {handed:?}"
+        );
+        let (refusals, answers): (Vec<String>, Vec<String>) = got
+            .into_iter()
+            .partition(|frame| frame.contains("\"error\""));
         // The refusals arrive in the order the relay sent the requests (id 5's last `method` is the credential one;
         // ids 6, 7 and 10 are arrays and are dropped unanswered, as is the notification).
         let refused: Vec<(Value, &str)> = vec![
@@ -764,22 +1123,42 @@ async fn p82_ws_session_relay_messages_by_relay_operator() {
         for (answer, (id, method)) in refusals.iter().zip(&refused) {
             assert_refusal(answer, id, method);
         }
-        let expected: Vec<String> = withheld_answers.iter().map(|w| relay_outbound_frame(&decision(relay), w.clone())).collect();
-        assert_eq!(answers, expected, "{relay}: the local answers, without their credentials");
+        let expected: Vec<String> = withheld_answers
+            .iter()
+            .map(|w| relay_outbound_frame(&decision(relay), w.clone()))
+            .collect();
+        assert_eq!(
+            answers, expected,
+            "{relay}: the local answers, without their credentials"
+        );
         for frame in refusals.iter().chain(&answers) {
             for secret in [BEARER, API_KEY, ENV_SECRET, MCP_SECRET] {
-                assert!(!frame.contains(secret), "{relay}: {secret} reached the relay: {frame}");
+                assert!(
+                    !frame.contains(secret),
+                    "{relay}: {secret} reached the relay: {frame}"
+                );
             }
         }
     }
     for relay in FLUXROUTER_RELAYS {
-        let (handed, got) = p82_session(relay, p82_relay_frames(), local_answers.clone(), local_answers.len()).await;
+        let (handed, got) = p82_session(
+            relay,
+            p82_relay_frames(),
+            local_answers.clone(),
+            local_answers.len(),
+        )
+        .await;
         // Every text frame byte for byte, every binary frame as one message, in order; no refusal.
         let mut expected: Vec<String> = Vec::new();
         for frame in p82_relay_frames() {
             match frame {
                 Message::Text(text) => expected.push(text.to_string()),
-                Message::Binary(bin) => expected.push(String::from_utf8(bin.to_vec()).unwrap().trim_end_matches(['\r', '\n']).to_owned()),
+                Message::Binary(bin) => expected.push(
+                    String::from_utf8(bin.to_vec())
+                        .unwrap()
+                        .trim_end_matches(['\r', '\n'])
+                        .to_owned(),
+                ),
                 _ => unreachable!(),
             }
         }
@@ -800,15 +1179,29 @@ async fn p82_ws_session_ends_when_the_agent_is_gone_after_a_binary_frame() {
         let (_agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
         let cancel = CancellationToken::new();
         let identity = decision(relay);
-        let frame = br#"{"jsonrpc":"2.0","id":1,"method":"_fuigo/session/list","params":{}}"#.to_vec();
-        server_tx.send(Message::Binary(frame.into())).await.expect("relay sends");
+        let frame =
+            br#"{"jsonrpc":"2.0","id":1,"method":"_fuigo/session/list","params":{}}"#.to_vec();
+        server_tx
+            .send(Message::Binary(frame.into()))
+            .await
+            .expect("relay sends");
         let ended = tokio::time::timeout(
             Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, &identity),
+            run_websocket_session(
+                client_ws,
+                &to_agent_tx,
+                &mut agent_out_rx,
+                &cancel,
+                &identity,
+            ),
         )
         .await
         .unwrap_or_else(|_| panic!("{relay}: the reader kept waiting after the agent was gone"));
-        assert_eq!(ended.expect("no error"), SessionEndReason::Normal, "{relay}");
+        assert_eq!(
+            ended.expect("no error"),
+            SessionEndReason::Normal,
+            "{relay}"
+        );
     }
 }
 
@@ -820,9 +1213,22 @@ fn p82_relay_reader_and_writer_are_gated() {
     let src = include_str!("relay.rs");
     let prod = src.split("\n#[cfg(test)]").next().unwrap();
     let flat = prod.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert_eq!(flat.matches("relay_credentials::gate_relay_message(&json)").count(), 2, "text and binary");
-    assert_eq!(flat.matches("ws_outbound.send(Message::Text(").count(), 1, "one text writer");
-    assert_eq!(flat.matches("to_agent_tx.send(").count(), 3, "text, binary gated, binary as before");
+    assert_eq!(
+        flat.matches("relay_credentials::gate_relay_message(&json)")
+            .count(),
+        2,
+        "text and binary"
+    );
+    assert_eq!(
+        flat.matches("ws_outbound.send(Message::Text(").count(),
+        1,
+        "one text writer"
+    );
+    assert_eq!(
+        flat.matches("to_agent_tx.send(").count(),
+        3,
+        "text, binary gated, binary as before"
+    );
     for pinned in [
         "let relay_is_fluxrouter = identity.disclosure.is_permitted();",
         "let outbound = if relay_is_fluxrouter { if declare_relay_client_capabilities(&mut json) { json.to_string() } \
@@ -843,7 +1249,13 @@ fn p82_relay_reader_and_writer_are_gated() {
     }
     // The gate's own first statements.
     let own = include_str!("relay_credentials.rs");
-    let own = own.split("\n#[cfg(test)]").next().unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
+    let own = own
+        .split("\n#[cfg(test)]")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     for pinned in [
         "if disclosure.is_permitted() || !(CREDENTIAL_KEYS.iter().any(|key| msg.contains(key)) || msg.contains(\"\\\\u\")) { return msg; }",
         "let Some(object) = message.as_object() else {",

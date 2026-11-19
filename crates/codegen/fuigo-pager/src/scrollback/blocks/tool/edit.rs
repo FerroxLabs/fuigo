@@ -1946,9 +1946,24 @@ mod tests {
         use ratatui::style::Color;
         let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![
-            DiffLine { text: "context\n".into(), lo: 4, ln: 4, tag: ChangeTag::Equal },
-            DiffLine { text: "old line\n".into(), lo: 5, ln: 0, tag: ChangeTag::Delete },
-            DiffLine { text: "new line\n".into(), lo: 0, ln: 5, tag: ChangeTag::Insert },
+            DiffLine {
+                text: "context\n".into(),
+                lo: 4,
+                ln: 4,
+                tag: ChangeTag::Equal,
+            },
+            DiffLine {
+                text: "old line\n".into(),
+                lo: 5,
+                ln: 0,
+                tag: ChangeTag::Delete,
+            },
+            DiffLine {
+                text: "new line\n".into(),
+                lo: 0,
+                ln: 5,
+                tag: ChangeTag::Insert,
+            },
         ];
         let config = DiffRenderConfig::default();
         let path = Path::new("test.txt");
@@ -1967,9 +1982,17 @@ mod tests {
         assert_eq!(line_to_string(&outputs[0].line), "  4  context");
         assert_eq!(line_to_string(&outputs[1].line), "  5- old line");
         assert_eq!(line_to_string(&outputs[2].line), "  5+ new line");
-        assert_eq!(outputs[1].content_start_col, 5, "the marker does not move the content");
+        assert_eq!(
+            outputs[1].content_start_col, 5,
+            "the marker does not move the content"
+        );
         // A wrapped line marks only its first row
-        let long = vec![DiffLine { text: "word ".repeat(30), lo: 0, ln: 7, tag: ChangeTag::Insert }];
+        let long = vec![DiffLine {
+            text: "word ".repeat(30),
+            lo: 0,
+            ln: 7,
+            tag: ChangeTag::Insert,
+        }];
         let wrapped = render_diff_hunk_highlighted(&long, path, &plain, 40, &config);
         assert!(wrapped.len() > 1);
         assert!(line_to_string(&wrapped[0].line).starts_with("  7+ word"));

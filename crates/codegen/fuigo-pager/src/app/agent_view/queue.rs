@@ -1263,11 +1263,16 @@ mod queue_edit_routing_tests {
     /// and interrupt the turn the card belongs to (which answers the card).
     #[test]
     fn send_now_does_not_answer_an_open_question_card() {
-        use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
+        use fuigo_tools::implementations::fuigo_build::ask_user_question::{
+            Question, QuestionOption,
+        };
         let mut agent = make_running_agent();
         agent.session.pending_prompts.clear();
         agent.sync_queue_pane();
-        assert!(agent.held_queue_top_sendable(), "fixture: a sendable queued row");
+        assert!(
+            agent.held_queue_top_sendable(),
+            "fixture: a sendable queued row"
+        );
         let stashed = agent.prompt.stash();
         agent.question_view = Some(crate::views::question_view::QuestionViewState::new(
             "card-1".to_string(),
@@ -1285,12 +1290,21 @@ mod queue_edit_routing_tests {
             stashed,
         ));
         let registry = non_vscode_registry();
-        let outcome = agent.handle_input(&crossterm::event::Event::Key(force_interject_key()), &registry);
+        let outcome = agent.handle_input(
+            &crossterm::event::Event::Key(force_interject_key()),
+            &registry,
+        );
         assert!(
-            !matches!(outcome, InputOutcome::Action(Action::QueueInterjectShared { .. })),
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::QueueInterjectShared { .. })
+            ),
             "send-now went past the open card: {outcome:?}"
         );
-        assert!(agent.question_view.is_some(), "the card is still waiting for its answer");
+        assert!(
+            agent.question_view.is_some(),
+            "the card is still waiting for its answer"
+        );
     }
 
     /// 53.11: a queued command such as `/compact` is not text to edit. Opening it for edit used to load "/compact" into the
@@ -1302,17 +1316,27 @@ mod queue_edit_routing_tests {
         let id = agent.session.enqueue_command("/compact".into());
         agent.prompt.set_text("my new idea");
         agent.enter_queue_edit(id, false, None);
-        assert!(matches!(agent.prompt_mode, PromptMode::Normal), "must not enter edit mode");
+        assert!(
+            matches!(agent.prompt_mode, PromptMode::Normal),
+            "must not enter edit mode"
+        );
         assert_eq!(agent.prompt.text(), "my new idea", "the draft is kept");
         assert!(agent.toast.is_some(), "the refusal is explained");
-        assert_eq!(agent.session.pending_prompts.len(), 1, "the queued command stays");
+        assert_eq!(
+            agent.session.pending_prompts.len(),
+            1,
+            "the queued command stays"
+        );
 
         // A queued prompt is still editable.
         agent.session.pending_prompts.clear();
         let prompt_id = agent.session.enqueue_prompt("a follow-up".into());
         agent.prompt.set_text("");
         agent.enter_queue_edit(prompt_id, false, None);
-        assert!(matches!(agent.prompt_mode, PromptMode::EditingQueued { .. }));
+        assert!(matches!(
+            agent.prompt_mode,
+            PromptMode::EditingQueued { .. }
+        ));
         assert_eq!(agent.prompt.text(), "a follow-up");
     }
 

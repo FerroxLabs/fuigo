@@ -2367,7 +2367,10 @@ fn vim_normal_section(entries: &[ShortcutsHelpEntry]) -> Option<usize> {
     entries.iter().position(|e| {
         matches!(
             e,
-            ShortcutsHelpEntry::SectionHeader { label: "Vim Normal mode", .. }
+            ShortcutsHelpEntry::SectionHeader {
+                label: "Vim Normal mode",
+                ..
+            }
         )
     })
 }
@@ -2392,7 +2395,12 @@ fn vim_normal_section_lists_the_prompt_keys_when_enabled() {
     let _g = PromptVimGuard::set(true);
     let entries = build_entries(&[When::PromptFocused], &registry, true);
     let at = vim_normal_section(&entries).expect("section present");
-    let ShortcutsHelpEntry::SectionHeader { entry_count, category_idx, .. } = &entries[at] else {
+    let ShortcutsHelpEntry::SectionHeader {
+        entry_count,
+        category_idx,
+        ..
+    } = &entries[at]
+    else {
         unreachable!()
     };
     assert_eq!(*entry_count, VIM_NORMAL_ROWS.len());
@@ -2407,7 +2415,15 @@ fn vim_normal_section_lists_the_prompt_keys_when_enabled() {
         assert_eq!(item.label, label);
         assert!(!dimmed);
     }
-    for needle in ["h j k l", "w b e", "gg G", "f t F T ; ,", "d c y", "p P", "u Ctrl+R"] {
+    for needle in [
+        "h j k l",
+        "w b e",
+        "gg G",
+        "f t F T ; ,",
+        "d c y",
+        "p P",
+        "u Ctrl+R",
+    ] {
         assert!(
             VIM_NORMAL_ROWS.iter().any(|(k, _, _)| *k == needle),
             "missing {needle}"

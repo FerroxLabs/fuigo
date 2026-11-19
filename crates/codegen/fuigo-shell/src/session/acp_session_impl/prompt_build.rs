@@ -938,9 +938,11 @@ impl SessionActor {
         // F5-C4: the offloaded prompt is a session file, written as the session's writer (owner-only, atomic).
         let session_writer = self.rebuild_spec.session_writer.clone();
         let offload = tokio::task::spawn_blocking(move || {
-            write_offload_and_build(&full_message, bounded, file_path, |path, bytes| match &session_writer {
-                Some(writer) => writer.replace_atomic_sync(writer.rel_of(path)?, bytes),
-                None => Err(crate::session::storage::jsonl::no_writer_error(path)),
+            write_offload_and_build(&full_message, bounded, file_path, |path, bytes| {
+                match &session_writer {
+                    Some(writer) => writer.replace_atomic_sync(writer.rel_of(path)?, bytes),
+                    None => Err(crate::session::storage::jsonl::no_writer_error(path)),
+                }
             })
         })
         .await;
@@ -979,14 +981,16 @@ impl SessionActor {
         let prior = self.chat_state_handle.get_conversation_for_model().await;
         let outline = crate::session::image_describe::build_conversation_outline(&prior);
         let writer = self.rebuild_spec.session_writer.as_ref().ok_or_else(|| {
-            crate::acp_error::session_storage("no session writer: the images cannot be saved".to_string())
+            crate::acp_error::session_storage(
+                "no session writer: the images cannot be saved".to_string(),
+            )
         })?;
         let persisted = crate::session::image_describe::persist_user_images(writer, images)
             .map_err(|e| {
-            crate::acp_error::session_storage(format!(
-                "failed to save user images to assets dir: {e}"
-            ))
-        })?;
+                crate::acp_error::session_storage(format!(
+                    "failed to save user images to assets dir: {e}"
+                ))
+            })?;
         let image_paths: Vec<String> = persisted
             .iter()
             .map(|p| p.path.to_string_lossy().into_owned())
@@ -994,7 +998,9 @@ impl SessionActor {
         let current_query = crate::session::image_describe::strip_template_context_tags(
             &fuigo_chat_state::compaction_utils::extract_user_query(&original_user_message),
         );
-        let active_session_config = self.reconstruct_full_config(crate::session::acp_session::CallRole::Side).await;
+        let active_session_config = self
+            .reconstruct_full_config(crate::session::acp_session::CallRole::Side)
+            .await;
         // The helper slug and how it was chosen come from ONE config snapshot (P90 F6), so a
         // config reload can never pair one helper with another helper's provenance. The
         // session's spawn-time slug is the fallback for a config that carries none.
@@ -1008,7 +1014,8 @@ impl SessionActor {
                 )
             });
         let resolved_describe = crate::agent::config::explicit_helper_route(
-            self.resolve_aux_sampler_config(&describe_slug, choice).await,
+            self.resolve_aux_sampler_config(&describe_slug, choice)
+                .await,
             self.models_manager.model_in_catalog(&describe_slug),
             &active_session_config,
             choice,

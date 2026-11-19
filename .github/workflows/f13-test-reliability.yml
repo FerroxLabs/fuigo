@@ -22,8 +22,8 @@ jobs:
       CARGO_BUILD_JOBS: '4'
       RUST_MIN_STACK: '16777216'
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (action default toolchain: stable)
       - name: Prepare pinned protoc
         shell: bash
         run: |
@@ -32,7 +32,7 @@ jobs:
           echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  $RUNNER_TEMP/protoc.zip" | sha256sum -c -
           unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
           echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: f13-focused-debug
           cache-on-failure: true
@@ -47,7 +47,7 @@ jobs:
           done
           cargo test --locked -p fuigo-workspace --lib tasks_snapshot_excludes_foreground_and_completed_processes -- --test-threads=1 2>&1 | tee f13-receipts/workspace-snapshot.log || failed=1
           exit "$failed"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: f13-focused-receipts

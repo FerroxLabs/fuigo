@@ -14,8 +14,9 @@ use tempfile::TempDir;
 
 use super::sweep_pin::PinnedDir;
 use super::{
-    CleanupLevel, CleanupStats, MarkLiveError, SessionDirRename, StdRename, cleanup_session_dir_with, cleanup_stale_sessions_inner,
-    mark_session_live, mark_session_live_waiting, mark_session_live_with, open_lock_nofollow, open_sweep_lock,
+    CleanupLevel, CleanupStats, MarkLiveError, SessionDirRename, StdRename,
+    cleanup_session_dir_with, cleanup_stale_sessions_inner, mark_session_live,
+    mark_session_live_waiting, mark_session_live_with, open_lock_nofollow, open_sweep_lock,
     prune_pinned_session_caches, session_last_activity_within, sweep_lock_path, touch_nofollow,
 };
 
@@ -26,7 +27,11 @@ fn mark(session_dir: &Path) {
 }
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap().block_on(future)
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(future)
 }
 
 const TTL_DAYS: u32 = 30;
@@ -34,7 +39,10 @@ const TTL_DAYS: u32 = 30;
 /// A sessions root whose own name has no leading dot (`TempDir::new()` names start with `.tmp`, and the pre-P172
 /// sweep skipped any folder whose name starts with a dot, so such a root would prove nothing).
 fn sessions_tmp() -> TempDir {
-    tempfile::Builder::new().prefix("sessions-").tempdir().unwrap()
+    tempfile::Builder::new()
+        .prefix("sessions-")
+        .tempdir()
+        .unwrap()
 }
 
 fn days_ago(days: u64) -> FileTime {
@@ -104,7 +112,12 @@ fn a_session_in_use_is_untouched_when_it_has_no_stale_cache() {
 fn a_session_in_use_has_only_its_stale_cache_files_swept() {
     let tmp = sessions_tmp();
     let session = write_session(tmp.path(), "cwd", "s1", days_ago(0));
-    let old_blobs = ["images/1.jpg", "videos/1.mp4", "downloads/1.pdf", "terminal/t.log"];
+    let old_blobs = [
+        "images/1.jpg",
+        "videos/1.mp4",
+        "downloads/1.pdf",
+        "terminal/t.log",
+    ];
     for rel in old_blobs {
         write(&session.join(rel), days_ago(60));
     }
@@ -114,13 +127,22 @@ fn a_session_in_use_has_only_its_stale_cache_files_swept() {
 
     let stats = sweep(tmp.path(), None);
 
-    assert_eq!(CleanupStats { files_deleted: 4, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            files_deleted: 4,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     for rel in old_blobs {
         assert!(!session.join(rel).exists(), "{rel} must be swept");
     }
     assert!(session.join("images/2.jpg").is_file());
     assert!(session.join("downloads/2.pdf").is_file());
-    assert!(session.join("images").is_dir(), "a cache folder is never removed");
+    assert!(
+        session.join("images").is_dir(),
+        "a cache folder is never removed"
+    );
 }
 
 #[test]
@@ -134,7 +156,13 @@ fn a_session_nobody_used_for_the_ttl_is_removed_whole() {
 
     let stats = sweep(tmp.path(), None);
 
-    assert_eq!(CleanupStats { sessions_removed: 1, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            sessions_removed: 1,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     assert!(!idle.exists());
     assert!(fresh.join("updates.jsonl").is_file());
     assert!(summary_rewritten.join("updates.jsonl").is_file());
@@ -151,7 +179,13 @@ fn the_live_session_is_never_removed_but_its_stale_cache_is_pruned() {
 
     let stats = sweep(tmp.path(), Some(&live));
 
-    assert_eq!(CleanupStats { files_deleted: 1, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            files_deleted: 1,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     assert!(live.join("summary.json").is_file());
     assert!(live.join("updates.jsonl").is_file());
     assert!(live.join("compaction_checkpoints/a.json").is_file());
@@ -165,7 +199,10 @@ fn the_live_session_is_never_removed_but_its_stale_cache_is_pruned() {
 fn mark_session_live_keeps_an_idle_session_out_of_a_foreign_sweep() {
     let tmp = sessions_tmp();
     let attaching = write_session(tmp.path(), "cwd", "attaching", days_ago(40));
-    write(&attaching.join("compaction_checkpoints/a.json"), days_ago(40));
+    write(
+        &attaching.join("compaction_checkpoints/a.json"),
+        days_ago(40),
+    );
     let summary_before = std::fs::read(attaching.join("summary.json")).unwrap();
     let no_summary = tmp.path().join("cwd").join("no-summary");
     write(&no_summary.join("summary.json.lock"), days_ago(40));
@@ -175,12 +212,25 @@ fn mark_session_live_keeps_an_idle_session_out_of_a_foreign_sweep() {
     mark(&tmp.path().join("cwd").join("not-created-yet"));
     let stats = sweep(tmp.path(), None);
 
-    assert_eq!(CleanupStats { sessions_removed: 1, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            sessions_removed: 1,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     assert!(attaching.join("updates.jsonl").is_file());
     assert!(attaching.join("compaction_checkpoints/a.json").is_file());
-    assert_eq!(summary_before, std::fs::read(attaching.join("summary.json")).unwrap(), "nothing is written");
+    assert_eq!(
+        summary_before,
+        std::fs::read(attaching.join("summary.json")).unwrap(),
+        "nothing is written"
+    );
     assert!(!no_summary.exists());
-    assert!(!tmp.path().join("cwd").join("not-created-yet").exists(), "marking never creates a folder");
+    assert!(
+        !tmp.path().join("cwd").join("not-created-yet").exists(),
+        "marking never creates a folder"
+    );
 }
 
 #[test]
@@ -197,7 +247,13 @@ fn a_stub_folder_follows_its_newest_file_or_its_own_mtime() {
 
     let stats = sweep(tmp.path(), None);
 
-    assert_eq!(CleanupStats { sessions_removed: 2, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            sessions_removed: 2,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     assert!(!lock_only.exists());
     assert!(!old_empty.exists());
     assert!(fresh_empty.is_dir());
@@ -215,7 +271,13 @@ fn dot_entries_are_kept_while_stray_files_follow_the_mtime_rule() {
 
     let stats = sweep(tmp.path(), None);
 
-    assert_eq!(CleanupStats { files_deleted: 1, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            files_deleted: 1,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     assert!(cwd.join(".cwd").is_file());
     assert!(tmp.path().join(".index/old.bin").is_file());
     assert!(cwd.join(".hidden/old.bin").is_file());
@@ -235,7 +297,14 @@ fn an_emptied_cwd_folder_is_removed_only_after_a_session_removal() {
 
     let stats = sweep(tmp.path(), None);
 
-    assert_eq!(CleanupStats { dirs_removed: 1, sessions_removed: 2, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            dirs_removed: 1,
+            sessions_removed: 2,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     assert!(!tmp.path().join("emptied").exists());
     assert!(untouched.is_dir());
     assert!(tmp.path().join("kept/fresh/summary.json").is_file());
@@ -280,7 +349,14 @@ fn a_symlinked_cache_folder_is_never_entered() {
 
     assert_eq!(0, stats.files_deleted, "{stats:?}");
     assert!(outside.path().join("precious.txt").is_file());
-    assert!(in_use.join("images").symlink_metadata().unwrap().file_type().is_symlink());
+    assert!(
+        in_use
+            .join("images")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 /// A symlink inside a cache folder is not a regular file: it is left alone and its old target is never deleted.
@@ -298,7 +374,13 @@ fn a_symlink_inside_a_cache_folder_is_left_alone() {
 
     let stats = sweep(tmp.path(), None);
 
-    assert_eq!(CleanupStats { files_deleted: 1, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            files_deleted: 1,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     assert!(precious.is_file());
     assert!(session.join("terminal/old.log").symlink_metadata().is_ok());
     assert!(!session.join("terminal/real-old.log").exists());
@@ -374,7 +456,14 @@ fn an_attach_between_the_first_look_and_the_lock_keeps_the_session() {
     let attaching = write_session(tmp.path(), "cwd", "attaching", days_ago(40));
     write(&attaching.join("prompts/prompt_0.txt"), days_ago(40));
 
-    let stats = cleanup_session_dir_with(&attaching, TTL_DAYS, &StdRename, || mark(&attaching), || {}, |_| {});
+    let stats = cleanup_session_dir_with(
+        &attaching,
+        TTL_DAYS,
+        &StdRename,
+        || mark(&attaching),
+        || {},
+        |_| {},
+    );
 
     assert_eq!(CleanupStats::default(), stats);
     assert!(attaching.join("prompts/prompt_0.txt").is_file());
@@ -386,12 +475,21 @@ fn an_attach_between_the_first_look_and_the_lock_keeps_the_session() {
 fn the_sweeps_own_lock_file_is_not_activity() {
     let tmp = sessions_tmp();
     let idle = write_session(tmp.path(), "cwd", "idle", days_ago(40));
-    write(&idle.join(crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE), days_ago(0));
+    write(
+        &idle.join(crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE),
+        days_ago(0),
+    );
     write(&sweep_lock_path(&idle).unwrap(), days_ago(0));
 
     let stats = cleanup_session_dir_with(&idle, TTL_DAYS, &StdRename, || {}, || {}, |_| {});
 
-    assert_eq!(CleanupStats { sessions_removed: 1, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            sessions_removed: 1,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     assert!(!idle.exists());
 }
 
@@ -403,7 +501,11 @@ fn an_idle_session_whose_lock_file_is_a_symlink_is_kept() {
     let outside = TempDir::new().unwrap();
     let target = outside.path().join("target.lock");
     let idle = write_session(tmp.path(), "cwd", "idle", days_ago(40));
-    std::os::unix::fs::symlink(&target, idle.join(crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE)).unwrap();
+    std::os::unix::fs::symlink(
+        &target,
+        idle.join(crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE),
+    )
+    .unwrap();
 
     let stats = sweep(tmp.path(), None);
 
@@ -437,13 +539,23 @@ fn an_attach_during_a_removal_waits_for_it_and_finds_nothing() {
         })
     };
     std::thread::sleep(Duration::from_millis(300));
-    assert!(!marked.load(Ordering::SeqCst), "the attach must wait while the session is being removed");
+    assert!(
+        !marked.load(Ordering::SeqCst),
+        "the attach must wait while the session is being removed"
+    );
     // What the sweep does while it holds the lock: take the session off its path
-    std::fs::rename(&session, tmp.path().join("cwd").join(".fuigo-sweep-removing-test")).unwrap();
+    std::fs::rename(
+        &session,
+        tmp.path().join("cwd").join(".fuigo-sweep-removing-test"),
+    )
+    .unwrap();
     drop(sweep_lock);
 
     assert!(attach.join().unwrap(), "the attach finds nothing to mark");
-    assert!(!session.exists(), "the attach recreates nothing of a removed session");
+    assert!(
+        !session.exists(),
+        "the attach recreates nothing of a removed session"
+    );
 }
 
 /// A sweep stuck mid-removal does not make the attach load a session it is removing: the load fails with a retry.
@@ -453,12 +565,27 @@ fn an_attach_fails_rather_than_loading_a_session_a_stuck_sweep_holds() {
     let session = write_session(tmp.path(), "cwd", "stuck", days_ago(40));
     let sweep_lock = open_sweep_lock(&session).expect("lock file");
     fs2::FileExt::try_lock_exclusive(&sweep_lock).expect("the sweep's exclusive lock");
-    let before = std::fs::metadata(session.join("summary.json")).unwrap().modified().unwrap();
+    let before = std::fs::metadata(session.join("summary.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
 
-    let outcome = block_on(mark_session_live_waiting(&session, Duration::from_millis(200)));
+    let outcome = block_on(mark_session_live_waiting(
+        &session,
+        Duration::from_millis(200),
+    ));
 
-    assert!(matches!(outcome, Err(MarkLiveError::SweepBusy)), "{outcome:?}");
-    assert_eq!(before, std::fs::metadata(session.join("summary.json")).unwrap().modified().unwrap());
+    assert!(
+        matches!(outcome, Err(MarkLiveError::SweepBusy)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        before,
+        std::fs::metadata(session.join("summary.json"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    );
     drop(sweep_lock);
 }
 
@@ -467,16 +594,33 @@ fn an_attach_fails_rather_than_loading_a_session_a_stuck_sweep_holds() {
 fn an_attach_never_waits_for_an_actor_or_a_recovery() {
     let tmp = sessions_tmp();
     let session = write_session(tmp.path(), "cwd", "live", days_ago(40));
-    let recovery = open_lock_nofollow(&session, crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE).unwrap();
+    let recovery = open_lock_nofollow(
+        &session,
+        crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE,
+    )
+    .unwrap();
     fs2::FileExt::try_lock_exclusive(&recovery).expect("a recovery's exclusive lock");
-    let before = std::fs::metadata(session.join("summary.json")).unwrap().modified().unwrap();
+    let before = std::fs::metadata(session.join("summary.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
 
     let started = std::time::Instant::now();
     let outcome = block_on(mark_session_live_waiting(&session, Duration::from_secs(60)));
 
     assert!(outcome.is_ok());
-    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-    assert!(std::fs::metadata(session.join("summary.json")).unwrap().modified().unwrap() > before);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        std::fs::metadata(session.join("summary.json"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            > before
+    );
 }
 
 /// Astra r3: once the session has left its path nothing can be opened there, so no attach can create a fresh
@@ -489,18 +633,46 @@ fn a_removed_session_leaves_its_path_before_anything_is_deleted() {
     write(&idle.join("prompts/prompt_0.txt"), days_ago(40));
     let mut seen = None;
 
-    let stats = cleanup_session_dir_with(&idle, TTL_DAYS, &StdRename, || {}, || {}, |removing| {
-        assert!(!idle.exists(), "the session's path is gone before deletion starts");
-        assert!(open_lock_nofollow(&idle, crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE).is_none());
-        assert!(block_on(mark_session_live(&idle)).is_ok());
-        assert!(!idle.exists(), "an attach now recreates nothing");
-        assert!(removing.join("prompts/prompt_0.txt").is_file(), "the content moved whole, nothing deleted yet");
-        seen = Some(removing.to_path_buf());
-    });
+    let stats = cleanup_session_dir_with(
+        &idle,
+        TTL_DAYS,
+        &StdRename,
+        || {},
+        || {},
+        |removing| {
+            assert!(
+                !idle.exists(),
+                "the session's path is gone before deletion starts"
+            );
+            assert!(
+                open_lock_nofollow(&idle, crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE)
+                    .is_none()
+            );
+            assert!(block_on(mark_session_live(&idle)).is_ok());
+            assert!(!idle.exists(), "an attach now recreates nothing");
+            assert!(
+                removing.join("prompts/prompt_0.txt").is_file(),
+                "the content moved whole, nothing deleted yet"
+            );
+            seen = Some(removing.to_path_buf());
+        },
+    );
 
-    assert_eq!(CleanupStats { sessions_removed: 1, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            sessions_removed: 1,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     let removing = seen.expect("the removal renamed the session first");
-    assert!(removing.file_name().unwrap().to_string_lossy().starts_with(".fuigo-sweep-removing-idle-"));
+    assert!(
+        removing
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".fuigo-sweep-removing-idle-")
+    );
     assert!(!removing.exists());
     assert!(!idle.exists());
 }
@@ -515,7 +687,13 @@ fn the_next_sweep_finishes_an_interrupted_removal() {
 
     let stats = sweep(tmp.path(), None);
 
-    assert_eq!(CleanupStats { dirs_removed: 1, ..CleanupStats::default() }, stats);
+    assert_eq!(
+        CleanupStats {
+            dirs_removed: 1,
+            ..CleanupStats::default()
+        },
+        stats
+    );
     assert!(!leftover.exists());
     assert!(fresh.join("updates.jsonl").is_file());
 }
@@ -539,7 +717,10 @@ impl SessionDirRename for NtfsLikeRename {
             {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    format!("Access is denied. (os error 5): {} is open", target.display()),
+                    format!(
+                        "Access is denied. (os error 5): {} is open",
+                        target.display()
+                    ),
                 ));
             }
         }
@@ -557,8 +738,10 @@ fn renamers() -> Vec<(&'static str, &'static dyn SessionDirRename)> {
 }
 
 fn entry_names(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> =
-        std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
     names.sort();
     names
 }
@@ -572,10 +755,14 @@ fn the_ntfs_double_refuses_a_folder_with_an_open_file_beneath_it() {
     write(&session.join("prompts/p.txt"), days_ago(0));
     let open = std::fs::File::open(session.join("prompts/p.txt")).unwrap();
     let cwd = PinnedDir::open_root(&tmp.path().join("cwd")).unwrap();
-    let error = NtfsLikeRename.rename(&cwd, OsStr::new("s1"), OsStr::new("moved")).unwrap_err();
+    let error = NtfsLikeRename
+        .rename(&cwd, OsStr::new("s1"), OsStr::new("moved"))
+        .unwrap_err();
     assert_eq!(std::io::ErrorKind::PermissionDenied, error.kind());
     drop(open);
-    NtfsLikeRename.rename(&cwd, OsStr::new("s1"), OsStr::new("moved")).unwrap();
+    NtfsLikeRename
+        .rename(&cwd, OsStr::new("s1"), OsStr::new("moved"))
+        .unwrap();
 }
 
 /// The audit's repro: on Windows an idle session was never removed, because the sweep renamed it while it still held
@@ -589,9 +776,19 @@ fn an_idle_session_is_removed_under_every_rename_rule() {
 
         let stats = cleanup_session_dir_with(&idle, TTL_DAYS, renamer, || {}, || {}, |_| {});
 
-        assert_eq!(CleanupStats { sessions_removed: 1, ..CleanupStats::default() }, stats, "{rule}");
+        assert_eq!(
+            CleanupStats {
+                sessions_removed: 1,
+                ..CleanupStats::default()
+            },
+            stats,
+            "{rule}"
+        );
         assert!(!idle.exists(), "{rule}");
-        assert!(entry_names(&tmp.path().join("cwd")).is_empty(), "{rule}: nothing left behind");
+        assert!(
+            entry_names(&tmp.path().join("cwd")).is_empty(),
+            "{rule}: nothing left behind"
+        );
     }
 }
 
@@ -611,7 +808,11 @@ fn an_open_handle_inside_an_idle_session_keeps_it_whole_under_the_ntfs_rule() {
     assert_eq!(1, stats.errors, "{stats:?}");
     assert!(idle.join("summary.json").is_file());
     assert!(idle.join("prompts/prompt_0.txt").is_file());
-    assert!(entry_names(&tmp.path().join("cwd")).iter().all(|name| !name.starts_with(".fuigo-sweep-removing-")));
+    assert!(
+        entry_names(&tmp.path().join("cwd"))
+            .iter()
+            .all(|name| !name.starts_with(".fuigo-sweep-removing-"))
+    );
     drop(open);
 }
 
@@ -629,15 +830,33 @@ fn the_attach_races_hold_under_every_rename_rule() {
             TTL_DAYS,
             renamer,
             || {},
-            || during = Some(block_on(mark_session_live_waiting(&idle, Duration::from_millis(100)))),
+            || {
+                during = Some(block_on(mark_session_live_waiting(
+                    &idle,
+                    Duration::from_millis(100),
+                )))
+            },
             |_| assert!(block_on(mark_session_live(&idle)).is_ok()),
         );
-        assert!(during.expect("hook ran").is_err(), "{rule}: no mark between the last look and the rename");
+        assert!(
+            during.expect("hook ran").is_err(),
+            "{rule}: no mark between the last look and the rename"
+        );
         assert_eq!(1, stats.sessions_removed, "{rule}: {stats:?}");
-        assert!(!idle.exists(), "{rule}: an attach after the rename recreates nothing");
+        assert!(
+            !idle.exists(),
+            "{rule}: an attach after the rename recreates nothing"
+        );
 
         let attaching = write_session(tmp.path(), "cwd", "attaching", days_ago(40));
-        let stats = cleanup_session_dir_with(&attaching, TTL_DAYS, renamer, || mark(&attaching), || {}, |_| {});
+        let stats = cleanup_session_dir_with(
+            &attaching,
+            TTL_DAYS,
+            renamer,
+            || mark(&attaching),
+            || {},
+            |_| {},
+        );
         assert_eq!(CleanupStats::default(), stats, "{rule}");
         assert!(attaching.join("updates.jsonl").is_file(), "{rule}");
     }
@@ -673,8 +892,14 @@ fn an_orphaned_sweep_lock_is_cleared_after_the_ttl() {
 /// `touch` that fails for the named files, as a read-only file or a Windows sharing violation does.
 fn touch_failing_for(names: &'static [&'static str]) -> impl Fn(&Path) -> std::io::Result<()> {
     move |path| {
-        if names.iter().any(|name| path.file_name() == Some(std::ffi::OsStr::new(name))) {
-            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "read-only"))
+        if names
+            .iter()
+            .any(|name| path.file_name() == Some(std::ffi::OsStr::new(name)))
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "read-only",
+            ))
         } else {
             touch_nofollow(path)
         }
@@ -691,8 +916,11 @@ fn an_attach_that_cannot_bump_the_summary_marks_the_transcript_instead() {
     let tmp = sessions_tmp();
     let idle = write_session(tmp.path(), "cwd", "idle", days_ago(40));
 
-    let outcome =
-        block_on(mark_session_live_with(&idle, Duration::from_secs(5), &touch_failing_for(&["summary.json"])));
+    let outcome = block_on(mark_session_live_with(
+        &idle,
+        Duration::from_secs(5),
+        &touch_failing_for(&["summary.json"]),
+    ));
 
     assert!(outcome.is_ok());
     assert!(mtime(&idle.join("updates.jsonl")) > SystemTime::now() - Duration::from_secs(3600));
@@ -714,7 +942,10 @@ fn an_idle_session_that_cannot_be_marked_at_all_is_not_loaded() {
         &touch_failing_for(&["summary.json", "updates.jsonl"]),
     ));
 
-    assert!(matches!(outcome, Err(MarkLiveError::Unmarkable { .. })), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(MarkLiveError::Unmarkable { .. })),
+        "{outcome:?}"
+    );
     assert_eq!(before, mtime(&idle.join("summary.json")));
 }
 
@@ -764,11 +995,16 @@ fn the_activity_scan_is_bounded_and_never_follows_a_link() {
     let tmp = sessions_tmp();
     let session = write_session(tmp.path(), "cwd", "s1", days_ago(40));
     for i in 0..20 {
-        write(&session.join(format!("subagents/c{i}/updates.jsonl")), days_ago(40));
+        write(
+            &session.join(format!("subagents/c{i}/updates.jsonl")),
+            days_ago(40),
+        );
     }
 
     assert!(session_last_activity_within(&session, 10).is_err());
-    let newest = session_last_activity_within(&session, 1_000).unwrap().unwrap();
+    let newest = session_last_activity_within(&session, 1_000)
+        .unwrap()
+        .unwrap();
     assert!(newest < SystemTime::now() - Duration::from_secs(39 * 86_400));
 
     #[cfg(unix)]
@@ -776,7 +1012,9 @@ fn the_activity_scan_is_bounded_and_never_follows_a_link() {
         let outside = TempDir::new().unwrap();
         write(&outside.path().join("fresh.txt"), days_ago(0));
         std::os::unix::fs::symlink(outside.path(), session.join("linked")).unwrap();
-        let newest = session_last_activity_within(&session, 1_000).unwrap().unwrap();
+        let newest = session_last_activity_within(&session, 1_000)
+            .unwrap()
+            .unwrap();
         assert!(newest < SystemTime::now() - Duration::from_secs(39 * 86_400));
     }
 }
@@ -805,8 +1043,15 @@ fn an_identity_repair_in_progress_cannot_erase_an_attachs_mark() {
     assert!(outcome.is_ok(), "{outcome:?}");
     // P176 (Astra r2): released first, so the timestamp alone must keep the session (a held mark keeps it anyway)
     drop(outcome);
-    assert!(mtime(&idle.join("updates.jsonl")) > SystemTime::now() - Duration::from_secs(3600), "the transcript was marked");
-    assert_eq!(CleanupStats::default(), sweep(tmp.path(), None), "the attach's mark survives the repair");
+    assert!(
+        mtime(&idle.join("updates.jsonl")) > SystemTime::now() - Duration::from_secs(3600),
+        "the transcript was marked"
+    );
+    assert_eq!(
+        CleanupStats::default(),
+        sweep(tmp.path(), None),
+        "the attach's mark survives the repair"
+    );
     assert!(idle.join("summary.json").is_file());
 }
 
@@ -819,7 +1064,9 @@ fn a_mark_with_no_repair_running_bumps_the_summary() {
     mark(&idle);
 
     assert!(mtime(&idle.join("summary.json")) > SystemTime::now() - Duration::from_secs(3600));
-    assert!(mtime(&idle.join("updates.jsonl")) < SystemTime::now() - Duration::from_secs(39 * 86_400));
+    assert!(
+        mtime(&idle.join("updates.jsonl")) < SystemTime::now() - Duration::from_secs(39 * 86_400)
+    );
 }
 
 /// LOW: activity deeper than the old bound counts, and a tree deeper than the scan's bound keeps the session instead
@@ -828,7 +1075,10 @@ fn a_mark_with_no_repair_running_bumps_the_summary() {
 fn deep_activity_counts_and_a_tree_past_the_depth_bound_is_kept() {
     let tmp = sessions_tmp();
     let nested = write_session(tmp.path(), "cwd", "nested", days_ago(40));
-    write(&nested.join("subagents/a/subagents/b/prompts/p.txt"), days_ago(0));
+    write(
+        &nested.join("subagents/a/subagents/b/prompts/p.txt"),
+        days_ago(0),
+    );
     let too_deep = write_session(tmp.path(), "cwd", "too-deep", days_ago(40));
     write(&too_deep.join("a/b/c/d/e/f/g/h/i/old.txt"), days_ago(40));
 
@@ -848,7 +1098,11 @@ fn a_held_orphaned_sweep_lock_is_kept() {
     let lock_path = sweep_lock_path(&gone).unwrap();
     write(&lock_path, days_ago(40));
     write_session(tmp.path(), "cwd", "fresh", days_ago(0));
-    let held = std::fs::OpenOptions::new().read(true).write(true).open(&lock_path).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
     fs2::FileExt::try_lock_shared(&held).unwrap();
 
     sweep(tmp.path(), None);
@@ -873,8 +1127,9 @@ fn a_waiting_attach_survives_the_unlinked_lock_and_finds_nothing() {
             || {},
             || {
                 let idle = idle.clone();
-                waiter =
-                    Some(std::thread::spawn(move || block_on(mark_session_live_waiting(&idle, Duration::from_secs(60)))));
+                waiter = Some(std::thread::spawn(move || {
+                    block_on(mark_session_live_waiting(&idle, Duration::from_secs(60)))
+                }));
                 wait_until_the_waiter_holds_the_lock(&lock_path);
             },
             |_| {},
@@ -888,7 +1143,11 @@ fn a_waiting_attach_survives_the_unlinked_lock_and_finds_nothing() {
         drop(outcome);
         assert_eq!(1, stats.sessions_removed, "{rule}: {stats:?}");
         assert!(!idle.exists(), "{rule}");
-        assert!(entry_names(&tmp.path().join("cwd")).is_empty(), "{rule}: {:?}", entry_names(&tmp.path().join("cwd")));
+        assert!(
+            entry_names(&tmp.path().join("cwd")).is_empty(),
+            "{rule}: {:?}",
+            entry_names(&tmp.path().join("cwd"))
+        );
     }
 }
 
@@ -908,7 +1167,10 @@ fn wait_until_the_waiter_holds_the_lock(lock_path: &Path) {
             if holders >= 2 {
                 return;
             }
-            assert!(started.elapsed() < Duration::from_secs(30), "the waiter never opened the sweep lock");
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the waiter never opened the sweep lock"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -940,7 +1202,10 @@ fn a_summary_a_repair_is_about_to_backdate_is_not_trusted_as_recent_use() {
     ));
     drop(repair);
 
-    assert!(matches!(outcome, Err(MarkLiveError::Unmarkable { .. })), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(MarkLiveError::Unmarkable { .. })),
+        "{outcome:?}"
+    );
 }
 
 // ── P176: hardening left by P172 and P178 ──
@@ -959,7 +1224,10 @@ fn backdate_tree(dir: &Path, age: FileTime) {
 }
 
 fn removal_folders(cwd: &Path) -> Vec<String> {
-    entry_names(cwd).into_iter().filter(|name| name.starts_with(".fuigo-sweep-removing-")).collect()
+    entry_names(cwd)
+        .into_iter()
+        .filter(|name| name.starts_with(".fuigo-sweep-removing-"))
+        .collect()
 }
 
 /// P178 residual (MEDIUM): an attach whose sweep lock fails for a reason other than contention (a filesystem whose
@@ -973,13 +1241,25 @@ fn an_unguarded_mark_between_the_last_look_and_the_rename_puts_the_session_back(
         write(&idle.join("prompts/prompt_0.txt"), days_ago(40));
 
         // What such an attach does: bump the summary without holding any lock
-        let stats =
-            cleanup_session_dir_with(&idle, TTL_DAYS, renamer, || {}, || touch_nofollow(&idle.join("summary.json")).unwrap(), |_| {});
+        let stats = cleanup_session_dir_with(
+            &idle,
+            TTL_DAYS,
+            renamer,
+            || {},
+            || touch_nofollow(&idle.join("summary.json")).unwrap(),
+            |_| {},
+        );
 
         assert_eq!(0, stats.sessions_removed, "{rule}: {stats:?}");
-        assert!(idle.join("summary.json").is_file(), "{rule}: the session is back at its path");
+        assert!(
+            idle.join("summary.json").is_file(),
+            "{rule}: the session is back at its path"
+        );
         assert!(idle.join("prompts/prompt_0.txt").is_file(), "{rule}");
-        assert!(removal_folders(&tmp.path().join("cwd")).is_empty(), "{rule}");
+        assert!(
+            removal_folders(&tmp.path().join("cwd")).is_empty(),
+            "{rule}"
+        );
         // Its sweep lock stays: an attach may hold it
         assert!(sweep_lock_path(&idle).unwrap().is_file(), "{rule}");
     }
@@ -998,10 +1278,19 @@ fn without_a_usable_sweep_lock_the_load_works_and_the_sweep_keeps_the_session() 
     assert_eq!(0, stats.sessions_removed, "{stats:?}");
     assert!(idle.join("updates.jsonl").is_file());
 
-    let before = std::fs::metadata(idle.join("summary.json")).unwrap().modified().unwrap();
+    let before = std::fs::metadata(idle.join("summary.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
     let outcome = block_on(mark_session_live_waiting(&idle, Duration::from_millis(200)));
     assert!(outcome.is_ok(), "{outcome:?}");
-    assert!(std::fs::metadata(idle.join("summary.json")).unwrap().modified().unwrap() > before);
+    assert!(
+        std::fs::metadata(idle.join("summary.json"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            > before
+    );
 }
 
 /// P178 residual (LOW): the mark's timestamp alone did not protect a load suspended past the TTL. The attach now holds
@@ -1053,12 +1342,27 @@ fn a_folder_above_the_session_swapped_for_a_link_never_leads_the_sweep_outside()
         |_| {},
     );
 
-    assert_eq!(0, renamer.0.get(), "a session whose path changed is not acted on at all");
+    assert_eq!(
+        0,
+        renamer.0.get(),
+        "a session whose path changed is not acted on at all"
+    );
     assert_eq!(0, stats.sessions_removed, "{stats:?}");
-    assert!(victim.join("victim.txt").is_file(), "nothing outside the sessions tree is moved or deleted");
+    assert!(
+        victim.join("victim.txt").is_file(),
+        "nothing outside the sessions tree is moved or deleted"
+    );
     assert!(victim.join("summary.json").is_file());
-    assert!(entry_names(&outside.path().join("x")).iter().all(|name| !name.starts_with('.')), "no removal folder outside");
-    assert!(moved.join("idle/summary.json").is_file(), "the session is kept when its path changed");
+    assert!(
+        entry_names(&outside.path().join("x"))
+            .iter()
+            .all(|name| !name.starts_with('.')),
+        "no removal folder outside"
+    );
+    assert!(
+        moved.join("idle/summary.json").is_file(),
+        "the session is kept when its path changed"
+    );
 }
 
 /// The production rename, counting its calls.
@@ -1091,8 +1395,14 @@ fn a_cache_prune_stays_in_the_pinned_session_when_a_folder_above_is_swapped() {
     let mut stats = CleanupStats::default();
     prune_pinned_session_caches(&pinned, OsStr::new("s1"), TTL_DAYS, &mut stats);
 
-    assert!(foreign.join("images/foreign.png").is_file(), "nothing reached through the link is pruned");
-    assert!(!moved.join("s1/images/old.png").exists(), "the pinned session's own stale cache is pruned");
+    assert!(
+        foreign.join("images/foreign.png").is_file(),
+        "nothing reached through the link is pruned"
+    );
+    assert!(
+        !moved.join("s1/images/old.png").exists(),
+        "the pinned session's own stale cache is pruned"
+    );
     assert_eq!(1, stats.files_deleted, "{stats:?}");
 }
 
@@ -1144,10 +1454,16 @@ fn a_marked_session_whose_path_was_taken_is_kept_aside_never_deleted() {
 
     assert_eq!(0, stats.sessions_removed, "{stats:?}");
     let cwd = tmp.path().join("cwd");
-    let kept: Vec<String> = entry_names(&cwd).into_iter().filter(|name| name.starts_with(".fuigo-sweep-kept-idle-")).collect();
+    let kept: Vec<String> = entry_names(&cwd)
+        .into_iter()
+        .filter(|name| name.starts_with(".fuigo-sweep-kept-idle-"))
+        .collect();
     assert_eq!(1, kept.len(), "{:?}", entry_names(&cwd));
     assert!(cwd.join(&kept[0]).join("prompts/prompt_0.txt").is_file());
-    assert!(idle.join("updates.jsonl").is_file(), "what was recreated at the path is untouched");
+    assert!(
+        idle.join("updates.jsonl").is_file(),
+        "what was recreated at the path is untouched"
+    );
 
     // No later sweep removes it, however old it gets
     backdate_tree(&cwd.join(&kept[0]), days_ago(400));
@@ -1159,7 +1475,10 @@ fn a_marked_session_whose_path_was_taken_is_kept_aside_never_deleted() {
 #[test]
 fn a_removal_folder_with_fresh_activity_is_kept() {
     let tmp = sessions_tmp();
-    let fresh_leftover = tmp.path().join("cwd").join(".fuigo-sweep-removing-busy-1-2");
+    let fresh_leftover = tmp
+        .path()
+        .join("cwd")
+        .join(".fuigo-sweep-removing-busy-1-2");
     write(&fresh_leftover.join("updates.jsonl"), days_ago(0));
 
     sweep(tmp.path(), None);
@@ -1192,11 +1511,18 @@ fn a_second_sweep_never_deletes_a_removal_the_first_may_still_put_back() {
     let tmp = sessions_tmp();
     let idle = write_session(tmp.path(), "cwd", "idle", days_ago(40));
     write(&idle.join("prompts/prompt_0.txt"), days_ago(40));
-    let renamer = RenameThenSecondSweep { root: tmp.path(), second: std::cell::RefCell::new(None) };
+    let renamer = RenameThenSecondSweep {
+        root: tmp.path(),
+        second: std::cell::RefCell::new(None),
+    };
 
     let first = cleanup_session_dir_with(&idle, TTL_DAYS, &renamer, || {}, || {}, |_| {});
 
-    let second = renamer.second.borrow_mut().take().expect("the second sweep ran");
+    let second = renamer
+        .second
+        .borrow_mut()
+        .take()
+        .expect("the second sweep ran");
     assert_eq!(0, second.dirs_removed, "{second:?}");
     assert_eq!(0, first.sessions_removed, "{first:?}");
     assert!(idle.join("summary.json").is_file(), "put back whole");
@@ -1209,7 +1535,10 @@ fn a_second_sweep_never_deletes_a_removal_the_first_may_still_put_back() {
 #[test]
 fn an_orphaned_removal_folder_is_finished_under_its_sessions_lock() {
     let tmp = sessions_tmp();
-    let leftover = tmp.path().join("cwd").join(".fuigo-sweep-removing-a-b-c-123-456");
+    let leftover = tmp
+        .path()
+        .join("cwd")
+        .join(".fuigo-sweep-removing-a-b-c-123-456");
     write(&leftover.join("updates.jsonl"), days_ago(40));
     // A name that does not parse is kept
     let odd = tmp.path().join("cwd").join(".fuigo-sweep-removing-odd");
@@ -1221,7 +1550,11 @@ fn an_orphaned_removal_folder_is_finished_under_its_sessions_lock() {
     assert_eq!(1, stats.dirs_removed, "{stats:?}");
     assert!(!leftover.exists());
     assert!(odd.join("updates.jsonl").is_file());
-    assert!(!sweep_lock_path(&tmp.path().join("cwd").join("a-b-c")).unwrap().exists());
+    assert!(
+        !sweep_lock_path(&tmp.path().join("cwd").join("a-b-c"))
+            .unwrap()
+            .exists()
+    );
     assert!(fresh.join("updates.jsonl").is_file());
 }
 
@@ -1229,7 +1562,10 @@ fn an_orphaned_removal_folder_is_finished_under_its_sessions_lock() {
 #[test]
 fn a_removal_folder_whose_session_lock_is_held_is_left_alone() {
     let tmp = sessions_tmp();
-    let leftover = tmp.path().join("cwd").join(".fuigo-sweep-removing-busy-1-2");
+    let leftover = tmp
+        .path()
+        .join("cwd")
+        .join(".fuigo-sweep-removing-busy-1-2");
     write(&leftover.join("updates.jsonl"), days_ago(40));
     let lock = open_sweep_lock(&tmp.path().join("cwd").join("busy")).expect("lock file");
     fs2::FileExt::try_lock_exclusive(&lock).expect("the deciding sweep's lock");
@@ -1274,10 +1610,16 @@ fn a_put_back_never_replaces_an_empty_folder_that_took_the_path() {
 
     assert_eq!(0, stats.sessions_removed, "{stats:?}");
     let cwd = tmp.path().join("cwd");
-    let kept: Vec<String> = entry_names(&cwd).into_iter().filter(|name| name.starts_with(".fuigo-sweep-kept-idle-")).collect();
+    let kept: Vec<String> = entry_names(&cwd)
+        .into_iter()
+        .filter(|name| name.starts_with(".fuigo-sweep-kept-idle-"))
+        .collect();
     assert_eq!(1, kept.len(), "{:?}", entry_names(&cwd));
     assert!(cwd.join(&kept[0]).join("prompts/prompt_0.txt").is_file());
-    assert!(idle.is_dir() && entry_names(&idle).is_empty(), "the creator's folder is left as it was");
+    assert!(
+        idle.is_dir() && entry_names(&idle).is_empty(),
+        "the creator's folder is left as it was"
+    );
 }
 
 /// A filesystem without the no-replace rename (`EINVAL`): the put-back must not fall back to a plain rename, which
@@ -1291,7 +1633,9 @@ fn a_put_back_without_a_no_replace_rename_keeps_the_session_aside_and_replaces_n
 
     // The empty folder appears only after the unsupported error, where a plain rename would have run
     let path = idle.clone();
-    PinnedDir::fail_next_noreplace_with_einval(Some(Box::new(move || std::fs::create_dir(path).unwrap())));
+    PinnedDir::fail_next_noreplace_with_einval(Some(Box::new(move || {
+        std::fs::create_dir(path).unwrap()
+    })));
     let stats = cleanup_session_dir_with(
         &idle,
         TTL_DAYS,
@@ -1304,12 +1648,23 @@ fn a_put_back_without_a_no_replace_rename_keeps_the_session_aside_and_replaces_n
     assert_eq!(0, stats.sessions_removed, "{stats:?}");
     let cwd = tmp.path().join("cwd");
     let names = entry_names(&cwd);
-    let kept: Vec<&String> = names.iter().filter(|name| name.starts_with(".fuigo-sweep-kept-idle-")).collect();
+    let kept: Vec<&String> = names
+        .iter()
+        .filter(|name| name.starts_with(".fuigo-sweep-kept-idle-"))
+        .collect();
     assert_eq!(1, kept.len(), "{names:?}");
-    assert!(names.iter().all(|name| !name.starts_with(".fuigo-sweep-removing-")), "{names:?}");
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.starts_with(".fuigo-sweep-removing-")),
+        "{names:?}"
+    );
     assert!(cwd.join(kept[0]).join("prompts/prompt_0.txt").is_file());
     assert!(cwd.join(kept[0]).join("summary.json").is_file());
-    assert!(idle.is_dir() && entry_names(&idle).is_empty(), "the creator's folder is not replaced");
+    assert!(
+        idle.is_dir() && entry_names(&idle).is_empty(),
+        "the creator's folder is not replaced"
+    );
 }
 
 /// Same error with nothing at the old path: no plain rename at all, the session is kept aside (a warning names it).
@@ -1335,7 +1690,10 @@ fn a_put_back_without_a_no_replace_rename_keeps_the_session_aside_even_when_the_
     assert_eq!(0, stats.sessions_removed, "{stats:?}");
     let cwd = tmp.path().join("cwd");
     let names = entry_names(&cwd);
-    let kept: Vec<&String> = names.iter().filter(|name| name.starts_with(".fuigo-sweep-kept-idle-")).collect();
+    let kept: Vec<&String> = names
+        .iter()
+        .filter(|name| name.starts_with(".fuigo-sweep-kept-idle-"))
+        .collect();
     assert_eq!(1, kept.len(), "{names:?}");
     assert!(!idle.exists(), "no plain rename put it back");
     assert!(cwd.join(kept[0]).join("prompts/prompt_0.txt").is_file());
@@ -1348,9 +1706,12 @@ fn a_no_replace_rename_refuses_an_empty_folder_and_renames_otherwise() {
     std::fs::create_dir(tmp.path().join("b")).unwrap();
     let dir = PinnedDir::open_root(tmp.path()).unwrap();
 
-    let error = dir.rename_child_noreplace(OsStr::new("a"), OsStr::new("b")).unwrap_err();
+    let error = dir
+        .rename_child_noreplace(OsStr::new("a"), OsStr::new("b"))
+        .unwrap_err();
     assert_eq!(std::io::ErrorKind::AlreadyExists, error.kind(), "{error}");
-    dir.rename_child_noreplace(OsStr::new("a"), OsStr::new("c")).unwrap();
+    dir.rename_child_noreplace(OsStr::new("a"), OsStr::new("c"))
+        .unwrap();
     assert!(tmp.path().join("c").is_dir() && !tmp.path().join("a").exists());
 }
 
@@ -1382,15 +1743,34 @@ fn a_folder_swapped_after_the_last_check_still_cannot_lead_the_rename_outside() 
     let victim = write_session(outside.path(), "x", "idle", days_ago(40));
     write(&victim.join("victim.txt"), days_ago(40));
     let idle = write_session(tmp.path(), "cwd", "idle", days_ago(40));
-    let (cwd, moved, target) = (tmp.path().join("cwd"), tmp.path().join("cwd-moved"), outside.path().join("x"));
-    let renamer = SwapThenRename { cwd: &cwd, moved: &moved, target: &target };
+    let (cwd, moved, target) = (
+        tmp.path().join("cwd"),
+        tmp.path().join("cwd-moved"),
+        outside.path().join("x"),
+    );
+    let renamer = SwapThenRename {
+        cwd: &cwd,
+        moved: &moved,
+        target: &target,
+    };
 
     let stats = cleanup_session_dir_with(&idle, TTL_DAYS, &renamer, || {}, || {}, |_| {});
 
     assert_eq!(0, stats.sessions_removed, "{stats:?}");
-    assert!(victim.join("victim.txt").is_file(), "nothing outside the sessions tree is moved or deleted");
-    assert!(entry_names(&target).iter().all(|name| !name.starts_with('.')), "no removal folder outside");
-    assert!(moved.join("idle/summary.json").is_file(), "the real session is put back whole");
+    assert!(
+        victim.join("victim.txt").is_file(),
+        "nothing outside the sessions tree is moved or deleted"
+    );
+    assert!(
+        entry_names(&target)
+            .iter()
+            .all(|name| !name.starts_with('.')),
+        "no removal folder outside"
+    );
+    assert!(
+        moved.join("idle/summary.json").is_file(),
+        "the real session is put back whole"
+    );
 }
 
 /// Lock hygiene (R-lock-hygiene): a sweep's exclusive lock (the sweep lock, the turn-owner lock) is free once released,
@@ -1399,12 +1779,16 @@ fn a_folder_swapped_after_the_last_check_still_cannot_lead_the_rename_outside() 
 fn a_released_sweep_lock_is_free_although_a_copy_of_its_descriptor_lives_on() {
     let tmp = TempDir::new().unwrap();
     let cwd = PinnedDir::open_root(tmp.path()).unwrap();
-    let held = super::try_lock_exclusive_pinned(tmp.path(), &cwd, ".sweeping-s1").expect("first lock");
+    let held =
+        super::try_lock_exclusive_pinned(tmp.path(), &cwd, ".sweeping-s1").expect("first lock");
     let inherited = held.try_clone().unwrap();
     drop(held);
     let again = super::try_lock_exclusive_pinned(tmp.path(), &cwd, ".sweeping-s1");
     drop(inherited);
-    assert!(again.is_some(), "the released sweep lock stayed held by an inherited descriptor");
+    assert!(
+        again.is_some(),
+        "the released sweep lock stayed held by an inherited descriptor"
+    );
 }
 
 /// 1.0.41 r3 (design F5 §5.6): a writer another process claims between the sweep's first look and its locks keeps
@@ -1414,7 +1798,10 @@ fn a_writer_claimed_between_the_first_look_and_the_locks_keeps_the_session() {
     let tmp = sessions_tmp();
     let idle = write_session(tmp.path(), "cwd", "idle", days_ago(40));
     // The lock file exists from an earlier run (old, unheld), so the first look finds nothing held
-    write(&idle.join(fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE), days_ago(40));
+    write(
+        &idle.join(fuigo_session_writer::lock::SESSION_WRITER_LOCK_FILE),
+        days_ago(40),
+    );
     let mut holder = None;
     let stats = cleanup_session_dir_with(
         &idle,

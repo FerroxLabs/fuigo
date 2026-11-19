@@ -911,10 +911,15 @@ async fn an_active_goal_objective_seeds_the_last_query_over_a_stale_prompt() {
         "control: without a goal the stale prompt's images are carried"
     );
     assert_eq!(1, none.images.last_turn_image_parts.len());
-    let seeded = CompactionStateContext::build(&conversation, with(Some("ship the device test"))).await;
-    assert_eq!(seeded.last_user_query.as_deref(), Some("ship the device test"));
+    let seeded =
+        CompactionStateContext::build(&conversation, with(Some("ship the device test"))).await;
+    assert_eq!(
+        seeded.last_user_query.as_deref(),
+        Some("ship the device test")
+    );
     assert!(
-        seeded.images.last_turn_image_files.is_none() && seeded.images.last_turn_image_parts.is_empty(),
+        seeded.images.last_turn_image_files.is_none()
+            && seeded.images.last_turn_image_parts.is_empty(),
         "a goal objective carries no images from the stale prompt: {:?}",
         seeded.images
     );
@@ -2211,7 +2216,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
 #[test]
 fn generation_zero_compaction_keeps_legacy_project_instructions() {
     let state_context = CompactionStateContext {
-            images: Default::default(),
+        images: Default::default(),
         cwd_generation: 0,
         destination_project_instructions: Some("destination rules".into()),
         agent_message_anchor: None,
@@ -2242,7 +2247,7 @@ fn generation_zero_compaction_keeps_legacy_project_instructions() {
 #[test]
 fn relocated_compaction_uses_destination_project_instructions() {
     let state_context = CompactionStateContext {
-            images: Default::default(),
+        images: Default::default(),
         cwd_generation: 1,
         destination_project_instructions: Some("destination rules".into()),
         agent_message_anchor: None,
@@ -2273,7 +2278,7 @@ fn relocated_compaction_uses_destination_project_instructions() {
 #[test]
 fn relocated_compaction_does_not_restore_source_instructions_when_destination_has_none() {
     let state_context = CompactionStateContext {
-            images: Default::default(),
+        images: Default::default(),
         cwd_generation: 1,
         destination_project_instructions: None,
         agent_message_anchor: None,
@@ -2307,7 +2312,7 @@ fn relocated_compaction_does_not_restore_source_instructions_when_destination_ha
 #[test]
 fn build_compacted_history_tags_agents_md_with_project_instructions() {
     let state_context = CompactionStateContext {
-            images: Default::default(),
+        images: Default::default(),
         cwd_generation: 0,
         destination_project_instructions: None,
         agent_message_anchor: None,
@@ -2355,7 +2360,7 @@ fn build_compacted_history_tags_agents_md_with_project_instructions() {
 #[test]
 fn build_compacted_history_omits_agents_md_when_none() {
     let state_context = CompactionStateContext {
-            images: Default::default(),
+        images: Default::default(),
         cwd_generation: 0,
         destination_project_instructions: None,
         agent_message_anchor: None,
@@ -3460,16 +3465,28 @@ async fn r3_integrity_hold_survives_compaction() {
         ConversationItem::assistant("done"),
     ];
     let full = CompactionStateContext::build(&held, CompactionInputs::default()).await;
-    assert!(fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&full)));
+    assert!(fuigo_sampling_types::history_has_peer_integrity_hold(
+        &compact(&full)
+    ));
     let tail_only = full.for_compaction();
-    assert!(fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&tail_only)));
-    let again = CompactionStateContext::build(&compact(&tail_only), CompactionInputs::default()).await;
-    assert!(fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&again.for_compaction())));
+    assert!(fuigo_sampling_types::history_has_peer_integrity_hold(
+        &compact(&tail_only)
+    ));
+    let again =
+        CompactionStateContext::build(&compact(&tail_only), CompactionInputs::default()).await;
+    assert!(fuigo_sampling_types::history_has_peer_integrity_hold(
+        &compact(&again.for_compaction())
+    ));
     let mut cleared_history = held.clone();
     cleared_history.push(ConversationItem::peer_influence_marker(false));
-    let cleared = CompactionStateContext::build(&cleared_history, CompactionInputs::default()).await;
-    assert!(!fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&cleared)));
-    assert!(!fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&cleared.for_compaction())));
+    let cleared =
+        CompactionStateContext::build(&cleared_history, CompactionInputs::default()).await;
+    assert!(!fuigo_sampling_types::history_has_peer_integrity_hold(
+        &compact(&cleared)
+    ));
+    assert!(!fuigo_sampling_types::history_has_peer_integrity_hold(
+        &compact(&cleared.for_compaction())
+    ));
     let model_view = ModelRequestHistory::from_raw(compact(&full)).into_items();
     assert!(!model_view.iter().any(|i| i.is_peer_influence_marker()));
 }
@@ -3498,30 +3515,57 @@ async fn r3_peer_influence_survives_compaction_as_one_marker() {
         ConversationItem::user("<user_query>\nnext\n</user_query>"),
         ConversationItem::assistant("done"),
     ];
-    let full = CompactionStateContext::build(&influenced_history, CompactionInputs::default()).await;
+    let full =
+        CompactionStateContext::build(&influenced_history, CompactionInputs::default()).await;
     for ctx in [&full, &full.for_compaction()] {
         let compacted = compact(ctx);
-        assert!(fuigo_sampling_types::history_is_peer_influenced(&compacted), "compaction must keep the state");
-        let markers = compacted.iter().filter(|i| i.is_peer_influence_marker()).count();
+        assert!(
+            fuigo_sampling_types::history_is_peer_influenced(&compacted),
+            "compaction must keep the state"
+        );
+        let markers = compacted
+            .iter()
+            .filter(|i| i.is_peer_influence_marker())
+            .count();
         assert!(markers <= 1, "at most one carried marker, got {markers}");
     }
     // The tail no longer holds the peer message, only the carried marker keeps the state.
     let tail_only = full.for_compaction();
-    assert!(tail_only.recent_messages.iter().all(|i| i.is_peer_influence_marker()));
+    assert!(
+        tail_only
+            .recent_messages
+            .iter()
+            .all(|i| i.is_peer_influence_marker())
+    );
     assert_eq!(tail_only.recent_messages.len(), 1);
     // Twice: a compacted history compacts again with the state intact.
-    let again = CompactionStateContext::build(&compact(&tail_only), CompactionInputs::default()).await;
-    assert!(fuigo_sampling_types::history_is_peer_influenced(&compact(&again.for_compaction())));
+    let again =
+        CompactionStateContext::build(&compact(&tail_only), CompactionInputs::default()).await;
+    assert!(fuigo_sampling_types::history_is_peer_influenced(&compact(
+        &again.for_compaction()
+    )));
     // Cleared: no marker is carried.
     let mut cleared_history = influenced_history.clone();
     cleared_history.insert(4, ConversationItem::peer_influence_marker(false));
-    let cleared = CompactionStateContext::build(&cleared_history, CompactionInputs::default()).await;
-    assert!(!fuigo_sampling_types::history_is_peer_influenced(&compact(&cleared)));
-    assert!(!fuigo_sampling_types::history_is_peer_influenced(&compact(&cleared.for_compaction())));
+    let cleared =
+        CompactionStateContext::build(&cleared_history, CompactionInputs::default()).await;
+    assert!(!fuigo_sampling_types::history_is_peer_influenced(&compact(
+        &cleared
+    )));
+    assert!(!fuigo_sampling_types::history_is_peer_influenced(&compact(
+        &cleared.for_compaction()
+    )));
     // A session that never admitted a peer message gets no marker at all.
-    let plain = vec![ConversationItem::system("sys"), ConversationItem::user("<user_query>\nhi\n</user_query>")];
+    let plain = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_query>\nhi\n</user_query>"),
+    ];
     let plain_ctx = CompactionStateContext::build(&plain, CompactionInputs::default()).await;
-    assert!(!compact(&plain_ctx).iter().any(|i| i.is_peer_influence_marker()));
+    assert!(
+        !compact(&plain_ctx)
+            .iter()
+            .any(|i| i.is_peer_influence_marker())
+    );
     // Never model-facing.
     let model_view = ModelRequestHistory::from_raw(compact(&full)).into_items();
     assert!(!model_view.iter().any(|i| i.is_peer_influence_marker()));
@@ -3532,7 +3576,10 @@ async fn r3_peer_influence_survives_compaction_as_one_marker() {
 #[tokio::test]
 async fn p7r3_summarizer_inputs_hold_no_marker_text_and_compaction_keeps_the_markers() {
     use fuigo_sampling_types::PeerCarriedState;
-    let carried = PeerCarriedState { carried: vec![("bash".into(), "sha256:ab".into(), "m1".into())], refused: vec!["lane a".into()] };
+    let carried = PeerCarriedState {
+        carried: vec![("bash".into(), "sha256:ab".into(), "m1".into())],
+        refused: vec!["lane a".into()],
+    };
     let history = vec![
         ConversationItem::system("sys"),
         ConversationItem::user("<user_query>\nwork\n</user_query>"),
@@ -3545,13 +3592,25 @@ async fn p7r3_summarizer_inputs_hold_no_marker_text_and_compaction_keeps_the_mar
         ConversationItem::assistant("ok"),
     ];
     let no_marker_text = |items: &[ConversationItem]| {
-        !items.iter().any(|i| i.is_peer_influence_marker() || i.text_content().contains("[state marker"))
+        !items
+            .iter()
+            .any(|i| i.is_peer_influence_marker() || i.text_content().contains("[state marker"))
     };
-    assert!(no_marker_text(&prepare_conversation_for_summarization(history.clone())));
-    assert!(no_marker_text(&prepare_conversation_for_segment(history.clone())));
-    assert!(no_marker_text(&prepare_conversation_for_verbatim_summarization(history.clone(), false)));
-    assert!(no_marker_text(&prepare_conversation_for_verbatim_summarization(history.clone(), true)));
-    assert!(no_marker_text(&ModelRequestHistory::from_raw(history.clone()).into_items()));
+    assert!(no_marker_text(&prepare_conversation_for_summarization(
+        history.clone()
+    )));
+    assert!(no_marker_text(&prepare_conversation_for_segment(
+        history.clone()
+    )));
+    assert!(no_marker_text(
+        &prepare_conversation_for_verbatim_summarization(history.clone(), false)
+    ));
+    assert!(no_marker_text(
+        &prepare_conversation_for_verbatim_summarization(history.clone(), true)
+    ));
+    assert!(no_marker_text(
+        &ModelRequestHistory::from_raw(history.clone()).into_items()
+    ));
     assert!(no_marker_text(&drop_peer_state_markers(history.clone())));
     // Stored history after compaction still has them (denials + carried state).
     let ctx = CompactionStateContext::build(&history, CompactionInputs::default()).await;
@@ -3566,15 +3625,24 @@ async fn p7r3_summarizer_inputs_hold_no_marker_text_and_compaction_keeps_the_mar
         transcript_hint: None,
         summary_count: 1,
     });
-    assert_eq!(fuigo_sampling_types::history_peer_carried(&compacted), carried);
-    assert_eq!(fuigo_sampling_types::history_peer_denials(&compacted).len(), 1);
+    assert_eq!(
+        fuigo_sampling_types::history_peer_carried(&compacted),
+        carried
+    );
+    assert_eq!(
+        fuigo_sampling_types::history_peer_denials(&compacted).len(),
+        1
+    );
 }
 
 /// Packet 7 round 3: a re-flag during a clear leaves [cleared, carried] in the tail; compaction keeps the carried state.
 #[tokio::test]
 async fn p7r3_compaction_keeps_a_carried_marker_that_follows_a_cleared_marker() {
     use fuigo_sampling_types::PeerCarriedState;
-    let carried = PeerCarriedState { carried: vec![("bash".into(), "sha256:ab".into(), "m1".into())], refused: vec![] };
+    let carried = PeerCarriedState {
+        carried: vec![("bash".into(), "sha256:ab".into(), "m1".into())],
+        refused: vec![],
+    };
     let history = vec![
         ConversationItem::system("sys"),
         ConversationItem::user("<user_query>\nwork\n</user_query>"),
@@ -3584,7 +3652,10 @@ async fn p7r3_compaction_keeps_a_carried_marker_that_follows_a_cleared_marker() 
         ConversationItem::peer_carried_denials_marker(&carried),
         ConversationItem::assistant("ok"),
     ];
-    assert_eq!(fuigo_sampling_types::history_peer_carried(&history), carried);
+    assert_eq!(
+        fuigo_sampling_types::history_peer_carried(&history),
+        carried
+    );
     let ctx = CompactionStateContext::build(&history, CompactionInputs::default()).await;
     for c in [&ctx, &ctx.for_compaction()] {
         let compacted = build_compacted_history(CompactedHistoryInput {
@@ -3598,7 +3669,10 @@ async fn p7r3_compaction_keeps_a_carried_marker_that_follows_a_cleared_marker() 
             transcript_hint: None,
             summary_count: 1,
         });
-        assert_eq!(fuigo_sampling_types::history_peer_carried(&compacted), carried);
+        assert_eq!(
+            fuigo_sampling_types::history_peer_carried(&compacted),
+            carried
+        );
     }
 }
 
@@ -3607,7 +3681,15 @@ async fn p7r3_compaction_keeps_a_carried_marker_that_follows_a_cleared_marker() 
 async fn p7r4_a_full_carried_list_of_128_keys_survives_compaction() {
     use fuigo_sampling_types::PeerCarriedState;
     let carried = PeerCarriedState {
-        carried: (0..128).map(|i| ("bash".to_string(), format!("sha256:{i:016x}"), format!("m{i}"))).collect(),
+        carried: (0..128)
+            .map(|i| {
+                (
+                    "bash".to_string(),
+                    format!("sha256:{i:016x}"),
+                    format!("m{i}"),
+                )
+            })
+            .collect(),
         refused: vec![],
     };
     let history = vec![
@@ -3628,7 +3710,12 @@ async fn p7r4_a_full_carried_list_of_128_keys_survives_compaction() {
         transcript_hint: None,
         summary_count: 1,
     });
-    assert_eq!(fuigo_sampling_types::history_peer_carried(&compacted).carried.len(), 128);
+    assert_eq!(
+        fuigo_sampling_types::history_peer_carried(&compacted)
+            .carried
+            .len(),
+        128
+    );
 }
 
 /// `ModelRequestHistory::from_raw` is the shared filter plus the agent-message label: same items in, same order, for a
@@ -3643,5 +3730,8 @@ fn p7r4_from_raw_is_a_no_op_for_a_history_without_markers() {
     ];
     let json = |v: &[ConversationItem]| serde_json::to_value(v).expect("serialize");
     assert_eq!(json(&drop_peer_state_markers(items.clone())), json(&items));
-    assert_eq!(json(&ModelRequestHistory::from_raw(items.clone()).into_items()), json(&items));
+    assert_eq!(
+        json(&ModelRequestHistory::from_raw(items.clone()).into_items()),
+        json(&items)
+    );
 }

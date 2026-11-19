@@ -246,7 +246,8 @@ impl DiscoveryConfig {
                 tracing::debug!(plugin = %name, id = %dp.id.0, "plugin already in enabled/disabled list");
                 continue;
             }
-            if !restricted && matches!(dp.scope, PluginScope::CliOverride | PluginScope::ConfigPath) {
+            if !restricted && matches!(dp.scope, PluginScope::CliOverride | PluginScope::ConfigPath)
+            {
                 tracing::debug!(plugin = %name, scope = ?dp.scope, "auto-adding to enabled list");
                 self.enabled.push(name.clone());
             } else {
@@ -354,7 +355,8 @@ pub fn discover_plugins(
             // A repository-discovered plugin's root must itself resolve inside the repository (outside a git repo:
             // the folder the session runs in), so `.fuigo/plugins/p -> /elsewhere` cannot adopt `/elsewhere`.
             // Pinned once here: every project plugin below is checked against this resolved folder.
-            let repo_root = pin_or_fail_closed(&git_root.clone().unwrap_or_else(|| cwd.to_path_buf()));
+            let repo_root =
+                pin_or_fail_closed(&git_root.clone().unwrap_or_else(|| cwd.to_path_buf()));
             for plugins_dir in project_dirs {
                 let origin = project_plugins_dir_origin(&plugins_dir);
                 scan_plugin_dir(
@@ -892,7 +894,10 @@ fn drop_untrusted_project_shadows(candidates: &mut Vec<DiscoveredPlugin>) {
 /// repository's "x" would otherwise be enabled by the same entry and, as the higher-priority scope, replace theirs
 /// with only a `conflict` string. A project plugin with no same-named plugin elsewhere is unaffected, and a full
 /// id still enables it. The surviving plugin carries a `conflict` note naming the plugin left out.
-fn drop_project_shadows_of_bare_enabled(candidates: &mut Vec<DiscoveredPlugin>, enabled: &[String]) {
+fn drop_project_shadows_of_bare_enabled(
+    candidates: &mut Vec<DiscoveredPlugin>,
+    enabled: &[String],
+) {
     let elsewhere: HashSet<String> = candidates
         .iter()
         .filter(|p| p.scope != PluginScope::Project)
@@ -1131,7 +1136,11 @@ mod tests {
         };
         let trust = TrustStore::load_from(tmp.path().join("trust"));
         let unrestricted = discover_plugins(None, &config, &trust, true);
-        assert_eq!(unrestricted.len(), 2, "fixture: both local plugins load unrestricted");
+        assert_eq!(
+            unrestricted.len(),
+            2,
+            "fixture: both local plugins load unrestricted"
+        );
         let every_id: Vec<String> = unrestricted.iter().map(|p| p.id.0.clone()).collect();
         config.source_restriction = Some(PluginSourceRestriction {
             allowed_ids: every_id,
@@ -1162,7 +1171,10 @@ mod tests {
             .find(|p| p.plugin_name() == "keep")
             .map(|p| p.id.0.clone())
             .expect("fixture: keep is discovered");
-        assert!(all.iter().any(|p| p.plugin_name() == "demo"), "fixture: demo is discovered");
+        assert!(
+            all.iter().any(|p| p.plugin_name() == "demo"),
+            "fixture: demo is discovered"
+        );
         config.source_restriction = Some(PluginSourceRestriction {
             allowed_ids: vec![keep_id.clone(), "user/00000000/demo".to_string()],
         });
@@ -1170,7 +1182,10 @@ mod tests {
         let restricted = discover_plugins(Some(&project), &config, &trust, true);
         let names: Vec<&str> = restricted.iter().map(|p| p.plugin_name()).collect();
         assert!(names.contains(&"keep"), "{names:?}");
-        assert!(!names.contains(&"demo"), "a same-named plugin with another id must not load: {names:?}");
+        assert!(
+            !names.contains(&"demo"),
+            "a same-named plugin with another id must not load: {names:?}"
+        );
         config.populate_plugin_lists(&restricted);
         assert_eq!(
             config.enabled,
@@ -1200,8 +1215,20 @@ mod tests {
         let discovered = discover_plugins(Some(&project), &config, &trust, true);
         let names: HashSet<_> = discovered.iter().map(|p| p.plugin_name()).collect();
         assert_eq!(names, HashSet::from(["admitted-cli", "admitted-config"]));
-        assert!(discovered.iter().find(|p| p.plugin_name() == "admitted-cli").unwrap().trusted);
-        assert!(!discovered.iter().find(|p| p.plugin_name() == "admitted-config").unwrap().trusted);
+        assert!(
+            discovered
+                .iter()
+                .find(|p| p.plugin_name() == "admitted-cli")
+                .unwrap()
+                .trusted
+        );
+        assert!(
+            !discovered
+                .iter()
+                .find(|p| p.plugin_name() == "admitted-config")
+                .unwrap()
+                .trusted
+        );
         assert_eq!(DiscoveryConfig::default().auto_discover, None);
     }
 
@@ -1566,9 +1593,19 @@ mod tests {
         let trust = TrustStore::load_from(tmp.path().join("trust"));
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
-        collect_installed_plugins(&registry, PluginScope::User, &trust, false, &mut seen, &mut candidates);
+        collect_installed_plugins(
+            &registry,
+            PluginScope::User,
+            &trust,
+            false,
+            &mut seen,
+            &mut candidates,
+        );
         let names: Vec<&str> = candidates.iter().map(|p| p.plugin_name()).collect();
-        assert!(!names.contains(&"evil"), "a symlink out of the install dir must be skipped, got {names:?}");
+        assert!(
+            !names.contains(&"evil"),
+            "a symlink out of the install dir must be skipped, got {names:?}"
+        );
     }
 
     #[test]
@@ -1795,8 +1832,24 @@ mod tests {
         let build = || {
             let mut seen = HashSet::new();
             let mut candidates = Vec::new();
-            collect_plugin(&proj_plugin, PluginScope::Project, PluginOrigin::ProjectFuigo, &trust, true, &mut seen, &mut candidates);
-            collect_plugin(&user_plugin, PluginScope::User, PluginOrigin::UserFuigo, &trust, true, &mut seen, &mut candidates);
+            collect_plugin(
+                &proj_plugin,
+                PluginScope::Project,
+                PluginOrigin::ProjectFuigo,
+                &trust,
+                true,
+                &mut seen,
+                &mut candidates,
+            );
+            collect_plugin(
+                &user_plugin,
+                PluginScope::User,
+                PluginOrigin::UserFuigo,
+                &trust,
+                true,
+                &mut seen,
+                &mut candidates,
+            );
             candidates
         };
         // The defect: the project plugin wins the conflict pass and the user's "x" disappears.
@@ -1810,7 +1863,13 @@ mod tests {
         resolve_name_conflicts(&mut candidates);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].scope, PluginScope::User);
-        assert!(candidates[0].conflict.as_deref().unwrap_or("").contains("Project plugin"));
+        assert!(
+            candidates[0]
+                .conflict
+                .as_deref()
+                .unwrap_or("")
+                .contains("Project plugin")
+        );
 
         // The project plugin's full id still enables it.
         let mut candidates = build();
@@ -2311,14 +2370,28 @@ mod tests {
         make_manifest_plugin(&project.join("vendor"), "insider");
         let plugins = project.join(".fuigo").join("plugins");
         std::fs::create_dir_all(&plugins).unwrap();
-        std::os::unix::fs::symlink(base.join("elsewhere").join("outsider"), plugins.join("outsider")).unwrap();
-        std::os::unix::fs::symlink(project.join("vendor").join("insider"), plugins.join("insider")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("elsewhere").join("outsider"),
+            plugins.join("outsider"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            project.join("vendor").join("insider"),
+            plugins.join("insider"),
+        )
+        .unwrap();
 
         let trust = TrustStore::load_from(base.join("trust"));
         let found = discover_plugins(Some(&project), &DiscoveryConfig::default(), &trust, true);
         let names: Vec<&str> = found.iter().map(|p| p.plugin_name()).collect();
-        assert!(!names.contains(&"outsider"), "plugin linked outside the repository loaded: {names:?}");
-        assert!(names.contains(&"insider"), "plugin linked inside the repository missing: {names:?}");
+        assert!(
+            !names.contains(&"outsider"),
+            "plugin linked outside the repository loaded: {names:?}"
+        );
+        assert!(
+            names.contains(&"insider"),
+            "plugin linked inside the repository missing: {names:?}"
+        );
     }
 
     /// m4: a whole project `.fuigo/plugins` dir linked outside the repository loads none of its plugins.
@@ -2331,7 +2404,11 @@ mod tests {
         std::fs::create_dir_all(project.join(".fuigo")).unwrap();
         git2::Repository::init(&project).unwrap();
         make_manifest_plugin(&base.join("elsewhere"), "outsider");
-        std::os::unix::fs::symlink(base.join("elsewhere"), project.join(".fuigo").join("plugins")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("elsewhere"),
+            project.join(".fuigo").join("plugins"),
+        )
+        .unwrap();
 
         let trust = TrustStore::load_from(base.join("trust"));
         let found = discover_plugins(Some(&project), &DiscoveryConfig::default(), &trust, true);

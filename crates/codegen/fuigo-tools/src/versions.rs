@@ -680,8 +680,9 @@ mod tests {
 
     #[test]
     fn resolve_with_warnings_unsupported_version_errors_with_list() {
-        let err = resolve_version_with_warnings("current", "FuigoBuild:grep", Some("legacy-0.4.10"))
-            .unwrap_err();
+        let err =
+            resolve_version_with_warnings("current", "FuigoBuild:grep", Some("legacy-0.4.10"))
+                .unwrap_err();
         assert!(
             err.contains("is not supported for tool"),
             "expected 'not supported' error, got: {err}"

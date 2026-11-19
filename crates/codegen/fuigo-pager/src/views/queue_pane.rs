@@ -1803,16 +1803,30 @@ mod tests {
             let inner = pane.last_inner.expect("rendered");
             (0..2)
                 .map(|row| {
-                    buf[(inner.x, inner.y + row)].modifier.contains(Modifier::DIM)
+                    buf[(inner.x, inner.y + row)]
+                        .modifier
+                        .contains(Modifier::DIM)
                 })
                 .collect()
         };
 
-        assert_eq!(dim_rows(&mut pane), [false, false], "nothing is dim while no row is being edited");
+        assert_eq!(
+            dim_rows(&mut pane),
+            [false, false],
+            "nothing is dim while no row is being edited"
+        );
         pane.set_editing_row(Some(ids[1]));
-        assert_eq!(dim_rows(&mut pane), [false, true], "only the edited row dims");
+        assert_eq!(
+            dim_rows(&mut pane),
+            [false, true],
+            "only the edited row dims"
+        );
         pane.set_editing_row(None);
-        assert_eq!(dim_rows(&mut pane), [false, false], "leaving edit mode restores the row");
+        assert_eq!(
+            dim_rows(&mut pane),
+            [false, false],
+            "leaving edit mode restores the row"
+        );
     }
 
     // -- Action-button rendering (hover + layout) ----------------------------

@@ -15,7 +15,11 @@ pub(super) fn integrity_warning(changes: &[Change]) -> String {
                 `/peers clear-influence`."
             .to_string();
     }
-    let paths: Vec<String> = changes.iter().take(8).map(|c| display_path(&c.path)).collect();
+    let paths: Vec<String> = changes
+        .iter()
+        .take(8)
+        .map(|c| display_path(&c.path))
+        .collect();
     format!(
         "Warning: a protected file changed while this session was reading messages from another session: {}. The change was not \
          undone. Further peer messages are held (reason integrity) until you run `/peers clear-influence`.",
@@ -25,7 +29,9 @@ pub(super) fn integrity_warning(changes: &[Change]) -> String {
 
 impl SessionActor {
     /// S6.7: the origin and influenced flag for the `PreToolUse` payload; `None` (bytes unchanged) with the feature off.
-    pub(super) fn pre_tool_use_peer_note(&self) -> Option<fuigo_workspace::permission::PeerPayloadNote> {
+    pub(super) fn pre_tool_use_peer_note(
+        &self,
+    ) -> Option<fuigo_workspace::permission::PeerPayloadNote> {
         if !peer_messaging_enabled() {
             return None;
         }
@@ -62,9 +68,13 @@ impl SessionActor {
     /// Take the baseline snapshot once the session is peer-influenced (idempotent).
     pub(super) fn arm_peer_integrity(&self) {
         // A subagent never arms its own watch: the root's watch covers the same files.
-        if peer_messaging_enabled() && !self.startup_hints.is_subagent && self.tool_context.peer_influence.is_set() {
+        if peer_messaging_enabled()
+            && !self.startup_hints.is_subagent
+            && self.tool_context.peer_influence.is_set()
+        {
             // File work runs on a blocking thread; this may be called with the session state lock held.
-            self.peer_admission.integrity_arm_background(self.peer_integrity_roots());
+            self.peer_admission
+                .integrity_arm_background(self.peer_integrity_roots());
         }
     }
 
@@ -75,7 +85,8 @@ impl SessionActor {
     /// it, where the batch-end recheck reports it (a possible false trip, which fails closed).
     pub(super) async fn ensure_peer_baseline(&self) {
         if peer_messaging_enabled() && !self.startup_hints.is_subagent {
-            self.peer_admission.integrity_arm_background(self.peer_integrity_roots());
+            self.peer_admission
+                .integrity_arm_background(self.peer_integrity_roots());
             // Bounded: a read that hangs or panics raises the hold, and the marker and warning are written here.
             let changes = self.peer_admission.integrity_await_baseline().await;
             self.persist_integrity_trip(&changes).await;
@@ -90,18 +101,28 @@ impl SessionActor {
         // S6.6: persist the hold (item kind, hashes nowhere) so a resume brings it back before any message is admitted.
         let _ = self
             .chat_state_handle
-            .push_state_marker_and_ack(crate::sampling::ConversationItem::peer_integrity_tripped_marker())
+            .push_state_marker_and_ack(
+                crate::sampling::ConversationItem::peer_integrity_tripped_marker(),
+            )
             .await;
         let warning = integrity_warning(changes);
         #[cfg(test)]
-        self.peer_admission.hooks.warnings.lock().unwrap_or_else(|p| p.into_inner()).push(warning.clone());
+        self.peer_admission
+            .hooks
+            .warnings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(warning.clone());
         self.send_host_turn_slash_command_output(&warning).await;
     }
 
     /// After every tool call of an influenced session: stat the watched files, hash the ones that moved. One warning, once.
     /// Both waits (the baseline and the file work) are bounded; a timeout fails closed the same way as a change.
     pub(super) async fn recheck_peer_integrity(&self) {
-        if !peer_messaging_enabled() || self.startup_hints.is_subagent || !self.tool_context.peer_influence.is_set() {
+        if !peer_messaging_enabled()
+            || self.startup_hints.is_subagent
+            || !self.tool_context.peer_influence.is_set()
+        {
             return;
         }
         self.arm_peer_integrity();

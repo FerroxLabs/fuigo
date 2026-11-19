@@ -100,10 +100,7 @@ async fn manual_auth_posts_to_events_endpoint_as_fuigo_shell_manual_auth() {
         ("is_leader_mode", serde_json::json!(false)),
         ("is_interactive", serde_json::json!(false)),
         ("release_channel", serde_json::json!("alpha")),
-        (
-            "dev_build",
-            serde_json::json!(fuigo_version::IS_DEV_BUILD),
-        ),
+        ("dev_build", serde_json::json!(fuigo_version::IS_DEV_BUILD)),
         ("sessions_active", serde_json::json!(0)),
         ("subagents_active", serde_json::json!(0)),
         ("compaction_active", serde_json::json!(false)),

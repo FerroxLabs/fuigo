@@ -11,11 +11,7 @@ fn temp_workspace(tag: &str, toml_body: &str) -> PathBuf {
     let ws = std::env::temp_dir().join(format!("fuigo-rdv-{tag}-{}-{nanos}", std::process::id()));
     let fuigo = ws.join(".fuigo");
     std::fs::create_dir_all(&fuigo).unwrap();
-    std::fs::write(
-        fuigo.join(fuigo_config::SANDBOX_CONFIG_FILENAME),
-        toml_body,
-    )
-    .unwrap();
+    std::fs::write(fuigo.join(fuigo_config::SANDBOX_CONFIG_FILENAME), toml_body).unwrap();
     ws
 }
 

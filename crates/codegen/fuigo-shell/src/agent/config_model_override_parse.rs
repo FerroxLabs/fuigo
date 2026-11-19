@@ -324,9 +324,8 @@ fn parse_model_override_table(
     // `notice` is config text shown in a terminal: scrub it as it is parsed (a blank one stays `Some`, to clear an inherited notice).
     if let Some(notice) = entry.notice.take() {
         let blank = notice.text.trim().is_empty();
-        entry.notice = crate::agent::config::sanitize_model_notice(notice.clone()).or_else(|| {
-            blank.then_some(notice)
-        });
+        entry.notice = crate::agent::config::sanitize_model_notice(notice.clone())
+            .or_else(|| blank.then_some(notice));
     }
 
     if entry.auth_provider.is_some() {

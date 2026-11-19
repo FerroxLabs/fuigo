@@ -3456,7 +3456,11 @@ fn u42_last_system_text(app: &AppView) -> String {
 fn u42_b3_delete_refusal_reaches_scrollback_whole_with_one_prefix() {
     let refusal = fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE;
     // The two shapes the effect can produce: the reason alone, and a shell message that already carries the prefix.
-    for error in [refusal.to_string(), format!("Couldn't delete session: {refusal}"), format!("couldn't delete session: {refusal}")] {
+    for error in [
+        refusal.to_string(),
+        format!("Couldn't delete session: {refusal}"),
+        format!("couldn't delete session: {refusal}"),
+    ] {
         let mut app = test_app_with_agent();
         let _ = dispatch_task_result(
             TaskResult::DeleteSessionFailed {
@@ -3466,7 +3470,10 @@ fn u42_b3_delete_refusal_reaches_scrollback_whole_with_one_prefix() {
             },
             &mut app,
         );
-        assert_eq!(u42_last_system_text(&app), format!("Couldn't delete session: {refusal}"));
+        assert_eq!(
+            u42_last_system_text(&app),
+            format!("Couldn't delete session: {refusal}")
+        );
     }
 }
 

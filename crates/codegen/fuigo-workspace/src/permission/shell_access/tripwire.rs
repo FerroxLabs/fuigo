@@ -66,17 +66,17 @@ enum Shape {
 
 fn shape_of(program: &str) -> Shape {
     match program {
-        "cat" | "bat" | "less" | "more" | "head" | "tail" | "grep" | "egrep" | "fgrep" | "rg" | "ag" | "ls" | "stat"
-        | "file" | "wc" | "diff" | "cmp" | "sha1sum" | "sha256sum" | "sha512sum" | "md5sum" | "cksum" | "du" | "tree"
-        | "realpath" | "readlink" | "basename" | "dirname" | "echo" | "printf" | "test" | "[" | "jq" | "true"
-        | "false" | "type" | "which" | "cd" | "pushd" | "popd" | "source" | "." | "chmod" | "chown" | "chgrp" => {
-            Shape::Reader
-        }
+        "cat" | "bat" | "less" | "more" | "head" | "tail" | "grep" | "egrep" | "fgrep" | "rg"
+        | "ag" | "ls" | "stat" | "file" | "wc" | "diff" | "cmp" | "sha1sum" | "sha256sum"
+        | "sha512sum" | "md5sum" | "cksum" | "du" | "tree" | "realpath" | "readlink"
+        | "basename" | "dirname" | "echo" | "printf" | "test" | "[" | "jq" | "true" | "false"
+        | "type" | "which" | "cd" | "pushd" | "popd" | "source" | "." | "chmod" | "chown"
+        | "chgrp" => Shape::Reader,
         "sh" | "bash" | "zsh" | "dash" | "ksh" | "find" | "xargs" => Shape::Skip,
         "sed" | "gsed" | "awk" | "gawk" | "mawk" | "nawk" => Shape::Script,
         "cp" | "rsync" | "scp" | "install" | "ln" | "ditto" => Shape::Copy,
-        "tar" | "gtar" | "bsdtar" | "zip" | "unzip" | "7z" | "7za" | "7zz" | "7zr" | "cpio" | "pax" | "curl" | "wget"
-        | "patch" | "yq" => Shape::Sources,
+        "tar" | "gtar" | "bsdtar" | "zip" | "unzip" | "7z" | "7za" | "7zz" | "7zr" | "cpio"
+        | "pax" | "curl" | "wget" | "patch" | "yq" => Shape::Sources,
         "docker" | "podman" | "kubectl" => Shape::Docker,
         "git" => Shape::Git,
         _ => Shape::ScanAll,
@@ -98,24 +98,78 @@ const fn opts(
     long_scan: &'static [&'static str],
     long_skip: &'static [&'static str],
 ) -> Opts {
-    Opts { short_scan, short_skip, long_scan, long_skip }
+    Opts {
+        short_scan,
+        short_skip,
+        long_scan,
+        long_skip,
+    }
 }
 
 fn opts_of(program: &str) -> Opts {
     match program {
         "cp" | "ln" => opts("tS", "", &["target-directory", "suffix"], &["context"]),
         "chmod" | "chown" | "chgrp" => opts("", "", &[], &["reference"]),
-        "install" => opts("tSmog", "", &["target-directory", "suffix", "mode", "owner", "group"], &["context"]),
+        "install" => opts(
+            "tSmog",
+            "",
+            &["target-directory", "suffix", "mode", "owner", "group"],
+            &["context"],
+        ),
         "rsync" => opts(
             "eT",
             "BfM@",
-            &["rsh", "rsync-path", "backup-dir", "partial-dir", "temp-dir", "log-file", "write-batch", "only-write-batch"],
             &[
-                "exclude", "include", "exclude-from", "include-from", "filter", "files-from", "read-batch", "password-file",
-                "port", "address", "sockopts", "bwlimit", "timeout", "contimeout", "max-size", "min-size", "modify-window",
-                "block-size", "out-format", "info", "debug", "iconv", "protocol", "outbuf", "max-delete", "stop-after",
-                "stop-at", "early-input", "checksum-choice", "compress-choice", "compress-level", "skip-compress", "suffix",
-                "link-dest", "compare-dest", "copy-dest", "chmod", "chown", "usermap", "groupmap",
+                "rsh",
+                "rsync-path",
+                "backup-dir",
+                "partial-dir",
+                "temp-dir",
+                "log-file",
+                "write-batch",
+                "only-write-batch",
+            ],
+            &[
+                "exclude",
+                "include",
+                "exclude-from",
+                "include-from",
+                "filter",
+                "files-from",
+                "read-batch",
+                "password-file",
+                "port",
+                "address",
+                "sockopts",
+                "bwlimit",
+                "timeout",
+                "contimeout",
+                "max-size",
+                "min-size",
+                "modify-window",
+                "block-size",
+                "out-format",
+                "info",
+                "debug",
+                "iconv",
+                "protocol",
+                "outbuf",
+                "max-delete",
+                "stop-after",
+                "stop-at",
+                "early-input",
+                "checksum-choice",
+                "compress-choice",
+                "compress-level",
+                "skip-compress",
+                "suffix",
+                "link-dest",
+                "compare-dest",
+                "copy-dest",
+                "chmod",
+                "chown",
+                "usermap",
+                "groupmap",
             ],
         ),
         "scp" => opts("oSJ", "FiPclDX", &[], &[]),
@@ -123,51 +177,167 @@ fn opts_of(program: &str) -> Opts {
             "oDc",
             "HXdubAeFwxEKTCmrYyzQtU",
             &[
-                "output", "output-dir", "dump-header", "cookie-jar", "trace", "trace-ascii", "stderr", "libcurl",
-                "etag-save", "hsts", "alt-svc",
+                "output",
+                "output-dir",
+                "dump-header",
+                "cookie-jar",
+                "trace",
+                "trace-ascii",
+                "stderr",
+                "libcurl",
+                "etag-save",
+                "hsts",
+                "alt-svc",
             ],
             &[
-                "header", "request", "data", "data-raw", "data-binary", "data-urlencode", "user", "cookie", "user-agent",
-                "referer", "form", "url", "proxy", "write-out", "cacert", "cert", "key", "upload-file", "max-time",
-                "connect-timeout", "retry", "range", "config", "limit-rate", "max-redirs", "continue-at", "interface",
-                "resolve", "connect-to", "etag-compare", "json", "variable", "expand-data", "capath", "proxy-user",
+                "header",
+                "request",
+                "data",
+                "data-raw",
+                "data-binary",
+                "data-urlencode",
+                "user",
+                "cookie",
+                "user-agent",
+                "referer",
+                "form",
+                "url",
+                "proxy",
+                "write-out",
+                "cacert",
+                "cert",
+                "key",
+                "upload-file",
+                "max-time",
+                "connect-timeout",
+                "retry",
+                "range",
+                "config",
+                "limit-rate",
+                "max-redirs",
+                "continue-at",
+                "interface",
+                "resolve",
+                "connect-to",
+                "etag-compare",
+                "json",
+                "variable",
+                "expand-data",
+                "capath",
+                "proxy-user",
             ],
         ),
         "wget" => opts(
             "OoaPe",
             "iBUtTwQlARDIXY",
-            &["output-document", "output-file", "append-output", "directory-prefix", "execute", "save-cookies", "warc-file"],
             &[
-                "input-file", "user-agent", "tries", "timeout", "wait", "quota", "level", "accept", "reject", "header",
-                "load-cookies", "post-data", "post-file", "referer", "user", "password", "base", "limit-rate",
-                "ca-certificate", "certificate", "private-key",
+                "output-document",
+                "output-file",
+                "append-output",
+                "directory-prefix",
+                "execute",
+                "save-cookies",
+                "warc-file",
+            ],
+            &[
+                "input-file",
+                "user-agent",
+                "tries",
+                "timeout",
+                "wait",
+                "quota",
+                "level",
+                "accept",
+                "reject",
+                "header",
+                "load-cookies",
+                "post-data",
+                "post-file",
+                "referer",
+                "user",
+                "password",
+                "base",
+                "limit-rate",
+                "ca-certificate",
+                "certificate",
+                "private-key",
             ],
         ),
         "tar" | "gtar" | "bsdtar" => opts(
             "fCIF",
             "TXbHLVgKN",
             &[
-                "file", "directory", "index-file", "use-compress-program", "info-script", "new-volume-script",
-                "to-command", "checkpoint-action", "rsh-command",
+                "file",
+                "directory",
+                "index-file",
+                "use-compress-program",
+                "info-script",
+                "new-volume-script",
+                "to-command",
+                "checkpoint-action",
+                "rsh-command",
             ],
             &[
-                "files-from", "exclude-from", "exclude", "transform", "xform", "newer", "newer-mtime", "blocking-factor",
-                "format", "label", "owner", "group", "mode", "strip-components", "exclude-tag", "newer-than",
-                "after-date", "checkpoint", "totals",
+                "files-from",
+                "exclude-from",
+                "exclude",
+                "transform",
+                "xform",
+                "newer",
+                "newer-mtime",
+                "blocking-factor",
+                "format",
+                "label",
+                "owner",
+                "group",
+                "mode",
+                "strip-components",
+                "exclude-tag",
+                "newer-than",
+                "after-date",
+                "checkpoint",
+                "totals",
             ],
         ),
-        "zip" => opts("bO", "ixnPt", &["output-file", "temp-path"], &["include", "exclude", "suffixes"]),
+        "zip" => opts(
+            "bO",
+            "ixnPt",
+            &["output-file", "temp-path"],
+            &["include", "exclude", "suffixes"],
+        ),
         "unzip" => opts("d", "x", &[], &[]),
-        "cpio" => opts("FIO", "RHEMC", &["file"], &["format", "pattern-file", "owner"]),
+        "cpio" => opts(
+            "FIO",
+            "RHEMC",
+            &["file"],
+            &["format", "pattern-file", "owner"],
+        ),
         "pax" => opts("f", "sxbEGgopTUD", &[], &[]),
-        "patch" => opts("ord", "ipVBzDFgxY", &["output", "reject-file", "directory"], &["strip", "input", "prefix"]),
-        "less" => opts("oO", "bhjkpPtTxyzD", &["log-file", "LOG-FILE"], &["pattern", "tag", "prompt"]),
+        "patch" => opts(
+            "ord",
+            "ipVBzDFgxY",
+            &["output", "reject-file", "directory"],
+            &["strip", "input", "prefix"],
+        ),
+        "less" => opts(
+            "oO",
+            "bhjkpPtTxyzD",
+            &["log-file", "LOG-FILE"],
+            &["pattern", "tag", "prompt"],
+        ),
         "tree" => opts("o", "LPIHT", &[], &[]),
         "diff" => opts("", "", &["output"], &[]),
-        "rg" => opts("", "efgjmtTAB", &["pre"], &["file", "glob", "regexp", "type", "max-count"]),
+        "rg" => opts(
+            "",
+            "efgjmtTAB",
+            &["pre"],
+            &["file", "glob", "regexp", "type", "max-count"],
+        ),
         "bat" => opts("", "", &["pager"], &[]),
         "sed" | "gsed" => opts("e", "fl", &["expression"], &["file", "line-length"]),
-        "awk" | "gawk" | "mawk" | "nawk" => opts("v", "fF", &["assign"], &["file", "field-separator"]),
+        "awk" | "gawk" | "mawk" | "nawk" => {
+            opts("v", "fF", &["assign"], &["file", "field-separator"])
+        }
         _ => opts("", "", &[], &[]),
     }
 }
@@ -196,25 +366,103 @@ fn word_is_scan_option(table: &Opts, word: &str) -> bool {
 /// Long flags that take no value in the copy and fetch programs (so the word after them is an operand).
 fn is_boolean_long(name: &str) -> bool {
     const BOOLEANS: &[&str] = &[
-        "archive", "verbose", "recursive", "force", "dry-run", "progress", "update", "compress", "checksum", "quiet",
-        "links", "times", "perms", "owner", "group", "devices", "specials", "inplace", "partial", "stats", "relative",
-        "backup", "one-file-system", "numeric-ids", "remove-source-files", "existing", "whole-file", "sparse",
-        "hard-links", "itemize-changes", "human-readable", "dirs", "prune-empty-dirs", "interactive", "symbolic",
-        "dereference", "parents", "silent", "show-error", "fail", "location", "insecure", "include", "head",
-        "remote-name", "remote-name-all", "compressed", "progress-bar", "globoff", "create", "extract", "list",
-        "append", "gzip", "bzip2", "xz", "zstd", "bzip", "gunzip", "preserve", "no-clobber", "continue", "mirror",
-        "timestamping", "spider", "recursive", "xattrs", "acls", "executability", "cvs-exclude", "from0", "list-only",
-        "version", "help", "copy-links", "safe-links", "verify", "totals", "overwrite", "keep-old-files",
+        "archive",
+        "verbose",
+        "recursive",
+        "force",
+        "dry-run",
+        "progress",
+        "update",
+        "compress",
+        "checksum",
+        "quiet",
+        "links",
+        "times",
+        "perms",
+        "owner",
+        "group",
+        "devices",
+        "specials",
+        "inplace",
+        "partial",
+        "stats",
+        "relative",
+        "backup",
+        "one-file-system",
+        "numeric-ids",
+        "remove-source-files",
+        "existing",
+        "whole-file",
+        "sparse",
+        "hard-links",
+        "itemize-changes",
+        "human-readable",
+        "dirs",
+        "prune-empty-dirs",
+        "interactive",
+        "symbolic",
+        "dereference",
+        "parents",
+        "silent",
+        "show-error",
+        "fail",
+        "location",
+        "insecure",
+        "include",
+        "head",
+        "remote-name",
+        "remote-name-all",
+        "compressed",
+        "progress-bar",
+        "globoff",
+        "create",
+        "extract",
+        "list",
+        "append",
+        "gzip",
+        "bzip2",
+        "xz",
+        "zstd",
+        "bzip",
+        "gunzip",
+        "preserve",
+        "no-clobber",
+        "continue",
+        "mirror",
+        "timestamping",
+        "spider",
+        "recursive",
+        "xattrs",
+        "acls",
+        "executability",
+        "cvs-exclude",
+        "from0",
+        "list-only",
+        "version",
+        "help",
+        "copy-links",
+        "safe-links",
+        "verify",
+        "totals",
+        "overwrite",
+        "keep-old-files",
     ];
     BOOLEANS.contains(&name)
-        || ["no-", "delete", "preserve", "copy-", "keep-", "ignore-", "force-", "skip-", "remove-"]
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
+        || [
+            "no-", "delete", "preserve", "copy-", "keep-", "ignore-", "force-", "skip-", "remove-",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 /// Split `inner[1..]` into operand indexes (inputs candidates) and the rest. Option words are never operands; the
 /// separate value of a known value option is not an operand (it is scanned or, for known inputs, skipped).
-fn operand_indexes(shape: Shape, program: &str, inner: &[String], skipped_values: &mut Vec<usize>) -> Vec<usize> {
+fn operand_indexes(
+    shape: Shape,
+    program: &str,
+    inner: &[String],
+    skipped_values: &mut Vec<usize>,
+) -> Vec<usize> {
     let table = opts_of(program);
     let unknown_long_takes_value = !matches!(shape, Shape::Reader | Shape::Script);
     let plus_is_option = shape == Shape::Reader;
@@ -240,7 +488,8 @@ fn operand_indexes(shape: Shape, program: &str, inner: &[String], skipped_values
         } else if let Some(long) = word.strip_prefix("--") {
             if long.contains('=') {
                 // `chmod --reference=FILE` names a file that is only read (P166 r8B).
-                if matches!(program, "chmod" | "chown" | "chgrp") && long.starts_with("reference=") {
+                if matches!(program, "chmod" | "chown" | "chgrp") && long.starts_with("reference=")
+                {
                     skipped_values.push(i);
                 }
                 continue;
@@ -274,19 +523,80 @@ fn operand_indexes(shape: Shape, program: &str, inner: &[String], skipped_values
 
 /// Names the protected matcher knows, for glob words (A8). Dot-names only match a pattern that starts with a dot.
 const GLOB_NAMES: &[&str] = &[
-    ".git", "hooks", "modules", ".mcp.json", ".claude", "settings.json", "settings.local.json", ".cursor", "hooks.json",
-    ".fuigo", "hooks-paths", ".ssh", "etc", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
-    ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".kshrc", ".cshrc", ".tcshrc", ".login", ".logout",
-    ".inputrc", ".xprofile", "pre-commit", "commit-msg", "pre-push", "post-commit", "post-merge", "pre-rebase",
-    "prepare-commit-msg", "post-checkout", "pre-receive", "update", "post-receive", "pre-applypatch", "applypatch-msg",
-    "post-update", "pre-merge-commit", "fsmonitor-watchman", "push-to-checkout", "reference-transaction",
+    ".git",
+    "hooks",
+    "modules",
+    ".mcp.json",
+    ".claude",
+    "settings.json",
+    "settings.local.json",
+    ".cursor",
+    "hooks.json",
+    ".fuigo",
+    "hooks-paths",
+    ".ssh",
+    "etc",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".profile",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".zlogout",
+    ".kshrc",
+    ".cshrc",
+    ".tcshrc",
+    ".login",
+    ".logout",
+    ".inputrc",
+    ".xprofile",
+    "pre-commit",
+    "commit-msg",
+    "pre-push",
+    "post-commit",
+    "post-merge",
+    "pre-rebase",
+    "prepare-commit-msg",
+    "post-checkout",
+    "pre-receive",
+    "update",
+    "post-receive",
+    "pre-applypatch",
+    "applypatch-msg",
+    "post-update",
+    "pre-merge-commit",
+    "fsmonitor-watchman",
+    "push-to-checkout",
+    "reference-transaction",
 ];
 
 /// Substrings that make an undecodable word potentially protected (after quote and backslash removal).
 const PROTECTED_NEEDLES: &[&str] = &[
-    ".git/hooks", ".git/modules", ".mcp.json", ".fuigo", ".claude/settings", ".cursor/hooks", ".ssh", "/etc/", ".bashrc",
-    ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".kshrc",
-    ".cshrc", ".tcshrc", ".inputrc", "hooks-paths",
+    ".git/hooks",
+    ".git/modules",
+    ".mcp.json",
+    ".fuigo",
+    ".claude/settings",
+    ".cursor/hooks",
+    ".ssh",
+    "/etc/",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".profile",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".kshrc",
+    ".cshrc",
+    ".tcshrc",
+    ".inputrc",
+    "hooks-paths",
 ];
 
 pub(super) const BRACE_CAP: usize = 256;
@@ -298,8 +608,13 @@ pub(super) fn raw_has_protected_needle(text: &str) -> bool {
 }
 
 fn contains_protected_needle(text: &str) -> bool {
-    let plain: String = text.chars().filter(|c| !matches!(c, '\'' | '"' | '\\')).collect();
-    PROTECTED_NEEDLES.iter().any(|needle| plain.contains(needle))
+    let plain: String = text
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    PROTECTED_NEEDLES
+        .iter()
+        .any(|needle| plain.contains(needle))
 }
 
 /// Decode ANSI-C `$'...'` escapes (the body between the quotes).
@@ -324,7 +639,9 @@ pub(super) fn decode_ansi_c_body(body: &str) -> String {
             Some('x') => {
                 let mut value = 0u32;
                 let mut digits = 0;
-                while digits < 2 && let Some(d) = chars.peek().and_then(|c| c.to_digit(16)) {
+                while digits < 2
+                    && let Some(d) = chars.peek().and_then(|c| c.to_digit(16))
+                {
                     value = value * 16 + d;
                     chars.next();
                     digits += 1;
@@ -335,7 +652,9 @@ pub(super) fn decode_ansi_c_body(body: &str) -> String {
                 let max = if u == 'u' { 4 } else { 8 };
                 let mut value = 0u32;
                 let mut digits = 0;
-                while digits < max && let Some(d) = chars.peek().and_then(|c| c.to_digit(16)) {
+                while digits < max
+                    && let Some(d) = chars.peek().and_then(|c| c.to_digit(16))
+                {
                     value = value.saturating_mul(16).saturating_add(d);
                     chars.next();
                     digits += 1;
@@ -345,7 +664,9 @@ pub(super) fn decode_ansi_c_body(body: &str) -> String {
             Some(first @ '0'..='7') => {
                 let mut value = first.to_digit(8).unwrap_or(0);
                 let mut digits = 1;
-                while digits < 3 && let Some(d) = chars.peek().and_then(|c| c.to_digit(8)) {
+                while digits < 3
+                    && let Some(d) = chars.peek().and_then(|c| c.to_digit(8))
+                {
                     value = value * 8 + d;
                     chars.next();
                     digits += 1;
@@ -376,7 +697,10 @@ pub(super) fn decode_view(raw: &str) -> String {
             '"' => {
                 i += 1;
                 while i < chars.len() && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '$' | '`' | '"' | '\\' | '\n') {
+                    if chars[i] == '\\'
+                        && i + 1 < chars.len()
+                        && matches!(chars[i + 1], '$' | '`' | '"' | '\\' | '\n')
+                    {
                         i += 1;
                     }
                     out.push(chars[i]);
@@ -432,7 +756,9 @@ fn sequence_int(text: &str) -> Option<i128> {
         return None;
     }
     // Longer than an i64 holds: counted as "too large", not parsed.
-    if digits.len() > 18 { return Some(i128::MAX); }
+    if digits.len() > 18 {
+        return Some(i128::MAX);
+    }
     text.parse::<i128>().ok()
 }
 
@@ -463,12 +789,20 @@ fn parse_sequence(body: &str, budget: usize) -> Sequence {
             let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
             digits.len() > 1 && digits.starts_with('0')
         };
-        let width = if padded(parts[0]) || padded(parts[1]) { parts[0].len().max(parts[1].len()) } else { 0 };
+        let width = if padded(parts[0]) || padded(parts[1]) {
+            parts[0].len().max(parts[1].len())
+        } else {
+            0
+        };
         let direction = if to >= from { 1 } else { -1 };
         let mut values = Vec::new();
         let mut at = from;
         loop {
-            let digits = format!("{:0>width$}", at.abs(), width = width.saturating_sub(usize::from(at < 0)));
+            let digits = format!(
+                "{:0>width$}",
+                at.abs(),
+                width = width.saturating_sub(usize::from(at < 0))
+            );
             values.push(if at < 0 { format!("-{digits}") } else { digits });
             let next = at + direction * step;
             if (direction > 0 && next > to) || (direction < 0 && next < to) {
@@ -540,7 +874,10 @@ pub(super) fn brace_expand(word: &str, budget: &mut usize) -> Result<Vec<String>
                     let mut bounds = vec![start];
                     bounds.extend(commas);
                     bounds.push(end);
-                    bounds.windows(2).map(|pair| chars[pair[0] + 1..pair[1]].iter().collect()).collect()
+                    bounds
+                        .windows(2)
+                        .map(|pair| chars[pair[0] + 1..pair[1]].iter().collect())
+                        .collect()
                 } else {
                     let body: String = chars[start + 1..end].iter().collect();
                     match parse_sequence(&body, *budget) {
@@ -555,7 +892,8 @@ pub(super) fn brace_expand(word: &str, budget: &mut usize) -> Result<Vec<String>
                 };
                 let mut out = Vec::new();
                 for alternative in alternatives {
-                    for expanded in brace_expand(&format!("{prefix}{alternative}{suffix}"), budget)? {
+                    for expanded in brace_expand(&format!("{prefix}{alternative}{suffix}"), budget)?
+                    {
                         if *budget == 0 {
                             return Err(());
                         }
@@ -577,10 +915,17 @@ fn glob_match(pattern: &[char], name: &[char]) -> bool {
         Some('*') => (0..=name.len()).any(|skip| glob_match(&pattern[1..], &name[skip..])),
         Some('?') => !name.is_empty() && glob_match(&pattern[1..], &name[1..]),
         Some('[') => {
-            let Some(close) = pattern.iter().skip(2).position(|c| *c == ']').map(|at| at + 2) else {
+            let Some(close) = pattern
+                .iter()
+                .skip(2)
+                .position(|c| *c == ']')
+                .map(|at| at + 2)
+            else {
                 return !name.is_empty() && name[0] == '[' && glob_match(&pattern[1..], &name[1..]);
             };
-            let Some(&first) = name.first() else { return false };
+            let Some(&first) = name.first() else {
+                return false;
+            };
             let set = &pattern[1..close];
             let (negate, set) = match set.first() {
                 Some('!' | '^') => (true, &set[1..]),
@@ -609,7 +954,8 @@ fn glob_expand(word: &str) -> (Vec<String>, bool) {
     // P166 r10: every protected needle holds a dot-name (or `/etc/`), and a component that starts with `*`, `?` or `[`
     // cannot match one. A word with no absolute root and no component starting with `.` can therefore never reach a
     // protected path, so reaching the cap there is not a reason to give up (`rm */*`).
-    let anchored = word.starts_with('/') || word.split('/').any(|component| component.starts_with('.'));
+    let anchored =
+        word.starts_with('/') || word.split('/').any(|component| component.starts_with('.'));
     let mut paths = vec![Vec::<String>::new()];
     for component in word.split('/') {
         let options: Vec<String> = if component.contains(['*', '?', '[']) {
@@ -640,7 +986,10 @@ fn glob_expand(word: &str) -> (Vec<String>, bool) {
         }
         paths = next;
     }
-    (paths.into_iter().map(|parts| parts.join("/")).collect(), capped)
+    (
+        paths.into_iter().map(|parts| parts.join("/")).collect(),
+        capped,
+    )
 }
 
 /// Path-like tokens of one expanded chunk (the r7 splitter: option values glued with `=`, `,`, `:`...).
@@ -656,7 +1005,11 @@ fn emit_plain(chunk: &str, out: &mut Vec<String>) {
                 out.push(stripped.to_owned());
             }
             // u35 r3: the attached value starts after the second character, which may be non-ASCII.
-            if let Some((at, _)) = token.char_indices().nth(2).filter(|_| !token.starts_with("--")) {
+            if let Some((at, _)) = token
+                .char_indices()
+                .nth(2)
+                .filter(|_| !token.starts_with("--"))
+            {
                 out.push(token[at..].to_owned());
             }
         } else {
@@ -699,7 +1052,11 @@ fn emit_chunk(chunk: &str, tw: &mut Tripwire) {
 /// command or a script, then expand braces and globs per chunk.
 fn scan_text(text: &str, tw: &mut Tripwire) {
     for chunk in text.split(|c: char| {
-        c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '=' | ';' | ':' | '|' | '<' | '>' | '(' | ')' | '&' | '!')
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '`' | '=' | ';' | ':' | '|' | '<' | '>' | '(' | ')' | '&' | '!'
+            )
     }) {
         if !chunk.is_empty() {
             emit_chunk(chunk, tw);
@@ -732,7 +1089,9 @@ fn scan_raw(raw: &str, tw: &mut Tripwire) {
 
 /// The directory of `env -C DIR` / `--chdir DIR` among a command's wrapper words.
 fn env_chdir_dir(wrapper: &[String]) -> Option<String> {
-    let at = wrapper.iter().position(|word| shell_program_name(word) == "env")?;
+    let at = wrapper
+        .iter()
+        .position(|word| shell_program_name(word) == "env")?;
     let mut words = wrapper[at + 1..].iter();
     while let Some(word) = words.next() {
         if word == "-C" || word == "--chdir" {
@@ -754,32 +1113,55 @@ fn env_chdir_dir(wrapper: &[String]) -> Option<String> {
     None
 }
 
-pub(super) fn tripwire(program: &str, words: &[String], inner: &[String], extras: &CommandExtras) -> Tripwire {
+pub(super) fn tripwire(
+    program: &str,
+    words: &[String],
+    inner: &[String],
+    extras: &CommandExtras,
+) -> Tripwire {
     let mut tw = Tripwire::default();
     let shape = shape_of(program);
     let start = words.len().saturating_sub(inner.len());
-    let wrapper: &[String] = if words[start..] == *inner { &words[..start] } else { &[] };
+    let wrapper: &[String] = if words[start..] == *inner {
+        &words[..start]
+    } else {
+        &[]
+    };
 
     let mut skipped_values = Vec::new();
     let operands = operand_indexes(shape, program, inner, &mut skipped_values);
     let skip: Vec<usize> = match shape {
         Shape::Skip => (1..inner.len()).collect(),
-        Shape::Reader => operands.iter().copied().chain(skipped_values.iter().copied()).collect(),
+        Shape::Reader => operands
+            .iter()
+            .copied()
+            .chain(skipped_values.iter().copied())
+            .collect(),
         Shape::Script => {
             let own_script = inner.iter().skip(1).any(|word| {
-                matches!(word.as_str(), "-e" | "-f" | "--expression" | "--file" | "--program" | "--source")
-                    || (word.starts_with("-e") || word.starts_with("-f")) && !word.starts_with("--") && word.len() > 2
+                matches!(
+                    word.as_str(),
+                    "-e" | "-f" | "--expression" | "--file" | "--program" | "--source"
+                ) || (word.starts_with("-e") || word.starts_with("-f"))
+                    && !word.starts_with("--")
+                    && word.len() > 2
                     || word.starts_with("--expression=")
                     || word.starts_with("--file=")
             });
             let first = usize::from(!own_script);
-            operands.iter().skip(first).copied().chain(skipped_values.iter().copied()).collect()
+            operands
+                .iter()
+                .skip(first)
+                .copied()
+                .chain(skipped_values.iter().copied())
+                .collect()
         }
         Shape::Copy => {
-            let target_dir = inner
-                .iter()
-                .skip(1)
-                .any(|word| word == "-t" || word.starts_with("--target-directory") || (word.starts_with("-t") && !word.starts_with("--")));
+            let target_dir = inner.iter().skip(1).any(|word| {
+                word == "-t"
+                    || word.starts_with("--target-directory")
+                    || (word.starts_with("-t") && !word.starts_with("--"))
+            });
             let keep_last = usize::from(!target_dir);
             let sources = operands.len().saturating_sub(keep_last);
             operands
@@ -789,7 +1171,11 @@ pub(super) fn tripwire(program: &str, words: &[String], inner: &[String], extras
                 .chain(skipped_values.iter().copied())
                 .collect()
         }
-        Shape::Sources => operands.iter().copied().chain(skipped_values.iter().copied()).collect(),
+        Shape::Sources => operands
+            .iter()
+            .copied()
+            .chain(skipped_values.iter().copied())
+            .collect(),
         Shape::Docker => {
             let cp_at = operands.iter().position(|&i| inner[i] == "cp");
             match cp_at {
@@ -797,7 +1183,9 @@ pub(super) fn tripwire(program: &str, words: &[String], inner: &[String], extras
                 None => Vec::new(),
             }
         }
-        Shape::Git => (1..inner.len()).filter(|&i| !inner[i].starts_with('-')).collect(),
+        Shape::Git => (1..inner.len())
+            .filter(|&i| !inner[i].starts_with('-'))
+            .collect(),
         Shape::ScanAll => Vec::new(),
     };
 
@@ -810,7 +1198,9 @@ pub(super) fn tripwire(program: &str, words: &[String], inner: &[String], extras
         if shape == Shape::Copy
             && matches!(program, "scp" | "rsync")
             && operands.contains(&i)
-            && word.split_once(':').is_some_and(|(host, _)| host.contains('/'))
+            && word
+                .split_once(':')
+                .is_some_and(|(host, _)| host.contains('/'))
         {
             own.tokens.push(word.clone());
             continue;
@@ -820,7 +1210,8 @@ pub(super) fn tripwire(program: &str, words: &[String], inner: &[String], extras
     let reader = shape == Shape::Reader;
     // An over-cap brace word cannot be judged whatever the command: a reader or git option value may still name the
     // file the program writes (`less -o {.gi,a,...}t/hooks/x`, `git config --file {...}`).
-    if (reader || shape == Shape::Git) && extras.raw_ambiguous.iter().any(|raw| brace_over_cap(raw)) {
+    if (reader || shape == Shape::Git) && extras.raw_ambiguous.iter().any(|raw| brace_over_cap(raw))
+    {
         own.unpinned = true;
     }
     if !reader && shape != Shape::Skip {
@@ -839,12 +1230,30 @@ pub(super) fn tripwire(program: &str, words: &[String], inner: &[String], extras
     let reader_writes = reader
         && (chmod_like
             || (!extras.raw_ambiguous.is_empty()
-                && inner.iter().skip(1).any(|word| word_is_scan_option(&reader_table, word)))
-            || extras.raw_ambiguous.iter().any(|raw| word_is_scan_option(&reader_table, raw)));
+                && inner
+                    .iter()
+                    .skip(1)
+                    .any(|word| word_is_scan_option(&reader_table, word)))
+            || extras
+                .raw_ambiguous
+                .iter()
+                .any(|raw| word_is_scan_option(&reader_table, raw)));
     // `find` only reads unless it has an action that writes or runs something (P166 r12 item 5).
     let read_only_find = program == "find"
         && !inner.iter().any(|word| {
-            matches!(word.as_str(), "-delete" | "-rm" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fprint0" | "-fprintf" | "-fls")
+            matches!(
+                word.as_str(),
+                "-delete"
+                    | "-rm"
+                    | "-exec"
+                    | "-execdir"
+                    | "-ok"
+                    | "-okdir"
+                    | "-fprint"
+                    | "-fprint0"
+                    | "-fprintf"
+                    | "-fls"
+            )
         });
     if (!reader || reader_writes) && !read_only_find {
         for value in &extras.assignments {

@@ -8,10 +8,7 @@ fn configured_garbage_file_yields_zero_roots_and_builds() {
 
     // Safety: sole test in this binary; set before any OnceLock resolve.
     unsafe {
-        std::env::set_var(
-            fuigo_extra_ca::ENV_FUIGO_EXTRA_CA_BUNDLE,
-            path.as_os_str(),
-        );
+        std::env::set_var(fuigo_extra_ca::ENV_FUIGO_EXTRA_CA_BUNDLE, path.as_os_str());
     }
 
     assert!(fuigo_extra_ca::extra_root_ders().is_empty());

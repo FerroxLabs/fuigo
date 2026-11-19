@@ -391,9 +391,13 @@ pub(crate) async fn run_goal_planner(
 
     // F5-C5: the caller creates `goal/` through the session's writer; a missing one fails closed here.
     if let Some(parent) = inputs.plan_file.parent()
-        && let Err(err) = tokio::fs::metadata(parent)
-            .await
-            .and_then(|meta| if meta.is_dir() { Ok(()) } else { Err(std::io::Error::from(std::io::ErrorKind::NotADirectory)) })
+        && let Err(err) = tokio::fs::metadata(parent).await.and_then(|meta| {
+            if meta.is_dir() {
+                Ok(())
+            } else {
+                Err(std::io::Error::from(std::io::ErrorKind::NotADirectory))
+            }
+        })
     {
         tracing::warn!(
             parent = %parent.display(),
@@ -503,7 +507,10 @@ fn record_fail_closed(
 
 // Tests
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

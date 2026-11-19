@@ -329,7 +329,10 @@ async fn deliver_queued_retry_status_mirrors(
     replay_buffer: &mut ReplayBuffer,
 ) {
     while let Ok(event) = event_rx.try_recv() {
-        if matches!(event, SessionEvent::RetryStatusMirror(_) | SessionEvent::OrderedFuigo(_)) {
+        if matches!(
+            event,
+            SessionEvent::RetryStatusMirror(_) | SessionEvent::OrderedFuigo(_)
+        ) {
             session.handle_session_event(event, replay_buffer).await;
         }
     }
@@ -417,7 +420,8 @@ pub(super) async fn run_session(
     tracing::debug!("fs_notify_config: {:?}", fs_notify_config);
     let mut replay_buffer = ReplayBuffer::new(session.buffering_settings.clone());
     // P148: the config notices this session was sent, so a reload's `NotifyConfigNoticeIfNew` does not repeat one.
-    let mut told_config_notices: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut told_config_notices: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     let event_tx_for_flush_timer = session.event_tx.clone();
     let buffering_flush_interval = replay_buffer.max_wait_duration_ms();
     if let Some(buffering_flush_interval) = buffering_flush_interval {
@@ -560,11 +564,23 @@ pub(super) async fn run_session(
     tokio::pin!(idle_flush_sleep);
     let mut startup_dream_pending = session.memory.dream_config.enabled;
     let dream_check_sleep = tokio::time::sleep(if startup_dream_pending {
-        startup_dream_delay(std::env::var("FUIGO_MEMORY_DREAM_STARTUP_SECS").ok().as_deref())
-    } else { std::time::Duration::MAX });
+        startup_dream_delay(
+            std::env::var("FUIGO_MEMORY_DREAM_STARTUP_SECS")
+                .ok()
+                .as_deref(),
+        )
+    } else {
+        std::time::Duration::MAX
+    });
     // Dropping the actor loop aborts its dream task, releasing the OS guard and HTTP future.
     struct DreamTask(Option<tokio::task::JoinHandle<()>>);
-    impl Drop for DreamTask { fn drop(&mut self) { if let Some(task) = &self.0 { task.abort(); } } }
+    impl Drop for DreamTask {
+        fn drop(&mut self) {
+            if let Some(task) = &self.0 {
+                task.abort();
+            }
+        }
+    }
     let mut dream_task = DreamTask(None);
     tokio::pin!(dream_check_sleep);
     let mut deferred_start = DeferredStart::new();

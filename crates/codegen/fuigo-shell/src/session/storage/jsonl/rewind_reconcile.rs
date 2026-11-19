@@ -82,7 +82,10 @@ impl RewindJournal {
         let chat_before = match &conversation {
             Some(_) => {
                 let dir = chat_path.parent().unwrap_or(Path::new("."));
-                read_evidence(dir, chat_path).map_err(io::Error::other)?.as_deref().map(ContentFingerprint::of)
+                read_evidence(dir, chat_path)
+                    .map_err(io::Error::other)?
+                    .as_deref()
+                    .map(ContentFingerprint::of)
             }
             None => None,
         };
@@ -92,7 +95,10 @@ impl RewindJournal {
             Err(_) => None,
         };
         let (chat_after, marker_created_at) = match conversation {
-            Some(RewindConversation { after, marker_created_at }) => (Some(after), Some(marker_created_at)),
+            Some(RewindConversation {
+                after,
+                marker_created_at,
+            }) => (Some(after), Some(marker_created_at)),
             None => (None, None),
         };
         Ok(Self {
@@ -112,21 +118,34 @@ impl RewindJournal {
     }
 
     fn parse(bytes: &[u8]) -> Option<Self> {
-        serde_json::from_slice::<Self>(bytes).ok().filter(|journal| journal.version == JOURNAL_VERSION)
+        serde_json::from_slice::<Self>(bytes)
+            .ok()
+            .filter(|journal| journal.version == JOURNAL_VERSION)
     }
 
     fn target(&self) -> usize {
         match self.rewrite {
-            RewindPointsRewrite::TruncateFrom(index) | RewindPointsRewrite::MergeFrom(index) => index,
+            RewindPointsRewrite::TruncateFrom(index) | RewindPointsRewrite::MergeFrom(index) => {
+                index
+            }
         }
     }
 }
 
 /// Remove a rewind's durable copy, then its journal (a missing one is already removed). Links are removed as links.
 /// As the session's writer (F5-C4 gap f): never by path.
-pub(crate) fn remove_copy_then_journal(writer: &fuigo_session_writer::SessionWriter, rewind_points: &Path) -> io::Result<()> {
-    remove_if_present(writer, &crate::session::storage::rewind_points_pre_rewind_copy(rewind_points))?;
-    remove_if_present(writer, &crate::session::storage::rewind_points_journal(rewind_points))
+pub(crate) fn remove_copy_then_journal(
+    writer: &fuigo_session_writer::SessionWriter,
+    rewind_points: &Path,
+) -> io::Result<()> {
+    remove_if_present(
+        writer,
+        &crate::session::storage::rewind_points_pre_rewind_copy(rewind_points),
+    )?;
+    remove_if_present(
+        writer,
+        &crate::session::storage::rewind_points_journal(rewind_points),
+    )
 }
 
 fn remove_if_present(writer: &fuigo_session_writer::SessionWriter, path: &Path) -> io::Result<()> {
@@ -144,8 +163,12 @@ fn open_evidence(dir: &Path, path: &Path) -> Result<Option<std::fs::File>, Strin
     match crate::session::storage::open_beneath_nofollow(dir, name) {
         Ok(file) => Ok(Some(file)),
         Err(BeneathRefusal::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(BeneathRefusal::Io(error)) => Err(format!("{} could not be read ({error})", path.display())),
-        Err(BeneathRefusal::Refused(why)) => Err(format!("{} cannot be used: {why}", path.display())),
+        Err(BeneathRefusal::Io(error)) => {
+            Err(format!("{} could not be read ({error})", path.display()))
+        }
+        Err(BeneathRefusal::Refused(why)) => {
+            Err(format!("{} cannot be used: {why}", path.display()))
+        }
     }
 }
 
@@ -154,7 +177,8 @@ fn read_evidence(dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, String> {
         return Ok(None);
     };
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|error| format!("{} could not be read ({error})", path.display()))?;
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("{} could not be read ({error})", path.display()))?;
     Ok(Some(bytes))
 }
 
@@ -214,13 +238,23 @@ fn points_state(journal: &RewindJournal, current: Option<&[u8]>, copy: &[u8]) ->
     let starts_as_written = journal.points_written.is_prefix_of(current);
     if starts_as_written && (!starts_as_copy || journal.points_written.len >= copy.len() as u64) {
         let start = usize::try_from(journal.points_written.len).unwrap_or(usize::MAX);
-        return Points::Rewritten { appended: current.get(start..).unwrap_or_default().to_vec() };
+        return Points::Rewritten {
+            appended: current.get(start..).unwrap_or_default().to_vec(),
+        };
     }
-    if starts_as_copy { Points::Unchanged } else { Points::Unknown }
+    if starts_as_copy {
+        Points::Unchanged
+    } else {
+        Points::Unknown
+    }
 }
 
 /// `transcript`: `None` when `updates.jsonl` could not be checked.
-fn conversation_state(journal: &RewindJournal, chat: Option<&[u8]>, transcript: Option<Transcript>) -> Conversation {
+fn conversation_state(
+    journal: &RewindJournal,
+    chat: Option<&[u8]>,
+    transcript: Option<Transcript>,
+) -> Conversation {
     let Some(after) = &journal.chat_after else {
         return Conversation::NotPartOfIt;
     };
@@ -237,7 +271,11 @@ fn conversation_state(journal: &RewindJournal, chat: Option<&[u8]>, transcript: 
         Some(before) => chat.is_some_and(|chat| before.is_prefix_of(chat)),
         None => chat.is_none_or(<[u8]>::is_empty),
     };
-    if starts_as_before { Conversation::NotSaved } else { Conversation::Unknown }
+    if starts_as_before {
+        Conversation::NotSaved
+    } else {
+        Conversation::Unknown
+    }
 }
 
 /// The copy put back, followed by what was appended after the swap (on its own line).
@@ -324,8 +362,13 @@ fn read_transcript(
     let mut tail = Vec::new();
     file.read_to_end(&mut tail)?;
     let mut transcript = Transcript::default();
-    for line in tail.split(|byte| *byte == b'\n').filter_map(|line| std::str::from_utf8(line).ok()) {
-        if let crate::session::storage::RewindStep::UserChunk { .. } = crate::session::storage::rewind_step_for_line(line) {
+    for line in tail
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| std::str::from_utf8(line).ok())
+    {
+        if let crate::session::storage::RewindStep::UserChunk { .. } =
+            crate::session::storage::rewind_step_for_line(line)
+        {
             transcript.later_history = true;
             continue;
         }
@@ -371,7 +414,8 @@ fn append_rewind_marker(
             meta: None,
         },
     ));
-    let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(&update).map_err(io::Error::other)?;
+    let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(&update)
+        .map_err(io::Error::other)?;
     let mut line = serde_json::to_vec(&envelope).map_err(io::Error::other)?;
     line.push(b'\n');
     // The torn-tail fix and the sync of `append_jsonl_line_locked`, as the writer's method (the caller holds the
@@ -413,10 +457,21 @@ fn bounded_lock(
     shared: bool,
     wait: std::time::Duration,
 ) -> Result<super::HeldLock, LockFailure> {
-    match JsonlStorageAdapter::lock_bounded(path, lock_path.clone(), shared, std::time::Instant::now() + wait) {
+    match JsonlStorageAdapter::lock_bounded(
+        path,
+        lock_path.clone(),
+        shared,
+        std::time::Instant::now() + wait,
+    ) {
         Ok(Some(lock)) => Ok(lock),
-        Ok(None) => Err(LockFailure::Unusable(format!("{} cannot be opened or locked", lock_path.display()))),
-        Err(error) => Err(LockFailure::Held(format!("{} is held by another Fuigo process ({error})", lock_path.display()))),
+        Ok(None) => Err(LockFailure::Unusable(format!(
+            "{} cannot be opened or locked",
+            lock_path.display()
+        ))),
+        Err(error) => Err(LockFailure::Held(format!(
+            "{} is held by another Fuigo process ({error})",
+            lock_path.display()
+        ))),
     }
 }
 
@@ -424,8 +479,13 @@ impl JsonlStorageAdapter {
     /// [`Self::reconcile_interrupted_rewind_as`] as a writer of the session claimed here (unit tests).
     #[cfg(test)]
     pub(crate) async fn reconcile_interrupted_rewind(&self, info: &Info) -> Option<String> {
-        let writer = fuigo_session_writer::SessionWriter::try_claim(info.id.0.to_string(), self.session_dir(info)).ok()?;
-        self.reconcile_interrupted_rewind_as(info, Some(&writer)).await
+        let writer = fuigo_session_writer::SessionWriter::try_claim(
+            info.id.0.to_string(),
+            self.session_dir(info),
+        )
+        .ok()?;
+        self.reconcile_interrupted_rewind_as(info, Some(&writer))
+            .await
     }
 
     /// Reconcile a rewind of `info` that Fuigo was killed in the middle of (see the module doc). Returns the note
@@ -499,21 +559,34 @@ impl JsonlStorageAdapter {
 
 /// `path`, a file of the session folder, relative to it (the writer's methods take relative paths).
 fn rel<'p>(files: &Files, path: &'p Path) -> io::Result<&'p Path> {
-    path.strip_prefix(&files.dir).map_err(|_| io::Error::other(format!("{} is outside the session folder", path.display())))
+    path.strip_prefix(&files.dir)
+        .map_err(|_| io::Error::other(format!("{} is outside the session folder", path.display())))
 }
 
 /// [`remove_if_present`] as the session's writer.
-fn remove_through(writer: &fuigo_session_writer::SessionWriter, files: &Files, path: &Path) -> io::Result<()> {
+fn remove_through(
+    writer: &fuigo_session_writer::SessionWriter,
+    files: &Files,
+    path: &Path,
+) -> io::Result<()> {
     match writer.remove_sync(rel(files, path)?) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
 }
 
-fn reconcile_locked(files: &Files, info: &Info, writer: &fuigo_session_writer::SessionWriter) -> Option<String> {
+fn reconcile_locked(
+    files: &Files,
+    info: &Info,
+    writer: &fuigo_session_writer::SessionWriter,
+) -> Option<String> {
     if let Err(error) = files.copy.symlink_metadata() {
         if error.kind() != io::ErrorKind::NotFound {
-            return Some(kept_notice(files, None, &format!("{} could not be checked ({error})", files.copy.display())));
+            return Some(kept_notice(
+                files,
+                None,
+                &format!("{} could not be checked ({error})", files.copy.display()),
+            ));
         }
         // A journal alone: the rewind stopped before its copy was written, or its cleanup between the two removals.
         // Either way there is nothing to reconcile.
@@ -525,9 +598,14 @@ fn reconcile_locked(files: &Files, info: &Info, writer: &fuigo_session_writer::S
     let inputs = (|| {
         let copy = read_evidence(&files.dir, &files.copy)?
             .ok_or_else(|| format!("{} disappeared while it was checked", files.copy.display()))?;
-        let journal = read_evidence(&files.dir, &files.journal)?.as_deref().and_then(RewindJournal::parse);
+        let journal = read_evidence(&files.dir, &files.journal)?
+            .as_deref()
+            .and_then(RewindJournal::parse);
         let current = read_evidence(&files.dir, &files.points)?;
-        let chat = match journal.as_ref().and_then(|journal| journal.chat_after.as_ref()) {
+        let chat = match journal
+            .as_ref()
+            .and_then(|journal| journal.chat_after.as_ref())
+        {
             Some(_) => read_evidence(&files.dir, &files.chat)?,
             None => None,
         };
@@ -540,8 +618,18 @@ fn reconcile_locked(files: &Files, info: &Info, writer: &fuigo_session_writer::S
     let target = journal.as_ref().map(RewindJournal::target);
     // The transcript is checked (and repaired) under its own append lock, held until the end.
     let (transcript, _updates_lock) = match journal.as_ref() {
-        Some(RewindJournal { chat_after: Some(_), marker_created_at: Some(created_at), updates_len: Some(from), .. }) => {
-            match bounded_lock(&files.updates, files.updates.with_extension("jsonl.lock"), false, APPEND_LOCK_WAIT) {
+        Some(RewindJournal {
+            chat_after: Some(_),
+            marker_created_at: Some(created_at),
+            updates_len: Some(from),
+            ..
+        }) => {
+            match bounded_lock(
+                &files.updates,
+                files.updates.with_extension("jsonl.lock"),
+                false,
+                APPEND_LOCK_WAIT,
+            ) {
                 Ok(lock) => {
                     let transcript = match open_evidence(&files.dir, &files.updates) {
                         Ok(Some(file)) => read_transcript(file, *from, target.unwrap_or_default(), created_at)
@@ -566,7 +654,13 @@ fn reconcile_locked(files: &Files, info: &Info, writer: &fuigo_session_writer::S
         }
         _ => (None, None),
     };
-    let decision = decide(journal.as_ref(), current.as_deref(), &copy, chat.as_deref(), transcript);
+    let decision = decide(
+        journal.as_ref(),
+        current.as_deref(),
+        &copy,
+        chat.as_deref(),
+        transcript,
+    );
     // The decision's bytes are saved file contents: only what was decided is logged.
     let decided = match &decision {
         Decision::Undo { .. } => "undo",
@@ -577,7 +671,8 @@ fn reconcile_locked(files: &Files, info: &Info, writer: &fuigo_session_writer::S
     Some(match decision {
         Decision::Undo { restore } => {
             if let Some(bytes) = restore
-                && let Err(error) = rel(files, &files.points).and_then(|points| writer.replace_atomic_sync(points, &bytes))
+                && let Err(error) = rel(files, &files.points)
+                    .and_then(|points| writer.replace_atomic_sync(points, &bytes))
             {
                 return Some(kept_notice(
                     files,
@@ -585,13 +680,19 @@ fn reconcile_locked(files: &Files, info: &Info, writer: &fuigo_session_writer::S
                     &format!("rewind_points.jsonl could not be put back from the copy ({error})"),
                 ));
             }
-            format!("{}{}", undone_notice(journal.as_ref()), cleanup(files, info, writer))
+            format!(
+                "{}{}",
+                undone_notice(journal.as_ref()),
+                cleanup(files, info, writer)
+            )
         }
         Decision::Finish { record_marker } => {
             let journal = journal.as_ref()?;
             let mut marker_note = "";
             if record_marker && let Some(created_at) = &journal.marker_created_at {
-                if let Err(error) = append_rewind_marker(writer, files, info, journal.target(), created_at) {
+                if let Err(error) =
+                    append_rewind_marker(writer, files, info, journal.target(), created_at)
+                {
                     // The transcript would still show the rewound turns: keep everything and say so.
                     return Some(kept_notice(
                         files,
@@ -626,7 +727,9 @@ fn cleanup(files: &Files, info: &Info, writer: &fuigo_session_writer::SessionWri
         // Harmless: a journal without its copy refuses nothing and the next load removes it.
         tracing::warn!(session_id = %info.id, %error, path = %files.journal.display(), "a rewind's journal could not be removed");
     }
-    format!(" The copy of the saved file history from before it ({copy}) is no longer needed and was removed.")
+    format!(
+        " The copy of the saved file history from before it ({copy}) is no longer needed and was removed."
+    )
 }
 
 fn undone_notice(journal: Option<&RewindJournal>) -> String {
@@ -657,7 +760,9 @@ fn undone_notice(journal: Option<&RewindJournal>) -> String {
 }
 
 fn kept_notice(files: &Files, target: Option<usize>, reason: &str) -> String {
-    let which = target.map(|target| format!(" to prompt #{target}")).unwrap_or_default();
+    let which = target
+        .map(|target| format!(" to prompt #{target}"))
+        .unwrap_or_default();
     let (points, copy) = (files.points.display(), files.copy.display());
     format!(
         "An earlier rewind of this session{which} did not finish, and Fuigo cannot tell whether it went through: \
@@ -668,7 +773,10 @@ fn kept_notice(files: &Files, target: Option<usize>, reason: &str) -> String {
     )
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "rewind_reconcile_tests.rs"]
 mod tests;

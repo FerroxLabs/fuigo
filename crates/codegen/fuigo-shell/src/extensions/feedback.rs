@@ -563,7 +563,6 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
-
 #[cfg(test)]
 mod review_identity_tests {
     use super::stamp_review_agent_id;
@@ -581,7 +580,8 @@ mod review_identity_tests {
     }
 
     fn stamped(method: &UploadMethod) -> serde_json::Value {
-        let mut record = serde_json::json!({"event": "create", "commentId": "c1", "sessionId": "s1"});
+        let mut record =
+            serde_json::json!({"event": "create", "commentId": "c1", "sessionId": "s1"});
         stamp_review_agent_id(&mut record, method, MACHINE_ID);
         record
     }
@@ -603,7 +603,9 @@ mod review_identity_tests {
         ] {
             let record = stamped(&proxy(url));
             assert!(!record.to_string().contains(MACHINE_ID), "{url}: {record}");
-            let key = record["agentId"].as_str().unwrap_or_else(|| panic!("{url}: no agentId: {record}"));
+            let key = record["agentId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{url}: no agentId: {record}"));
             assert_eq!(
                 key,
                 fuigo_extra_ca::fluxrouter::destination_pseudonym(url, MACHINE_ID),
@@ -615,12 +617,20 @@ mod review_identity_tests {
             );
             let archived: serde_json::Value =
                 serde_json::from_slice(&archived).expect("one transformed LOC record");
-            assert_eq!(archived["agentId"], key, "{url}: comment and LOC keys differ");
+            assert_eq!(
+                archived["agentId"], key,
+                "{url}: comment and LOC keys differ"
+            );
             assert_eq!(record["commentId"], "c1");
         }
-        assert_eq!(stamped(&proxy("https://api.fluxrouter.ai/v1"))["agentId"], MACHINE_ID);
         assert_eq!(
-            stamped(&UploadMethod::Direct { service_account_key: Some("{}".into()) })["agentId"],
+            stamped(&proxy("https://api.fluxrouter.ai/v1"))["agentId"],
+            MACHINE_ID
+        );
+        assert_eq!(
+            stamped(&UploadMethod::Direct {
+                service_account_key: Some("{}".into())
+            })["agentId"],
             MACHINE_ID
         );
         let s3 = UploadMethod::S3 {

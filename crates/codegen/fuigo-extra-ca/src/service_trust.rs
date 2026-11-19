@@ -210,19 +210,40 @@ mod tests {
         assert_eq!(decide("https://api.fluxrouter.ai/v1/user", None), Ok(()));
         assert_eq!(decide("https://API.FluxRouter.ai./x", None), Ok(()));
         let base = Some("https://proxy.example.test/v1");
-        assert_eq!(decide("https://proxy.example.test/v1/billing", base), Ok(()));
+        assert_eq!(
+            decide("https://proxy.example.test/v1/billing", base),
+            Ok(())
+        );
         assert_eq!(decide("https://proxy.example.test:443/other", base), Ok(()));
-        assert_eq!(decide("wss://hub.example.test/ws", Some("wss://hub.example.test/ws")), Ok(()));
+        assert_eq!(
+            decide(
+                "wss://hub.example.test/ws",
+                Some("wss://hub.example.test/ws")
+            ),
+            Ok(())
+        );
         // the configured-API-origin answer is consulted
-        assert!(session_may_reach_service("https://gw.example.test/v1", None, |u| u.contains("gw.")).is_ok());
+        assert!(
+            session_may_reach_service("https://gw.example.test/v1", None, |u| u.contains("gw."))
+                .is_ok()
+        );
     }
 
     #[test]
     fn cleartext_loopback_userinfo_and_other_origins_are_refused_even_when_configured() {
         use ServiceRefusal::*;
         assert_eq!(decide("http://api.fluxrouter.ai/v1", None), Err(Cleartext));
-        assert_eq!(decide("ws://hub.example.test/ws", Some("ws://hub.example.test/ws")), Err(Cleartext));
-        assert_eq!(decide("http://proxy.example.test/v1", Some("http://proxy.example.test/v1")), Err(Cleartext));
+        assert_eq!(
+            decide("ws://hub.example.test/ws", Some("ws://hub.example.test/ws")),
+            Err(Cleartext)
+        );
+        assert_eq!(
+            decide(
+                "http://proxy.example.test/v1",
+                Some("http://proxy.example.test/v1")
+            ),
+            Err(Cleartext)
+        );
         for local in [
             "https://localhost/v1",
             "https://app.localhost/v1",
@@ -236,32 +257,52 @@ mod tests {
             assert_eq!(decide(local, Some(local)), Err(Loopback), "{local}");
         }
         assert_eq!(
-            decide("https://u:p@proxy.example.test/v1", Some("https://proxy.example.test")),
+            decide(
+                "https://u:p@proxy.example.test/v1",
+                Some("https://proxy.example.test")
+            ),
             Err(Userinfo)
         );
         let base = Some("https://proxy.example.test/v1");
-        assert_eq!(decide("https://proxy.example.test:8443/v1", base), Err(NotTrusted));
-        assert_eq!(decide("https://proxy.example.test.evil.example/v1", base), Err(NotTrusted));
+        assert_eq!(
+            decide("https://proxy.example.test:8443/v1", base),
+            Err(NotTrusted)
+        );
+        assert_eq!(
+            decide("https://proxy.example.test.evil.example/v1", base),
+            Err(NotTrusted)
+        );
         assert_eq!(decide("https://evil.example/v1", base), Err(NotTrusted));
         assert_eq!(decide("wss://proxy.example.test/v1", base), Err(NotTrusted));
-        assert_eq!(decide("https://api.fluxrouter.ai:8443/v1", None), Err(NotTrusted));
+        assert_eq!(
+            decide("https://api.fluxrouter.ai:8443/v1", None),
+            Err(NotTrusted)
+        );
         // a base with userinfo admits nothing
-        assert_eq!(decide("https://proxy.example.test/v1", Some("https://u@proxy.example.test")), Err(NotTrusted));
+        assert_eq!(
+            decide(
+                "https://proxy.example.test/v1",
+                Some("https://u@proxy.example.test")
+            ),
+            Err(NotTrusted)
+        );
         assert_eq!(decide("not a url", None), Err(Unparseable));
     }
 
     #[test]
     fn the_refusal_names_the_origin_and_the_remedy_and_never_the_path() {
-        let refused = session_may_reach_service(
-            "http://127.0.0.1:9/v1/feedback?token=secret",
-            None,
-            |_| false,
-        )
-        .unwrap_err();
+        let refused =
+            session_may_reach_service("http://127.0.0.1:9/v1/feedback?token=secret", None, |_| {
+                false
+            })
+            .unwrap_err();
         let text = refused.to_string();
         assert!(text.contains("http://127.0.0.1:9"), "{text}");
         assert!(text.contains("The request was not made"), "{text}");
-        assert!(text.contains("[endpoints].cli_chat_proxy_base_url"), "{text}");
+        assert!(
+            text.contains("[endpoints].cli_chat_proxy_base_url"),
+            "{text}"
+        );
         assert!(!text.contains("secret") && !text.contains("/v1"), "{text}");
         assert_eq!(refused.reason_label(), "cleartext");
     }

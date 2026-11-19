@@ -84,7 +84,8 @@ mod test {
 
     #[ctor::ctor]
     fn init() {
-        let filter = tracing_subscriber::filter::EnvFilter::from_default_env().add_directive(LevelFilter::DEBUG.into());
+        let filter = tracing_subscriber::filter::EnvFilter::from_default_env()
+            .add_directive(LevelFilter::DEBUG.into());
         let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     }
 

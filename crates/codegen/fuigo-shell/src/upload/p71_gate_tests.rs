@@ -60,13 +60,22 @@ where
     let third_party = RecordingEndpoint::third_party().await;
     run(third_party.proxy_base_url()).await;
     third_party.settle(SETTLE).await;
-    assert_eq!(third_party.connections(), 0, "{path}: a connection reached the third-party proxy");
-    assert!(third_party.received().is_empty(), "{path}: bytes reached the third-party proxy");
+    assert_eq!(
+        third_party.connections(),
+        0,
+        "{path}: a connection reached the third-party proxy"
+    );
+    assert!(
+        third_party.received().is_empty(),
+        "{path}: bytes reached the third-party proxy"
+    );
 
     let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
     run(fluxrouter_class.proxy_base_url()).await;
     assert!(
-        fluxrouter_class.wait_for_request(std::time::Duration::from_secs(5)).await,
+        fluxrouter_class
+            .wait_for_request(std::time::Duration::from_secs(5))
+            .await,
         "{path}: nothing reached the FluxRouter-class proxy (positive control)"
     );
     assert!(
@@ -85,9 +94,13 @@ async fn tool_definitions_trace_is_gated() {
         serde_json::json!({"type": "object"}),
     )];
     let tools = &tools;
-    assert_gated("tool_definitions.json", b"P71-TOOLDEF-MARKER reads /home/rowan/work", |base| async move {
-        super::trace::upload_tool_definitions(config_for(&base), None, tools, None).await;
-    })
+    assert_gated(
+        "tool_definitions.json",
+        b"P71-TOOLDEF-MARKER reads /home/rowan/work",
+        |base| async move {
+            super::trace::upload_tool_definitions(config_for(&base), None, tools, None).await;
+        },
+    )
     .await;
 }
 
@@ -98,7 +111,8 @@ async fn tool_definitions_trace_is_gated() {
 async fn share_bundle_is_gated() {
     let put = format!("PUT {}", fuigo_file_utils::gate_testkit::SIGNED_PUT_PATH);
     assert_gated("share bundle", put.as_bytes(), |base| async move {
-        crate::extensions::share::upload_share_data_to_gcs("sess-1", &[], &config_for(&base), None).await;
+        crate::extensions::share::upload_share_data_to_gcs("sess-1", &[], &config_for(&base), None)
+            .await;
     })
     .await;
     let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
@@ -109,21 +123,31 @@ async fn share_bundle_is_gated() {
         None,
     )
     .await;
-    assert!(fluxrouter_class.received_contains(b"share/sess-1_"), "the object path names the share bundle");
-    assert!(fluxrouter_class.received_contains(b"\r\n\r\n[]"), "the bundle body was not PUT");
+    assert!(
+        fluxrouter_class.received_contains(b"share/sess-1_"),
+        "the object path names the share bundle"
+    );
+    assert!(
+        fluxrouter_class.received_contains(b"\r\n\r\n[]"),
+        "the bundle body was not PUT"
+    );
 }
 
 #[tokio::test]
 async fn auth_diagnostics_body_and_object_path_are_gated() {
-    assert_gated("auth-diagnostics", b"P71-DIAG-MARKER user-123", |base| async move {
-        super::gcs::upload_to_auth_diagnostics(
-            b"P71-DIAG-MARKER user-123",
-            "user-123",
-            &method_for(&base),
-            api_key_manager(),
-        )
-        .await;
-    })
+    assert_gated(
+        "auth-diagnostics",
+        b"P71-DIAG-MARKER user-123",
+        |base| async move {
+            super::gcs::upload_to_auth_diagnostics(
+                b"P71-DIAG-MARKER user-123",
+                "user-123",
+                &method_for(&base),
+                api_key_manager(),
+            )
+            .await;
+        },
+    )
     .await;
     // The object path names the account; the class 3 mock above received no connection at all, so
     // neither the body nor the path (an `X-Storage-Path` header) left the machine.
@@ -165,8 +189,13 @@ async fn subagent_metadata_is_gated() {
     assert_gated("subagent.json", b"P71-SUBAGENT-MARKER", |base| {
         let metadata = metadata.clone();
         async move {
-            super::trace::upload_subagent_metadata(&metadata, "gs://unused", method_for(&base), api_key_manager())
-                .await;
+            super::trace::upload_subagent_metadata(
+                &metadata,
+                "gs://unused",
+                method_for(&base),
+                api_key_manager(),
+            )
+            .await;
         }
     })
     .await;
@@ -178,16 +207,21 @@ async fn subagent_metadata_is_gated() {
 #[tokio::test]
 async fn review_comment_records_are_gated() {
     for event in ["create", "delete"] {
-        assert_gated("review comment record", b"P71-REVIEW-MARKER", move |base| async move {
-            crate::extensions::feedback::upload_review_record(
-                config_for(&base),
-                None,
-                "sess-1/comments/c-1.json".to_string(),
-                br#"{"event":"x","citation":"P71-REVIEW-MARKER /home/rowan/work/src/lib.rs"}"#.to_vec(),
-                event,
-            )
-            .await;
-        })
+        assert_gated(
+            "review comment record",
+            b"P71-REVIEW-MARKER",
+            move |base| async move {
+                crate::extensions::feedback::upload_review_record(
+                    config_for(&base),
+                    None,
+                    "sess-1/comments/c-1.json".to_string(),
+                    br#"{"event":"x","citation":"P71-REVIEW-MARKER /home/rowan/work/src/lib.rs"}"#
+                        .to_vec(),
+                    event,
+                )
+                .await;
+            },
+        )
         .await;
     }
 }
@@ -197,7 +231,11 @@ async fn review_comment_records_are_gated() {
 #[tokio::test]
 async fn feedback_archive_is_gated_and_its_notice_promises_no_bucket() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("events.jsonl"), b"P71-FEEDBACK-MARKER user-123\n").unwrap();
+    std::fs::write(
+        dir.path().join("events.jsonl"),
+        b"P71-FEEDBACK-MARKER user-123\n",
+    )
+    .unwrap();
 
     let third_party = RecordingEndpoint::third_party().await;
     let err = crate::extensions::feedback::send_feedback_archive(
@@ -210,11 +248,21 @@ async fn feedback_archive_is_gated_and_its_notice_promises_no_bucket() {
     .expect_err("a third-party proxy must not receive the feedback archive");
     assert!(format!("{err:?}").contains("withheld"), "{err:?}");
     third_party.settle(SETTLE).await;
-    assert_eq!(third_party.connections(), 0, "the feedback archive reached a third-party proxy");
+    assert_eq!(
+        third_party.connections(),
+        0,
+        "the feedback archive reached a third-party proxy"
+    );
     let notices = fuigo_file_utils::destination_gate::withheld_notices();
-    assert!(notices.iter().any(|n| n == fuigo_file_utils::destination_gate::FEEDBACK_WITHHELD_NOTICE));
     assert!(
-        !fuigo_file_utils::destination_gate::FEEDBACK_WITHHELD_NOTICE.to_lowercase().contains("bucket"),
+        notices
+            .iter()
+            .any(|n| n == fuigo_file_utils::destination_gate::FEEDBACK_WITHHELD_NOTICE)
+    );
+    assert!(
+        !fuigo_file_utils::destination_gate::FEEDBACK_WITHHELD_NOTICE
+            .to_lowercase()
+            .contains("bucket"),
         "the feedback archive has no bucket alternative"
     );
 
@@ -238,9 +286,12 @@ async fn feedback_archive_is_gated_and_its_notice_promises_no_bucket() {
         .expect("a request with a body");
     assert_eq!(&body[..2], &[0x1f, 0x8b], "the body is not a gzip archive");
     let mut unpacked = Vec::new();
-    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(body), &mut unpacked).expect("gunzip the received body");
+    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(body), &mut unpacked)
+        .expect("gunzip the received body");
     assert!(
-        unpacked.windows(28).any(|w| w == b"P71-FEEDBACK-MARKER user-123"),
+        unpacked
+            .windows(28)
+            .any(|w| w == b"P71-FEEDBACK-MARKER user-123"),
         "the received archive does not hold the session's events.jsonl"
     );
 }
@@ -249,8 +300,13 @@ async fn feedback_archive_is_gated_and_its_notice_promises_no_bucket() {
 /// `fuigo trace` does not back off and retry a destination that cannot change.
 #[test]
 fn a_withheld_upload_is_a_destination_refusal() {
-    let err = fuigo_file_utils::destination_gate::gate_proxy_url("https://third.example/v1", "x").unwrap_err();
+    let err = fuigo_file_utils::destination_gate::gate_proxy_url("https://third.example/v1", "x")
+        .unwrap_err();
     assert!(super::gcs::is_destination_refusal(&err));
-    assert!(super::gcs::is_destination_refusal(&err.context("Upload failed")));
-    assert!(!super::gcs::is_destination_refusal(&anyhow::anyhow!("network down")));
+    assert!(super::gcs::is_destination_refusal(
+        &err.context("Upload failed")
+    ));
+    assert!(!super::gcs::is_destination_refusal(&anyhow::anyhow!(
+        "network down"
+    )));
 }

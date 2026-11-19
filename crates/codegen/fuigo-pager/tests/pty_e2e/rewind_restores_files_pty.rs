@@ -68,7 +68,10 @@ async fn session_with_one_agent_edit() -> (PtyHarness, ContentController, PathBu
         .wait_for_turn_idle(Duration::from_secs(15))
         .expect("turn idle");
     let text = read_fixture(&abs);
-    assert!(text.contains(EDITED), "the agent's edit must be on disk, got {text:?}");
+    assert!(
+        text.contains(EDITED),
+        "the agent's edit must be on disk, got {text:?}"
+    );
     (harness, content, abs)
 }
 
@@ -90,7 +93,9 @@ async fn open_rewind_confirm(harness: &mut PtyHarness) {
 async fn rewind_conversation_and_files_restores_the_edited_file() {
     let (mut harness, _content, abs) = session_with_one_agent_edit().await;
     open_rewind_confirm(&mut harness).await;
-    harness.inject_keys(b"y").expect("choose conversation and files");
+    harness
+        .inject_keys(b"y")
+        .expect("choose conversation and files");
     let text = wait_for_fixture(&mut harness, &abs, 30, |t| t.contains(ORIGINAL));
     assert!(
         text.contains(ORIGINAL) && !text.contains(EDITED),
@@ -101,8 +106,17 @@ async fn rewind_conversation_and_files_restores_the_edited_file() {
     // Edit block of the agent turn, so wait for the real event: the rewind result message naming the reverted file.
     harness
         .wait_for_text("Reverted conversation and 1 file", Duration::from_secs(15))
-        .unwrap_or_else(|_| panic!("the rewind result must be reported:\n{}", harness.screen_contents()));
-    assert!(harness.contains_text(FIXTURE), "the restored file must be named:\n{}", harness.screen_contents());
+        .unwrap_or_else(|_| {
+            panic!(
+                "the rewind result must be reported:\n{}",
+                harness.screen_contents()
+            )
+        });
+    assert!(
+        harness.contains_text(FIXTURE),
+        "the restored file must be named:\n{}",
+        harness.screen_contents()
+    );
     harness.quit().expect("clean quit");
 }
 
@@ -133,17 +147,31 @@ async fn rewind_reports_a_conflicting_file_and_does_not_overwrite_it() {
     let external = format!("{EDITED}\nEXTERNAL_EDIT\n");
     std::fs::write(&abs, &external).expect("external edit");
     open_rewind_confirm(&mut harness).await;
-    harness.inject_keys(b"y").expect("choose conversation and files");
+    harness
+        .inject_keys(b"y")
+        .expect("choose conversation and files");
     harness
         .wait_for_text("changed outside Fuigo", Duration::from_secs(30))
         .unwrap_or_else(|_| panic!("conflict not reported:\n{}", harness.screen_contents()));
-    assert!(harness.contains_text(FIXTURE), "{}", harness.screen_contents());
+    assert!(
+        harness.contains_text(FIXTURE),
+        "{}",
+        harness.screen_contents()
+    );
     harness.update(Duration::from_millis(500));
-    assert_eq!(read_fixture(&abs), external, "a conflicting file must not be overwritten unasked");
+    assert_eq!(
+        read_fixture(&abs),
+        external,
+        "a conflicting file must not be overwritten unasked"
+    );
     // Cancel: still untouched.
     harness.inject_keys(b"n").expect("cancel");
     harness.update(Duration::from_millis(500));
-    assert_eq!(read_fixture(&abs), external, "cancel must leave the file alone");
+    assert_eq!(
+        read_fixture(&abs),
+        external,
+        "cancel must leave the file alone"
+    );
     // Ask again and overwrite explicitly.
     open_rewind_confirm(&mut harness).await;
     harness.inject_keys(b"y").expect("again");
@@ -152,6 +180,9 @@ async fn rewind_reports_a_conflicting_file_and_does_not_overwrite_it() {
         .expect("conflict reported again");
     harness.inject_keys(b"o").expect("overwrite");
     let text = wait_for_fixture(&mut harness, &abs, 30, |t| t.contains(ORIGINAL));
-    assert!(text.contains(ORIGINAL), "explicit overwrite must restore, got {text:?}");
+    assert!(
+        text.contains(ORIGINAL),
+        "explicit overwrite must restore, got {text:?}"
+    );
     harness.quit().expect("clean quit");
 }

@@ -14,17 +14,17 @@ pub mod error;
 mod external_auth;
 mod flow;
 mod jwt;
+pub mod key_models;
 pub(crate) mod manager;
 mod model;
 pub mod oidc;
-pub mod key_models;
-pub mod provider_status;
+#[cfg(test)]
+pub(crate) mod p47_service_wire_tests;
 mod pre_tui;
+pub mod provider_status;
 pub(crate) mod recovery;
 pub(crate) mod refresh;
 pub(crate) mod session_delivery;
-#[cfg(test)]
-pub(crate) mod p47_service_wire_tests;
 pub(crate) mod single_flight;
 mod storage;
 mod token_output;

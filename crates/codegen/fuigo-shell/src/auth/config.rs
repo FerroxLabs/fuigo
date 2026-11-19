@@ -107,7 +107,10 @@ impl std::fmt::Debug for FuigoComConfig {
             .field("token_header", token_header)
             .field("oidc", oidc)
             .field("oauth2", oauth2)
-            .field("auth_provider_command", &auth_provider_command.as_ref().map(|_| "<redacted>"))
+            .field(
+                "auth_provider_command",
+                &auth_provider_command.as_ref().map(|_| "<redacted>"),
+            )
             .field("auth_provider_label", auth_provider_label)
             .field("auth_token_ttl", auth_token_ttl)
             .field("disable_api_key_auth", disable_api_key_auth)

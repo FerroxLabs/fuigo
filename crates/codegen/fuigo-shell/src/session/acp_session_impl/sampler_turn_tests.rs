@@ -304,7 +304,15 @@ async fn busyloop_terminal_gate_blocks_every_late_model_dispatch() {
         model: model.into(),
         api_key: Some("fixture-dummy".into()),
         api_backend: ApiBackend::Responses,
-        dispatch_gate: Some(std::sync::Arc::new(super::ParkGate::new(sid.clone(), if side { crate::session::acp_session::CallRole::Side } else { crate::session::acp_session::CallRole::Main }, None))),
+        dispatch_gate: Some(std::sync::Arc::new(super::ParkGate::new(
+            sid.clone(),
+            if side {
+                crate::session::acp_session::CallRole::Side
+            } else {
+                crate::session::acp_session::CallRole::Main
+            },
+            None,
+        ))),
         ..Default::default()
     };
     server.enqueue_response(
@@ -371,7 +379,15 @@ async fn busyloop_side_refusal_never_terminates_main_prompt() {
             model: if side { "flux-fast" } else { "flux-auto" }.into(),
             api_key: Some("fixture-dummy".into()),
             api_backend: fuigo_sampler::ApiBackend::Responses,
-            dispatch_gate: Some(std::sync::Arc::new(super::ParkGate::new(sid.clone(), if side { crate::session::acp_session::CallRole::Side } else { crate::session::acp_session::CallRole::Main }, None))),
+            dispatch_gate: Some(std::sync::Arc::new(super::ParkGate::new(
+                sid.clone(),
+                if side {
+                    crate::session::acp_session::CallRole::Side
+                } else {
+                    crate::session::acp_session::CallRole::Main
+                },
+                None,
+            ))),
             ..Default::default()
         })
         .unwrap();
@@ -396,27 +412,41 @@ async fn busyloop_side_refusal_never_terminates_main_prompt() {
 #[test]
 fn r2_park_gate_literals_have_one_constructor() {
     fn scan(dir: &std::path::Path, hits: &mut Vec<String>) {
+        let pattern = regex::Regex::new(concat!(r"(?:\b|::)", "ParkGate", r"\s*\{")).unwrap();
         for e in std::fs::read_dir(dir).unwrap() {
             let p = e.unwrap().path();
-            if p.is_dir() { scan(&p, hits); }
-            else if p.extension().is_some_and(|e| e == "rs") {
+            if p.is_dir() {
+                scan(&p, hits);
+            } else if p.extension().is_some_and(|e| e == "rs") {
                 let text = std::fs::read_to_string(&p).unwrap();
-                let pattern = regex::Regex::new(concat!(r"(?:\b|::)", "ParkGate", r"\s*\{")).unwrap();
                 for m in pattern.find_iter(&text) {
                     let prefix = &text[..m.start()];
                     let line = prefix.rsplit('\n').next().unwrap();
-                    if line.contains("struct ") || line.contains("impl ") { continue; }
+                    if line.contains("struct ") || line.contains("impl ") {
+                        continue;
+                    }
                     if p.file_name().unwrap() == "sampler_turn.rs" {
                         let implementation = text.find("impl ParkGate {").unwrap();
-                        let constructor = implementation + text[implementation..].find("fn new(").unwrap();
+                        let constructor =
+                            implementation + text[implementation..].find("fn new(").unwrap();
                         let body = constructor + text[constructor..].find('{').unwrap();
                         let mut depth = 0;
-                        let end = text[body..].char_indices().find_map(|(offset, ch)| {
-                            if ch == '{' { depth += 1; }
-                            if ch == '}' { depth -= 1; }
-                            (depth == 0).then_some(body + offset)
-                        }).unwrap();
-                        assert!((body..end).contains(&m.start()), "ParkGate literal outside its call-role constructor");
+                        let end = text[body..]
+                            .char_indices()
+                            .find_map(|(offset, ch)| {
+                                if ch == '{' {
+                                    depth += 1;
+                                }
+                                if ch == '}' {
+                                    depth -= 1;
+                                }
+                                (depth == 0).then_some(body + offset)
+                            })
+                            .unwrap();
+                        assert!(
+                            (body..end).contains(&m.start()),
+                            "ParkGate literal outside its call-role constructor"
+                        );
                     }
                     hits.push(p.file_name().unwrap().to_string_lossy().to_string());
                 }
@@ -424,8 +454,15 @@ fn r2_park_gate_literals_have_one_constructor() {
         }
     }
     let mut hits = Vec::new();
-    scan(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut hits);
-    assert_eq!(hits, vec!["sampler_turn.rs"], "only the call-role constructor may build the dispatch gate");
+    scan(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut hits,
+    );
+    assert_eq!(
+        hits,
+        vec!["sampler_turn.rs"],
+        "only the call-role constructor may build the dispatch gate"
+    );
 }
 
 /// Production text of a source file: everything before the first `#[cfg(test)]` that gates an INLINE `mod x { .. }`.
@@ -441,26 +478,44 @@ fn production_text(text: &str) -> &str {
     }
     let inline_mod = regex::Regex::new(r"^(pub(\([^)]*\))?\s+)?mod\s+\w+\s*\{").unwrap();
     for (i, line) in lines.iter().enumerate() {
-        if line.trim() != "#[cfg(test)]" { continue; }
-        let item = lines[i + 1..].iter().map(|l| l.trim())
+        if line.trim() != "#[cfg(test)]" {
+            continue;
+        }
+        let item = lines[i + 1..]
+            .iter()
+            .map(|l| l.trim())
             .find(|l| !l.is_empty() && !l.starts_with("#[") && !l.starts_with("//"));
-        if item.is_some_and(|l| inline_mod.is_match(l)) { return &text[..offsets[i]]; }
+        if item.is_some_and(|l| inline_mod.is_match(l)) {
+            return &text[..offsets[i]];
+        }
     }
     text
 }
 
 /// `(model-endpoint literals seen, 1-based lines of those not preceded by a `check_open` in the same function)`.
 fn ungated_model_endpoint_sites(text: &str) -> (usize, Vec<usize>) {
-    let endpoint = regex::Regex::new(r#""[^"]*/(responses|chat/completions|messages)\b[^"]*""#).unwrap();
-    let function = regex::Regex::new(r"^\s*(pub(\([^)]*\))?\s+)?(const\s+)?(async\s+)?(unsafe\s+)?fn\s").unwrap();
+    let endpoint =
+        regex::Regex::new(r#""[^"]*/(responses|chat/completions|messages)\b[^"]*""#).unwrap();
+    let function =
+        regex::Regex::new(r"^\s*(pub(\([^)]*\))?\s+)?(const\s+)?(async\s+)?(unsafe\s+)?fn\s")
+            .unwrap();
     let lines: Vec<&str> = production_text(text).lines().collect();
     let (mut seen, mut offenders) = (0, Vec::new());
     for (i, line) in lines.iter().enumerate() {
-        if line.trim_start().starts_with("//") || !endpoint.is_match(line) { continue; }
+        if line.trim_start().starts_with("//") || !endpoint.is_match(line) {
+            continue;
+        }
         seen += 1;
-        let start = (0..=i).rev().find(|&j| function.is_match(lines[j])).unwrap_or(0);
-        let end = (i + 1..lines.len()).find(|&j| function.is_match(lines[j])).unwrap_or(lines.len());
-        if !lines[start..end].iter().any(|l| l.contains("check_open")) { offenders.push(i + 1); }
+        let start = (0..=i)
+            .rev()
+            .find(|&j| function.is_match(lines[j]))
+            .unwrap_or(0);
+        let end = (i + 1..lines.len())
+            .find(|&j| function.is_match(lines[j]))
+            .unwrap_or(lines.len());
+        if !lines[start..end].iter().any(|l| l.contains("check_open")) {
+            offenders.push(i + 1);
+        }
     }
     (seen, offenders)
 }
@@ -475,28 +530,63 @@ fn r3_model_endpoint_dispatch_sites_consult_the_gate() {
         // Only counts the requests a test server received.
         "fuigo-pager/src/app/leader_cluster/mod.rs",
     ];
-    fn scan(dir: &std::path::Path, root: &std::path::Path, offenders: &mut Vec<String>, seen: &mut usize) {
+    fn scan(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        offenders: &mut Vec<String>,
+        seen: &mut usize,
+    ) {
         for e in std::fs::read_dir(dir).unwrap() {
             let p = e.unwrap().path();
             let name = p.file_name().unwrap().to_string_lossy().to_string();
             if p.is_dir() {
-                if matches!(name.as_str(), "tests" | "examples" | "benches" | "target" | "fuigo-sampler" | "fuigo-test-support" | "fuigo-test-utils") || name.contains("harness") { continue; }
+                if matches!(
+                    name.as_str(),
+                    "tests"
+                        | "examples"
+                        | "benches"
+                        | "target"
+                        | "fuigo-sampler"
+                        | "fuigo-test-support"
+                        | "fuigo-test-utils"
+                ) || name.contains("harness")
+                {
+                    continue;
+                }
                 scan(&p, root, offenders, seen);
-            } else if name.ends_with(".rs") && !name.ends_with("_tests.rs") && !name.ends_with("_test.rs") && name != "tests.rs" {
+            } else if name.ends_with(".rs")
+                && !name.ends_with("_tests.rs")
+                && !name.ends_with("_test.rs")
+                && name != "tests.rs"
+            {
                 let rel = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
-                if ALLOWED_FILES.iter().any(|a| rel.ends_with(a)) { continue; }
-                let (n, lines) = ungated_model_endpoint_sites(&std::fs::read_to_string(&p).unwrap());
+                if ALLOWED_FILES.iter().any(|a| rel.ends_with(a)) {
+                    continue;
+                }
+                let (n, lines) =
+                    ungated_model_endpoint_sites(&std::fs::read_to_string(&p).unwrap());
                 *seen += n;
                 offenders.extend(lines.into_iter().map(|l| format!("{rel}:{l}")));
             }
         }
     }
-    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").canonicalize().unwrap();
+    let crates = dunce::canonicalize(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".."),
+    )
+    .unwrap();
     let mut offenders = Vec::new();
     let mut seen = 0;
     scan(&crates, &crates, &mut offenders, &mut seen);
-    assert!(seen >= 2, "the scan must see the web search request sites; saw {seen}");
-    assert!(offenders.is_empty(), "model-endpoint request built without a dispatch-gate check in the same function: {offenders:?}");
+    assert!(
+        seen >= 2,
+        "the scan must see the web search request sites; saw {seen}"
+    );
+    assert!(
+        offenders.is_empty(),
+        "model-endpoint request built without a dispatch-gate check in the same function: {offenders:?}"
+    );
 }
 
 /// The guard must catch what a lazier scan misses: a planted ungated request after an early `#[cfg(test)] use`,
@@ -504,7 +594,10 @@ fn r3_model_endpoint_dispatch_sites_consult_the_gate() {
 #[test]
 fn r3_dispatch_guard_catches_planted_ungated_requests() {
     let after_cfg_test_use = "#[cfg(test)]\nuse std::fmt;\nfn send(c: &C) {\n    let u = format!(\"{}/responses\", b);\n    c.post(&u);\n}\n";
-    assert_eq!(ungated_model_endpoint_sites(after_cfg_test_use), (1, vec![4]));
+    assert_eq!(
+        ungated_model_endpoint_sites(after_cfg_test_use),
+        (1, vec![4])
+    );
     let restricted = "pub(in crate::x) fn send(c: &C) {\n    let u = format!(\"{}/chat/completions\", b);\n    c.post(&u);\n}\n";
     assert_eq!(ungated_model_endpoint_sites(restricted), (1, vec![2]));
     let super_async = "pub(super) async fn send(c: &C) {\n    let u = \"https://h/v1/messages\";\n}\nconst fn other() {}\n";

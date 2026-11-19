@@ -224,7 +224,9 @@ impl FileSearchState {
         // Advance the stale-result fence past the prior query (see `min_generation`).
         self.min_generation += 1;
         // A different query (or a restarted walk) makes the list on screen the previous answer
-        if self.last_query.as_deref() != Some(query) || matches!(restart, RestartWalk::Restart { .. }) {
+        if self.last_query.as_deref() != Some(query)
+            || matches!(restart, RestartWalk::Restart { .. })
+        {
             self.results_stale = true;
         }
         self.last_query = Some(query.to_owned());
@@ -408,7 +410,10 @@ impl FileSearchState {
 
         if Arc::ptr_eq(&results.topk, &self.results.topk) {
             // The matcher answered the current query with the very list already shown: it is current
-            if self.results_stale && results.generation >= self.min_generation && results.status.done {
+            if self.results_stale
+                && results.generation >= self.min_generation
+                && results.status.done
+            {
                 self.results_stale = false;
             }
             return false;
@@ -635,10 +640,16 @@ mod tests {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             loop {
                 state.poll();
-                if state.selected_result().is_some_and(|r| r.path.to_string().contains(needle)) {
+                if state
+                    .selected_result()
+                    .is_some_and(|r| r.path.to_string().contains(needle))
+                {
                     return;
                 }
-                assert!(std::time::Instant::now() < deadline, "no match for {needle:?} in time");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "no match for {needle:?} in time"
+                );
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         };
@@ -686,10 +697,16 @@ mod tests {
         // `@!` and a typed leading dot both reach hidden files
         assert!(names(&list_outside(root.path(), None, &q, true)).contains(&format!("{q}.secret")));
         let dotted = format!("{q}.se");
-        assert_eq!(names(&list_outside(root.path(), None, &dotted, false)), [format!("{q}.secret")]);
+        assert_eq!(
+            names(&list_outside(root.path(), None, &dotted, false)),
+            [format!("{q}.secret")]
+        );
         // The name typed after the last slash filters
         let filtered = format!("{q}no");
-        assert_eq!(names(&list_outside(root.path(), None, &filtered, false)), [format!("{q}notes.md")]);
+        assert_eq!(
+            names(&list_outside(root.path(), None, &filtered, false)),
+            [format!("{q}notes.md")]
+        );
     }
 
     #[test]

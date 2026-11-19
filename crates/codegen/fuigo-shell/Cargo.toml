@@ -107,7 +107,7 @@ futures-util = { workspace = true }
 urlencoding = { workspace = true }
 gethostname = { workspace = true }
 gcloud-storage = { workspace = true }
-git2 = { version = "0.20", default-features = false, features = [
+git2 = { version = "0.21", default-features = false, features = [
     "vendored-libgit2",
 ] }
 notify = { workspace = true }

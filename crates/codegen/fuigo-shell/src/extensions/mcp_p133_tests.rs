@@ -15,14 +15,34 @@ fn an_upserted_stdio_server_cannot_name_the_saved_key() {
         "env": { "TOKEN": "${FUIGO_API_KEY}", "OTHER": "ok" }
     }));
     let req = untrusted_upsert(req).expect("cleaned");
-    let server = req.config.to_acp_mcp_server(&req.server_name).expect("builds");
-    let acp::McpServer::Stdio(s) = server else { panic!("stdio") };
+    let server = req
+        .config
+        .to_acp_mcp_server(&req.server_name)
+        .expect("builds");
+    let acp::McpServer::Stdio(s) = server else {
+        panic!("stdio")
+    };
     assert_eq!(s.args, vec!["--key=".to_owned(), "--plain".to_owned()]);
-    assert_eq!(s.env.iter().find(|e| e.name == "TOKEN").map(|e| e.value.as_str()), Some(""));
-    assert_eq!(s.env.iter().find(|e| e.name == "OTHER").map(|e| e.value.as_str()), Some("ok"));
+    assert_eq!(
+        s.env
+            .iter()
+            .find(|e| e.name == "TOKEN")
+            .map(|e| e.value.as_str()),
+        Some("")
+    );
+    assert_eq!(
+        s.env
+            .iter()
+            .find(|e| e.name == "OTHER")
+            .map(|e| e.value.as_str()),
+        Some("ok")
+    );
     // What would be persisted holds no reference either.
     let saved = serde_json::to_string(&req.config).unwrap();
-    assert!(!saved.contains("FUIGO_API_KEY"), "the persisted definition would launder the reference: {saved}");
+    assert!(
+        !saved.contains("FUIGO_API_KEY"),
+        "the persisted definition would launder the reference: {saved}"
+    );
 }
 
 #[test]
@@ -33,12 +53,39 @@ fn an_upserted_http_server_cannot_name_the_saved_key() {
         "bearer_token_env_var": "FUIGO_API_KEY"
     }));
     let req = untrusted_upsert(req).expect("cleaned");
-    let acp::McpServer::Http(h) = req.config.to_acp_mcp_server(&req.server_name).expect("builds") else { panic!("http") };
-    assert_eq!(h.headers.iter().find(|x| x.name == "Authorization").map(|x| x.value.as_str()), Some("Bearer "));
-    assert_eq!(h.headers.iter().find(|x| x.name == "X-Plain").map(|x| x.value.as_str()), Some("ok"));
-    assert!(!serde_json::to_string(&req.config).unwrap().contains("FUIGO_API_KEY"));
+    let acp::McpServer::Http(h) = req
+        .config
+        .to_acp_mcp_server(&req.server_name)
+        .expect("builds")
+    else {
+        panic!("http")
+    };
+    assert_eq!(
+        h.headers
+            .iter()
+            .find(|x| x.name == "Authorization")
+            .map(|x| x.value.as_str()),
+        Some("Bearer ")
+    );
+    assert_eq!(
+        h.headers
+            .iter()
+            .find(|x| x.name == "X-Plain")
+            .map(|x| x.value.as_str()),
+        Some("ok")
+    );
+    assert!(
+        !serde_json::to_string(&req.config)
+            .unwrap()
+            .contains("FUIGO_API_KEY")
+    );
     let notes = fuigo_config::key_naming::refusal_notes();
-    assert!(notes.iter().any(|n| n.contains("p133-up-http") && n.contains("FUIGO_API_KEY")), "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("p133-up-http") && n.contains("FUIGO_API_KEY")),
+        "{notes:?}"
+    );
 }
 
 /// A client cannot opt out by sending the provenance mark itself as false, or in as true.
@@ -50,8 +97,20 @@ fn the_client_cannot_clear_the_untrusted_mark() {
     }));
     let req = untrusted_upsert(req).expect("cleaned");
     assert!(req.config.untrusted_source);
-    let acp::McpServer::Stdio(s) = req.config.to_acp_mcp_server(&req.server_name).expect("builds") else { panic!("stdio") };
-    assert_eq!(s.env.iter().find(|e| e.name == "TOKEN").map(|e| e.value.as_str()), Some(""));
+    let acp::McpServer::Stdio(s) = req
+        .config
+        .to_acp_mcp_server(&req.server_name)
+        .expect("builds")
+    else {
+        panic!("stdio")
+    };
+    assert_eq!(
+        s.env
+            .iter()
+            .find(|e| e.name == "TOKEN")
+            .map(|e| e.value.as_str()),
+        Some("")
+    );
 }
 
 /// The control: an upsert that does not name the key is unchanged.
@@ -61,9 +120,24 @@ fn an_upsert_without_a_key_reference_is_unchanged() {
         "session_id": "s", "server_name": "p133-up-plain", "command": "x", "env": { "TOKEN": "${OTHER_TOKEN}" }
     }));
     let req = untrusted_upsert(req).expect("cleaned");
-    assert!(req.config.untrusted_source, "an upsert stays an untrusted source even when it names nothing");
-    let acp::McpServer::Stdio(s) = req.config.to_acp_mcp_server(&req.server_name).expect("builds") else { panic!("stdio") };
-    assert_eq!(s.env.iter().find(|e| e.name == "TOKEN").map(|e| e.value.as_str()), Some("${OTHER_TOKEN}"));
+    assert!(
+        req.config.untrusted_source,
+        "an upsert stays an untrusted source even when it names nothing"
+    );
+    let acp::McpServer::Stdio(s) = req
+        .config
+        .to_acp_mcp_server(&req.server_name)
+        .expect("builds")
+    else {
+        panic!("stdio")
+    };
+    assert_eq!(
+        s.env
+            .iter()
+            .find(|e| e.name == "TOKEN")
+            .map(|e| e.value.as_str()),
+        Some("${OTHER_TOKEN}")
+    );
 }
 
 /// A value that composes a reference only when the config loader expands it must not be persisted: the user config is
@@ -94,11 +168,22 @@ fn an_upsert_cannot_launder_a_composed_reference_into_the_user_config() {
         let mut text = s.clone();
         for _ in 0..4 {
             text = fuigo_config::expand_env_vars_in_string(&text);
-            assert!(fuigo_config::key_naming::refuse_key_references_in_str(&text).is_none(), "{s:?} expands to {text:?}");
+            assert!(
+                fuigo_config::key_naming::refuse_key_references_in_str(&text).is_none(),
+                "{s:?} expands to {text:?}"
+            );
         }
     }
-    assert!(saved.get("bearer_token_env_var").is_none_or(|v| v.is_null()), "{saved}");
-    assert!(strings.iter().any(|s| s == "ok"), "the plain value stays: {strings:?}");
+    assert!(
+        saved
+            .get("bearer_token_env_var")
+            .is_none_or(|v| v.is_null()),
+        "{saved}"
+    );
+    assert!(
+        strings.iter().any(|s| s == "ok"),
+        "the plain value stays: {strings:?}"
+    );
     // Entries of `env` and `headers` are values, never selectors: literal text that merely spells the name stays.
     assert_eq!(saved["env"]["ENV_KEY"], "FUIGO_API_KEY", "{saved}");
 }
@@ -113,11 +198,17 @@ fn an_upserted_header_cannot_launder_a_reference_over_two_expansions() {
     }));
     let req = untrusted_upsert(req).expect("cleaned");
     let saved = serde_json::to_value(&req.config).unwrap();
-    let auth = saved["headers"]["Authorization"].as_str().unwrap_or_default().to_owned();
+    let auth = saved["headers"]["Authorization"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     let mut text = auth.clone();
     for _ in 0..4 {
         text = fuigo_config::expand_env_vars_in_string(&text);
-        assert!(fuigo_config::key_naming::refuse_key_references_in_str(&text).is_none(), "{auth:?} expands to {text:?}");
+        assert!(
+            fuigo_config::key_naming::refuse_key_references_in_str(&text).is_none(),
+            "{auth:?} expands to {text:?}"
+        );
     }
     assert_eq!(saved["headers"]["Env-Key"], "FUIGO_API_KEY", "{saved}");
     assert_eq!(saved["headers"]["X-Plain"], "ok", "{saved}");
@@ -135,17 +226,33 @@ fn an_upserted_definition_stays_untrusted_after_it_is_saved_and_loaded() {
     let req = untrusted_upsert(req).expect("cleaned");
     // What `save_mcp_server_config` writes, and what the loader reads back.
     let written = toml::Value::try_from(&req.config).expect("serializes");
-    assert_eq!(written["__fuigo_untrusted_source"].as_bool(), Some(true), "{written}");
+    assert_eq!(
+        written["__fuigo_untrusted_source"].as_bool(),
+        Some(true),
+        "{written}"
+    );
     let mut loaded: crate::util::config::McpServerConfig = written.try_into().expect("loads");
     assert!(loaded.untrusted_source);
     // After a restart the expansion yields a reference; the final gate removes it.
-    if let crate::util::config::McpServerTransportConfig::StreamableHttp { headers, .. } = &mut loaded.transport {
-        headers.get_or_insert_with(Default::default).insert("Authorization".into(), "Bearer ${FUIGO_API_KEY}".into());
+    if let crate::util::config::McpServerTransportConfig::StreamableHttp { headers, .. } =
+        &mut loaded.transport
+    {
+        headers
+            .get_or_insert_with(Default::default)
+            .insert("Authorization".into(), "Bearer ${FUIGO_API_KEY}".into());
     } else {
         panic!("http transport");
     }
-    let acp::McpServer::Http(h) = loaded.to_acp_mcp_server("p133-up-saved").expect("builds") else { panic!("http") };
-    assert_eq!(h.headers.iter().find(|x| x.name == "Authorization").map(|x| x.value.as_str()), Some("Bearer "));
+    let acp::McpServer::Http(h) = loaded.to_acp_mcp_server("p133-up-saved").expect("builds") else {
+        panic!("http")
+    };
+    assert_eq!(
+        h.headers
+            .iter()
+            .find(|x| x.name == "Authorization")
+            .map(|x| x.value.as_str()),
+        Some("Bearer ")
+    );
 }
 
 /// P152 (e2e lane B #4): the note for a server added through `/mcps` (or any ACP client's `mcp/upsert`) must fit that
@@ -168,7 +275,10 @@ fn p152_the_note_for_an_added_server_fits_its_source() {
         !note.contains("Move this entry into"),
         "an added server is already in config.toml; the note must not say to move it there: {note}"
     );
-    assert!(note.contains("/mcps"), "the note names how the server was added: {note}");
+    assert!(
+        note.contains("/mcps"),
+        "the note names how the server was added: {note}"
+    );
     assert!(
         note.contains("__fuigo_untrusted_source"),
         "the note says what keeps the saved entry untrusted: {note}"
@@ -187,7 +297,15 @@ fn an_upserted_bearer_token_file_is_not_persisted() {
     assert_eq!(req.config.bearer_token_file(), None);
     let written = toml::Value::try_from(&req.config).expect("serializes");
     assert!(written.get("bearer_token_file").is_none(), "{written}");
-    assert!(!written.to_string().contains("/home/u/.secrets"), "{written}");
+    assert!(
+        !written.to_string().contains("/home/u/.secrets"),
+        "{written}"
+    );
     let notes = fuigo_config::key_naming::refusal_notes();
-    assert!(notes.iter().any(|n| n.contains("`b266c-up-file`") && n.contains("bearer_token_file ignored")), "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("`b266c-up-file`") && n.contains("bearer_token_file ignored")),
+        "{notes:?}"
+    );
 }

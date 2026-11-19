@@ -130,7 +130,13 @@ async fn a_denied_headless_run_exits_three_and_says_why() {
     // No --yolo: headless mode has no operator, so the request is refused.
     let result = run_headless(
         &fx.server,
-        &["-p", "edit the fixture", "--trust", "--output-format", "json"],
+        &[
+            "-p",
+            "edit the fixture",
+            "--trust",
+            "--output-format",
+            "json",
+        ],
         fx.sandbox.workspace(),
     )
     .await;
@@ -157,16 +163,29 @@ async fn a_denied_headless_run_exits_three_and_says_why() {
         result.stderr
     );
     // One line per refusal, carrying the per-tool remedy: not a "refused" line followed by a "blocked" one.
-    let fuigo_lines: Vec<&str> = result.stderr.lines().filter(|l| l.starts_with("fuigo: ")).collect();
-    assert_eq!(fuigo_lines.len(), 1, "exactly one stderr line per refusal: {}", result.stderr);
+    let fuigo_lines: Vec<&str> = result
+        .stderr
+        .lines()
+        .filter(|l| l.starts_with("fuigo: "))
+        .collect();
+    assert_eq!(
+        fuigo_lines.len(),
+        1,
+        "exactly one stderr line per refusal: {}",
+        result.stderr
+    );
     assert!(
         fuigo_lines[0].contains("acceptEdits") && fuigo_lines[0].contains("refused"),
         "the one line carries the edit remedy: {}",
         fuigo_lines[0]
     );
     // D.2.2: the reason is on the document a machine reads, not only in the prose.
-    let doc: serde_json::Value = serde_json::from_str(result.stdout.trim())
-        .unwrap_or_else(|e| panic!("stdout must stay exactly one JSON value ({e}): {}", result.stdout));
+    let doc: serde_json::Value = serde_json::from_str(result.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout must stay exactly one JSON value ({e}): {}",
+            result.stdout
+        )
+    });
     assert_eq!(doc["stopReason"], "cancelled", "document: {doc}");
     assert_eq!(
         doc["permissionDenied"]["rule"], "headless_never_approves",
@@ -310,7 +329,10 @@ async fn accept_edits_still_refuses_a_shell_command_headless() {
         result.stderr,
         fx.server.request_log_summary()
     );
-    assert!(victim.join("keep.txt").exists(), "a refused command must not run");
+    assert!(
+        victim.join("keep.txt").exists(),
+        "a refused command must not run"
+    );
     assert!(
         result.stderr.contains("headless_never_approves"),
         "stderr: {}",
@@ -369,15 +391,29 @@ async fn an_edit_refusal_remedy_names_accept_edits_not_redirects() {
 
     let result = run_headless(
         &fx.server,
-        &["-p", "edit the fixture", "--trust", "--output-format", "json"],
+        &[
+            "-p",
+            "edit the fixture",
+            "--trust",
+            "--output-format",
+            "json",
+        ],
         fx.sandbox.workspace(),
     )
     .await;
 
     assert_eq!(result.status.code(), Some(3), "stderr:\n{}", result.stderr);
-    let lines: Vec<&str> = result.stderr.lines().filter(|l| l.starts_with("fuigo: ")).collect();
+    let lines: Vec<&str> = result
+        .stderr
+        .lines()
+        .filter(|l| l.starts_with("fuigo: "))
+        .collect();
     assert_eq!(lines.len(), 1, "exactly one stderr line: {}", result.stderr);
-    assert!(lines[0].starts_with("fuigo: refused"), "the one line is the refusal: {}", lines[0]);
+    assert!(
+        lines[0].starts_with("fuigo: refused"),
+        "the one line is the refusal: {}",
+        lines[0]
+    );
     assert!(
         lines[0].contains("acceptEdits"),
         "an edit refusal's remedy names acceptEdits: {}",

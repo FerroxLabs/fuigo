@@ -3726,9 +3726,15 @@ mod tool_density_tests {
         let recap_mode = state.get_by_id(msg).unwrap().display_mode();
         state.set_tool_density(false);
         assert_eq!(state.tool_density(), Some(DisplayMode::Expanded));
-        assert_eq!(state.get_by_id(first).unwrap().display_mode(), DisplayMode::Expanded);
+        assert_eq!(
+            state.get_by_id(first).unwrap().display_mode(),
+            DisplayMode::Expanded
+        );
         state.set_tool_density(true);
-        assert_eq!(state.get_by_id(first).unwrap().display_mode(), DisplayMode::Collapsed);
+        assert_eq!(
+            state.get_by_id(first).unwrap().display_mode(),
+            DisplayMode::Collapsed
+        );
         let later = state.push_block(exec_block());
         assert_eq!(
             state.get_by_id(later).unwrap().display_mode(),

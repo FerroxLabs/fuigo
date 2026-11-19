@@ -1018,7 +1018,11 @@ async fn u38_f6_rate_limit_resend_announces_the_rate_limit_ceiling() {
     let announced: Vec<(u32, u32)> = events
         .iter()
         .filter_map(|event| match event {
-            SamplingEvent::Retrying { attempt, max_retries, .. } => Some((*attempt, *max_retries)),
+            SamplingEvent::Retrying {
+                attempt,
+                max_retries,
+                ..
+            } => Some((*attempt, *max_retries)),
             _ => None,
         })
         .collect();
@@ -1062,7 +1066,11 @@ async fn u38_f6_a_failed_request_reports_every_wire_attempt() {
     server.shutdown();
 
     assert!(collected.result.is_err());
-    assert_eq!(counter.load(Ordering::SeqCst), 3, "the ceiling still stops at three calls");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        3,
+        "the ceiling still stops at three calls"
+    );
     assert_eq!(collected.attempts, 3);
 }
 
@@ -1907,13 +1915,25 @@ async fn a_subagent_retry_whose_backoff_ends_during_a_hold_park_sends_nothing() 
     .expect("retrying after the first failure");
     gate.send(false).unwrap(); // park starts while the sampler is in backoff
     tokio::time::sleep(Duration::from_secs(6)).await; // the backoff (about 2s, jittered) ends during the park
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "the retry was sent while parked");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "the retry was sent while parked"
+    );
 
     gate.send(true).unwrap(); // unpark
     let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
     server.shutdown();
-    assert!(matches!(events.last(), Some(SamplingEvent::Completed { .. })), "{:?}", events.last());
-    assert_eq!(counter.load(Ordering::SeqCst), 2, "exactly one request after the unpark");
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "{:?}",
+        events.last()
+    );
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "exactly one request after the unpark"
+    );
 }
 
 /// A side call (a plain `conversation_collect`, no actor, no retry loop) reaches the dispatch point even if it got
@@ -1926,11 +1946,18 @@ async fn a_side_call_past_execution_admission_is_held_at_dispatch() {
     let client = fuigo_sampler::SamplingClient::new(cfg).expect("client");
     let call = tokio::spawn(async move { client.conversation_collect(user_request("hi")).await });
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(counter.load(Ordering::SeqCst), 0, "a side call dispatched while the gate was closed");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "a side call dispatched while the gate was closed"
+    );
     assert!(!call.is_finished());
 
     gate.send(true).unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(10), call).await.expect("finishes").expect("join");
+    let result = tokio::time::timeout(Duration::from_secs(10), call)
+        .await
+        .expect("finishes")
+        .expect("join");
     server.shutdown();
     result.expect("collect after unpark");
     assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -1961,7 +1988,11 @@ async fn a_cancelled_call_waiting_at_the_gate_ends_without_dispatch() {
     }
     gate.send(true).unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(counter.load(Ordering::SeqCst), 0, "a cancelled call dispatched after the unpark");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "a cancelled call dispatched after the unpark"
+    );
     assert_eq!(handle.active_count().await, 0);
     server.shutdown();
 }
@@ -2009,7 +2040,11 @@ async fn a_call_waiting_at_the_gate_is_not_admitted_until_it_dispatches() {
     let rid = RequestId::from("req-admit-cancel");
     handle.submit(rid.clone(), cancelled);
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(admission.admits.load(Ordering::SeqCst), 0, "admitted while held at the gate");
+    assert_eq!(
+        admission.admits.load(Ordering::SeqCst),
+        0,
+        "admitted while held at the gate"
+    );
     handle.cancel(rid.clone());
     let _ = await_event_matching(
         &mut event_rx,
@@ -2018,18 +2053,34 @@ async fn a_call_waiting_at_the_gate_is_not_admitted_until_it_dispatches() {
     )
     .await
     .expect("Failed event after cancel while gated");
-    assert_eq!(admission.admits.load(Ordering::SeqCst), 0, "a cancel at the gate consumed a call slot");
+    assert_eq!(
+        admission.admits.load(Ordering::SeqCst),
+        0,
+        "a cancel at the gate consumed a call slot"
+    );
 
     let mut served = user_request("serve me");
     served.execution_admission = Some(admission.clone());
     handle.submit(RequestId::from("req-admit-serve"), served);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(admission.admits.load(Ordering::SeqCst), 0, "admitted while the gate is closed");
+    assert_eq!(
+        admission.admits.load(Ordering::SeqCst),
+        0,
+        "admitted while the gate is closed"
+    );
     gate.send(true).unwrap();
     let events = drain_until_terminal(&mut event_rx, Duration::from_secs(10)).await;
     server.shutdown();
-    assert!(matches!(events.last(), Some(SamplingEvent::Completed { .. })), "{:?}", events.last());
-    assert_eq!(admission.admits.load(Ordering::SeqCst), 1, "admitted exactly once, after the gate");
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "{:?}",
+        events.last()
+    );
+    assert_eq!(
+        admission.admits.load(Ordering::SeqCst),
+        1,
+        "admitted exactly once, after the gate"
+    );
 }
 
 /// An admission whose `admit` awaits (a durable write) while the gate closes; counts refunds.
@@ -2091,13 +2142,25 @@ async fn a_call_inside_the_admission_write_when_the_gate_closes_sends_nothing() 
     gate.send(false).unwrap(); // the park reaches Parked while the write is in flight
     admission.release.notify_one();
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(counter.load(Ordering::SeqCst), 0, "a request left after the park was acknowledged");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "a request left after the park was acknowledged"
+    );
     gate.send(true).unwrap();
     let events = drain_until_terminal(&mut event_rx, Duration::from_secs(10)).await;
     server.shutdown();
-    assert!(matches!(events.last(), Some(SamplingEvent::Completed { .. })), "{:?}", events.last());
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "{:?}",
+        events.last()
+    );
     assert_eq!(counter.load(Ordering::SeqCst), 1);
-    assert_eq!(admission.refunds.load(Ordering::SeqCst), 0, "a dispatched attempt must not be refunded");
+    assert_eq!(
+        admission.refunds.load(Ordering::SeqCst),
+        0,
+        "a dispatched attempt must not be refunded"
+    );
 }
 
 /// A call cancelled at the second gate (admitted, never sent) gives its call slot back.
@@ -2118,12 +2181,20 @@ async fn a_call_cancelled_at_the_second_gate_refunds_its_slot() {
     admission.release.notify_one();
     tokio::time::sleep(Duration::from_millis(300)).await;
     handle.cancel(rid);
-    let _ = await_event_matching(&mut event_rx, |e| matches!(e, SamplingEvent::Failed { .. }), Duration::from_secs(5))
-        .await
-        .expect("Failed event after cancel at the second gate");
+    let _ = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, SamplingEvent::Failed { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("Failed event after cancel at the second gate");
     tokio::time::sleep(Duration::from_millis(300)).await;
     server.shutdown();
     assert_eq!(counter.load(Ordering::SeqCst), 0);
     assert_eq!(admission.admits.load(Ordering::SeqCst), 1);
-    assert_eq!(admission.refunds.load(Ordering::SeqCst), 1, "the cancelled, never-sent attempt kept its slot");
+    assert_eq!(
+        admission.refunds.load(Ordering::SeqCst),
+        1,
+        "the cancelled, never-sent attempt kept its slot"
+    );
 }

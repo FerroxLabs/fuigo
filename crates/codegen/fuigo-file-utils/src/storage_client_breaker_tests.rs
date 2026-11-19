@@ -2,13 +2,13 @@
 
 use super::{HttpUploadError, StorageClient, storage_breaker_config};
 use axum::{Router, response::IntoResponse, routing::post};
+use fuigo_circuit_breaker::{BreakerState, Observer, Outcome};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
-use fuigo_circuit_breaker::{BreakerState, Observer, Outcome};
 
 /// Read the threshold straight from the preset so the test stays
 /// in lock-step with `BreakerConfig::client()` if it ever changes.

@@ -70,7 +70,9 @@ impl SessionActor {
     async fn generate_turn_summary(&self, prompt_id: &str, generation: u64) {
         use crate::session::helpers::turn_summary;
 
-        let conversation = crate::session::model_facing_reads::turn_summary_conversation(&self.chat_state_handle).await;
+        let conversation =
+            crate::session::model_facing_reads::turn_summary_conversation(&self.chat_state_handle)
+                .await;
         let Some(anchor) = turn_summary::last_user_anchor(&conversation) else {
             return;
         };

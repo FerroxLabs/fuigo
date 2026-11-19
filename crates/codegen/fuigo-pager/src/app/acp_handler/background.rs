@@ -641,7 +641,11 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
             // (`Backgrounded` and this handler both stamp "now", which reads about 0 s)
             if meta.is_replay {
                 bg_task.start_time = task_snapshot.start_time;
-                bg_task.end_time = Some(task_snapshot.end_time.unwrap_or_else(std::time::SystemTime::now));
+                bg_task.end_time = Some(
+                    task_snapshot
+                        .end_time
+                        .unwrap_or_else(std::time::SystemTime::now),
+                );
             } else {
                 bg_task.end_time = Some(std::time::SystemTime::now());
             }

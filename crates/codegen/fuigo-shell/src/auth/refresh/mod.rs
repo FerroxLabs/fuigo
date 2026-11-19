@@ -102,11 +102,18 @@ impl std::fmt::Debug for RefreshOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Success(v0) => f.debug_tuple("Success").field(v0).finish(),
-            Self::PermanentFailure { error, tried_key, tried_refresh_token } => f
+            Self::PermanentFailure {
+                error,
+                tried_key,
+                tried_refresh_token,
+            } => f
                 .debug_struct("PermanentFailure")
                 .field("error", error)
                 .field("tried_key", &tried_key.as_ref().map(|_| "<redacted>"))
-                .field("tried_refresh_token", &tried_refresh_token.as_ref().map(|_| "<redacted>"))
+                .field(
+                    "tried_refresh_token",
+                    &tried_refresh_token.as_ref().map(|_| "<redacted>"),
+                )
                 .finish(),
             Self::TransientFailure { message } => f
                 .debug_struct("TransientFailure")

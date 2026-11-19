@@ -148,40 +148,76 @@ mod tests {
                 "error sending request for url (http://127.0.0.1:1/tenant(foo)/v1/responses?key=p70-FAKE-SECRET&sig=p70-FAKE-SIG): refused",
                 "error sending request for url (http://127.0.0.1:1/tenant(foo)/v1/responses?key=<redacted>&sig=<redacted> refused",
             ),
-            ("at 'http://h/a]b/c,d.e?k=p70-FAKE-SECRET', retrying", "at 'http://h/a]b/c,d.e?k=<redacted> retrying"),
+            (
+                "at 'http://h/a]b/c,d.e?k=p70-FAKE-SECRET', retrying",
+                "at 'http://h/a]b/c,d.e?k=<redacted> retrying",
+            ),
             // (the parser percent-encodes the `>` it was handed as part of the path)
-            ("<http://u:p70-FAKE-SECRET@h/p> gone", "<http://<redacted>@h/p%3E gone"),
-            (r#"{"url":"http://h/p?k=p70-FAKE-SECRET","n":1}"#, r#"{"url":"http://h/p?k=<redacted>","n":1}"#),
-            ("see (https://h/docs), then https://h/v1.", "see (https://h/docs), then https://h/v1."),
+            (
+                "<http://u:p70-FAKE-SECRET@h/p> gone",
+                "<http://<redacted>@h/p%3E gone",
+            ),
+            (
+                r#"{"url":"http://h/p?k=p70-FAKE-SECRET","n":1}"#,
+                r#"{"url":"http://h/p?k=<redacted>","n":1}"#,
+            ),
+            (
+                "see (https://h/docs), then https://h/v1.",
+                "see (https://h/docs), then https://h/v1.",
+            ),
         ] {
             let once = redact_urls_in_text(input);
             assert_eq!(once, expected, "input={input:?}");
             assert!(!once.contains("FAKE"), "a credential survived: {once}");
-            assert_eq!(redact_urls_in_text(&once), once, "not idempotent for {input:?}");
+            assert_eq!(
+                redact_urls_in_text(&once),
+                once,
+                "not idempotent for {input:?}"
+            );
         }
     }
 
     #[test]
     fn redact_urls_in_text_redacts_each_url_and_keeps_the_rest() {
         assert_eq!(
-            redact_urls_in_text("error sending request for url (https://h/v1?key=FAKE123): refused"),
+            redact_urls_in_text(
+                "error sending request for url (https://h/v1?key=FAKE123): refused"
+            ),
             "error sending request for url (https://h/v1?key=<redacted> refused"
         );
         assert_eq!(redact_urls_in_text("no url here"), "no url here");
-        assert_eq!(redact_urls_in_text("éhttps://h/?k=FAKE1 ü"), "éhttps://h/?k=<redacted> ü");
+        assert_eq!(
+            redact_urls_in_text("éhttps://h/?k=FAKE1 ü"),
+            "éhttps://h/?k=<redacted> ü"
+        );
     }
 
     #[test]
     fn redact_url_hides_userinfo_query_and_fragment_values() {
         for (input, expected) in [
             ("https://api.example/v1", "https://api.example/v1"),
-            ("https://api.example/v1?key=FAKE123&alt=sse", "https://api.example/v1?key=<redacted>&alt=<redacted>"),
-            ("https://user:FAKEpass@host:8443/p?x", "https://<redacted>@host:8443/p?<redacted>"),
+            (
+                "https://api.example/v1?key=FAKE123&alt=sse",
+                "https://api.example/v1?key=<redacted>&alt=<redacted>",
+            ),
+            (
+                "https://user:FAKEpass@host:8443/p?x",
+                "https://<redacted>@host:8443/p?<redacted>",
+            ),
             ("http://h/p#access_token=FAKE", "http://h/p#<redacted>"),
             ("not a url ?token=FAKE", "<redacted url>"),
-            ("https:/user:pw9Zk@example.com/v1", "https://<redacted>@example.com/v1"),
-            ("https:\\\\user:pw9Zk@example.com\\v1", "https://<redacted>@example.com/v1"),
-            ("https:///user:pw9Zk@example.com/v1", "https://<redacted>@example.com/v1"),
+            (
+                "https:/user:pw9Zk@example.com/v1",
+                "https://<redacted>@example.com/v1",
+            ),
+            (
+                "https:\\\\user:pw9Zk@example.com\\v1",
+                "https://<redacted>@example.com/v1",
+            ),
+            (
+                "https:///user:pw9Zk@example.com/v1",
+                "https://<redacted>@example.com/v1",
+            ),
             ("plain-text", "plain-text"),
             ("", ""),
         ] {
@@ -197,8 +233,14 @@ mod tests {
         assert_eq!(bearer_fingerprint(""), "sha256:e3b0/len=0");
         // Characters, not bytes.
         assert!(bearer_fingerprint("🔑🔑").ends_with("/len=2"));
-        assert_eq!(bearer_fingerprint("same-FAKE-key"), bearer_fingerprint("same-FAKE-key"));
-        assert_ne!(bearer_fingerprint("one-FAKE-key"), bearer_fingerprint("two-FAKE-key"));
+        assert_eq!(
+            bearer_fingerprint("same-FAKE-key"),
+            bearer_fingerprint("same-FAKE-key")
+        );
+        assert_ne!(
+            bearer_fingerprint("one-FAKE-key"),
+            bearer_fingerprint("two-FAKE-key")
+        );
     }
 
     /// No fingerprint contains any run of its credential longer than three characters: neither a short key (which the
@@ -216,7 +258,10 @@ mod tests {
             let chars: Vec<char> = key.chars().collect();
             for w in chars.windows(4) {
                 let frag: String = w.iter().collect();
-                assert!(!fp.contains(&frag), "fingerprint {fp:?} of {key:?} contains {frag:?}");
+                assert!(
+                    !fp.contains(&frag),
+                    "fingerprint {fp:?} of {key:?} contains {frag:?}"
+                );
             }
         }
     }

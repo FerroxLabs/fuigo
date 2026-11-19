@@ -315,9 +315,15 @@ pub fn check_fetch_identity(
 }
 
 /// Refuse a payload whose `revision` is below the highest this machine has accepted (audit S12-F2).
-pub fn check_not_rolled_back(payload: &SignedPayload, highest_accepted: u64) -> Result<(), SigError> {
+pub fn check_not_rolled_back(
+    payload: &SignedPayload,
+    highest_accepted: u64,
+) -> Result<(), SigError> {
     if payload.revision < highest_accepted {
-        return Err(SigError::RolledBack { got: payload.revision, highest: highest_accepted });
+        return Err(SigError::RolledBack {
+            got: payload.revision,
+            highest: highest_accepted,
+        });
     }
     Ok(())
 }
@@ -331,9 +337,16 @@ pub(crate) fn on_disk_signed_revision(home: &std::path::Path) -> Option<(Option<
     let SidecarRead::Present(sidecar) = read_sidecar(home) else {
         return None;
     };
-    with_embedded_keys(|keys| verify_signed_payload(&sidecar.signed_payload, &sidecar.signature, keys))
-        .ok()
-        .map(|payload| (signed_identity(&payload).map(str::to_owned), payload.revision))
+    with_embedded_keys(|keys| {
+        verify_signed_payload(&sidecar.signed_payload, &sidecar.signature, keys)
+    })
+    .ok()
+    .map(|payload| {
+        (
+            signed_identity(&payload).map(str::to_owned),
+            payload.revision,
+        )
+    })
 }
 
 /// The policy identity the sidecar on disk names (`Some(None)`: none), read WITHOUT verifying it; `None` when there is
@@ -343,13 +356,21 @@ pub(crate) fn on_disk_sidecar_identity(home: &std::path::Path) -> Option<Option<
         return None;
     };
     let payload: serde_json::Value = serde_json::from_str(&sidecar.signed_payload).ok()?;
-    let named = |key: &str| payload.get(key).and_then(serde_json::Value::as_str).map(str::to_owned);
+    let named = |key: &str| {
+        payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
     Some(named("deployment_id").or_else(|| named("team_id")))
 }
 
 /// The identity a payload's revisions count against: its effective principal (`deployment_id`, else `team_id`).
 fn signed_identity(payload: &SignedPayload) -> Option<&str> {
-    payload.deployment_id.as_deref().or(payload.team_id.as_deref())
+    payload
+        .deployment_id
+        .as_deref()
+        .or(payload.team_id.as_deref())
 }
 
 /// The revision floor `home`'s marker records for the payload's own identity (audit R06).
@@ -360,7 +381,10 @@ fn revision_floor_for(home: &std::path::Path, payload: &SignedPayload) -> u64 {
 /// Refuse a verified payload below the floor `home` records for its identity. The apply re-checks this while it holds
 /// the managed-config lock, so a revision verified before another process applied a newer one is never installed
 /// over it (audit R07).
-pub fn check_revision_floor_at(home: &std::path::Path, payload: &SignedPayload) -> Result<(), SigError> {
+pub fn check_revision_floor_at(
+    home: &std::path::Path,
+    payload: &SignedPayload,
+) -> Result<(), SigError> {
     check_not_rolled_back(payload, revision_floor_for(home, payload))
 }
 

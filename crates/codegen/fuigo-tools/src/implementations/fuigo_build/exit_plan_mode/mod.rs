@@ -188,7 +188,10 @@ impl fuigo_tool_runtime::Tool for ExitPlanModeTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,7 +212,10 @@ mod tests {
     #[test]
     fn tool_name_and_description() {
         let tool = ExitPlanModeTool;
-        assert_eq!(fuigo_tool_runtime::Tool::id(&tool).as_str(), "exit_plan_mode");
+        assert_eq!(
+            fuigo_tool_runtime::Tool::id(&tool).as_str(),
+            "exit_plan_mode"
+        );
     }
 
     #[test]

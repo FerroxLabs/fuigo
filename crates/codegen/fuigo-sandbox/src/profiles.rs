@@ -203,7 +203,9 @@ fn load_sandbox_config_from(
     let project_path = workspace.join(".fuigo").join(SANDBOX_CONFIG_FILENAME);
     if !project_allowed {
         if project_path.exists()
-            && crate::startup_warnings::first(format!("untrusted-project-profiles:{project_path:?}"))
+            && crate::startup_warnings::first(format!(
+                "untrusted-project-profiles:{project_path:?}"
+            ))
         {
             fuigo_tty_utils::cli_eprintln!(
                 "WARNING: ignoring the sandbox profiles in {}: the folder is not trusted",
@@ -1575,9 +1577,16 @@ read_write = ["/tmp/ci-artifacts"]
     #[test]
     fn profile_names_are_trimmed_and_case_folded_for_built_ins_only() {
         for name in ["Strict", " STRICT ", "strict\n"] {
-            assert_eq!(name.parse::<ProfileName>().unwrap(), ProfileName::Strict, "{name:?}");
+            assert_eq!(
+                name.parse::<ProfileName>().unwrap(),
+                ProfileName::Strict,
+                "{name:?}"
+            );
         }
-        assert_eq!("Read-Only".parse::<ProfileName>().unwrap(), ProfileName::ReadOnly);
+        assert_eq!(
+            "Read-Only".parse::<ProfileName>().unwrap(),
+            ProfileName::ReadOnly
+        );
         assert_eq!("OFF".parse::<ProfileName>().unwrap(), ProfileName::Off);
         // A custom name keeps its spelling (trimmed): config keys are case-sensitive
         assert_eq!(
@@ -1606,7 +1615,11 @@ read_write = ["/tmp/ci-artifacts"]
         )
         .unwrap();
         let config = load_sandbox_config_from(&root.join("none.toml"), &workspace, true);
-        assert!(!config.profiles.contains_key("Strict"), "{:?}", config.profiles);
+        assert!(
+            !config.profiles.contains_key("Strict"),
+            "{:?}",
+            config.profiles
+        );
         assert!(config.profiles.contains_key("mine"));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1623,7 +1636,10 @@ read_write = ["/tmp/ci-artifacts"]
         std::fs::write(&global, "[profiles.theirs]\nextends = \"strict\"\n").unwrap();
         let config = load_sandbox_config_from(&global, &workspace, false);
         assert!(!config.profiles.contains_key("mine"));
-        assert!(config.profiles.contains_key("theirs"), "the user's own file still loads");
+        assert!(
+            config.profiles.contains_key("theirs"),
+            "the user's own file still loads"
+        );
         let config = load_sandbox_config_from(&global, &workspace, true);
         assert!(config.profiles.contains_key("mine"));
         let _ = std::fs::remove_dir_all(&root);

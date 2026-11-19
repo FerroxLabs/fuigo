@@ -368,8 +368,11 @@ fn our_hook_plugins(specs: &[fuigo_hooks::config::HookSpec]) -> Vec<String> {
 fn our_mcp_servers(registry: Option<&fuigo_agent::plugins::PluginRegistry>) -> Vec<String> {
     let cwd = tempfile::tempdir().unwrap();
     let compat = fuigo_tools::types::compat::CompatConfig::default();
-    let merged =
-        crate::session::managed_mcp::merge_managed_mcp_servers_sourced(cwd.path(), registry, &compat);
+    let merged = crate::session::managed_mcp::merge_managed_mcp_servers_sourced(
+        cwd.path(),
+        registry,
+        &compat,
+    );
     let mut names: Vec<String> = merged
         .iter()
         .map(|(s, _)| crate::session::managed_mcp::mcp_server_name(s).to_string())
@@ -448,7 +451,11 @@ fn restricted_marketplaces_load_no_unverifiable_plugin_hooks_or_mcp() {
         allowed_ids: vec!["user/0badc0de/demo".to_string()],
     };
     let dc = plugins_cfg.to_discovery_config_with(Some(restriction));
-    assert!(dc.enabled.is_empty(), "no bare name or unallowed id survives: {:?}", dc.enabled);
+    assert!(
+        dc.enabled.is_empty(),
+        "no bare name or unallowed id survives: {:?}",
+        dc.enabled
+    );
     assert!(dc.config_paths.is_empty() && dc.cli_plugin_dirs.is_empty());
     let locked = handle.build_for_cwd(
         repo.path(),
@@ -471,13 +478,18 @@ fn restricted_marketplaces_load_no_unverifiable_plugin_hooks_or_mcp() {
         our_hook_plugins(&SessionActor::plugin_hook_specs(locked.as_deref(), true)).is_empty(),
         "no plugin hook may run"
     );
-    assert!(our_mcp_servers(locked.as_deref()).is_empty(), "no plugin MCP server may start");
+    assert!(
+        our_mcp_servers(locked.as_deref()).is_empty(),
+        "no plugin MCP server may start"
+    );
     for name in ["demo", "cfgplug", "cliplug", "sessplug"] {
         let server = format!("p169g-srv-{name}");
-        assert!(locked
-            .as_deref()
-            .and_then(|r| r.mcp_server_owner(&server))
-            .is_none());
+        assert!(
+            locked
+                .as_deref()
+                .and_then(|r| r.mcp_server_owner(&server))
+                .is_none()
+        );
     }
 }
 
@@ -564,9 +576,15 @@ fn helper_sampling_is_unbound_without_a_fleet_pin() {
     assert!(aux(&none, "claude-opus-4-7", Default).is_some());
     let mut user = helper_cfg(None);
     user.models.allowed_models = Some(vec!["beta-*".into()]);
-    assert!(aux(&user, "alpha-1", Default).is_some(), "a user list never binds helpers");
+    assert!(
+        aux(&user, "alpha-1", Default).is_some(),
+        "a user list never binds helpers"
+    );
     let empty = helper_cfg(Some(AllowlistPin::List(vec![])));
-    assert!(aux(&empty, "alpha-1", Default).is_some(), "an empty pin is unrestricted");
+    assert!(
+        aux(&empty, "alpha-1", Default).is_some(),
+        "an empty pin is unrestricted"
+    );
 }
 
 /// Web search runs on its own resolver; the pin binds it too (disabled, not rerouted).
@@ -586,7 +604,10 @@ fn fleet_pin_binds_web_search_sampling() {
             &effective_allowlist(&cfg),
         )
     };
-    assert!(search("alpha-1").is_none(), "an excluded web-search model is disabled");
+    assert!(
+        search("alpha-1").is_none(),
+        "an excluded web-search model is disabled"
+    );
     assert!(
         search(crate::models::default_web_search_model()).is_none(),
         "the hidden default web-search model is not admitted by the pin"
@@ -617,8 +638,14 @@ fn manager_helper_admission_follows_the_fleet_pin() {
     let cfg = helper_cfg(Some(AllowlistPin::List(vec!["beta-*".into()])));
     let mgr = crate::agent::models::ModelsManager::from_config(&cfg, None, auth.clone()).unwrap();
     assert!(mgr.helper_model_admitted("beta-1"));
-    assert!(!mgr.helper_model_admitted("alpha-1"), "in the catalog but outside the pin");
-    assert!(!mgr.helper_model_admitted("claude-opus-4-7"), "not in the catalog");
+    assert!(
+        !mgr.helper_model_admitted("alpha-1"),
+        "in the catalog but outside the pin"
+    );
+    assert!(
+        !mgr.helper_model_admitted("claude-opus-4-7"),
+        "not in the catalog"
+    );
     let open = helper_cfg(None);
     let mgr = crate::agent::models::ModelsManager::from_config(&open, None, auth).unwrap();
     assert!(mgr.helper_model_admitted("alpha-1") && mgr.helper_model_admitted("claude-opus-4-7"));
@@ -627,7 +654,10 @@ fn manager_helper_admission_follows_the_fleet_pin() {
 // ---- Round 7: the model on the wire follows the entry the fleet pin admitted (audit: grok-p169-r6.md) ----
 
 /// Fleet pin `["beta-*"]`; catalog: `alpha-1`, `beta-1`, and a user key `claude-opus-4-7` whose model id is `beta-1`.
-fn wire_fixture() -> (Config, indexmap::IndexMap<String, crate::agent::config::ModelEntry>) {
+fn wire_fixture() -> (
+    Config,
+    indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+) {
     let mut cfg = config_from_toml(
         r#"
 [models]
@@ -657,16 +687,37 @@ fn ai_suggest_sends_only_a_pin_admitted_model() {
     use crate::agent::models::ai_suggest_wire_model as wire;
     let (cfg, cat) = wire_fixture();
     let a = effective_allowlist(&cfg);
-    assert_eq!(wire(&a, &cat, Some("claude-opus-4-7"), Some("beta-1")).as_deref(), Some("beta-1"));
-    assert_eq!(wire(&a, &cat, Some("alpha-1"), Some("beta-1")).as_deref(), Some("beta-1"), "outside the pin");
-    assert_eq!(wire(&a, &cat, Some("not-in-catalog"), Some("beta-1")).as_deref(), Some("beta-1"));
-    assert_eq!(wire(&a, &cat, None, Some("beta-1")).as_deref(), Some("beta-1"), "no literal grok-4.6 under a pin");
+    assert_eq!(
+        wire(&a, &cat, Some("claude-opus-4-7"), Some("beta-1")).as_deref(),
+        Some("beta-1")
+    );
+    assert_eq!(
+        wire(&a, &cat, Some("alpha-1"), Some("beta-1")).as_deref(),
+        Some("beta-1"),
+        "outside the pin"
+    );
+    assert_eq!(
+        wire(&a, &cat, Some("not-in-catalog"), Some("beta-1")).as_deref(),
+        Some("beta-1")
+    );
+    assert_eq!(
+        wire(&a, &cat, None, Some("beta-1")).as_deref(),
+        Some("beta-1"),
+        "no literal grok-4.6 under a pin"
+    );
     assert_eq!(wire(&a, &cat, None, None), None, "no session model: skip");
     let open = helper_cfg(None);
     let open_cat = resolve_model_catalog(&open, None);
     let a = effective_allowlist(&open);
-    assert_eq!(wire(&a, &open_cat, Some("claude-opus-4-7"), Some("beta-1")).as_deref(), Some("claude-opus-4-7"));
-    assert_eq!(wire(&a, &open_cat, None, Some("beta-1")).as_deref(), Some("grok-4.6"), "unpinned: unchanged");
+    assert_eq!(
+        wire(&a, &open_cat, Some("claude-opus-4-7"), Some("beta-1")).as_deref(),
+        Some("claude-opus-4-7")
+    );
+    assert_eq!(
+        wire(&a, &open_cat, None, Some("beta-1")).as_deref(),
+        Some("grok-4.6"),
+        "unpinned: unchanged"
+    );
 }
 
 /// Audit HIGH 2: pin `["beta-*"]`, session on `beta-1`, user rewrites a memory note.
@@ -675,11 +726,18 @@ fn memory_note_rewrite_sends_only_a_pin_admitted_model() {
     use crate::agent::models::rewrite_note_wire_model as wire;
     let (cfg, cat) = wire_fixture();
     let a = effective_allowlist(&cfg);
-    assert_eq!(wire(&a, &cat, Some("beta-1")).as_deref(), Some("beta-1"), "no literal grok-4.6 under a pin");
+    assert_eq!(
+        wire(&a, &cat, Some("beta-1")).as_deref(),
+        Some("beta-1"),
+        "no literal grok-4.6 under a pin"
+    );
     assert_eq!(wire(&a, &cat, None), None, "no session model: skip");
     let open = helper_cfg(None);
     let open_cat = resolve_model_catalog(&open, None);
-    assert_eq!(wire(&effective_allowlist(&open), &open_cat, Some("beta-1")).as_deref(), Some("grok-4.6"));
+    assert_eq!(
+        wire(&effective_allowlist(&open), &open_cat, Some("beta-1")).as_deref(),
+        Some("grok-4.6")
+    );
 }
 
 /// Audit HIGH 3: pin `["beta-*"]` and `[compaction.memory_flush] flush_model = "claude-opus-4-7"`.
@@ -688,15 +746,35 @@ fn memory_flush_sends_only_a_pin_admitted_model() {
     use crate::agent::models::flush_wire_model as wire;
     let (cfg, cat) = wire_fixture();
     let a = effective_allowlist(&cfg);
-    assert_eq!(wire(&a, &cat, Some("not-in-catalog"), Some("beta-1")).as_deref(), Some("beta-1"));
-    assert_eq!(wire(&a, &cat, Some("alpha-1"), Some("beta-1")).as_deref(), Some("beta-1"), "outside the pin");
-    assert_eq!(wire(&a, &cat, None, Some("beta-1")).as_deref(), Some("beta-1"));
-    assert_eq!(wire(&a, &cat, Some("not-in-catalog"), None), None, "no session model: skip the flush");
+    assert_eq!(
+        wire(&a, &cat, Some("not-in-catalog"), Some("beta-1")).as_deref(),
+        Some("beta-1")
+    );
+    assert_eq!(
+        wire(&a, &cat, Some("alpha-1"), Some("beta-1")).as_deref(),
+        Some("beta-1"),
+        "outside the pin"
+    );
+    assert_eq!(
+        wire(&a, &cat, None, Some("beta-1")).as_deref(),
+        Some("beta-1")
+    );
+    assert_eq!(
+        wire(&a, &cat, Some("not-in-catalog"), None),
+        None,
+        "no session model: skip the flush"
+    );
     let open = helper_cfg(None);
     let open_cat = resolve_model_catalog(&open, None);
     let a = effective_allowlist(&open);
-    assert_eq!(wire(&a, &open_cat, Some("not-in-catalog"), Some("beta-1")).as_deref(), Some("not-in-catalog"));
-    assert_eq!(wire(&a, &open_cat, None, Some("beta-1")).as_deref(), Some("beta-1"));
+    assert_eq!(
+        wire(&a, &open_cat, Some("not-in-catalog"), Some("beta-1")).as_deref(),
+        Some("not-in-catalog")
+    );
+    assert_eq!(
+        wire(&a, &open_cat, None, Some("beta-1")).as_deref(),
+        Some("beta-1")
+    );
 }
 
 /// Audit HIGH 4: pin `["beta-*"]`; user `[model.claude-opus-4-7]` has `model = "beta-1"`; the hint is the key. The pin
@@ -706,13 +784,29 @@ fn prompt_suggestion_sends_the_admitted_entrys_model_id() {
     use crate::agent::models::suggest_prompt_wire_model as wire;
     let (cfg, cat) = wire_fixture();
     let a = effective_allowlist(&cfg);
-    assert_eq!(wire(&a, &cat, "claude-opus-4-7", Some("beta-1")).as_deref(), Some("beta-1"));
-    assert_eq!(wire(&a, &cat, "beta-1", Some("beta-1")).as_deref(), Some("beta-1"));
-    assert_eq!(wire(&a, &cat, "alpha-1", Some("beta-1")).as_deref(), Some("beta-1"), "outside the pin");
+    assert_eq!(
+        wire(&a, &cat, "claude-opus-4-7", Some("beta-1")).as_deref(),
+        Some("beta-1")
+    );
+    assert_eq!(
+        wire(&a, &cat, "beta-1", Some("beta-1")).as_deref(),
+        Some("beta-1")
+    );
+    assert_eq!(
+        wire(&a, &cat, "alpha-1", Some("beta-1")).as_deref(),
+        Some("beta-1"),
+        "outside the pin"
+    );
     let open = helper_cfg(None);
     let open_cat = resolve_model_catalog(&open, None);
     assert_eq!(
-        wire(&effective_allowlist(&open), &open_cat, "claude-opus-4-7", Some("beta-1")).as_deref(),
+        wire(
+            &effective_allowlist(&open),
+            &open_cat,
+            "claude-opus-4-7",
+            Some("beta-1")
+        )
+        .as_deref(),
         Some("claude-opus-4-7"),
         "unpinned: unchanged"
     );
@@ -747,7 +841,11 @@ context_window = 256000
     }
     let mgr = crate::agent::models::ModelsManager::from_config(&cfg, None, auth).unwrap();
     // The detector config reaches an entry through the catalog; enable it on the aliasing entry.
-    let mut entry = mgr.models().get("claude-opus-4-7").cloned().expect("aliasing entry");
+    let mut entry = mgr
+        .models()
+        .get("claude-opus-4-7")
+        .cloned()
+        .expect("aliasing entry");
     entry.info.laziness_detector.enabled = true;
     mgr.insert_test_entry("claude-opus-4-7", entry);
     mgr
@@ -761,21 +859,38 @@ fn laziness_classifier_sends_the_admitted_entrys_model_id() {
     let (wire, cfg) = mgr.laziness_target("claude-opus-4-7").expect("admitted");
     assert_eq!(wire, "beta-1", "the wire id, not the catalog key");
     assert!(cfg.enabled, "detector config comes from the selected entry");
-    assert!(mgr.laziness_target("alpha-1").is_none(), "outside the pin: skip the call");
-    assert!(mgr.laziness_target("not-in-catalog").is_none(), "off the catalog under a pin: skip the call");
+    assert!(
+        mgr.laziness_target("alpha-1").is_none(),
+        "outside the pin: skip the call"
+    );
+    assert!(
+        mgr.laziness_target("not-in-catalog").is_none(),
+        "off the catalog under a pin: skip the call"
+    );
     let open = r8_manager(false);
-    assert_eq!(open.laziness_target("alpha-1").map(|(w, _)| w).as_deref(), Some("alpha-1"), "unpinned: unchanged");
+    assert_eq!(
+        open.laziness_target("alpha-1").map(|(w, _)| w).as_deref(),
+        Some("alpha-1"),
+        "unpinned: unchanged"
+    );
 }
 
 /// Audit LOW B: the goal evaluator's empty-session-model fallback is the admitted entry's model id, or none.
 #[test]
 fn goal_evaluator_fallback_is_the_admitted_entrys_model_id() {
     let mgr = r8_manager(true);
-    assert_eq!(mgr.selected_wire_model("claude-opus-4-7").as_deref(), Some("beta-1"));
+    assert_eq!(
+        mgr.selected_wire_model("claude-opus-4-7").as_deref(),
+        Some("beta-1")
+    );
     assert_eq!(mgr.selected_wire_model("alpha-1"), None);
     assert_eq!(mgr.selected_wire_model("not-in-catalog"), None);
     let open = r8_manager(false);
-    assert_eq!(open.selected_wire_model("claude-opus-4-7").as_deref(), Some("claude-opus-4-7"), "unpinned: unchanged");
+    assert_eq!(
+        open.selected_wire_model("claude-opus-4-7").as_deref(),
+        Some("claude-opus-4-7"),
+        "unpinned: unchanged"
+    );
 }
 
 /// Audit LOW C: under a fleet pin the session-model fallback is re-checked for admission.
@@ -784,13 +899,28 @@ fn session_model_fallback_is_rechecked_under_a_pin() {
     use crate::agent::models::ai_suggest_wire_model as wire;
     let (cfg, cat) = wire_fixture();
     let a = effective_allowlist(&cfg);
-    assert_eq!(wire(&a, &cat, None, Some("alpha-1")), None, "session model outside the pin");
-    assert_eq!(wire(&a, &cat, None, Some("not-in-catalog")), None, "session model off the catalog");
-    assert_eq!(wire(&a, &cat, None, Some("beta-1")).as_deref(), Some("beta-1"));
+    assert_eq!(
+        wire(&a, &cat, None, Some("alpha-1")),
+        None,
+        "session model outside the pin"
+    );
+    assert_eq!(
+        wire(&a, &cat, None, Some("not-in-catalog")),
+        None,
+        "session model off the catalog"
+    );
+    assert_eq!(
+        wire(&a, &cat, None, Some("beta-1")).as_deref(),
+        Some("beta-1")
+    );
     let failed = helper_cfg(Some(AllowlistPin::List(vec!["nothing-*".to_string()])));
     let failed_cat = resolve_model_catalog(&failed, None);
     let a = effective_allowlist(&failed);
-    assert_eq!(wire(&a, &failed_cat, None, Some("beta-1")), None, "nothing admitted: skip");
+    assert_eq!(
+        wire(&a, &failed_cat, None, Some("beta-1")),
+        None,
+        "nothing admitted: skip"
+    );
 }
 
 /// Audit LOW D: no pin, no `flush_model`, no sampling config: the flush sends the empty model as before the refactor.
@@ -799,7 +929,14 @@ fn unpinned_flush_without_any_model_keeps_the_previous_request() {
     use crate::agent::models::flush_wire_model as wire;
     let open = helper_cfg(None);
     let open_cat = resolve_model_catalog(&open, None);
-    assert_eq!(wire(&effective_allowlist(&open), &open_cat, None, None).as_deref(), Some(""));
+    assert_eq!(
+        wire(&effective_allowlist(&open), &open_cat, None, None).as_deref(),
+        Some("")
+    );
     let (cfg, cat) = wire_fixture();
-    assert_eq!(wire(&effective_allowlist(&cfg), &cat, None, None), None, "pinned: still skipped");
+    assert_eq!(
+        wire(&effective_allowlist(&cfg), &cat, None, None),
+        None,
+        "pinned: still skipped"
+    );
 }

@@ -180,7 +180,12 @@ impl RouteMemory {
     fn load_checked(&self) -> Option<Store> {
         let file = std::fs::File::open(&self.path).ok()?;
         let mut bytes = Vec::new();
-        if file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_FILE_BYTES {
+        if file
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() as u64 > MAX_FILE_BYTES
+        {
             return None;
         }
         serde_json::from_slice(&bytes).ok()
@@ -211,7 +216,10 @@ impl RouteMemory {
     /// The advisory lock on `api-key-probe-state.lock`, next to the file, so two Fuigo processes cannot lose each
     /// other's update. A short bounded wait; if the lock file cannot be opened or the lock is not free in time this
     /// returns `None` and the caller goes on without it (a lost update is possible, a block never is).
-    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder"
+    )]
     fn lock(&self) -> Option<HeldFlock> {
         use fs2::FileExt as _;
         self.path.file_name()?; // an empty path (bookkeeping switched off) has no lock either
@@ -222,7 +230,11 @@ impl RouteMemory {
         #[cfg(windows)]
         let existed = lock_path.exists();
         let file = fuigo_config::owner_only_file_options(
-            std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false),
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
         )
         .open(&lock_path)
         .ok()?;
@@ -230,7 +242,9 @@ impl RouteMemory {
         // Windows has no mode bits: give a lock file we just created the same owner-only ACL as the data file
         // (`save`). Not compiled or run by the author; a failure is ignored.
         #[cfg(windows)]
-        if !existed && let Err(e) = fuigo_secrets::owner_only::set_windows_owner_only_acl(&lock_path) {
+        if !existed
+            && let Err(e) = fuigo_secrets::owner_only::set_windows_owner_only_acl(&lock_path)
+        {
             tracing::debug!(error = %e, "api key probe lock: owner-only ACL not applied");
         }
         #[cfg(test)]
@@ -250,9 +264,14 @@ impl RouteMemory {
     }
 
     /// Writes the file; true when it was written.
-    #[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder"
+    )]
     fn save(&self, mut store: Store, now: u64) -> bool {
-        store.unsupported.retain(|e| live(e.t, now, UNSUPPORTED_TTL_SECS));
+        store
+            .unsupported
+            .retain(|e| live(e.t, now, UNSUPPORTED_TTL_SECS));
         store.verdicts.retain(|e| live(e.t, now, VERDICT_TTL_SECS));
         store.unsupported.sort_by_key(|e| std::cmp::Reverse(e.t));
         store.verdicts.sort_by_key(|e| std::cmp::Reverse(e.t));
@@ -291,7 +310,10 @@ impl RouteMemory {
             return false;
         };
         let h = hash(&["unsupported-v1", &url]);
-        self.load().unsupported.iter().any(|e| e.h == h && live(e.t, now, UNSUPPORTED_TTL_SECS))
+        self.load()
+            .unsupported
+            .iter()
+            .any(|e| e.h == h && live(e.t, now, UNSUPPORTED_TTL_SECS))
     }
 
     pub(crate) fn remember_unsupported(&self, url: &str, now: u64) {
@@ -311,7 +333,10 @@ impl RouteMemory {
         let url = normalise(url)?;
         let h = hash(&["verdict-v1", &url, key]);
         let store = self.load();
-        let e = store.verdicts.iter().find(|e| e.h == h && live(e.t, now, VERDICT_TTL_SECS))?;
+        let e = store
+            .verdicts
+            .iter()
+            .find(|e| e.h == h && live(e.t, now, VERDICT_TTL_SECS))?;
         match e.v.as_str() {
             "usable" => Some(ApiKeyProbeVerdict::Usable),
             "unusable" => Some(ApiKeyProbeVerdict::Unusable),
@@ -320,7 +345,13 @@ impl RouteMemory {
     }
 
     /// Stores Usable or Unusable; an Unknown verdict is never stored.
-    pub(crate) fn store_verdict(&self, url: &str, key: &str, verdict: ApiKeyProbeVerdict, now: u64) {
+    pub(crate) fn store_verdict(
+        &self,
+        url: &str,
+        key: &str,
+        verdict: ApiKeyProbeVerdict,
+        now: u64,
+    ) {
         let word = match verdict {
             ApiKeyProbeVerdict::Usable => "usable",
             ApiKeyProbeVerdict::Unusable => "unusable",
@@ -332,7 +363,11 @@ impl RouteMemory {
         let h = hash(&["verdict-v1", &url, key]);
         self.update(now, |store| {
             store.verdicts.retain(|e| e.h != h);
-            store.verdicts.push(Cached { h, v: word.to_string(), t: now });
+            store.verdicts.push(Cached {
+                h,
+                v: word.to_string(),
+                t: now,
+            });
             true
         });
     }
@@ -364,13 +399,21 @@ impl RouteMemory {
                 if u.path != self.path || u.seen == Some(now_stamp) {
                     return true;
                 }
-                let list = if u.url_level { &file.models_401_url } else { &file.models_401 };
+                let list = if u.url_level {
+                    &file.models_401_url
+                } else {
+                    &file.models_401
+                };
                 list.iter().any(|f| f.h == u.e.h)
             });
         }
         let mut store = loaded.unwrap_or_default();
         for u in held.iter().filter(|u| u.path == self.path) {
-            let list = if u.url_level { &mut store.models_401_url } else { &mut store.models_401 };
+            let list = if u.url_level {
+                &mut store.models_401_url
+            } else {
+                &mut store.models_401
+            };
             match list.iter_mut().find(|f| f.h == u.e.h) {
                 Some(f) if f.t < u.e.t => *f = u.e.clone(),
                 Some(_) => {}
@@ -381,11 +424,24 @@ impl RouteMemory {
         let ch = cred_hash(&url, credential);
         let uh = hash(&["models-401-url-v1", &url]);
         let mut remaining = 0u64;
-        let due = |e: &Rejected, wait: u64| if e.t <= now { (e.t + wait).saturating_sub(now) } else { 0 };
-        if let Some(e) = store.models_401.iter().find(|e| e.h == ch && live(e.t, now, REJECT_TTL_SECS)) {
+        let due = |e: &Rejected, wait: u64| {
+            if e.t <= now {
+                (e.t + wait).saturating_sub(now)
+            } else {
+                0
+            }
+        };
+        if let Some(e) = store
+            .models_401
+            .iter()
+            .find(|e| e.h == ch && live(e.t, now, REJECT_TTL_SECS))
+        {
             remaining = remaining.max(due(e, backoff_secs(e.n.saturating_sub(1) as usize)));
         }
-        if let Some(e) = store.models_401_url.iter().find(|e| e.h == uh && live(e.t, now, REJECT_TTL_SECS))
+        if let Some(e) = store
+            .models_401_url
+            .iter()
+            .find(|e| e.h == uh && live(e.t, now, REJECT_TTL_SECS))
             && e.n >= URL_FREE_ATTEMPTS
         {
             remaining = remaining.max(due(e, backoff_secs((e.n - URL_FREE_ATTEMPTS) as usize)));
@@ -402,17 +458,34 @@ impl RouteMemory {
         let saved = self.update(now, |store| {
             // Also count what this process remembers from a failed write (a read-only home).
             let held = unsaved();
-            for (url_level, list, h) in [(false, &mut store.models_401, ch), (true, &mut store.models_401_url, uh)] {
-                let from_file = list.iter().find(|e| e.h == h && live(e.t, now, REJECT_TTL_SECS)).map_or(0, |e| e.n);
+            for (url_level, list, h) in [
+                (false, &mut store.models_401, ch),
+                (true, &mut store.models_401_url, uh),
+            ] {
+                let from_file = list
+                    .iter()
+                    .find(|e| e.h == h && live(e.t, now, REJECT_TTL_SECS))
+                    .map_or(0, |e| e.n);
                 let from_memory = held
                     .iter()
-                    .filter(|u| u.path == self.path && u.e.h == h && live(u.e.t, now, REJECT_TTL_SECS))
+                    .filter(|u| {
+                        u.path == self.path && u.e.h == h && live(u.e.t, now, REJECT_TTL_SECS)
+                    })
                     .map(|u| u.e.n)
                     .max()
                     .unwrap_or(0);
                 list.retain(|e| e.h != h);
-                let e = Rejected { h, n: from_file.max(from_memory).saturating_add(1), t: now };
-                written.push(Unsaved { path: self.path.clone(), url_level, e: e.clone(), seen: None });
+                let e = Rejected {
+                    h,
+                    n: from_file.max(from_memory).saturating_add(1),
+                    t: now,
+                };
+                written.push(Unsaved {
+                    path: self.path.clone(),
+                    url_level,
+                    e: e.clone(),
+                    seen: None,
+                });
                 list.push(e);
             }
             true
@@ -474,11 +547,19 @@ pub(crate) mod test_clock {
     /// Paths whose `update` ran without the lock (a stall of 200 ms, or an unopenable lock file).
     static UNLOCKED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
     pub(super) fn note_unlocked(path: &std::path::Path) {
-        UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()).push(path.to_path_buf());
+        UNLOCKED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(path.to_path_buf());
     }
     /// How many updates of `path` proceeded without the lock so far.
     pub(crate) fn unlocked_updates(path: &std::path::Path) -> usize {
-        UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|p| *p == path).count()
+        UNLOCKED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|p| *p == path)
+            .count()
     }
     /// Milliseconds `lock` waits before giving up; 0 means the production 200 ms. The concurrency test raises it so a
     /// loaded machine can never make a writer give up (the product still does, by design).
@@ -497,6 +578,9 @@ pub(crate) mod test_clock {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests;

@@ -17,8 +17,14 @@ fn a_link_is_never_opened_as_a_folder() {
 
     assert!(root.open_child(OsStr::new("link")).is_err());
     assert!(root.open_child(OsStr::new("file")).is_err());
-    assert_eq!(EntryKind::Other, root.child_info(OsStr::new("link")).unwrap().kind);
-    assert_eq!(EntryKind::File, root.child_info(OsStr::new("file")).unwrap().kind);
+    assert_eq!(
+        EntryKind::Other,
+        root.child_info(OsStr::new("link")).unwrap().kind
+    );
+    assert_eq!(
+        EntryKind::File,
+        root.child_info(OsStr::new("file")).unwrap().kind
+    );
 }
 
 /// The root's own path may be a link (a `~/.fuigo` that lives elsewhere); it is followed and still counts as in place.
@@ -48,7 +54,10 @@ fn a_swapped_folder_is_no_longer_at_its_path() {
 
     // The pin still names the real folder: what it lists is the moved folder's content
     std::fs::write(tmp.path().join("moved/inside"), b"x").unwrap();
-    assert_eq!(vec![OsStr::new("inside").to_os_string()], cwd.entry_names().unwrap());
+    assert_eq!(
+        vec![OsStr::new("inside").to_os_string()],
+        cwd.entry_names().unwrap()
+    );
 }
 
 /// A tree is removed without following any link in it: a link's target survives.

@@ -511,7 +511,10 @@ async fn ensure_latest_does_not_relaunch_down_onto_a_lower_gh_release() {
     fake_managed_install("0.2.22");
 
     let outcome = ensure_latest_on_disk(&make_config("stable")).await.unwrap();
-    assert_eq!(outcome.installed, None, "disk already at the highest release");
+    assert_eq!(
+        outcome.installed, None,
+        "disk already at the highest release"
+    );
     assert!(!outcome.relaunch_needed, "no automatic downgrade relaunch");
 }
 

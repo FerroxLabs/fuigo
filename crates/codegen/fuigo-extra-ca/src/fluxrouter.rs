@@ -495,7 +495,10 @@ mod tests {
             "https://api.fluxrouter.ai@evil.example/v1",
             "http://api.fluxrouter.ai/v1",
         ] {
-            assert!(!is_fluxrouter_operated_url(url), "{url} must not receive x-fuigo-* identity headers");
+            assert!(
+                !is_fluxrouter_operated_url(url),
+                "{url} must not receive x-fuigo-* identity headers"
+            );
         }
     }
 
@@ -531,8 +534,14 @@ mod tests {
     /// and lookalikes are withheld.
     #[test]
     fn websocket_identity_disclosure_needs_wss_to_the_fluxrouter_host() {
-        assert!(IdentityDisclosure::for_websocket_destination("wss://api.fluxrouter.ai/v1/stt").is_permitted());
-        assert!(IdentityDisclosure::for_websocket_destination("WSS://API.FLUXROUTER.AI./ws").is_permitted());
+        assert!(
+            IdentityDisclosure::for_websocket_destination("wss://api.fluxrouter.ai/v1/stt")
+                .is_permitted()
+        );
+        assert!(
+            IdentityDisclosure::for_websocket_destination("WSS://API.FLUXROUTER.AI./ws")
+                .is_permitted()
+        );
         for url in [
             "ws://api.fluxrouter.ai/v1/stt",
             "wss://api.fluxrouter.ai.evil.example/ws",
@@ -553,7 +562,11 @@ mod tests {
     /// strips every identity name (any case) and nothing else; a permitted one keeps them.
     #[test]
     fn identity_helpers_gate_exactly_the_identity_class() {
-        let pairs = [("x-userid", "acct-1"), ("x-email", "a@b.example"), ("x-fuigo-client-version", "1.0.21")];
+        let pairs = [
+            ("x-userid", "acct-1"),
+            ("x-email", "a@b.example"),
+            ("x-fuigo-client-version", "1.0.21"),
+        ];
         let withheld = IdentityDisclosure::for_destination("https://cli-proxy.example/v1");
         assert!(withheld.header_map(pairs).is_empty());
         let permitted = IdentityDisclosure::for_destination("https://api.fluxrouter.ai/v1");
@@ -565,20 +578,37 @@ mod tests {
         for name in IDENTITY_HEADER_NAMES {
             headers.insert(name, reqwest::header::HeaderValue::from_static("v"));
         }
-        headers.insert("authorization", reqwest::header::HeaderValue::from_static("Bearer t"));
-        headers.insert("x-fuigo-client-mode", reqwest::header::HeaderValue::from_static("cli"));
-        headers.insert("x-fuigo-session-id", reqwest::header::HeaderValue::from_static("s"));
+        headers.insert(
+            "authorization",
+            reqwest::header::HeaderValue::from_static("Bearer t"),
+        );
+        headers.insert(
+            "x-fuigo-client-mode",
+            reqwest::header::HeaderValue::from_static("cli"),
+        );
+        headers.insert(
+            "x-fuigo-session-id",
+            reqwest::header::HeaderValue::from_static("s"),
+        );
         let mut kept = headers.clone();
         assert_eq!(permitted.withhold_from_header_map(&mut kept), 0);
         assert_eq!(kept.len(), headers.len());
-        assert_eq!(withheld.withhold_from_header_map(&mut headers), IDENTITY_HEADER_NAMES.len());
+        assert_eq!(
+            withheld.withhold_from_header_map(&mut headers),
+            IDENTITY_HEADER_NAMES.len()
+        );
         let left: Vec<_> = headers.keys().map(|k| k.as_str().to_owned()).collect();
-        assert_eq!(left.len(), 3, "only the non-identity headers survive: {left:?}");
+        assert_eq!(
+            left.len(),
+            3,
+            "only the non-identity headers survive: {left:?}"
+        );
         assert!(headers.contains_key("authorization"));
 
         // A value that is not a valid header value is skipped, not fatal: identity is attribution,
         // so a malformed account id never blocks an otherwise authorised request (P43, pinned).
-        let malformed = permitted.header_map([("x-userid", "bad\nvalue"), ("x-email", "ok@b.example")]);
+        let malformed =
+            permitted.header_map([("x-userid", "bad\nvalue"), ("x-email", "ok@b.example")]);
         assert!(!malformed.contains_key("x-userid"));
         assert_eq!(malformed["x-email"], "ok@b.example");
 
@@ -598,7 +628,10 @@ mod tests {
     fn body_identity_goes_only_to_fluxrouter_and_others_get_an_origin_scoped_pseudonym() {
         let id = "3f2c1d7e-0000-4000-8000-00000000abcd";
         let flux = "https://api.fluxrouter.ai/v1/sessions/s1";
-        assert_eq!(IdentityDisclosure::for_destination(flux).body_identity(id), Some(id));
+        assert_eq!(
+            IdentityDisclosure::for_destination(flux).body_identity(id),
+            Some(id)
+        );
         assert_eq!(IdentityDisclosure::body_key_for(flux, id), id);
         for other in [
             "https://cli-proxy.example/v1/sessions/s1",
@@ -607,19 +640,39 @@ mod tests {
             "http://127.0.0.1:9/v1",
             "https://api.mixpanel.com/track",
         ] {
-            assert_eq!(IdentityDisclosure::for_destination(other).body_identity(id), None, "{other}");
+            assert_eq!(
+                IdentityDisclosure::for_destination(other).body_identity(id),
+                None,
+                "{other}"
+            );
             let key = IdentityDisclosure::body_key_for(other, id);
             assert_ne!(key, id, "{other} must not receive the identifier itself");
             assert!(!key.contains(id), "{other}");
             assert_eq!(key, destination_pseudonym(other, id));
-            assert_eq!(key, IdentityDisclosure::body_key_for(other, id), "stable for one origin");
+            assert_eq!(
+                key,
+                IdentityDisclosure::body_key_for(other, id),
+                "stable for one origin"
+            );
         }
         // Same origin, other path: same key. Other origin: unrelated key. Other value: other key.
         let a = destination_pseudonym("https://cli-proxy.example/v1/sessions/a", id);
-        assert_eq!(a, destination_pseudonym("https://cli-proxy.example/other", id));
-        assert_ne!(a, destination_pseudonym("https://other-proxy.example/v1/sessions/a", id));
-        assert_ne!(a, destination_pseudonym("https://cli-proxy.example:8443/v1/sessions/a", id));
-        assert_ne!(a, destination_pseudonym("https://cli-proxy.example/v1/sessions/a", "other-id"));
+        assert_eq!(
+            a,
+            destination_pseudonym("https://cli-proxy.example/other", id)
+        );
+        assert_ne!(
+            a,
+            destination_pseudonym("https://other-proxy.example/v1/sessions/a", id)
+        );
+        assert_ne!(
+            a,
+            destination_pseudonym("https://cli-proxy.example:8443/v1/sessions/a", id)
+        );
+        assert_ne!(
+            a,
+            destination_pseudonym("https://cli-proxy.example/v1/sessions/a", "other-id")
+        );
         // UUID-shaped, version 8, RFC 9562 variant.
         assert_eq!(a.len(), 36);
         assert_eq!(a.matches('-').count(), 4);
@@ -638,9 +691,21 @@ mod tests {
     #[test]
     fn websocket_body_key_keeps_the_value_for_fluxrouter_and_uses_the_one_recipe_elsewhere() {
         let id = "5d1f0c2a-7a7a-4b4b-8c8c-0123456789ab";
-        for flux in ["wss://api.fluxrouter.ai/ws/relay", "WSS://API.FLUXROUTER.AI./ws", "wss://api.fluxrouter.ai:8443/x"] {
-            assert_eq!(IdentityDisclosure::body_key_for_websocket(flux, id), id, "{flux}");
-            assert_ne!(IdentityDisclosure::body_key_for(flux, id), id, "{flux}: the https rule does not admit wss");
+        for flux in [
+            "wss://api.fluxrouter.ai/ws/relay",
+            "WSS://API.FLUXROUTER.AI./ws",
+            "wss://api.fluxrouter.ai:8443/x",
+        ] {
+            assert_eq!(
+                IdentityDisclosure::body_key_for_websocket(flux, id),
+                id,
+                "{flux}"
+            );
+            assert_ne!(
+                IdentityDisclosure::body_key_for(flux, id),
+                id,
+                "{flux}: the https rule does not admit wss"
+            );
         }
         for other in [
             "wss://relay.example/ws",
@@ -662,9 +727,21 @@ mod tests {
             "1aee0aad-2c8c-814c-a3bd-c47d513a2170"
         );
         let relay = IdentityDisclosure::body_key_for_websocket("wss://relay.example/ws", id);
-        assert_eq!(relay, IdentityDisclosure::body_key_for_websocket("WSS://Relay.Example:443/other?x=1", id));
-        for rekeyed in ["wss://relay.example:8443/ws", "wss://other-relay.example/ws", "https://relay.example/ws", "ws://relay.example/ws"] {
-            assert_ne!(IdentityDisclosure::body_key_for_websocket(rekeyed, id), relay, "{rekeyed}");
+        assert_eq!(
+            relay,
+            IdentityDisclosure::body_key_for_websocket("WSS://Relay.Example:443/other?x=1", id)
+        );
+        for rekeyed in [
+            "wss://relay.example:8443/ws",
+            "wss://other-relay.example/ws",
+            "https://relay.example/ws",
+            "ws://relay.example/ws",
+        ] {
+            assert_ne!(
+                IdentityDisclosure::body_key_for_websocket(rekeyed, id),
+                relay,
+                "{rekeyed}"
+            );
         }
     }
 
@@ -676,13 +753,36 @@ mod tests {
     fn destination_pseudonym_matches_its_published_recipe() {
         const MACHINE_ID: &str = "5d1f0c2a-7a7a-4b4b-8c8c-0123456789ab";
         for (destination, value, expected) in [
-            ("https://backend.example", MACHINE_ID, "c3ad749c-6794-8fb7-a4f2-03664010e911"),
-            ("https://backend.example/sessions/s1", MACHINE_ID, "c3ad749c-6794-8fb7-a4f2-03664010e911"),
-            ("https://api.mixpanel.com/track", "acct-7f3e", "fab2042c-4597-848c-b78b-c2f31bc9080e"),
-            ("http://127.0.0.1:8080/v1", MACHINE_ID, "c4c79e43-96c6-832a-a524-5e09c7430ad9"),
+            (
+                "https://backend.example",
+                MACHINE_ID,
+                "c3ad749c-6794-8fb7-a4f2-03664010e911",
+            ),
+            (
+                "https://backend.example/sessions/s1",
+                MACHINE_ID,
+                "c3ad749c-6794-8fb7-a4f2-03664010e911",
+            ),
+            (
+                "https://api.mixpanel.com/track",
+                "acct-7f3e",
+                "fab2042c-4597-848c-b78b-c2f31bc9080e",
+            ),
+            (
+                "http://127.0.0.1:8080/v1",
+                MACHINE_ID,
+                "c4c79e43-96c6-832a-a524-5e09c7430ad9",
+            ),
         ] {
-            assert_eq!(destination_pseudonym(destination, value), expected, "{destination} {value}");
-            assert_eq!(IdentityDisclosure::body_key_for(destination, value), expected);
+            assert_eq!(
+                destination_pseudonym(destination, value),
+                expected,
+                "{destination} {value}"
+            );
+            assert_eq!(
+                IdentityDisclosure::body_key_for(destination, value),
+                expected
+            );
         }
     }
 
@@ -704,10 +804,17 @@ mod tests {
             "https://backend.example/v1?x=1#frag",
             "https://Backend.Example",
         ] {
-            assert_eq!(destination_pseudonym(same, id), base, "{same} must key the same");
+            assert_eq!(
+                destination_pseudonym(same, id),
+                base,
+                "{same} must key the same"
+            );
         }
         let http_base = destination_pseudonym("http://backend.example/v1", id);
-        assert_eq!(destination_pseudonym("http://backend.example:80/x", id), http_base);
+        assert_eq!(
+            destination_pseudonym("http://backend.example:80/x", id),
+            http_base
+        );
         for other in [
             "http://backend.example/sessions/s1",
             "https://backend.example:8443/sessions/s1",
@@ -716,7 +823,11 @@ mod tests {
             "https://203.0.113.10/sessions/s1",
             "https://registry.example/sessions/s1",
         ] {
-            assert_ne!(destination_pseudonym(other, id), base, "{other} must re-key");
+            assert_ne!(
+                destination_pseudonym(other, id),
+                base,
+                "{other} must re-key"
+            );
         }
         // Two services on different origins get different keys for one machine.
         assert_ne!(

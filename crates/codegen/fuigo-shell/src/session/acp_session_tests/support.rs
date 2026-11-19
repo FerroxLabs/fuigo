@@ -325,7 +325,9 @@ pub(crate) async fn create_test_actor_with_terminal(
     chat_state_handle.record_token_usage(total_tokens);
     let actor = SessionActor {
         held_wakes: Default::default(),
-        refusal_prompt: Arc::new(std::sync::Mutex::new(fuigo_sampling_types::refusal::PromptSM::new(false))),
+        refusal_prompt: Arc::new(std::sync::Mutex::new(
+            fuigo_sampling_types::refusal::PromptSM::new(false),
+        )),
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,
@@ -567,9 +569,12 @@ pub(crate) async fn create_test_actor_with_terminal(
 /// claims one here, under a fresh id, for the actor's own folder (its first write creates the folder).
 pub(crate) fn give_test_writer(actor: &mut SessionActor) {
     let dir = crate::session::persistence::session_dir(&actor.session_info);
-    let writer = fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir).expect("claim");
-    std::sync::Arc::get_mut(&mut actor.rebuild_spec).expect("the test actor's spec is unshared").session_writer =
-        Some(writer);
+    let writer =
+        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), dir)
+            .expect("claim");
+    std::sync::Arc::get_mut(&mut actor.rebuild_spec)
+        .expect("the test actor's spec is unshared")
+        .session_writer = Some(writer);
 }
 #[cfg(test)]
 pub(crate) async fn create_test_actor(

@@ -16,8 +16,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
 use fuigo_sqlite_journal::JournalMode;
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::recovery;
 
@@ -1553,11 +1553,19 @@ fn p150_preparing_a_live_index_keeps_its_sqlite_locks() {
         fl.l_len = 1024;
         // SAFETY: the descriptor is open for the call and `fl` is a valid, exclusively borrowed `flock`.
         let rc = unsafe { libc::fcntl(probe_file.as_raw_fd(), libc::F_OFD_GETLK, &mut fl) };
-        assert_eq!(rc, 0, "F_OFD_GETLK failed: {}", std::io::Error::last_os_error());
+        assert_eq!(
+            rc,
+            0,
+            "F_OFD_GETLK failed: {}",
+            std::io::Error::last_os_error()
+        );
         fl.l_type != libc::F_UNLCK as libc::c_short
     };
     assert!(locked(), "the open transaction holds SQLite's locks");
     prepare_owner_only(&db);
-    assert!(locked(), "preparing a live database released its SQLite locks");
+    assert!(
+        locked(),
+        "preparing a live database released its SQLite locks"
+    );
     conn.execute_batch("COMMIT;").unwrap();
 }

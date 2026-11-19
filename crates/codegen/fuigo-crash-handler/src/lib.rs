@@ -475,8 +475,8 @@ fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         // O_NOFOLLOW and no truncate-on-open: a planted link is refused, and a file is only truncated after
         // it has been checked to be a regular file of ours (audit S11-F5).
         let mut file = std::fs::OpenOptions::new()
@@ -706,16 +706,27 @@ mod tests {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         assert!(reports[0].timestamp <= now, "timestamp clamped to now");
-        let name = reports[0].report_path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = reports[0]
+            .report_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert!(!name.contains(&u64::MAX.to_string()), "{name}");
         assert!(
-            reports[0].app_version.chars().all(|c| (' '..='~').contains(&c)),
+            reports[0]
+                .app_version
+                .chars()
+                .all(|c| (' '..='~').contains(&c)),
             "{:?}",
             reports[0].app_version
         );
         let notice = startup_notice(&reports).expect("notice");
         assert_eq!(notice.lines().count(), 5, "{notice}");
-        assert!(!notice.lines().any(|l| l.starts_with("Injected")), "{notice}");
+        assert!(
+            !notice.lines().any(|l| l.starts_with("Injected")),
+            "{notice}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

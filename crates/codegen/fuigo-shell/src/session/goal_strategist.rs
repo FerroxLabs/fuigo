@@ -257,7 +257,8 @@ pub(crate) async fn run_goal_strategist(
     // missing-strategy guard catches it).
 
     // plan.md safety: snapshot plan.md byte-for-byte and set up the restore guard BEFORE spawning
-    let mut plan_guard = PlanGuard::capture(inputs.plan_file).with_writer(inputs.session_writer.clone());
+    let mut plan_guard =
+        PlanGuard::capture(inputs.plan_file).with_writer(inputs.session_writer.clone());
 
     let strategy_file_str = inputs.strategy_file.to_string_lossy();
     let plan_file_str = inputs.plan_file.to_string_lossy();
@@ -442,7 +443,10 @@ impl<'a> PlanGuard<'a> {
 
     /// Write (`Some(bytes)`) or remove (`None`) plan.md through the session's writer (F5-C5).
     fn through_writer(&self, bytes: Option<&[u8]>) -> std::io::Result<()> {
-        let writer = self.writer.as_ref().ok_or_else(|| crate::session::storage::jsonl::no_writer_error(self.plan_file))?;
+        let writer = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| crate::session::storage::jsonl::no_writer_error(self.plan_file))?;
         let rel = writer.rel_of(self.plan_file)?;
         match bytes {
             Some(bytes) => writer.replace_atomic_sync(rel, bytes),
@@ -548,7 +552,10 @@ fn record_fail_open(
 
 // Tests
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,7 +824,11 @@ mod tests {
 
     /// A writer for the folder of `plan` under a fresh id (F5-C5: restores go through one).
     fn test_writer(plan: &Path) -> fuigo_session_writer::SessionWriter {
-        fuigo_session_writer::SessionWriter::try_claim(uuid::Uuid::now_v7().to_string(), plan.parent().unwrap()).expect("claim")
+        fuigo_session_writer::SessionWriter::try_claim(
+            uuid::Uuid::now_v7().to_string(),
+            plan.parent().unwrap(),
+        )
+        .expect("claim")
     }
 
     fn inputs<'a>(plan: &'a Path, strategy: &'a Path) -> GoalStrategistInputs<'a> {

@@ -85,9 +85,8 @@ where
         *slot = Some(guard);
     }
 
-    let filter = tracing_subscriber::filter::EnvFilter::new(
-        "fuigo_hooks=debug,fuigo_agent::plugins=debug",
-    );
+    let filter =
+        tracing_subscriber::filter::EnvFilter::new("fuigo_hooks=debug,fuigo_agent::plugins=debug");
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_ansi(false)

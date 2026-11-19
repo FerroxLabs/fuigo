@@ -22,7 +22,9 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
-use crate::session_cgroup::{PLACE_SENTINEL_ERRNO, PlaceError, SessionCgroup, decide_placement, placement_enabled, probe};
+use crate::session_cgroup::{
+    PLACE_SENTINEL_ERRNO, PlaceError, SessionCgroup, decide_placement, placement_enabled, probe,
+};
 use crate::{HANGUP_GRACE, ProcessGroup, new_process_group};
 
 /// A `Send + Sync` kill-handle for one unit's child-process trees. Cheap to
@@ -62,7 +64,9 @@ pub struct PlaceHook {
 
 impl PlaceHook {
     fn off() -> Self {
-        Self { retry_may_follow: false }
+        Self {
+            retry_may_follow: false,
+        }
     }
 
     /// True when a failed placement will be followed by a second `configure`
@@ -139,7 +143,10 @@ fn spawn_placed_impl<C: Placeable, E>(
         Err(why) => {
             // Unreachable on Linux (`place_or_latch` only fails with `Stopping`).
             // Never fail a working command: latch and run unplaced.
-            tracing::debug!(?why, "session cgroup gate unavailable; running unplaced, breached");
+            tracing::debug!(
+                ?why,
+                "session cgroup gate unavailable; running unplaced, breached"
+            );
             cg.latch_breached();
             let configured = configure(&mut cmd, &PlaceHook::off());
             configured.map_err(SpawnPlacedError::Build)?;
@@ -147,7 +154,9 @@ fn spawn_placed_impl<C: Placeable, E>(
         }
     };
     let placed = lease.placed();
-    let hook = PlaceHook { retry_may_follow: placed };
+    let hook = PlaceHook {
+        retry_may_follow: placed,
+    };
     let configured = configure(&mut cmd, &hook);
     if !placed {
         // Closed by session end: `breached` was latched under the lease already.
@@ -170,7 +179,9 @@ fn spawn_placed_impl<C: Placeable, E>(
             // whether the fallback starts a process, which is the only point at
             // which it can be set race-free.
             cg.fallback_point();
-            tracing::warn!("session cgroup placement failed; session is breached, command runs unplaced");
+            tracing::warn!(
+                "session cgroup placement failed; session is breached, command runs unplaced"
+            );
             drop(cmd);
             let mut cmd = new_command();
             configure(&mut cmd, &PlaceHook::off()).map_err(SpawnPlacedError::Build)?;
@@ -198,23 +209,23 @@ impl ProcessScope {
     /// failure is logged once and the session runs unplaced.
     pub fn new_session() -> Self {
         // `placement_enabled` reads the variable once and probes only when it is `on`.
-        Self::new_session_with(
-            placement_enabled().then_some("on"),
-            || {
-                match probe() {
+        Self::new_session_with(placement_enabled().then_some("on"), || {
+            match probe() {
                     Ok(host) => host
                         .create_session()
                         .inspect_err(|e| tracing::warn!(reason = %e, "session cgroup creation failed; session runs unplaced"))
                         .ok(),
                     Err(_) => None,
                 }
-            },
-        )
+        })
     }
 
     /// [`new_session`](Self::new_session) with the variable's value and the
     /// cgroup factory injected. `create` is not called unless `value` is `on`.
-    pub fn new_session_with(value: Option<&str>, create: impl FnOnce() -> Option<SessionCgroup>) -> Self {
+    pub fn new_session_with(
+        value: Option<&str>,
+        create: impl FnOnce() -> Option<SessionCgroup>,
+    ) -> Self {
         let mut cgroup = None;
         decide_placement(value, || {
             cgroup = create();

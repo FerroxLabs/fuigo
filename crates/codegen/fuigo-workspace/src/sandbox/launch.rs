@@ -167,6 +167,11 @@ impl WorkspaceSandbox {
         // The call-scoped rows apply to this spawn's policy and, through the record, to the
         // connections the proxy decides for it while it runs
         let inherited_once = settling.once;
+        // u46 r2: what widens this spawn for its call alone, for the persistent shell's trust tag
+        let mut widened: Vec<String> = inherited_once.iter().map(|g| g.id.to_string()).collect();
+        if let Some(subject) = &settling.replayed_under {
+            widened.push(format!("replay:{subject:?}"));
+        }
         grants.extend(inherited_once.iter().cloned());
         // One reading of the folder's proxy for the policy's port and the pointer's credential;
         // a spawn that runs unwrapped has no proxy
@@ -238,6 +243,7 @@ impl WorkspaceSandbox {
         Ok(Some(LaunchReceipt {
             sandboxed,
             backend: backend_name,
+            grants: widened,
         }))
     }
 }

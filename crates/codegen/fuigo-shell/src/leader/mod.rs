@@ -52,19 +52,22 @@
 //! ```
 mod act_on;
 mod client;
+pub(crate) mod drivers;
 #[cfg(feature = "test-support")]
 pub mod in_process;
 mod lock;
-pub(crate) mod peer_check;
-#[cfg(all(test, windows))]
-mod starter_identity_tests;
 pub(crate) mod peer_auth;
 #[cfg(all(test, windows))]
 mod peer_auth_tests;
-pub(crate) mod drivers;
+pub(crate) mod peer_check;
 pub mod protocol;
 pub(crate) mod server;
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[cfg(all(test, windows))]
+mod starter_identity_tests;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;
@@ -81,8 +84,8 @@ pub use protocol::{
 };
 use serde::{Deserialize, Serialize};
 pub use server::{
-    LeaderServerControlState, LeaderServerMetadata, RelayRefusalBoard, ServerError, ServerHandle, run_leader_server,
-    spawn_leader_server,
+    LeaderServerControlState, LeaderServerMetadata, RelayRefusalBoard, ServerError, ServerHandle,
+    run_leader_server, spawn_leader_server,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -158,7 +161,9 @@ fn note_adopted_leader(conn: &LeaderConnection) {
             leader_version,
             installed_version_for_eviction().as_deref(),
             CLIENT_LEADER_VERSION,
-            &crate::util::fuigo_home::fuigo_home().join("bin").join(managed_fuigo_bin_name()),
+            &crate::util::fuigo_home::fuigo_home()
+                .join("bin")
+                .join(managed_fuigo_bin_name()),
         )
     }) else {
         return;
@@ -728,22 +733,26 @@ async fn discover_leaders_in_with(root: &Path, endpoint_is_file: bool) -> Vec<Le
                     None,
                 ),
                 // Nothing answers on the pipe: the same verdict a lock without a socket file gets on Unix.
-                Err(error) if error.code == LeaderTargetErrorCode::SocketUnreachable => descriptor_from_paths(
-                    Some(lock_path),
-                    None,
-                    pid_from_lock,
-                    None,
-                    LeaderDiscoveryState::Stale,
-                    None,
-                ),
-                Err(error) if error.code == LeaderTargetErrorCode::UnsupportedProtocol => descriptor_from_paths(
-                    Some(lock_path),
-                    Some(derived),
-                    pid_from_lock,
-                    None,
-                    LeaderDiscoveryState::UnsupportedProtocol,
-                    Some(LeaderTargetErrorCode::UnsupportedProtocol),
-                ),
+                Err(error) if error.code == LeaderTargetErrorCode::SocketUnreachable => {
+                    descriptor_from_paths(
+                        Some(lock_path),
+                        None,
+                        pid_from_lock,
+                        None,
+                        LeaderDiscoveryState::Stale,
+                        None,
+                    )
+                }
+                Err(error) if error.code == LeaderTargetErrorCode::UnsupportedProtocol => {
+                    descriptor_from_paths(
+                        Some(lock_path),
+                        Some(derived),
+                        pid_from_lock,
+                        None,
+                        LeaderDiscoveryState::UnsupportedProtocol,
+                        Some(LeaderTargetErrorCode::UnsupportedProtocol),
+                    )
+                }
                 Err(error) => descriptor_from_paths(
                     Some(lock_path),
                     Some(derived),
@@ -1589,7 +1598,10 @@ async fn leader_pid_to_show(conn: &LeaderConnection, lock: &LeaderLock) -> Optio
 /// The leader process an eviction may signal or terminate, or `None` (then nothing is signalled; the caller behaves as when no
 /// pid is known). Windows: the OS-reported owner of the server end of `conn`'s own pipe, kept only if its image is a Fuigo binary,
 /// as an open handle that is also the handle the kill goes through. Elsewhere: the pid in the lock file, as before.
-async fn leader_target_to_act_on(conn: &LeaderConnection, lock: &LeaderLock) -> Option<act_on::ActTarget> {
+async fn leader_target_to_act_on(
+    conn: &LeaderConnection,
+    lock: &LeaderLock,
+) -> Option<act_on::ActTarget> {
     #[cfg(windows)]
     {
         let _ = lock;
@@ -1598,7 +1610,9 @@ async fn leader_target_to_act_on(conn: &LeaderConnection, lock: &LeaderLock) -> 
         match pid.and_then(act_on::ActTarget::from_os_server_pid) {
             Some(target) => Some(target),
             None => {
-                warn!("Not signalling the pipe's leader: the OS server pid is unknown, gone, or not a Fuigo process");
+                warn!(
+                    "Not signalling the pipe's leader: the OS server pid is unknown, gone, or not a Fuigo process"
+                );
                 None
             }
         }
@@ -2247,7 +2261,10 @@ fn spawn_leader_process(mut cmd: Command) -> std::io::Result<std::process::Child
     #[allow(clippy::disallowed_methods)]
     cmd.spawn()
 }
-#[allow(clippy::disallowed_methods, reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "leader lock/socket/log under FUIGO_HOME; not inside a session folder"
+)]
 fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionError> {
     let exe = resolve_exe_for_spawn()?;
     let mut cmd = Command::new(exe);
@@ -2334,19 +2351,40 @@ pub(crate) async fn wait_for_socket_connectable(
         None => Err(ConnectionError::Timeout),
     }
 }
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     #[test]
     fn g_leader_kill_never_terminates_a_pid_from_a_payload_or_lock_file_on_windows() {
         // Windows: only a leader that answered on the pipe is acted on, through its own connection.
-        assert_eq!(leader_kill_plan(true, true, Some(4242)), LeaderKillPlan::ViaPipeConnection);
-        assert_eq!(leader_kill_plan(true, false, Some(4242)), LeaderKillPlan::CannotIdentify);
-        assert_eq!(leader_kill_plan(true, false, None), LeaderKillPlan::CannotIdentify);
+        assert_eq!(
+            leader_kill_plan(true, true, Some(4242)),
+            LeaderKillPlan::ViaPipeConnection
+        );
+        assert_eq!(
+            leader_kill_plan(true, false, Some(4242)),
+            LeaderKillPlan::CannotIdentify
+        );
+        assert_eq!(
+            leader_kill_plan(true, false, None),
+            LeaderKillPlan::CannotIdentify
+        );
         // Elsewhere: unchanged.
-        assert_eq!(leader_kill_plan(false, true, Some(4242)), LeaderKillPlan::ByPid(4242));
-        assert_eq!(leader_kill_plan(false, false, Some(4242)), LeaderKillPlan::ByPid(4242));
-        assert_eq!(leader_kill_plan(false, false, None), LeaderKillPlan::CannotIdentify);
+        assert_eq!(
+            leader_kill_plan(false, true, Some(4242)),
+            LeaderKillPlan::ByPid(4242)
+        );
+        assert_eq!(
+            leader_kill_plan(false, false, Some(4242)),
+            LeaderKillPlan::ByPid(4242)
+        );
+        assert_eq!(
+            leader_kill_plan(false, false, None),
+            LeaderKillPlan::CannotIdentify
+        );
     }
     use super::*;
     use crate::leader::test_support::{
@@ -2574,7 +2612,8 @@ mod tests {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             fuigo_tty_utils::detach_std_command(&mut cmd);
-            #[allow(clippy::disallowed_methods)] // test fixture; killed and reaped by `SpawnedChild::drop`
+            #[allow(clippy::disallowed_methods)]
+            // test fixture; killed and reaped by `SpawnedChild::drop`
             SpawnedChild(cmd.spawn().expect("spawn test child"))
         };
         let marked = spawn(&["-c", "sleep 30; true", "sh", RELAY_ON_DEMAND_FLAG]);
@@ -2709,7 +2748,8 @@ mod tests {
     /// P124: a client older than its leader says so; same, older, unversioned and unparseable leaders say nothing.
     #[test]
     fn newer_leader_notice_names_both_versions_and_the_remedy() {
-        let text = newer_leader_notice(Some("1.0.22"), "1.0.21").expect("a newer leader is announced");
+        let text =
+            newer_leader_notice(Some("1.0.22"), "1.0.21").expect("a newer leader is announced");
         assert!(text.contains("1.0.22") && text.contains("1.0.21"), "{text}");
         assert!(text.contains("fuigo leader kill"), "{text}");
         assert!(!text.contains('\u{2014}'), "{text}");
@@ -2766,7 +2806,11 @@ mod tests {
                 .skip(before)
                 .filter(|n| n.contains("leader"))
                 .collect();
-            assert_eq!(announced.len(), usize::from(expect_notice), "{version}: {announced:?}");
+            assert_eq!(
+                announced.len(),
+                usize::from(expect_notice),
+                "{version}: {announced:?}"
+            );
             if expect_notice {
                 assert!(announced[0].contains(&version), "{announced:?}");
             }
@@ -2776,7 +2820,9 @@ mod tests {
     }
     /// The pid the eviction acts on (signals or terminates), taken from `conn` and `lock` by the production rule.
     async fn act_on_pid_of(conn: &LeaderConnection, lock: &LeaderLock) -> Option<u32> {
-        leader_target_to_act_on(conn, lock).await.map(|target| target.pid())
+        leader_target_to_act_on(conn, lock)
+            .await
+            .map(|target| target.pid())
     }
     /// Packet 2 round 2 (audit HIGH): on Windows the pid inside the `GetLeaderInfo` payload comes from whoever serves the pipe
     /// and must never be acted on. The fake claims pid 7777; the process that really serves the pipe is this test process.
@@ -2789,17 +2835,32 @@ mod tests {
         let sock_path = temp.path().join("leader-r2.sock");
         let fake = spawn_fake_leader(
             sock_path.clone(),
-            FakeLeaderBehavior::ClaimsPid { claimed_pid: CLAIMED },
+            FakeLeaderBehavior::ClaimsPid {
+                claimed_pid: CLAIMED,
+            },
         )
         .await;
         let lock = LeaderLock::from_paths(sock_path.with_extension("lock"), sock_path.clone());
-        let conn = connect_to_leader(&sock_path, "test", ClientMode::Stdio, ClientCapabilities::default())
-            .await
-            .expect("connect to the fake");
+        let conn = connect_to_leader(
+            &sock_path,
+            "test",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        .expect("connect to the fake");
         let acted = act_on_pid_of(&conn, &lock).await;
         fake.cancel();
-        assert_ne!(acted, Some(CLAIMED), "the payload pid must never be acted on");
-        assert_eq!(acted, Some(std::process::id()), "the pid to act on is the OS pid of the pipe server");
+        assert_ne!(
+            acted,
+            Some(CLAIMED),
+            "the payload pid must never be acted on"
+        );
+        assert_eq!(
+            acted,
+            Some(std::process::id()),
+            "the pid to act on is the OS pid of the pipe server"
+        );
     }
     /// Packet 2: a too-old leader that holds the lock, does not advertise `relaunch_v1` and never vacates must not keep the
     /// client in the vacate loop forever: the call returns the "could not replace" error once the budget is spent.
@@ -2824,7 +2885,8 @@ mod tests {
         )
         .await;
         // Another holder of the lock: the fake never lets go of it.
-        let mut holder = LeaderLock::from_paths(sock_path.with_extension("lock"), sock_path.clone());
+        let mut holder =
+            LeaderLock::from_paths(sock_path.with_extension("lock"), sock_path.clone());
         assert!(holder.try_acquire().unwrap(), "the test holds the lock");
         // SAFETY: serialised on FUIGO_LEADER_SOCKET; restored below.
         unsafe { std::env::set_var(LEADER_SOCKET_ENV, &sock_path) };
@@ -2847,7 +2909,10 @@ mod tests {
         match outcome {
             Err(ConnectionError::SpawnFailed(message)) => {
                 assert!(message.contains("0.0.0-p2-vacate"), "{message}");
-                assert!(message.contains("Close the other Fuigo windows"), "{message}");
+                assert!(
+                    message.contains("Close the other Fuigo windows"),
+                    "{message}"
+                );
             }
             Err(other) => panic!("wrong error: {other}"),
             Ok(_) => panic!("must not adopt a too-old leader"),
@@ -2859,9 +2924,18 @@ mod tests {
     #[test]
     fn explicit_downgrade_needs_an_explicit_request_and_a_lower_installed_version() {
         assert!(is_explicit_downgrade(true, "1.0.20", "1.0.21"));
-        assert!(!is_explicit_downgrade(false, "1.0.20", "1.0.21"), "an ordinary update is never a downgrade");
-        assert!(!is_explicit_downgrade(true, "1.0.21", "1.0.21"), "'Already up to date' installed nothing");
-        assert!(!is_explicit_downgrade(true, "1.0.22", "1.0.21"), "an upgrade is not a downgrade");
+        assert!(
+            !is_explicit_downgrade(false, "1.0.20", "1.0.21"),
+            "an ordinary update is never a downgrade"
+        );
+        assert!(
+            !is_explicit_downgrade(true, "1.0.21", "1.0.21"),
+            "'Already up to date' installed nothing"
+        );
+        assert!(
+            !is_explicit_downgrade(true, "1.0.22", "1.0.21"),
+            "an upgrade is not a downgrade"
+        );
         assert!(!is_explicit_downgrade(true, "unknown", "1.0.21"));
         assert!(!is_explicit_downgrade(true, "1.0.20", "unknown"));
     }
@@ -2901,14 +2975,25 @@ mod tests {
             },
         )
         .await;
-        let conn = connect_to_leader(&sock_path, "test", ClientMode::Stdio, ClientCapabilities::default())
-            .await
-            .unwrap();
+        let conn = connect_to_leader(
+            &sock_path,
+            "test",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        .unwrap();
         for _ in 0..3 {
-            assert!(evict_leader_conn(&conn), "discovery alone never makes eviction futile");
+            assert!(
+                evict_leader_conn(&conn),
+                "discovery alone never makes eviction futile"
+            );
         }
         note_spawned_leader(&conn);
-        assert!(!evict_leader_conn(&conn), "a spawn that left it running makes eviction futile");
+        assert!(
+            !evict_leader_conn(&conn),
+            "a spawn that left it running makes eviction futile"
+        );
         drop(conn);
         fake.cancel();
     }
@@ -2918,30 +3003,88 @@ mod tests {
         let futile = std::sync::Mutex::new(Vec::new());
         // client 1.0.21 (stale), installed 1.0.20 == leader: keep, however often it is met.
         for _ in 0..3 {
-            assert!(!evict_decision(Some("1.0.20"), "1.0.21", Some("1.0.20"), &futile));
+            assert!(!evict_decision(
+                Some("1.0.20"),
+                "1.0.21",
+                Some("1.0.20"),
+                &futile
+            ));
         }
         // ordinary upgrade: installed is the client's version, the leader is older: evict.
-        assert!(evict_decision(Some("1.0.20"), "1.0.21", Some("1.0.21"), &futile));
+        assert!(evict_decision(
+            Some("1.0.20"),
+            "1.0.21",
+            Some("1.0.21"),
+            &futile
+        ));
         // installed newer than the client, leader older: evict.
-        assert!(evict_decision(Some("1.0.20"), "1.0.21", Some("1.0.22"), &futile));
+        assert!(evict_decision(
+            Some("1.0.20"),
+            "1.0.21",
+            Some("1.0.22"),
+            &futile
+        ));
         // leader older than the installed version: it is not the installed one, evict.
-        assert!(evict_decision(Some("1.0.19"), "1.0.21", Some("1.0.20"), &futile));
+        assert!(evict_decision(
+            Some("1.0.19"),
+            "1.0.21",
+            Some("1.0.20"),
+            &futile
+        ));
         // installed unknown or unparseable: P124 behaviour.
         assert!(evict_decision(Some("1.0.20"), "1.0.21", None, &futile));
-        assert!(evict_decision(Some("1.0.20"), "1.0.21", Some("latest"), &futile));
+        assert!(evict_decision(
+            Some("1.0.20"),
+            "1.0.21",
+            Some("latest"),
+            &futile
+        ));
         // prerelease versions compare as semver
-        assert!(!evict_decision(Some("1.0.21-e2e.1"), "1.0.21-e2e.2", Some("1.0.21-e2e.1"), &futile));
-        assert!(evict_decision(Some("1.0.21-e2e.1"), "1.0.21-e2e.2", Some("1.0.21-e2e.2"), &futile));
+        assert!(!evict_decision(
+            Some("1.0.21-e2e.1"),
+            "1.0.21-e2e.2",
+            Some("1.0.21-e2e.1"),
+            &futile
+        ));
+        assert!(evict_decision(
+            Some("1.0.21-e2e.1"),
+            "1.0.21-e2e.2",
+            Some("1.0.21-e2e.2"),
+            &futile
+        ));
     }
     /// P129: the stale-client notice names the installed version and how to run it; it is silent in every other case.
     #[test]
     fn stale_client_notice_names_installed_version_and_remedy() {
-        let text = stale_client_notice(Some("1.0.20"), Some("1.0.20"), "1.0.21", Path::new("/h/.fuigo/bin/fuigo")).expect("stale client is told");
-        assert!(text.contains("1.0.20") && text.contains("1.0.21") && text.contains("/h/.fuigo/bin/fuigo"), "{text}");
-        assert_eq!(stale_client_notice(Some("1.0.20"), Some("1.0.21"), "1.0.21", Path::new("/x")), None);
-        assert_eq!(stale_client_notice(Some("1.0.20"), None, "1.0.21", Path::new("/x")), None);
-        assert_eq!(stale_client_notice(None, Some("1.0.20"), "1.0.21", Path::new("/x")), None);
-        assert_eq!(stale_client_notice(Some("1.0.21"), Some("1.0.21"), "1.0.21", Path::new("/x")), None);
+        let text = stale_client_notice(
+            Some("1.0.20"),
+            Some("1.0.20"),
+            "1.0.21",
+            Path::new("/h/.fuigo/bin/fuigo"),
+        )
+        .expect("stale client is told");
+        assert!(
+            text.contains("1.0.20")
+                && text.contains("1.0.21")
+                && text.contains("/h/.fuigo/bin/fuigo"),
+            "{text}"
+        );
+        assert_eq!(
+            stale_client_notice(Some("1.0.20"), Some("1.0.21"), "1.0.21", Path::new("/x")),
+            None
+        );
+        assert_eq!(
+            stale_client_notice(Some("1.0.20"), None, "1.0.21", Path::new("/x")),
+            None
+        );
+        assert_eq!(
+            stale_client_notice(None, Some("1.0.20"), "1.0.21", Path::new("/x")),
+            None
+        );
+        assert_eq!(
+            stale_client_notice(Some("1.0.21"), Some("1.0.21"), "1.0.21", Path::new("/x")),
+            None
+        );
     }
     /// P129: the installed version comes from the managed symlink for a managed client only.
     #[cfg(unix)]
@@ -2954,15 +3097,30 @@ mod tests {
         let exe_a = home.join("versions").join("fuigo-1.0.21-e2e.2");
         let exe_b = home.join("versions").join("fuigo-1.0.21-e2e.1");
         std::fs::write(&exe_a, "a").unwrap();
-        assert_eq!(managed_installed_version(home, Some(&exe_a)), None, "no symlink yet");
+        assert_eq!(
+            managed_installed_version(home, Some(&exe_a)),
+            None,
+            "no symlink yet"
+        );
         std::fs::write(&exe_b, "b").unwrap();
         std::os::unix::fs::symlink(&exe_b, home.join("bin").join("fuigo")).unwrap();
-        assert_eq!(managed_installed_version(home, Some(&exe_a)).as_deref(), Some("1.0.21-e2e.1"));
+        assert_eq!(
+            managed_installed_version(home, Some(&exe_a)).as_deref(),
+            Some("1.0.21-e2e.1")
+        );
         let outside = TempDir::new().unwrap();
-        assert_eq!(managed_installed_version(home, Some(&outside.path().join("fuigo"))), None, "dev binary: no installed version");
+        assert_eq!(
+            managed_installed_version(home, Some(&outside.path().join("fuigo"))),
+            None,
+            "dev binary: no installed version"
+        );
         assert_eq!(managed_installed_version(home, None), None);
         std::fs::remove_file(&exe_b).unwrap();
-        assert_eq!(managed_installed_version(home, Some(&exe_a)), None, "dangling link");
+        assert_eq!(
+            managed_installed_version(home, Some(&exe_a)),
+            None,
+            "dangling link"
+        );
     }
     /// P129 against a live registration: a lower leader that is the installed version is kept even before any spawn of ours.
     #[tokio::test]
@@ -2980,14 +3138,27 @@ mod tests {
             },
         )
         .await;
-        let conn = connect_to_leader(&sock_path, "test", ClientMode::Stdio, ClientCapabilities::default())
-            .await
-            .unwrap();
+        let conn = connect_to_leader(
+            &sock_path,
+            "test",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        .unwrap();
         let version = conn.registration().leader_binary_version.clone();
         let futile = std::sync::Mutex::new(Vec::new());
-        assert!(evict_decision(version.as_deref(), "0.0.1", None, &futile), "unknown install: P124 evicts");
         assert!(
-            !evict_decision(version.as_deref(), "0.0.1", Some("0.0.0-p129-installed"), &futile),
+            evict_decision(version.as_deref(), "0.0.1", None, &futile),
+            "unknown install: P124 evicts"
+        );
+        assert!(
+            !evict_decision(
+                version.as_deref(),
+                "0.0.1",
+                Some("0.0.0-p129-installed"),
+                &futile
+            ),
             "the leader is the installed version: the client is stale"
         );
         drop(conn);
@@ -3527,17 +3698,37 @@ mod tests {
         fs::write(&lock_path, "").unwrap();
         let found = discover_leaders_in_with(temp.path(), false).await;
         assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].classification, LeaderDiscoveryState::Stale, "nobody answers: Stale");
+        assert_eq!(
+            found[0].classification,
+            LeaderDiscoveryState::Stale,
+            "nobody answers: Stale"
+        );
         assert_eq!(found[0].socket_path, None);
 
-        let handle = spawn_leader_server(temp.path().join("leader.sock")).await.unwrap();
+        let handle = spawn_leader_server(temp.path().join("leader.sock"))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let found = discover_leaders_in_with(temp.path(), false).await;
-        assert_eq!(found.len(), 1, "one leader, not a lock entry plus a socket entry: {found:?}");
-        assert_eq!(found[0].classification, LeaderDiscoveryState::Reachable, "{found:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "one leader, not a lock entry plus a socket entry: {found:?}"
+        );
+        assert_eq!(
+            found[0].classification,
+            LeaderDiscoveryState::Reachable,
+            "{found:?}"
+        );
         assert_eq!(found[0].lock_path.as_deref(), Some(lock_path.as_path()));
-        assert_eq!(found[0].socket_path.as_deref(), Some(temp.path().join("leader.sock").as_path()));
-        assert_eq!(found[0].live_info.as_ref().map(|i| i.pid), Some(std::process::id()));
+        assert_eq!(
+            found[0].socket_path.as_deref(),
+            Some(temp.path().join("leader.sock").as_path())
+        );
+        assert_eq!(
+            found[0].live_info.as_ref().map(|i| i.pid),
+            Some(std::process::id())
+        );
         assert_eq!(reachable_leader_pids(&found).len(), 1);
         handle.cancel.cancel();
     }

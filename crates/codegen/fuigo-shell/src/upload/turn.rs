@@ -648,7 +648,11 @@ mod tests {
             resolve_ask_user_question_enabled(Some(true), true, || false),
             "an explicit opt-in still wins for non-interactive clients that answer programmatically"
         );
-        assert!(!resolve_ask_user_question_enabled(Some(false), false, || true));
+        assert!(!resolve_ask_user_question_enabled(
+            Some(false),
+            false,
+            || true
+        ));
     }
     #[test]
     fn parse_ask_user_question_returns_none_for_empty_meta() {

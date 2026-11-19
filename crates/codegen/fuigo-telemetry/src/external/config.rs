@@ -243,9 +243,24 @@ impl std::fmt::Debug for ExternalOtelConfig {
             .field("logs_transport", logs_transport)
             .field("metrics_transport", metrics_transport)
             .field("logs_endpoint", &fuigo_auth::redact_url(logs_endpoint))
-            .field("metrics_endpoint", &fuigo_auth::redact_url(metrics_endpoint))
-            .field("logs_headers", &logs_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
-            .field("metrics_headers", &metrics_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "metrics_endpoint",
+                &fuigo_auth::redact_url(metrics_endpoint),
+            )
+            .field(
+                "logs_headers",
+                &logs_headers
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "metrics_headers",
+                &metrics_headers
+                    .iter()
+                    .map(|(k, _)| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("logs_ca_certificate", logs_ca_certificate)
             .field("metrics_ca_certificate", metrics_ca_certificate)
             .field("logs_client_certificate", logs_client_certificate)
@@ -257,10 +272,16 @@ impl std::fmt::Debug for ExternalOtelConfig {
             .field("logs_export_interval", logs_export_interval)
             .field("gates", gates)
             .field("temporality", temporality)
-            .field("include_session_id_on_metrics", include_session_id_on_metrics)
+            .field(
+                "include_session_id_on_metrics",
+                include_session_id_on_metrics,
+            )
             .field("include_version_on_metrics", include_version_on_metrics)
             .field("client", client)
-            .field("internal_pipeline_consumed_otel_vars", internal_pipeline_consumed_otel_vars)
+            .field(
+                "internal_pipeline_consumed_otel_vars",
+                internal_pipeline_consumed_otel_vars,
+            )
             .field("enabled_source", enabled_source)
             .finish()
     }

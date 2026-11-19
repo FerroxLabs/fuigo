@@ -183,11 +183,20 @@ pub fn git_dir_lives_at(top: &Path, repo: &git2::Repository) -> bool {
     let Ok(text) = std::fs::read_to_string(&dot_git) else {
         return false;
     };
-    let Some(target) = text.lines().next().and_then(|l| l.strip_prefix("gitdir:")).map(str::trim) else {
+    let Some(target) = text
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("gitdir:"))
+        .map(str::trim)
+    else {
         return false;
     };
     let target = Path::new(target);
-    let target = if target.is_absolute() { target.to_path_buf() } else { top.join(target) };
+    let target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        top.join(target)
+    };
     dunce::canonicalize(&target).is_ok_and(|d| d == git_dir)
 }
 
@@ -339,13 +348,19 @@ mod tests {
         let nested = parent.join("evil");
         std::fs::create_dir_all(&nested).unwrap();
         let repo = git2::Repository::init(&nested).unwrap();
-        repo.config().unwrap().set_str("core.worktree", parent.to_str().unwrap()).unwrap();
+        repo.config()
+            .unwrap()
+            .set_str("core.worktree", parent.to_str().unwrap())
+            .unwrap();
         let chain = RepoDirChain::resolve(&nested);
         let parent_c = dunce::canonicalize(&parent).unwrap();
         assert!(
-            chain.git_root.as_deref().map(|r| dunce::canonicalize(r).unwrap()) != Some(parent_c),
+            chain
+                .git_root
+                .as_deref()
+                .map(|r| dunce::canonicalize(r).unwrap())
+                != Some(parent_c),
             "a nested repository's own core.worktree must not make the parent its repo root: {chain:?}"
         );
     }
-
 }

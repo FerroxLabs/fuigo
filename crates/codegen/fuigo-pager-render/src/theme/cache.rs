@@ -444,8 +444,14 @@ mod tests {
             set_terminal_native_lock(true);
             set_terminal_native_lock(false);
             let after = render_stamp();
-            assert_eq!(before.0, after.0, "premise: the key itself is back where it started");
-            assert_ne!(before, after, "a palette write between the two reads must be visible");
+            assert_eq!(
+                before.0, after.0,
+                "premise: the key itself is back where it started"
+            );
+            assert_ne!(
+                before, after,
+                "a palette write between the two reads must be visible"
+            );
         });
     }
 
@@ -454,7 +460,10 @@ mod tests {
     #[test]
     fn render_stamp_waits_out_a_palette_write_in_flight() {
         with_test_env(|| {
-            assert!(render_stamp().1.is_multiple_of(2), "a settled stamp is even");
+            assert!(
+                render_stamp().1.is_multiple_of(2),
+                "a settled stamp is even"
+            );
             // Restores an even sequence even if an assertion below panics, so later tests are not left spinning
             struct Finish;
             impl Drop for Finish {
@@ -469,7 +478,10 @@ mod tests {
             RENDER_GEN.fetch_add(1, Ordering::AcqRel); // a write begins and has not finished
             let reader = std::thread::spawn(render_stamp);
             std::thread::sleep(std::time::Duration::from_millis(150));
-            assert!(!reader.is_finished(), "render_stamp returned during a write in flight");
+            assert!(
+                !reader.is_finished(),
+                "render_stamp returned during a write in flight"
+            );
             RENDER_GEN.fetch_add(1, Ordering::AcqRel); // the write finishes
             drop(_writer);
             let stamp = reader.join().expect("reader");
@@ -943,7 +955,10 @@ mod tests {
     #[test]
     fn fuigo_theme_wins_over_lc_and_config() {
         with_test_env(|| {
-            let env = theme_env(&[("FUIGO_THEME", "fuigoday"), ("LC_FUIGO_THEME", "tokyonight")]);
+            let env = theme_env(&[
+                ("FUIGO_THEME", "fuigoday"),
+                ("LC_FUIGO_THEME", "tokyonight"),
+            ]);
             assert_eq!(
                 resolve_initial_theme_from(
                     env_theme_name_from(&env),

@@ -10,7 +10,9 @@ pub struct Policy {
 static POLICY: OnceLock<Policy> = OnceLock::new();
 
 pub fn install(policy: Policy) -> Result<(), &'static str> {
-    POLICY.set(policy).map_err(|_| "GCS transport policy already installed")
+    POLICY
+        .set(policy)
+        .map_err(|_| "GCS transport policy already installed")
 }
 
 pub fn client(timeout: std::time::Duration) -> Result<reqwest::Client, reqwest::Error> {
@@ -34,7 +36,9 @@ pub enum Error {
 }
 
 pub trait RequestPolicyExt {
-    fn send_guarded(self) -> impl std::future::Future<Output = Result<reqwest::Response, Error>> + Send;
+    fn send_guarded(
+        self,
+    ) -> impl std::future::Future<Output = Result<reqwest::Response, Error>> + Send;
 }
 
 impl RequestPolicyExt for reqwest::RequestBuilder {
@@ -46,7 +50,10 @@ impl RequestPolicyExt for reqwest::RequestBuilder {
         }
         // Approved dispatch boundary; destination checked immediately above.
         #[allow(clippy::disallowed_methods)]
-        client.execute(request).await.map_err(|error| Error::Http(error.without_url()))
+        client
+            .execute(request)
+            .await
+            .map_err(|error| Error::Http(error.without_url()))
     }
 }
 
@@ -61,20 +68,37 @@ mod tests {
         install(Policy {
             configure: |builder| builder.redirect(reqwest::redirect::Policy::none()),
             check_url: |url| {
-                if url.host_str() == Some("127.0.0.1") { Ok(()) } else { Err("denied".into()) }
+                if url.host_str() == Some("127.0.0.1") {
+                    Ok(())
+                } else {
+                    Err("denied".into())
+                }
             },
-        }).unwrap();
-        assert!(install(Policy { configure: |b| b, check_url: |_| Ok(()) }).is_err());
+        })
+        .unwrap();
+        assert!(install(Policy {
+            configure: |b| b,
+            check_url: |_| Ok(())
+        })
+        .is_err());
         let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         proxy.set_nonblocking(true).unwrap();
         let http = reqwest::Client::builder()
             .proxy(reqwest::Proxy::all(format!("http://{}", proxy.local_addr().unwrap())).unwrap())
-            .build().unwrap();
-        let error = http.post("http://blocked.invalid/token")
-            .body("fake-refresh-token").send_guarded().await.unwrap_err();
+            .build()
+            .unwrap();
+        let error = http
+            .post("http://blocked.invalid/token")
+            .body("fake-refresh-token")
+            .send_guarded()
+            .await
+            .unwrap_err();
         assert!(matches!(error, Error::Denied));
         assert!(!error.to_string().contains("fake-refresh-token"));
-        assert_eq!(proxy.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(
+            proxy.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
 
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = server.local_addr().unwrap();
@@ -84,7 +108,9 @@ mod tests {
             loop {
                 match server.accept() {
                     Ok((mut stream, _)) => {
-                        stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                            .unwrap();
                         let mut buf = [0; 2048];
                         let _n = stream.read(&mut buf).unwrap();
                         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
@@ -98,8 +124,12 @@ mod tests {
                 }
             }
         });
-        let response = client(std::time::Duration::from_secs(3)).unwrap()
-            .get(format!("http://{addr}/token")).send_guarded().await.unwrap();
+        let response = client(std::time::Duration::from_secs(3))
+            .unwrap()
+            .get(format!("http://{addr}/token"))
+            .send_guarded()
+            .await
+            .unwrap();
         assert_eq!(response.text().await.unwrap(), "ok");
         worker.join().unwrap();
     }

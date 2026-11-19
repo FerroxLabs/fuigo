@@ -29,9 +29,9 @@ use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
 use crate::types::api_key_provider::{CredentialPurpose, CredentialRequest};
 
+use crate::implementations::fuigo_build::storage::SessionFiles;
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::implementations::fuigo_build::storage::SessionFiles;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
 /// Wire model id (the request's `model`): the provider's spelling, never rebranded.
@@ -782,11 +782,24 @@ impl std::fmt::Debug for VideoGenConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disabled => f.write_str("Disabled"),
-            Self::Enabled { api_key: _, base_url, extra_headers, zdr_video_output_s3, tier_restricted, zdr_restricted } => f
+            Self::Enabled {
+                api_key: _,
+                base_url,
+                extra_headers,
+                zdr_video_output_s3,
+                tier_restricted,
+                zdr_restricted,
+            } => f
                 .debug_struct("Enabled")
                 .field("api_key", &"<redacted>")
                 .field("base_url", &fuigo_auth::redact_url(base_url))
-                .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+                .field(
+                    "extra_headers",
+                    &extra_headers
+                        .iter()
+                        .map(|(k, _)| (k, "<redacted>"))
+                        .collect::<Vec<_>>(),
+                )
                 .field("zdr_video_output_s3", zdr_video_output_s3)
                 .field("tier_restricted", tier_restricted)
                 .field("zdr_restricted", zdr_restricted)
@@ -957,13 +970,14 @@ async fn resolve_image_reference(value: &str) -> Result<String, fuigo_tool_runti
 
     // P166/S12: regular files only, capped, so a FIFO or device reference cannot hang or flood the call.
     let cap = crate::implementations::fuigo_build::read_file::MAX_READ_SOURCE_BYTES;
-    let raw_bytes = crate::util::file_reader::read_regular_file(std::path::Path::new(value), Some(cap))
-        .await
-        .map_err(|e| {
-            fuigo_tool_runtime::ToolError::invalid_arguments(format!(
-                "image reference not readable: {value} ({e})"
-            ))
-        })?;
+    let raw_bytes =
+        crate::util::file_reader::read_regular_file(std::path::Path::new(value), Some(cap))
+            .await
+            .map_err(|e| {
+                fuigo_tool_runtime::ToolError::invalid_arguments(format!(
+                    "image reference not readable: {value} ({e})"
+                ))
+            })?;
     if raw_bytes.is_empty() {
         return Err(fuigo_tool_runtime::ToolError::invalid_arguments(
             "image reference contained no data",
@@ -1562,11 +1576,22 @@ mod tests {
     /// P174: the local files a video call reads, for the permission check.
     #[test]
     fn local_image_paths_lists_every_file_the_tool_reads() {
-        let images: Vec<String> = ["data:image/png;base64,AAAA", "https://x.example/a.png", " rel.png ", "", "/abs.png", "/abs.png", "file:///t.png"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(local_image_paths(&images), vec!["rel.png", "/abs.png", "file:///t.png"]);
+        let images: Vec<String> = [
+            "data:image/png;base64,AAAA",
+            "https://x.example/a.png",
+            " rel.png ",
+            "",
+            "/abs.png",
+            "/abs.png",
+            "file:///t.png",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            local_image_paths(&images),
+            vec!["rel.png", "/abs.png", "file:///t.png"]
+        );
     }
 
     #[test]

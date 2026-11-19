@@ -10,8 +10,8 @@ use std::time::Duration;
 use crate::scaled;
 
 use agent_client_protocol::{self as acp, Agent as _};
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use fuigo_acp_lib::LineBufferedRead;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::env::fuigo_binary;
 use crate::headless::stderr_tail;
@@ -594,16 +594,24 @@ impl RawStdioClient {
             "params": params,
         });
         let deadline = tokio::time::Instant::now() + scaled(timeout);
-        self.send_line_until(&line.to_string(), deadline, method).await;
-        self.response_until(id, method, timeout, deadline, answer).await
+        self.send_line_until(&line.to_string(), deadline, method)
+            .await;
+        self.response_until(id, method, timeout, deadline, answer)
+            .await
     }
 
     /// Answer an agent-to-client request (one the callback deferred, or one a wait returned) with `result`.
     /// The write is bounded by `timeout`.
-    pub async fn respond(&mut self, id: &serde_json::Value, result: serde_json::Value, timeout: Duration) {
+    pub async fn respond(
+        &mut self,
+        id: &serde_json::Value,
+        result: serde_json::Value,
+        timeout: Duration,
+    ) {
         let line = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
         let deadline = tokio::time::Instant::now() + scaled(timeout);
-        self.send_line_until(&line.to_string(), deadline, "respond").await;
+        self.send_line_until(&line.to_string(), deadline, "respond")
+            .await;
     }
 
     /// [`Self::send_line`] bounded by `deadline`; a write still blocked at the deadline panics.
@@ -635,7 +643,8 @@ impl RawStdioClient {
             if matches(&msg) {
                 return Some(msg);
             }
-            self.answer_if_request(&msg, &mut answer, deadline, what).await;
+            self.answer_if_request(&msg, &mut answer, deadline, what)
+                .await;
         }
     }
 
@@ -709,7 +718,8 @@ impl RawStdioClient {
             }),
             RawReply::Defer => return,
         };
-        self.send_line_until(&reply.to_string(), deadline, what).await;
+        self.send_line_until(&reply.to_string(), deadline, what)
+            .await;
     }
 
     /// [`Self::response_for_id`] with agent-to-client requests answered by `answer` instead of refused.
@@ -721,7 +731,8 @@ impl RawStdioClient {
         answer: impl FnMut(&serde_json::Value) -> R,
     ) -> serde_json::Value {
         let deadline = tokio::time::Instant::now() + scaled(timeout);
-        self.response_until(id, what, timeout, deadline, answer).await
+        self.response_until(id, what, timeout, deadline, answer)
+            .await
     }
 
     /// Read until the response to `id`, answering agent-to-client requests, all before `deadline`.
@@ -752,7 +763,8 @@ impl RawStdioClient {
             if msg.get("method").is_none() && msg.get("id").and_then(|v| v.as_str()) == Some(id) {
                 return msg;
             }
-            self.answer_if_request(&msg, &mut answer, deadline, what).await;
+            self.answer_if_request(&msg, &mut answer, deadline, what)
+                .await;
         }
     }
 

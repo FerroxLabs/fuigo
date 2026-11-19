@@ -5273,7 +5273,10 @@ async fn test_reject_hunk_keeps_saved_edit_the_tracker_missed() {
     harness.settle().await;
 
     let content = std::fs::read_to_string(harness.working_dir.join("saved.rs")).unwrap();
-    assert_eq!(content, "a\nb\nUSER\n", "the saved edit must survive the reject");
+    assert_eq!(
+        content, "a\nb\nUSER\n",
+        "the saved edit must survive the reject"
+    );
 }
 
 #[tokio::test]
@@ -5295,7 +5298,10 @@ async fn test_reject_file_keeps_saved_edit_the_tracker_missed() {
     harness.settle().await;
 
     let content = std::fs::read_to_string(harness.working_dir.join("saved2.rs")).unwrap();
-    assert_eq!(content, "a\nb\nUSER\nd\ne\n", "the saved edit must survive a file-level reject");
+    assert_eq!(
+        content, "a\nb\nUSER\nd\ne\n",
+        "the saved edit must survive a file-level reject"
+    );
 }
 
 #[tokio::test]
@@ -5315,7 +5321,10 @@ async fn test_reject_hunk_does_not_overwrite_when_saved_edit_changed_the_hunk() 
     harness.settle().await;
 
     let content = std::fs::read_to_string(harness.working_dir.join("moved.rs")).unwrap();
-    assert_eq!(content, "a\nMINE\nc\n", "an edit the tracker missed must never be overwritten");
+    assert_eq!(
+        content, "a\nMINE\nc\n",
+        "an edit the tracker missed must never be overwritten"
+    );
 }
 
 // =========================================================================
@@ -5385,7 +5394,9 @@ async fn test_trusted_folder_status_scan_still_tracks_dirty_files() {
     let (_handle, tracked) = scan_all_dirty(temp.path()).await;
     let canon = dunce::canonicalize(&file).unwrap();
     assert!(
-        tracked.iter().any(|p| dunce::canonicalize(p).ok().as_ref() == Some(&canon)),
+        tracked
+            .iter()
+            .any(|p| dunce::canonicalize(p).ok().as_ref() == Some(&canon)),
         "trusted folder scan must still find the dirty file, got {tracked:?}"
     );
 }

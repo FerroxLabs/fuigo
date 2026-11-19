@@ -85,7 +85,10 @@ pub(crate) struct GatewayAcpInvoker {
 
 impl GatewayAcpInvoker {
     pub(crate) fn new(gateway: AcpAgentGatewaySender, session_id: String) -> Self {
-        Self { gateway, session_id }
+        Self {
+            gateway,
+            session_id,
+        }
     }
 }
 
@@ -123,10 +126,18 @@ impl AcpReverseInvoker for GatewayAcpInvoker {
             ));
         }
         let meta = serde_json::Value::Object(
-            std::iter::once((crate::session::reverse_ticket::TICKET_META_KEY.to_owned(), ticket.id().into())).collect(),
+            std::iter::once((
+                crate::session::reverse_ticket::TICKET_META_KEY.to_owned(),
+                ticket.id().into(),
+            ))
+            .collect(),
         );
-        let params = serde_json::value::to_raw_value(&SdkCallParams { server_id, message, meta })
-            .map_err(|err| err.to_string())?;
+        let params = serde_json::value::to_raw_value(&SdkCallParams {
+            server_id,
+            message,
+            meta,
+        })
+        .map_err(|err| err.to_string())?;
         let request = acp::ExtRequest::new(wire::MCP_SDK_CALL, params.into());
         // Bound the round trip: a missing or hung client fails this reverse call at the per-server tool timeout instead of stalling the tool loop
         let response = tokio::time::timeout(timeout, self.gateway.send(request))
@@ -177,21 +188,37 @@ mod tests {
             ]
         });
         let servers = || parse_acp_mcp_servers(meta.as_object());
-        let names = |kept: Vec<AcpServerEntry>| kept.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        let names =
+            |kept: Vec<AcpServerEntry>| kept.into_iter().map(|s| s.name).collect::<Vec<_>>();
         let src = Some(std::path::PathBuf::from("/etc/fuigo/managed_config.toml"));
-        assert_eq!(names(admit_acp_mcp_servers(servers(), &McpServerPolicy::default())).len(), 2);
-        let lockdown: McpServerPolicy =
-            McpServerAllowlist::new(vec![], vec![], src.clone()).with_lockdown().into();
+        assert_eq!(
+            names(admit_acp_mcp_servers(
+                servers(),
+                &McpServerPolicy::default()
+            ))
+            .len(),
+            2
+        );
+        let lockdown: McpServerPolicy = McpServerAllowlist::new(vec![], vec![], src.clone())
+            .with_lockdown()
+            .into();
         assert!(admit_acp_mcp_servers(servers(), &lockdown).is_empty());
         let by_name: McpServerPolicy = McpServerAllowlist::new(
-            vec![AllowedMcpServer::Name { name: "granted".into() }],
+            vec![AllowedMcpServer::Name {
+                name: "granted".into(),
+            }],
             vec![],
             src.clone(),
         )
         .into();
-        assert_eq!(names(admit_acp_mcp_servers(servers(), &by_name)), vec!["granted"]);
+        assert_eq!(
+            names(admit_acp_mcp_servers(servers(), &by_name)),
+            vec!["granted"]
+        );
         let by_url: McpServerPolicy = McpServerAllowlist::new(
-            vec![AllowedMcpServer::Http { url_pattern: "https://ok.example.com/*".into() }],
+            vec![AllowedMcpServer::Http {
+                url_pattern: "https://ok.example.com/*".into(),
+            }],
             vec![],
             src,
         )

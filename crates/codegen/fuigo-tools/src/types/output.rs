@@ -1,8 +1,8 @@
 use crate::implementations::fuigo_build::send_subagent_message::SendSubagentMessageOutput;
+use fuigo_tool_types::SubagentCompletedOutput;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use strip_ansi_escapes::strip_str;
-use fuigo_tool_types::SubagentCompletedOutput;
 /// `(added, removed)` line counts for the `edit.lines` telemetry counter.
 pub fn line_diff(old: &str, new: &str) -> (i64, i64) {
     let mut added = 0i64;
@@ -1320,9 +1320,9 @@ impl fuigo_tool_runtime::ToolOutput for MCPOutput {}
 mod tests {
     use super::*;
     use crate::implementations::fuigo_build::todo::{TodoPriority, TodoStatus};
-    use serde_json::json;
     use fuigo_tool_types::KillTaskResult;
     use fuigo_tool_types::TaskOutputResult;
+    use serde_json::json;
     #[test]
     fn send_subagent_message_error_classification_is_closed() {
         use crate::implementations::fuigo_build::send_subagent_message::SendSubagentMessageOutput::*;
@@ -2762,7 +2762,8 @@ mod tests {
             0,
             false,
         );
-        let dropped = fuigo_tool_runtime::TypedToolOutput::from_value(typed.tool_id, expected_value);
+        let dropped =
+            fuigo_tool_runtime::TypedToolOutput::from_value(typed.tool_id, expected_value);
         assert!(dropped.chat_completion_output.is_none());
     }
     #[test]

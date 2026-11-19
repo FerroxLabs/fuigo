@@ -302,7 +302,10 @@ fn format_duration_ago(now: std::time::SystemTime, start: std::time::SystemTime)
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,7 +566,8 @@ mod tests {
     #[test]
     fn manifest_empty_entries_no_file() {
         let dir = tempfile::tempdir().unwrap();
-        let w = SessionWriter::try_claim("bg-manifest-manifest_empty_entries_no_file", dir.path()).unwrap();
+        let w = SessionWriter::try_claim("bg-manifest-manifest_empty_entries_no_file", dir.path())
+            .unwrap();
         persist_manifest(&w, Vec::new());
         assert!(!dir.path().join(MANIFEST_FILENAME).exists());
     }
@@ -571,7 +575,11 @@ mod tests {
     #[test]
     fn manifest_missing_file_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let w = SessionWriter::try_claim("bg-manifest-manifest_missing_file_returns_empty", dir.path()).unwrap();
+        let w = SessionWriter::try_claim(
+            "bg-manifest-manifest_missing_file_returns_empty",
+            dir.path(),
+        )
+        .unwrap();
         let loaded = load_and_clear_manifest(&w);
         assert!(loaded.is_empty());
     }
@@ -579,7 +587,11 @@ mod tests {
     #[test]
     fn manifest_malformed_json_returns_empty_and_deletes() {
         let dir = tempfile::tempdir().unwrap();
-        let w = SessionWriter::try_claim("bg-manifest-manifest_malformed_json_returns_empty_and_deletes", dir.path()).unwrap();
+        let w = SessionWriter::try_claim(
+            "bg-manifest-manifest_malformed_json_returns_empty_and_deletes",
+            dir.path(),
+        )
+        .unwrap();
         let path = dir.path().join(MANIFEST_FILENAME);
         std::fs::write(&path, b"not valid json {{{").unwrap();
 
@@ -591,7 +603,11 @@ mod tests {
     #[test]
     fn manifest_partial_json_missing_fields_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let w = SessionWriter::try_claim("bg-manifest-manifest_partial_json_missing_fields_returns_empty", dir.path()).unwrap();
+        let w = SessionWriter::try_claim(
+            "bg-manifest-manifest_partial_json_missing_fields_returns_empty",
+            dir.path(),
+        )
+        .unwrap();
         let path = dir.path().join(MANIFEST_FILENAME);
         // Valid JSON array but missing required fields
         std::fs::write(&path, br#"[{"task_id": "x"}]"#).unwrap();
@@ -640,7 +656,9 @@ mod tests {
     #[test]
     fn manifest_roundtrip_preserves_kind() {
         let dir = tempfile::tempdir().unwrap();
-        let w = SessionWriter::try_claim("bg-manifest-manifest_roundtrip_preserves_kind", dir.path()).unwrap();
+        let w =
+            SessionWriter::try_claim("bg-manifest-manifest_roundtrip_preserves_kind", dir.path())
+                .unwrap();
         let mut entry = make_manifest_entry("mon-1", 60);
         entry.kind = fuigo_tools::computer::types::TaskKind::Monitor;
         persist_manifest(&w, vec![entry]);

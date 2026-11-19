@@ -12,11 +12,8 @@
 //!
 //! No deadline is imposed by default ([`WorkspaceClient::with_deadline`] opts in).
 //! That preserves the `WorkspaceOps::rpc_raw` behaviour where callers own their timeouts.
-use serde_json::Value;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use fuigo_computer_hub_sdk::harness::ToolHarness;
+use fuigo_tool_runtime::{ToolCallContext, ToolStreamItem, TypedToolOutput};
 use fuigo_workspace_types::rpc::agents_md::{AgentConfigFile, DiscoverAgentsMdReq};
 use fuigo_workspace_types::rpc::code_nav::{
     CodeFindDefinitionsReq, CodeFindReferencesReq, CodeGotoDefinitionReq, CodeGotoReferencesReq,
@@ -59,7 +56,10 @@ use fuigo_workspace_types::rpc::worktree::{
     WorktreeGcReq, WorktreeListReq, WorktreeShowReq,
 };
 use fuigo_workspace_types::rpc::{RpcEnvelope, RpcError, WORKSPACE_RPC_TOOL_ID, WorkspaceRpc};
-use fuigo_tool_runtime::{ToolCallContext, ToolStreamItem, TypedToolOutput};
+use serde_json::Value;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceClientError {
     /// A previous call observed a fatal transport error and no reconnect has been signalled since.
@@ -136,7 +136,9 @@ fn is_non_retryable_workspace_unavailable(err: &fuigo_tool_runtime::ToolError) -
             use serde::Deserialize as _;
             fuigo_tool_protocol::WorkspaceUnavailableDetails::deserialize(d).ok()
         })
-        .is_some_and(|d| d.code == fuigo_tool_protocol::WORKSPACE_UNAVAILABLE_SUBCODE && !d.retryable)
+        .is_some_and(|d| {
+            d.code == fuigo_tool_protocol::WORKSPACE_UNAVAILABLE_SUBCODE && !d.retryable
+        })
 }
 /// Typed client over a bound [`ToolHarness`] for `workspace.*` RPCs.
 ///
@@ -585,13 +587,13 @@ impl WorkspaceClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use schemars::JsonSchema;
-    use serde::Deserialize;
     use fuigo_computer_hub_sdk::harness::LocalRegistry;
-    use fuigo_workspace_types::rpc::RpcActivityClass;
     use fuigo_tool_protocol::{SessionId, ToolId};
     use fuigo_tool_runtime::{Tool, ToolError};
     use fuigo_tool_types::ToolDescription;
+    use fuigo_workspace_types::rpc::RpcActivityClass;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
     #[derive(Debug, Deserialize, JsonSchema)]
     struct RpcArgs {
         method: String,

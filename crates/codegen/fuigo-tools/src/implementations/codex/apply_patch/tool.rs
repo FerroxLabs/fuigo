@@ -222,7 +222,10 @@ async fn ensure_parent_dirs(path: &std::path::Path) -> Result<(), fuigo_tool_run
 
 /// [`ensure_parent_dirs`] that also records, top-down, every directory this call had to create (audit review L14), so a
 /// patch that then fails can take them away again.
-#[allow(clippy::disallowed_methods, reason = "file tool write of a model/user-chosen path (user content); not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "file tool write of a model/user-chosen path (user content); not inside a session folder"
+)]
 async fn ensure_parent_dirs_tracked(
     path: &std::path::Path,
     created: &mut Vec<PathBuf>,
@@ -256,7 +259,10 @@ async fn ensure_parent_dirs_tracked(
 
 /// Remove the directories a failed patch created, deepest first. `remove_dir` only removes an empty directory, so one
 /// that holds a file the patch already wrote stays.
-#[allow(clippy::disallowed_methods, reason = "file tool cleanup of directories this call created; not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "file tool cleanup of directories this call created; not inside a session folder"
+)]
 async fn remove_created_dirs(created: &[PathBuf]) {
     for dir in created.iter().rev() {
         let _ = tokio::fs::remove_dir(dir).await;
@@ -369,7 +375,9 @@ async fn compute_all_changes(
                             new_content,
                         });
                     } else {
-                        let dest_prior = PriorContent::from_read(read_tool_source(fs.as_ref(), &resolved_dest).await);
+                        let dest_prior = PriorContent::from_read(
+                            read_tool_source(fs.as_ref(), &resolved_dest).await,
+                        );
                         changes.push(FileChange::Move {
                             source_path: resolved,
                             dest_path: resolved_dest,
@@ -453,7 +461,9 @@ async fn read_file_as_string(
 /// same device and inode (which also catches a case-only rename on a case-insensitive volume and a symlink).
 async fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     use std::path::Component;
-    let norm = |p: &std::path::Path| -> PathBuf { p.components().filter(|c| *c != Component::CurDir).collect() };
+    let norm = |p: &std::path::Path| -> PathBuf {
+        p.components().filter(|c| *c != Component::CurDir).collect()
+    };
     if norm(a) == norm(b) {
         return true;
     }
@@ -612,119 +622,129 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
 
         let applied: Result<(), (usize, String)> = async {
             for (idx, change) in changes.iter().enumerate() {
-            match change {
-                FileChange::Add {
-                    path,
-                    content,
-                    prior,
-                } => {
-                    // Create parent directories if needed.
-                    ensure_parent_dirs(path).await.map_err(|e| (idx, e.to_string()))?;
-                    fs.write_file(path, content.as_bytes()).await.map_err(|e| (idx, e.to_string()))?;
+                match change {
+                    FileChange::Add {
+                        path,
+                        content,
+                        prior,
+                    } => {
+                        // Create parent directories if needed.
+                        ensure_parent_dirs(path)
+                            .await
+                            .map_err(|e| (idx, e.to_string()))?;
+                        fs.write_file(path, content.as_bytes())
+                            .await
+                            .map_err(|e| (idx, e.to_string()))?;
 
-                    notification_handle.send_file_written(FileWritten {
-                        tool_call_id: tool_call_id.clone(),
-                        absolute_path: path.clone(),
-                        content: content.clone(),
-                        previous_content: prior.previous_content(),
-                        is_new_file: prior.is_new_file(),
-                    });
+                        notification_handle.send_file_written(FileWritten {
+                            tool_call_id: tool_call_id.clone(),
+                            absolute_path: path.clone(),
+                            content: content.clone(),
+                            previous_content: prior.previous_content(),
+                            is_new_file: prior.is_new_file(),
+                        });
 
-                    file_results.push(ApplyPatchFileResult {
-                        path: path.clone(),
-                        action: "added".to_string(),
-                        old_text: None,
-                        new_text: content.clone(),
-                        move_to: None,
-                    });
+                        file_results.push(ApplyPatchFileResult {
+                            path: path.clone(),
+                            action: "added".to_string(),
+                            old_text: None,
+                            new_text: content.clone(),
+                            move_to: None,
+                        });
+                    }
+                    FileChange::Delete {
+                        path,
+                        original_content,
+                    } => {
+                        fs.delete_file(path)
+                            .await
+                            .map_err(|e| (idx, e.to_string()))?;
+
+                        notification_handle.send_file_written(FileWritten {
+                            tool_call_id: tool_call_id.clone(),
+                            absolute_path: path.clone(),
+                            content: String::new(),
+                            previous_content: original_content.clone(),
+                            is_new_file: false,
+                        });
+
+                        file_results.push(ApplyPatchFileResult {
+                            path: path.clone(),
+                            action: "deleted".to_string(),
+                            old_text: original_content.clone(),
+                            new_text: String::new(),
+                            move_to: None,
+                        });
+                    }
+                    FileChange::Update {
+                        path,
+                        original_content,
+                        new_content,
+                    } => {
+                        fs.write_file(path, new_content.as_bytes())
+                            .await
+                            .map_err(|e| (idx, e.to_string()))?;
+
+                        notification_handle.send_file_written(FileWritten {
+                            tool_call_id: tool_call_id.clone(),
+                            absolute_path: path.clone(),
+                            content: new_content.clone(),
+                            previous_content: Some(original_content.clone()),
+                            is_new_file: false,
+                        });
+
+                        file_results.push(ApplyPatchFileResult {
+                            path: path.clone(),
+                            action: "modified".to_string(),
+                            old_text: Some(original_content.clone()),
+                            new_text: new_content.clone(),
+                            move_to: None,
+                        });
+                    }
+                    FileChange::Move {
+                        source_path,
+                        dest_path,
+                        original_content,
+                        new_content,
+                        dest_prior,
+                    } => {
+                        // Create parent dirs for destination.
+                        ensure_parent_dirs(dest_path)
+                            .await
+                            .map_err(|e| (idx, e.to_string()))?;
+                        fs.write_file(dest_path, new_content.as_bytes())
+                            .await
+                            .map_err(|e| (idx, e.to_string()))?;
+                        fs.delete_file(source_path)
+                            .await
+                            .map_err(|e| (idx, e.to_string()))?;
+
+                        // Notify destination (new file at new location).
+                        notification_handle.send_file_written(FileWritten {
+                            tool_call_id: tool_call_id.clone(),
+                            absolute_path: dest_path.clone(),
+                            content: new_content.clone(),
+                            previous_content: dest_prior.previous_content(),
+                            is_new_file: dest_prior.is_new_file(),
+                        });
+                        // Notify source (deleted).
+                        notification_handle.send_file_written(FileWritten {
+                            tool_call_id: tool_call_id.clone(),
+                            absolute_path: source_path.clone(),
+                            content: String::new(),
+                            previous_content: Some(original_content.clone()),
+                            is_new_file: false,
+                        });
+
+                        file_results.push(ApplyPatchFileResult {
+                            path: source_path.clone(),
+                            action: "moved".to_string(),
+                            old_text: Some(original_content.clone()),
+                            new_text: new_content.clone(),
+                            move_to: Some(dest_path.clone()),
+                        });
+                    }
                 }
-                FileChange::Delete {
-                    path,
-                    original_content,
-                } => {
-                    fs.delete_file(path).await.map_err(|e| (idx, e.to_string()))?;
-
-                    notification_handle.send_file_written(FileWritten {
-                        tool_call_id: tool_call_id.clone(),
-                        absolute_path: path.clone(),
-                        content: String::new(),
-                        previous_content: original_content.clone(),
-                        is_new_file: false,
-                    });
-
-                    file_results.push(ApplyPatchFileResult {
-                        path: path.clone(),
-                        action: "deleted".to_string(),
-                        old_text: original_content.clone(),
-                        new_text: String::new(),
-                        move_to: None,
-                    });
-                }
-                FileChange::Update {
-                    path,
-                    original_content,
-                    new_content,
-                } => {
-                    fs.write_file(path, new_content.as_bytes())
-                        .await
-                        .map_err(|e| (idx, e.to_string()))?;
-
-                    notification_handle.send_file_written(FileWritten {
-                        tool_call_id: tool_call_id.clone(),
-                        absolute_path: path.clone(),
-                        content: new_content.clone(),
-                        previous_content: Some(original_content.clone()),
-                        is_new_file: false,
-                    });
-
-                    file_results.push(ApplyPatchFileResult {
-                        path: path.clone(),
-                        action: "modified".to_string(),
-                        old_text: Some(original_content.clone()),
-                        new_text: new_content.clone(),
-                        move_to: None,
-                    });
-                }
-                FileChange::Move {
-                    source_path,
-                    dest_path,
-                    original_content,
-                    new_content,
-                    dest_prior,
-                } => {
-                    // Create parent dirs for destination.
-                    ensure_parent_dirs(dest_path).await.map_err(|e| (idx, e.to_string()))?;
-                    fs.write_file(dest_path, new_content.as_bytes())
-                        .await
-                        .map_err(|e| (idx, e.to_string()))?;
-                    fs.delete_file(source_path).await.map_err(|e| (idx, e.to_string()))?;
-
-                    // Notify destination (new file at new location).
-                    notification_handle.send_file_written(FileWritten {
-                        tool_call_id: tool_call_id.clone(),
-                        absolute_path: dest_path.clone(),
-                        content: new_content.clone(),
-                        previous_content: dest_prior.previous_content(),
-                        is_new_file: dest_prior.is_new_file(),
-                    });
-                    // Notify source (deleted).
-                    notification_handle.send_file_written(FileWritten {
-                        tool_call_id: tool_call_id.clone(),
-                        absolute_path: source_path.clone(),
-                        content: String::new(),
-                        previous_content: Some(original_content.clone()),
-                        is_new_file: false,
-                    });
-
-                    file_results.push(ApplyPatchFileResult {
-                        path: source_path.clone(),
-                        action: "moved".to_string(),
-                        old_text: Some(original_content.clone()),
-                        new_text: new_content.clone(),
-                        move_to: Some(dest_path.clone()),
-                    });
-                }
-            }
             }
             Ok(())
         }
@@ -749,7 +769,10 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,7 +813,9 @@ mod tests {
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{value}: {e}"));
             assert_eq!(input.patch, patch, "{value}");
         }
-        assert!(serde_json::from_value::<ApplyPatchInput>(serde_json::json!({ "other": 1 })).is_err());
+        assert!(
+            serde_json::from_value::<ApplyPatchInput>(serde_json::json!({ "other": 1 })).is_err()
+        );
         // The schema advertised to JSON backends is unchanged: an object with a required `patch` string
         let schema = serde_json::to_value(schemars::schema_for!(ApplyPatchInput)).unwrap();
         assert_eq!(schema["required"], serde_json::json!(["patch"]));
@@ -801,7 +826,9 @@ mod tests {
     fn freeform_grammar_matches_codex() {
         assert!(APPLY_PATCH_LARK_GRAMMAR.starts_with("start: begin_patch hunk+ end_patch\n"));
         assert!(APPLY_PATCH_LARK_GRAMMAR.contains("add_line: \"+\" /(.*)/ LF -> line\n"));
-        assert!(APPLY_PATCH_LARK_GRAMMAR.contains("change_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\n"));
+        assert!(
+            APPLY_PATCH_LARK_GRAMMAR.contains("change_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\n")
+        );
         assert!(APPLY_PATCH_LARK_GRAMMAR.ends_with("%import common.LF\n"));
         assert!(APPLY_PATCH_FREEFORM_DESCRIPTION.contains("FREEFORM"));
     }
@@ -988,7 +1015,10 @@ mod tests {
         );
         let err = patch_edit_targets("not a valid patch").unwrap_err();
         assert!(err.contains("Invalid patch"), "{err}");
-        assert_eq!(patch_edit_targets("*** Begin Patch\n*** End Patch").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            patch_edit_targets("*** Begin Patch\n*** End Patch").unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     /// The write-only-what-was-judged guard finds a change outside the approved list, including either end of a move.
@@ -1012,7 +1042,10 @@ mod tests {
         let ok = [change("/w/a", None), change("/w/b", None)];
         assert_eq!(first_unjudged_path(&ok, &judged), None);
         let extra = [change("/w/a", None), change("/w/c", None)];
-        assert_eq!(first_unjudged_path(&extra, &judged), Some(&PathBuf::from("/w/c")));
+        assert_eq!(
+            first_unjudged_path(&extra, &judged),
+            Some(&PathBuf::from("/w/c"))
+        );
         let moved = [change("/w/a", Some("/w/.git/hooks/x"))];
         assert_eq!(
             first_unjudged_path(&moved, &judged),
@@ -1029,12 +1062,19 @@ mod tests {
         std::fs::write(tmp.path().join("report'"), "drop\n").unwrap();
         let shared = test_resources(tmp.path()).into_shared();
         let patch = wrap_patch("*** Delete File: report'");
-        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
-            .await
-            .unwrap();
-        assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{result:?}");
+        let result =
+            fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+                .await
+                .unwrap();
+        assert!(
+            matches!(result, ApplyPatchOutput::Success { .. }),
+            "{result:?}"
+        );
         assert!(!tmp.path().join("report'").exists());
-        assert_eq!(std::fs::read_to_string(tmp.path().join("report")).unwrap(), "keep\n");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("report")).unwrap(),
+            "keep\n"
+        );
     }
 
     // ── Parse error ──────────────────────────────────────────────
@@ -1145,12 +1185,22 @@ mod tests {
             let patch = wrap_patch(&format!(
                 "*** Update File: a.txt\n*** Move to: {dest}\n@@\n-old\n+new"
             ));
-            let result =
-                fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
-                    .await
-                    .unwrap();
-            assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{dest}: {result:?}");
-            assert_eq!(std::fs::read_to_string(tmp.path().join("a.txt")).unwrap(), "new\n", "{dest}");
+            let result = fuigo_tool_runtime::Tool::run(
+                &ApplyPatchTool,
+                test_ctx(shared),
+                make_input(&patch),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(result, ApplyPatchOutput::Success { .. }),
+                "{dest}: {result:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join("a.txt")).unwrap(),
+                "new\n",
+                "{dest}"
+            );
         }
     }
 
@@ -1160,10 +1210,14 @@ mod tests {
         std::fs::write(tmp.path().join("a.txt"), "orig\n").unwrap();
         let (shared, mut rx) = resources_with_channel(tmp.path());
         let patch = wrap_patch("*** Add File: a.txt\n+fresh");
-        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
-            .await
-            .unwrap();
-        assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{result:?}");
+        let result =
+            fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+                .await
+                .unwrap();
+        assert!(
+            matches!(result, ApplyPatchOutput::Success { .. }),
+            "{result:?}"
+        );
         let w = written(&mut rx);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].previous_content.as_deref(), Some("orig\n"));
@@ -1177,10 +1231,14 @@ mod tests {
         std::fs::write(tmp.path().join("b.txt"), "theirs\n").unwrap();
         let (shared, mut rx) = resources_with_channel(tmp.path());
         let patch = wrap_patch("*** Update File: a.txt\n*** Move to: b.txt\n@@\n-old\n+new");
-        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
-            .await
-            .unwrap();
-        assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{result:?}");
+        let result =
+            fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+                .await
+                .unwrap();
+        assert!(
+            matches!(result, ApplyPatchOutput::Success { .. }),
+            "{result:?}"
+        );
         let dest = written(&mut rx)
             .into_iter()
             .find(|w| w.absolute_path.ends_with("b.txt"))
@@ -1195,9 +1253,10 @@ mod tests {
         std::fs::write(tmp.path().join("a.bin"), b"x\xff\n").unwrap();
         let (shared, mut rx) = resources_with_channel(tmp.path());
         let patch = wrap_patch("*** Add File: a.bin\n+fresh");
-        let _ = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
-            .await
-            .unwrap();
+        let _ =
+            fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+                .await
+                .unwrap();
         let w = written(&mut rx);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].previous_content, None);
@@ -1211,10 +1270,14 @@ mod tests {
         std::fs::write(tmp.path().join("l.txt"), original).unwrap();
         let shared = test_resources(tmp.path()).into_shared();
         let patch = wrap_patch("*** Update File: l.txt\n@@\n-one\n+uno");
-        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
-            .await
-            .unwrap();
-        assert!(matches!(result, ApplyPatchOutput::ApplicationError(_)), "{result:?}");
+        let result =
+            fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+                .await
+                .unwrap();
+        assert!(
+            matches!(result, ApplyPatchOutput::ApplicationError(_)),
+            "{result:?}"
+        );
         assert_eq!(std::fs::read(tmp.path().join("l.txt")).unwrap(), original);
     }
 
@@ -1224,10 +1287,14 @@ mod tests {
         std::fs::write(tmp.path().join("a.bin"), b"x\xff\n").unwrap();
         let (shared, mut rx) = resources_with_channel(tmp.path());
         let patch = wrap_patch("*** Delete File: a.bin");
-        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
-            .await
-            .unwrap();
-        assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{result:?}");
+        let result =
+            fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+                .await
+                .unwrap();
+        assert!(
+            matches!(result, ApplyPatchOutput::Success { .. }),
+            "{result:?}"
+        );
         assert!(!tmp.path().join("a.bin").exists());
         let w = written(&mut rx);
         assert_eq!(w.len(), 1);
@@ -1239,7 +1306,10 @@ mod tests {
     struct FailsOn(&'static str);
     #[async_trait::async_trait]
     impl AsyncFileSystem for FailsOn {
-        async fn read_file(&self, path: &std::path::Path) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+        async fn read_file(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
             LocalFs.read_file(path).await
         }
         async fn write_file(
@@ -1255,7 +1325,10 @@ mod tests {
             }
             LocalFs.write_file(path, data).await
         }
-        async fn delete_file(&self, path: &std::path::Path) -> Result<(), crate::computer::types::ComputerError> {
+        async fn delete_file(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<(), crate::computer::types::ComputerError> {
             LocalFs.delete_file(path).await
         }
     }
@@ -1280,7 +1353,10 @@ mod tests {
             panic!("expected an application error naming the files, got {result:?}");
         };
         assert!(msg.contains("Applied") && msg.contains("a.txt"), "{msg}");
-        assert!(msg.contains("Not applied") && msg.contains("b.txt") && msg.contains("c.txt"), "{msg}");
+        assert!(
+            msg.contains("Not applied") && msg.contains("b.txt") && msg.contains("c.txt"),
+            "{msg}"
+        );
         assert!(tmp.path().join("a.txt").exists());
         assert!(!tmp.path().join("c.txt").exists());
     }
@@ -1292,9 +1368,17 @@ mod tests {
         std::fs::write(tmp.path().join("blocker"), "a file, not a directory").unwrap();
         let shared = test_resources(tmp.path()).into_shared();
         let patch = wrap_patch("*** Add File: a.txt\n+one\n*** Add File: blocker/x.txt\n+two");
-        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch)).await;
-        assert!(!matches!(result, Ok(ApplyPatchOutput::Success { .. })), "{result:?}");
-        assert!(!tmp.path().join("a.txt").exists(), "nothing is written when a later target cannot be");
+        let result =
+            fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+                .await;
+        assert!(
+            !matches!(result, Ok(ApplyPatchOutput::Success { .. })),
+            "{result:?}"
+        );
+        assert!(
+            !tmp.path().join("a.txt").exists(),
+            "nothing is written when a later target cannot be"
+        );
     }
 
     /// Audit review L14: directories made ahead of a patch that then cannot be applied do not stay behind.
@@ -1303,10 +1387,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("blocker"), "a file, not a directory").unwrap();
         let shared = test_resources(tmp.path()).into_shared();
-        let patch = wrap_patch("*** Add File: deep/er/a.txt\n+one\n*** Add File: blocker/x.txt\n+two");
-        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch)).await;
-        assert!(!matches!(result, Ok(ApplyPatchOutput::Success { .. })), "{result:?}");
-        assert!(!tmp.path().join("deep").exists(), "directories this call created are removed");
+        let patch =
+            wrap_patch("*** Add File: deep/er/a.txt\n+one\n*** Add File: blocker/x.txt\n+two");
+        let result =
+            fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+                .await;
+        assert!(
+            !matches!(result, Ok(ApplyPatchOutput::Success { .. })),
+            "{result:?}"
+        );
+        assert!(
+            !tmp.path().join("deep").exists(),
+            "directories this call created are removed"
+        );
         assert!(tmp.path().join("blocker").is_file());
     }
 
@@ -1328,9 +1421,18 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(result, ApplyPatchOutput::ApplicationError(_)), "{result:?}");
-        assert!(tmp.path().join("keep/a.txt").exists(), "an applied file stays with its directory");
-        assert!(tmp.path().join("old").is_dir(), "a directory that existed before stays");
+        assert!(
+            matches!(result, ApplyPatchOutput::ApplicationError(_)),
+            "{result:?}"
+        );
+        assert!(
+            tmp.path().join("keep/a.txt").exists(),
+            "an applied file stays with its directory"
+        );
+        assert!(
+            tmp.path().join("old").is_dir(),
+            "a directory that existed before stays"
+        );
         assert!(!tmp.path().join("old/new").exists());
         assert!(!tmp.path().join("gone").exists());
     }

@@ -13,17 +13,27 @@ fn memory_is_on_by_default_and_one_setting_turns_it_off() {
         std::env::var_os("FUIGO_MEMORY").is_none(),
         "this test needs FUIGO_MEMORY unexported"
     );
-    assert!(MemoryConfig::resolve_with_override(None, &config(""), None).enabled, "on by default");
     assert!(
-        !MemoryConfig::resolve_with_override(None, &config("[memory]\nenabled = false"), None).enabled,
+        MemoryConfig::resolve_with_override(None, &config(""), None).enabled,
+        "on by default"
+    );
+    assert!(
+        !MemoryConfig::resolve_with_override(None, &config("[memory]\nenabled = false"), None)
+            .enabled,
         "[memory] enabled = false turns it off"
     );
     assert!(
-        MemoryConfig::resolve_with_override(None, &config("[memory]\nenabled = true"), None).enabled
+        MemoryConfig::resolve_with_override(None, &config("[memory]\nenabled = true"), None)
+            .enabled
     );
     // Tuning other memory settings does not switch it off.
     assert!(
-        MemoryConfig::resolve_with_override(None, &config("[memory.search]\nmax_results = 3"), None).enabled
+        MemoryConfig::resolve_with_override(
+            None,
+            &config("[memory.search]\nmax_results = 3"),
+            None
+        )
+        .enabled
     );
 }
 

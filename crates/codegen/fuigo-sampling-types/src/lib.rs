@@ -17,7 +17,6 @@ pub mod types;
 
 pub use self::conversation::*;
 pub use self::dispatch_gate::{DispatchGate, DispatchGateFuture};
-pub use self::execution_admission::{AdmissionFuture, ExecutionAdmission};
 pub use self::doom_loop::{
     DEFAULT_EXACT_REPETITION_MIN_TOKENS, DOOM_LOOP_CHECK_EVENT_TYPE, DOOM_LOOP_CHECK_HEADER,
     DoomLoopPeek, DoomLoopRecoveryPolicy, DoomLoopSignal, DoomLoopSignalKind,
@@ -29,6 +28,7 @@ pub use self::error::{
     is_rate_limit_error_code, is_retryable_api_status, is_size_overflow_error_code,
     parse_error_code, status_user_message, user_facing_api_error_message,
 };
+pub use self::execution_admission::{AdmissionFuture, ExecutionAdmission};
 pub use self::tool_overrides::{
     ClearableField, MAX_WEB_SEARCH_DOMAINS, SearchDateBound, SearchDateBoundError, ToolOverrides,
     ToolOverridesUpdate, WebSearchOptions, WebSearchOptionsError, XSearchOptions,
@@ -38,5 +38,5 @@ pub use self::types::*;
 pub use async_openai::types::responses as rs;
 
 pub mod refusal;
-pub mod upstream_vocab;
 mod selective_error;
+pub mod upstream_vocab;

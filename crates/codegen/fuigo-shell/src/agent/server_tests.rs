@@ -154,10 +154,16 @@ fn p82_agent_serve_admits_only_the_secret() {
         headers.insert("authorization", HeaderValue::from_str(value).unwrap());
         headers
     };
-    let query = |key: &str| WsQueryParams { server_key: Some(key.to_owned()) };
+    let query = |key: &str| WsQueryParams {
+        server_key: Some(key.to_owned()),
+    };
     let none = WsQueryParams::default();
     let secret = "s3cret-0123456789";
-    assert!(validate_auth(&header(&format!("Bearer {secret}")), &none, secret));
+    assert!(validate_auth(
+        &header(&format!("Bearer {secret}")),
+        &none,
+        secret
+    ));
     assert!(validate_auth(&HeaderMap::new(), &query(secret), secret));
     for wrong in [
         "",
@@ -170,18 +176,43 @@ fn p82_agent_serve_admits_only_the_secret() {
         "s3cret-0123456789 ",
         "s3cret-0123456789\t",
     ] {
-        assert!(!validate_auth(&header(&format!("Bearer {wrong}")), &none, secret), "header {wrong:?}");
-        assert!(!validate_auth(&HeaderMap::new(), &query(wrong), secret), "query {wrong:?}");
+        assert!(
+            !validate_auth(&header(&format!("Bearer {wrong}")), &none, secret),
+            "header {wrong:?}"
+        );
+        assert!(
+            !validate_auth(&HeaderMap::new(), &query(wrong), secret),
+            "query {wrong:?}"
+        );
     }
-    assert!(!validate_auth(&header("Bearer wrong"), &query(secret), secret), "the header decides");
+    assert!(
+        !validate_auth(&header("Bearer wrong"), &query(secret), secret),
+        "the header decides"
+    );
     // A header that is not a bearer header does not decide: the query still can, as before.
-    assert!(validate_auth(&header("Basic czNjcmV0"), &query(secret), secret), "a non-bearer header falls back to the query");
-    assert!(!validate_auth(&header("Basic czNjcmV0"), &query("wrong"), secret));
-    assert!(!validate_auth(&header(secret), &none, secret), "not a bearer header");
+    assert!(
+        validate_auth(&header("Basic czNjcmV0"), &query(secret), secret),
+        "a non-bearer header falls back to the query"
+    );
+    assert!(!validate_auth(
+        &header("Basic czNjcmV0"),
+        &query("wrong"),
+        secret
+    ));
+    assert!(
+        !validate_auth(&header(secret), &none, secret),
+        "not a bearer header"
+    );
     assert!(!validate_auth(&HeaderMap::new(), &none, secret));
     for presented in ["", "x"] {
-        assert!(!validate_auth(&header(&format!("Bearer {presented}")), &none, ""), "empty server secret, header {presented:?}");
-        assert!(!validate_auth(&HeaderMap::new(), &query(presented), ""), "empty server secret, query {presented:?}");
+        assert!(
+            !validate_auth(&header(&format!("Bearer {presented}")), &none, ""),
+            "empty server secret, header {presented:?}"
+        );
+        assert!(
+            !validate_auth(&HeaderMap::new(), &query(presented), ""),
+            "empty server secret, query {presented:?}"
+        );
     }
 }
 
@@ -191,10 +222,17 @@ fn p82_agent_serve_admits_only_the_secret() {
 fn p82_agent_serve_compares_the_secret_in_constant_time() {
     let src = include_str!("server.rs");
     let prod = src.split("\n#[cfg(test)]").next().unwrap();
-    let flat = prod.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert_eq!(flat.matches("== expected_secret").count(), 0);
-    assert_eq!(flat.matches("expected_secret ==").count(), 0);
-    assert_eq!(flat.matches("secret_matches(").count(), 3, "definition + header + query");
+    // Whitespace-insensitive: rustfmt may reflow the guarded code, but the same tokens in the same order are
+    // still required (all whitespace is dropped from the source and from every needle).
+    let squash = |text: &str| text.split_whitespace().collect::<String>();
+    let flat = squash(prod);
+    assert_eq!(flat.matches(&squash("== expected_secret")).count(), 0);
+    assert_eq!(flat.matches(&squash("expected_secret ==")).count(), 0);
+    assert_eq!(
+        flat.matches("secret_matches(").count(),
+        3,
+        "definition + header + query"
+    );
     for pinned in [
         "return secret_matches(token, expected_secret);",
         "return secret_matches(key, expected_secret);",
@@ -208,7 +246,7 @@ fn p82_agent_serve_compares_the_secret_in_constant_time() {
          let expected = Sha256::digest(expected_secret.as_bytes()); \
          presented.iter().zip(expected.iter()).fold(0u8, |differ, (a, b)| differ | (a ^ b)) == 0 }",
     ] {
-        assert!(flat.contains(pinned), "{pinned}");
+        assert!(flat.contains(&squash(pinned)), "{pinned}");
     }
 }
 
@@ -232,9 +270,13 @@ async fn failed_handshake_is_delayed() {
 async fn inbound_queue_applies_back_pressure() {
     let (tx, rx) = mpsc::channel::<String>(super::INBOUND_QUEUE_DEPTH);
     for i in 0..super::INBOUND_QUEUE_DEPTH {
-        tx.try_send(format!("frame {i}")).expect("room in the queue");
+        tx.try_send(format!("frame {i}"))
+            .expect("room in the queue");
     }
-    assert!(tx.try_send("one too many".into()).is_err(), "queue must be bounded");
+    assert!(
+        tx.try_send("one too many".into()).is_err(),
+        "queue must be bounded"
+    );
     drop(rx);
 }
 

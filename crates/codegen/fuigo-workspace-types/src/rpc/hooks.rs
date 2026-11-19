@@ -24,16 +24,17 @@ pub struct HookRegistryWire {
 
 /// Shown once when a workspace server sends gate hooks without the `fail_closed` field: it predates `failClosed`, so a
 /// hook configured fail-closed would run fail-open.
-pub const FAIL_CLOSED_NOT_ENFORCED_WARNING: &str =
-    "this workspace server predates failClosed hooks: a hook set to \"failClosed\": true is not enforced by it and fails open";
+pub const FAIL_CLOSED_NOT_ENFORCED_WARNING: &str = "this workspace server predates failClosed hooks: a hook set to \"failClosed\": true is not enforced by it and fails open";
 
 impl HookRegistryWire {
     /// Whether any `pre_tool_use` / `user_prompt_submit` hook (the only events `failClosed` applies to) arrived without the
     /// `fail_closed` field, i.e. from a server that predates it.
     pub fn gate_hooks_without_fail_closed(&self) -> bool {
         self.hooks.iter().any(|(event, specs)| {
-            matches!(event, HookEventNameWire::PreToolUse | HookEventNameWire::UserPromptSubmit)
-                && specs.iter().any(|spec| spec.fail_closed.is_none())
+            matches!(
+                event,
+                HookEventNameWire::PreToolUse | HookEventNameWire::UserPromptSubmit
+            ) && specs.iter().any(|spec| spec.fail_closed.is_none())
         })
     }
 }
@@ -106,7 +107,13 @@ impl std::fmt::Debug for HookSpecWire {
             .field("timeout_ms", timeout_ms)
             .field("fail_closed", fail_closed)
             .field("source_dir", source_dir)
-            .field("extra_env", &extra_env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field(
+                "extra_env",
+                &extra_env
+                    .keys()
+                    .map(|k| (k, "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
             .field("layer", layer)
             .finish()
     }
@@ -296,7 +303,10 @@ mod tests {
         for flag in [true, false] {
             let json = serde_json::json!({ "hooks": { "pre_tool_use": [spec(Some(flag))] } });
             let wire: HookRegistryWire = serde_json::from_value(json.clone()).unwrap();
-            assert_eq!(wire.hooks[&HookEventNameWire::PreToolUse][0].fail_closed, Some(flag));
+            assert_eq!(
+                wire.hooks[&HookEventNameWire::PreToolUse][0].fail_closed,
+                Some(flag)
+            );
             assert_eq!(serde_json::to_value(&wire).unwrap(), json);
             assert!(!wire.gate_hooks_without_fail_closed());
         }
@@ -309,7 +319,10 @@ mod tests {
         }
         let json = serde_json::json!({ "hooks": { "session_start": [spec(None)] } });
         let wire: HookRegistryWire = serde_json::from_value(json).unwrap();
-        assert!(!wire.gate_hooks_without_fail_closed(), "failClosed does not apply to other events");
+        assert!(
+            !wire.gate_hooks_without_fail_closed(),
+            "failClosed does not apply to other events"
+        );
         assert!(!HookRegistryWire::default().gate_hooks_without_fail_closed());
     }
 }

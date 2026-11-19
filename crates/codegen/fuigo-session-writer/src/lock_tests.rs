@@ -1,7 +1,10 @@
 use super::*;
 
 fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime")
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
 }
 
 /// Another process's hold, as the test makes it: a second open of the lock file excludes this process's own open exactly
@@ -59,7 +62,10 @@ fn a_session_held_elsewhere_is_refused_and_free_once_released() {
     assert!(matches!(refused, Err(HeldElsewhere)), "{refused:?}");
     drop(other);
     assert!(eventually(|| !dir_open_elsewhere(dir.path())));
-    let lock = rt().block_on(acquire(dir.path())).expect("free").expect("locked");
+    let lock = rt()
+        .block_on(acquire(dir.path()))
+        .expect("free")
+        .expect("locked");
     assert!(!foreign_could_take(dir.path()));
     // This process's own hold is not "elsewhere".
     assert!(!dir_open_elsewhere(dir.path()));
@@ -70,14 +76,26 @@ fn a_session_held_elsewhere_is_refused_and_free_once_released() {
 #[test]
 fn holds_in_one_process_are_counted_and_the_last_one_releases() {
     let dir = tempfile::tempdir().expect("dir");
-    let first = rt().block_on(acquire(dir.path())).expect("first").expect("locked");
-    let second = rt().block_on(acquire(dir.path())).expect("re-entrant").expect("locked");
+    let first = rt()
+        .block_on(acquire(dir.path()))
+        .expect("first")
+        .expect("locked");
+    let second = rt()
+        .block_on(acquire(dir.path()))
+        .expect("re-entrant")
+        .expect("locked");
     assert!(!foreign_could_take(dir.path()));
     drop(first);
-    assert!(!foreign_could_take(dir.path()), "released while another hold in this process is live");
+    assert!(
+        !foreign_could_take(dir.path()),
+        "released while another hold in this process is live"
+    );
     drop(second);
     assert!(eventually(|| foreign_could_take(dir.path())));
-    let again = rt().block_on(acquire(dir.path())).expect("again").expect("locked");
+    let again = rt()
+        .block_on(acquire(dir.path()))
+        .expect("again")
+        .expect("locked");
     drop(again);
 }
 
@@ -85,7 +103,11 @@ fn holds_in_one_process_are_counted_and_the_last_one_releases() {
 fn nothing_is_locked_or_created_without_a_session_folder() {
     let dir = tempfile::tempdir().expect("dir");
     let missing = dir.path().join("no-such-session");
-    assert!(rt().block_on(acquire(&missing)).expect("no folder").is_none());
+    assert!(
+        rt().block_on(acquire(&missing))
+            .expect("no folder")
+            .is_none()
+    );
     assert!(!missing.exists());
     assert!(!dir_open_elsewhere(&missing));
     // The early check never creates the lock file.
@@ -100,8 +122,13 @@ const HOLDER_DIR: &str = "FUIGO_P30_DIRECT_HOLDER_DIR";
 #[test]
 #[ignore = "helper process for a_crashed_holder_releases_the_session"]
 fn holder_process() {
-    let Some(dir) = std::env::var_os(HOLDER_DIR) else { return };
-    let lock = rt().block_on(acquire(Path::new(&dir))).expect("holder").expect("locked");
+    let Some(dir) = std::env::var_os(HOLDER_DIR) else {
+        return;
+    };
+    let lock = rt()
+        .block_on(acquire(Path::new(&dir)))
+        .expect("holder")
+        .expect("locked");
     println!("HOLDER_READY");
     std::thread::sleep(Duration::from_secs(120));
     drop(lock);
@@ -115,7 +142,13 @@ fn a_crashed_holder_releases_the_session() {
     // Not enrolled in a process scope: this test kills and reaps it itself.
     #[allow(clippy::disallowed_methods)]
     let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"))
-        .args(["--exact", HOLDER, "--ignored", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            HOLDER,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(HOLDER_DIR, dir.path())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -130,10 +163,19 @@ fn a_crashed_holder_releases_the_session() {
         }
     }
     assert!(ready, "holder process never took the session");
-    assert!(dir_open_elsewhere(dir.path()), "the other process's hold is not seen");
-    assert!(matches!(rt().block_on(acquire(dir.path())), Err(HeldElsewhere)));
+    assert!(
+        dir_open_elsewhere(dir.path()),
+        "the other process's hold is not seen"
+    );
+    assert!(matches!(
+        rt().block_on(acquire(dir.path())),
+        Err(HeldElsewhere)
+    ));
     child.kill().expect("kill holder");
     child.wait().expect("reap holder");
-    let lock = rt().block_on(acquire(dir.path())).expect("released by the crash").expect("locked");
+    let lock = rt()
+        .block_on(acquire(dir.path()))
+        .expect("released by the crash")
+        .expect("locked");
     drop(lock);
 }

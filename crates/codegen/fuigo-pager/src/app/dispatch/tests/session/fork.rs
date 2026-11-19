@@ -85,7 +85,9 @@ fn worktree_forked_with_copy_notice_adds_one_more_line() {
         app.agents[&id].scrollback.len()
     };
     let without = forked(None);
-    let with = forked(Some("Worktree created, but 1 file had a copy problem".to_string()));
+    let with = forked(Some(
+        "Worktree created, but 1 file had a copy problem".to_string(),
+    ));
     assert_eq!(with, without + 1);
 }
 
@@ -1376,8 +1378,14 @@ fn a_fork_of_a_worktree_session_runs_in_and_shows_the_worktree_path() {
         &mut app,
     );
     let child_view = &app.agents[&child];
-    assert_eq!(child_view.session.cwd, wt, "the fork runs in the parent's worktree");
-    assert!(child_view.session.is_worktree && child_view.is_worktree, "the fork is a worktree session");
+    assert_eq!(
+        child_view.session.cwd, wt,
+        "the fork runs in the parent's worktree"
+    );
+    assert!(
+        child_view.session.is_worktree && child_view.is_worktree,
+        "the fork is a worktree session"
+    );
     let sb = &child_view.scrollback;
     let shown = (0..sb.len()).any(|i| match &sb.get(i).expect("entry").block {
         RenderBlock::System(sys) => sys.text.contains("/tmp/fuigo-worktrees/parent-wt/sub"),
@@ -1805,7 +1813,11 @@ fn dispatch_fork_is_blocked_while_a_card_waits_for_an_answer() {
             .toast
             .as_ref()
             .expect("the refusal is announced");
-        assert!(toast.0.contains("waiting for your answer"), "got: {}", toast.0);
+        assert!(
+            toast.0.contains("waiting for your answer"),
+            "got: {}",
+            toast.0
+        );
     }
 }
 

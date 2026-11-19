@@ -13,14 +13,17 @@
 //! cargo test -p fuigo-tools --test path_suggestions_production
 //! ```
 
+use fuigo_tools::util::path_suggestions::{format_not_found_error, path_not_found_hint};
 use std::path::PathBuf;
 use tempfile::TempDir;
-use fuigo_tools::util::path_suggestions::{format_not_found_error, path_not_found_hint};
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Set up a temp dir with the given dirs and files, then return (tmpdir, root).
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 fn setup_fs(dirs: &[&str], files: &[&str]) -> (TempDir, PathBuf) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();

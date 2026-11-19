@@ -55,7 +55,9 @@ impl UnacceptedOutput {
         let mut state = self.inner.lock();
         state.emitted = true;
         if !state.open_hosted.iter().any(|(id, _)| id == call_id) {
-            state.open_hosted.push((call_id.to_owned(), name.to_owned()));
+            state
+                .open_hosted
+                .push((call_id.to_owned(), name.to_owned()));
         }
     }
 
@@ -108,12 +110,24 @@ mod tests {
     #[test]
     fn discard_is_owed_only_after_visible_output_and_only_once() {
         let out = UnacceptedOutput::default();
-        assert_eq!(out.take_discard(), None, "nothing streamed, nothing to discard");
+        assert_eq!(
+            out.take_discard(),
+            None,
+            "nothing streamed, nothing to discard"
+        );
         out.note_message_id("msg_1".into());
         assert_eq!(out.take_discard(), None, "an id alone is not output");
         out.note_emitted();
-        assert_eq!(out.take_discard(), Some(Discard::default()), "the id was spent by the earlier take");
-        assert_eq!(out.take_discard(), None, "a second resend with no new output owes nothing");
+        assert_eq!(
+            out.take_discard(),
+            Some(Discard::default()),
+            "the id was spent by the earlier take"
+        );
+        assert_eq!(
+            out.take_discard(),
+            None,
+            "a second resend with no new output owes nothing"
+        );
         assert_eq!(out.claim_stream_start(42), 42);
         out.note_message_id("msg_2".into());
         out.note_emitted();
@@ -127,7 +141,11 @@ mod tests {
         );
         out.note_emitted();
         out.accept();
-        assert_eq!(out.take_discard(), None, "accepted output is never discarded");
+        assert_eq!(
+            out.take_discard(),
+            None,
+            "accepted output is never discarded"
+        );
         // Same millisecond, or a clock step back: still a new id, never a reused one
         assert_eq!(out.claim_stream_start(42), 43);
         assert_eq!(out.claim_stream_start(40), 44);
@@ -143,7 +161,13 @@ mod tests {
         assert!(!out.is_owed(), "an unseen row is not visible output");
         out.note_hosted_started("h1", "web_search");
         out.note_hosted_finished("h1");
-        assert!(out.is_owed(), "the shown row stays visible output after it completes");
-        assert!(out.take_open_hosted().is_empty(), "a completed row is not closed again");
+        assert!(
+            out.is_owed(),
+            "the shown row stays visible output after it completes"
+        );
+        assert!(
+            out.take_open_hosted().is_empty(),
+            "a completed row is not closed again"
+        );
     }
 }

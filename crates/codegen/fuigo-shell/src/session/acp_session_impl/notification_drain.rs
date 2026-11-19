@@ -327,7 +327,8 @@ impl SessionActor {
         {
             self.wake_peer_rows_after_hold(completion_tx.clone());
             let runnable = state.pending_inputs.iter().position(|item| {
-                !item.input_origin.as_prompt_origin().is_peer() && !state.edit_holds.contains_key(&item.prompt_id)
+                !item.input_origin.as_prompt_origin().is_peer()
+                    && !state.edit_holds.contains_key(&item.prompt_id)
             });
             let Some(index) = runnable else {
                 tracing::debug!(
@@ -346,8 +347,10 @@ impl SessionActor {
         // P189 A2 r3: a scheduled-fire row on a child starts no turn while an ancestor has a park entry in ANY phase
         // (`Unparking` included); it starts once the entry is gone. Client prompts and peer rows are unaffected here.
         let is_fire_row = |item: &InputItem| {
-            matches!(item.input_origin.as_prompt_origin(), super::PromptOrigin::SchedulerFired)
-                || crate::extensions::session_park::is_scheduled_fire_id(&item.prompt_id)
+            matches!(
+                item.input_origin.as_prompt_origin(),
+                super::PromptOrigin::SchedulerFired
+            ) || crate::extensions::session_park::is_scheduled_fire_id(&item.prompt_id)
         };
         if state.pending_inputs.front().is_some_and(is_fire_row)
             && crate::session::quiesce::has_park_above(self.session_info.id.0.as_ref())
@@ -468,7 +471,9 @@ impl SessionActor {
         // Peer rows only: the permission-mode atomics can change during the await above, and `running_task` is set below under
         // this same lock, so qualification is decided again here. If the row no longer qualifies the start is aborted (it is
         // re-held or dropped exactly as the start-of-turn recheck does) and the next row, if any, gets its turn.
-        if input_origin.as_prompt_origin().is_peer() && self.demote_unqualified_peer_rows(&mut state, true) {
+        if input_origin.as_prompt_origin().is_peer()
+            && self.demote_unqualified_peer_rows(&mut state, true)
+        {
             *self
                 .current_prompt_id
                 .lock()
@@ -896,7 +901,10 @@ impl SessionActor {
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod live_orphan_hook_tests {
     use super::*;

@@ -99,7 +99,10 @@ impl Drop for SilentTty {
 }
 
 #[cfg(unix)]
-#[allow(clippy::disallowed_methods, reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "auth state under FUIGO_HOME (~/.fuigo/auth*); not inside a session folder"
+)]
 pub(super) fn open_terminal() -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     #[cfg(target_os = "macos")]
@@ -135,7 +138,9 @@ pub(super) fn open_terminal() -> std::io::Result<std::fs::File> {
 pub(super) async fn read_from(file: std::fs::File) -> Result<String> {
     use std::io::Read;
     let silent = SilentTty::new(&file)?;
-    let file = tokio::io::unix::AsyncFd::new(file).map_err(|_| SubscriptionError::Terminal)?;
+    // SAFETY: `File` owns the open terminal descriptor and keeps returning it from `as_raw_fd` until dropped.
+    let file = unsafe { tokio::io::unix::AsyncFd::register(file) }
+        .map_err(|_| SubscriptionError::Terminal)?;
     let tty = (file, silent);
     let mut input = Vec::new();
     loop {

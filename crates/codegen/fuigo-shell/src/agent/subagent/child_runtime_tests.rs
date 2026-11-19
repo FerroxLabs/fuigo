@@ -6,9 +6,8 @@ use fuigo_tools::implementations::fuigo_build::task::coordinator::{
 };
 use fuigo_tools::implementations::fuigo_build::task::types::{
     ActiveAgentMessage, ActiveAgentMessageDelivery, ActiveAgentMessageOperation,
-    ActiveAgentMessageOutcome,
-    ActiveAgentMessageRequest, SubagentDescribeOutcome, SubagentOwner, SubagentRequest,
-    SubagentValidateTypeOutcome,
+    ActiveAgentMessageOutcome, ActiveAgentMessageRequest, SubagentDescribeOutcome, SubagentOwner,
+    SubagentRequest, SubagentValidateTypeOutcome,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -386,9 +385,8 @@ async fn every_delivery_class_reaches_the_child_host_as_the_same_command() {
     for operation in classes {
         let (outcome, delivered) = delivery_probe("child", operation, false).await;
         assert_eq!(outcome, ActiveAgentMessageOutcome::NotActiveOrFinalizing);
-        dispatched.push(
-            delivered.unwrap_or_else(|| panic!("{operation:?} must reach the child host")),
-        );
+        dispatched
+            .push(delivered.unwrap_or_else(|| panic!("{operation:?} must reach the child host")));
     }
 
     // Same command, same message, for every class.

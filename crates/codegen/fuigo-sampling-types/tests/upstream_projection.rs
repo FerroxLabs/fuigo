@@ -64,7 +64,8 @@ fn p1_unknown_present_strings_outside_slug_grammar_are_other() {
         for value in ["", "Unexpected Secret", "A".repeat(256).as_str()] {
             let mut body = json!({"error":{"message":"refusal"}});
             body["error"][field] = json!(value);
-            let parsed = UpstreamError::default().with_body(401, &serde_json::to_vec(&body).unwrap());
+            let parsed =
+                UpstreamError::default().with_body(401, &serde_json::to_vec(&body).unwrap());
             assert_eq!(serde_json::to_value(parsed).unwrap()[field], "other");
         }
     }

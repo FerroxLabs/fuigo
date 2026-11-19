@@ -143,8 +143,7 @@ fn broken_user_home_files_are_skipped_and_engage_nothing() {
             .unwrap();
         assert!(sources(&d, None).is_empty());
         // The same dangling symlink on an admin path fails closed.
-        std::os::unix::fs::symlink(d.sys.join("nowhere"), d.sys.join("requirements.toml"))
-            .unwrap();
+        std::os::unix::fs::symlink(d.sys.join("nowhere"), d.sys.join("requirements.toml")).unwrap();
         let s = sources(&d, None);
         assert_eq!(s.len(), 1);
         assert!(s[0].policy.is_err());
@@ -332,7 +331,10 @@ fn a_writable_or_foreign_owned_admin_file_fails_closed() {
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o664)).unwrap();
     let s = sources(&d, None);
     assert_eq!(s.len(), 1, "{s:?}");
-    assert!(s[0].policy.is_err(), "a group-writable admin file must fail closed: {s:?}");
+    assert!(
+        s[0].policy.is_err(),
+        "a group-writable admin file must fail closed: {s:?}"
+    );
     assert_eq!(s[0].ownership, PolicyLayerOwnership::Admin);
     for pin in BoolPin::ALL {
         assert!(resolve_bool_pin(pin, &s).is_disabled(), "{pin:?}");
@@ -340,11 +342,17 @@ fn a_writable_or_foreign_owned_admin_file_fails_closed() {
     let v = write(&d.sys, "managed-settings.json", "{}");
     std::fs::set_permissions(&v, std::fs::Permissions::from_mode(0o646)).unwrap();
     let s = sources(&d, Some(&v));
-    assert!(s.iter().all(|s| s.policy.is_err()), "an other-writable Claude file fails closed: {s:?}");
+    assert!(
+        s.iter().all(|s| s.policy.is_err()),
+        "an other-writable Claude file fails closed: {s:?}"
+    );
 
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
     std::fs::set_permissions(&v, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(sources(&d, Some(&v)).iter().all(|s| s.policy.is_ok()), "0644 and owned: applies");
+    assert!(
+        sources(&d, Some(&v)).iter().all(|s| s.policy.is_ok()),
+        "0644 and owned: applies"
+    );
     // Owned by someone other than the admin uid (root in production): fails closed.
     let other = process_euid().wrapping_add(1);
     let s = policy_sources_owned_by(Some(&d.sys), Some(&d.home), Some(&v), None, other);
@@ -352,7 +360,11 @@ fn a_writable_or_foreign_owned_admin_file_fails_closed() {
     assert!(s.iter().all(|s| s.policy.is_err()), "{s:?}");
 
     // A writable user-home file is the user's own layer: it applies.
-    let u = write(&d.home, "managed_config.toml", "allow_managed_hooks_only = true\n");
+    let u = write(
+        &d.home,
+        "managed_config.toml",
+        "allow_managed_hooks_only = true\n",
+    );
     std::fs::set_permissions(&u, std::fs::Permissions::from_mode(0o666)).unwrap();
     let s = policy_sources_owned_by(None, Some(&d.home), None, None, other);
     assert_eq!(s.len(), 1);
@@ -384,13 +396,25 @@ fn admin_bad_version_override_is_err_user_keeps_base_p183r9() {
     write(&d.sys, "requirements.toml", body);
     write(&d.home, "requirements.toml", body);
     let s = policy_sources_at(Some(&d.sys), Some(&d.home), None, None);
-    let sys = s.iter().find(|x| x.tier == PolicyLayerTier::SystemRequirements).unwrap();
+    let sys = s
+        .iter()
+        .find(|x| x.tier == PolicyLayerTier::SystemRequirements)
+        .unwrap();
     assert!(sys.policy.is_err(), "admin: lock-down");
-    let user = s.iter().find(|x| x.tier == PolicyLayerTier::UserRequirements).unwrap();
+    let user = s
+        .iter()
+        .find(|x| x.tier == PolicyLayerTier::UserRequirements)
+        .unwrap();
     assert!(user.policy.is_ok(), "user: base kept");
     let mdm: toml::Value = toml::from_str(body).unwrap();
     let s = policy_sources_at(Some(&d.sys), None, None, Some(Ok(mdm)));
-    assert!(s.iter().find(|x| x.tier == PolicyLayerTier::Mdm).unwrap().policy.is_err());
+    assert!(
+        s.iter()
+            .find(|x| x.tier == PolicyLayerTier::Mdm)
+            .unwrap()
+            .policy
+            .is_err()
+    );
 }
 
 /// P183 round 12 (Grok r8) sequence 2: an admin TOML with a wrong-typed key is `Err` in the policy engine, the hooks-only pin
@@ -402,11 +426,18 @@ fn wrong_typed_admin_toml_engages_the_hooks_pin_and_both_readers_agree_p183r12()
         (MANAGED_CONFIG_FILENAME, PolicyLayerTier::SystemManaged),
     ] {
         let d = dirs();
-        let p = write(&d.sys, name, "allow_managed_hooks_only = false\n[ui]\nyolo = \"no\"\n");
+        let p = write(
+            &d.sys,
+            name,
+            "allow_managed_hooks_only = false\n[ui]\nyolo = \"no\"\n",
+        );
         let s = sources(&d, None);
         let src = s.iter().find(|x| x.tier == tier).unwrap();
         assert!(src.policy.is_err(), "{name}: {:?}", src.policy);
-        assert!(resolve_bool_pin(BoolPin::NonManagedHooks, &s).is_disabled(), "{name}");
+        assert!(
+            resolve_bool_pin(BoolPin::NonManagedHooks, &s).is_disabled(),
+            "{name}"
+        );
         assert!(
             crate::validation::admin_requirements_source_checked(&p).is_err(),
             "{name}: the requirements reader must agree"
@@ -422,13 +453,24 @@ fn valid_and_unknown_key_admin_toml_agree_with_identical_pins_p183r12() {
     let doc = "allow_managed_hooks_only = true\nfuture_key = 1\n";
     let p = write(&d.sys, REQUIREMENTS_FILENAME, doc);
     let s = sources(&d, None);
-    let json = s[0].policy.as_ref().expect("unknown key must not lock down");
-    assert_eq!(json.get("allow_managed_hooks_only"), Some(&serde_json::json!(true)));
+    let json = s[0]
+        .policy
+        .as_ref()
+        .expect("unknown key must not lock down");
+    assert_eq!(
+        json.get("allow_managed_hooks_only"),
+        Some(&serde_json::json!(true))
+    );
     assert!(json.get("future_key").is_none());
     assert!(resolve_bool_pin(BoolPin::NonManagedHooks, &s).is_disabled());
-    let kept = crate::validation::admin_requirements_source_checked(&p).unwrap().unwrap();
+    let kept = crate::validation::admin_requirements_source_checked(&p)
+        .unwrap()
+        .unwrap();
     let layer: toml::Value = toml::from_str(&kept).unwrap();
-    assert_eq!(layer.get("allow_managed_hooks_only"), Some(&toml::Value::Boolean(true)));
+    assert_eq!(
+        layer.get("allow_managed_hooks_only"),
+        Some(&toml::Value::Boolean(true))
+    );
 }
 
 // ── FUIGO_MANAGED_HOOKS_ONLY (1.0.34) ─────────────────────────────────────────────────────────
@@ -437,8 +479,14 @@ fn valid_and_unknown_key_admin_toml_agree_with_identical_pins_p183r12() {
 fn managed_hooks_only_env_reads_like_the_model_refresh_switch() {
     use std::ffi::OsStr;
     assert!(!managed_hooks_only_env_on(None), "unset is off");
-    assert!(!managed_hooks_only_env_on(Some(OsStr::new(""))), "empty is off");
-    assert!(!managed_hooks_only_env_on(Some(OsStr::new("0"))), "0 is off");
+    assert!(
+        !managed_hooks_only_env_on(Some(OsStr::new(""))),
+        "empty is off"
+    );
+    assert!(
+        !managed_hooks_only_env_on(Some(OsStr::new("0"))),
+        "0 is off"
+    );
     for on in ["1", "true", "yes", "anything", "00", " "] {
         assert!(managed_hooks_only_env_on(Some(OsStr::new(on))), "{on:?}");
     }
@@ -446,12 +494,22 @@ fn managed_hooks_only_env_reads_like_the_model_refresh_switch() {
 
 #[test]
 fn env_off_leaves_the_file_pin_exactly_as_it_was() {
-    assert_eq!(with_env_managed_hooks_only(PolicyPin::Unpinned, false), PolicyPin::Unpinned);
+    assert_eq!(
+        with_env_managed_hooks_only(PolicyPin::Unpinned, false),
+        PolicyPin::Unpinned
+    );
     let d = dirs();
-    write(&d.sys, "requirements.toml", "allow_managed_hooks_only = true\n");
+    write(
+        &d.sys,
+        "requirements.toml",
+        "allow_managed_hooks_only = true\n",
+    );
     let file_pin = resolve_bool_pin(BoolPin::NonManagedHooks, &sources(&d, None));
     assert!(file_pin.is_disabled());
-    assert_eq!(with_env_managed_hooks_only(file_pin.clone(), false), file_pin);
+    assert_eq!(
+        with_env_managed_hooks_only(file_pin.clone(), false),
+        file_pin
+    );
 }
 
 #[test]
@@ -465,14 +523,25 @@ fn env_on_turns_the_pin_on_and_names_the_env_var() {
 #[test]
 fn env_on_never_replaces_or_lifts_a_managed_pin() {
     let d = dirs();
-    write(&d.sys, "requirements.toml", "allow_managed_hooks_only = true\n");
+    write(
+        &d.sys,
+        "requirements.toml",
+        "allow_managed_hooks_only = true\n",
+    );
     let file_pin = resolve_bool_pin(BoolPin::NonManagedHooks, &sources(&d, None));
     let with_env = with_env_managed_hooks_only(file_pin.clone(), true);
-    assert_eq!(with_env, file_pin, "the managed layer keeps the attribution");
+    assert_eq!(
+        with_env, file_pin,
+        "the managed layer keeps the attribution"
+    );
     assert!(!with_env.is_from_env());
     // Managed policy that says false does not un-pin the env switch either (the pin only tightens).
     let d = dirs();
-    write(&d.sys, "requirements.toml", "allow_managed_hooks_only = false\n");
+    write(
+        &d.sys,
+        "requirements.toml",
+        "allow_managed_hooks_only = false\n",
+    );
     let off = resolve_bool_pin(BoolPin::NonManagedHooks, &sources(&d, None));
     assert!(!off.is_disabled());
     assert!(with_env_managed_hooks_only(off, true).is_disabled());
@@ -482,7 +551,9 @@ fn env_on_never_replaces_or_lifts_a_managed_pin() {
 #[test]
 fn managed_hooks_only_pin_follows_the_process_environment() {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let prior = std::env::var_os(MANAGED_HOOKS_ONLY_ENV);
     // Every case compares with the unset baseline, so a host policy file cannot change the verdict.
     // SAFETY: this crate's tests do not read this variable anywhere else, and the lock serializes these cases.
@@ -490,7 +561,11 @@ fn managed_hooks_only_pin_follows_the_process_environment() {
     let baseline = managed_hooks_only_pin().is_disabled();
     for (value, expect_on) in [("0", false), ("", false), ("1", true)] {
         unsafe { std::env::set_var(MANAGED_HOOKS_ONLY_ENV, value) };
-        assert_eq!(managed_hooks_only_pin().is_disabled(), baseline || expect_on, "value {value:?}");
+        assert_eq!(
+            managed_hooks_only_pin().is_disabled(),
+            baseline || expect_on,
+            "value {value:?}"
+        );
     }
     match prior {
         Some(v) => unsafe { std::env::set_var(MANAGED_HOOKS_ONLY_ENV, v) },

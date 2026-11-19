@@ -1009,6 +1009,9 @@ mod signed_url_user_agent_tests {
     fn the_upload_client_records_its_user_agent_for_signed_urls() {
         let _ = super::shared_upload_client();
         let expected = super::process_user_agent_string();
-        assert_eq!(fuigo_file_utils::storage_client::signed_url_user_agent(), Some(expected.as_str()));
+        assert_eq!(
+            fuigo_file_utils::storage_client::signed_url_user_agent(),
+            Some(expected.as_str())
+        );
     }
 }

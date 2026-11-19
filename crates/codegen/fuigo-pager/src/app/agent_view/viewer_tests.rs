@@ -743,8 +743,7 @@ fn block_viewer_enter_from_fullscreen_child_quotes_into_parent() {
 
 // ── Block viewer: Shift+Y copies the code block under the cursor ───────────
 
-const CODE_REPLY: &str =
-    "intro text\n\n```rust\nfn main() {}\nlet x = 1;\n```\n\nbetween\n\n```\nplain body\n```\n\noutro";
+const CODE_REPLY: &str = "intro text\n\n```rust\nfn main() {}\nlet x = 1;\n```\n\nbetween\n\n```\nplain body\n```\n\noutro";
 
 fn shift_y() -> crossterm::event::KeyEvent {
     crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('Y'), KeyModifiers::SHIFT)
@@ -759,13 +758,13 @@ fn copy_code_at(agent: &mut AgentView, line: usize) -> Option<String> {
         .unwrap()
         .list_state
         .select_by_id(line as u64);
+    agent.block_viewer.as_mut().unwrap().handle_key(&shift_y());
+    let entry = agent.scrollback.get_by_id(id).unwrap();
     agent
         .block_viewer
         .as_mut()
         .unwrap()
-        .handle_key(&shift_y());
-    let entry = agent.scrollback.get_by_id(id).unwrap();
-    agent.block_viewer.as_mut().unwrap().process_pending_copy(entry)
+        .process_pending_copy(entry)
 }
 
 fn code_block_lines(agent: &AgentView) -> Vec<std::ops::Range<usize>> {
@@ -801,7 +800,8 @@ fn shift_y_in_the_markdown_viewer_copies_the_code_block_under_the_cursor() {
 /// Copying a code block keeps the tabs it was written with.
 #[test]
 fn shift_y_keeps_tabs_in_the_copied_code_block() {
-    let mut agent = agent_with_markdown_viewer("intro\n\n```go\nfunc main() {\n\tfmt.Println(1)\n}\n```\n");
+    let mut agent =
+        agent_with_markdown_viewer("intro\n\n```go\nfunc main() {\n\tfmt.Println(1)\n}\n```\n");
     let ranges = code_block_lines(&agent);
     assert_eq!(ranges.len(), 1);
     assert_eq!(
@@ -849,5 +849,8 @@ fn a_in_the_preview_approves_once_the_review_has_seen_a_key() {
     let _ = agent.handle_line_viewer_key(&plain_key('j'));
     agent.plan_approval_view.as_mut().unwrap().focus = PlanApprovalFocus::Preview;
     let _ = agent.handle_line_viewer_key(&plain_key('a'));
-    assert!(agent.plan_approval_view.is_none(), "`a` approves after the first key");
+    assert!(
+        agent.plan_approval_view.is_none(),
+        "`a` approves after the first key"
+    );
 }

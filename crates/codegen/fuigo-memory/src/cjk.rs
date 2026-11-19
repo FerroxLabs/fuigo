@@ -66,7 +66,11 @@ fn phrase(gram: &str) -> String {
 
 fn cjk_run_expr(run: &str) -> String {
     let phrases: Vec<String> = grams(run).iter().map(|g| phrase(g)).collect();
-    if phrases.len() == 1 { phrases.into_iter().next().unwrap_or_default() } else { format!("({})", phrases.join(" OR ")) }
+    if phrases.len() == 1 {
+        phrases.into_iter().next().unwrap_or_default()
+    } else {
+        format!("({})", phrases.join(" OR "))
+    }
 }
 
 /// One keyword as an FTS5 expression: a bare word for Latin text, a quoted phrase of single characters for each CJK run.
@@ -96,12 +100,20 @@ fn keyword_expr(keyword: &str) -> String {
         run.push(c);
     }
     flush(&mut run, run_is_cjk, &mut parts);
-    if parts.len() > 1 { format!("({})", parts.join(" ")) } else { parts.remove(0) }
+    if parts.len() > 1 {
+        format!("({})", parts.join(" "))
+    } else {
+        parts.remove(0)
+    }
 }
 
 /// The `MATCH` expression for a set of keywords: any one of them is enough, as before.
 pub(crate) fn match_expression(keywords: &[String]) -> String {
-    keywords.iter().map(|k| keyword_expr(k)).collect::<Vec<_>>().join(" OR ")
+    keywords
+        .iter()
+        .map(|k| keyword_expr(k))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 /// How much of a CJK `keyword` a (lowercased) chunk holds, from 0 to 1: the share of its character pairs found in the text.
@@ -133,7 +145,11 @@ pub(crate) fn cjk_keyword_coverage(lowered_chunk: &str, keyword: &str) -> f64 {
         }
     }
     count(&mut run, &mut total, &mut found);
-    if total == 0 { 0.0 } else { found as f64 / total as f64 }
+    if total == 0 {
+        0.0
+    } else {
+        found as f64 / total as f64
+    }
 }
 
 #[cfg(test)]
@@ -142,12 +158,18 @@ mod tests {
 
     #[test]
     fn text_without_cjk_is_untouched() {
-        assert!(matches!(fts_text("plain ascii text, ünïcode too"), Cow::Borrowed(_)));
+        assert!(matches!(
+            fts_text("plain ascii text, ünïcode too"),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]
     fn every_cjk_character_becomes_its_own_token() {
-        assert_eq!(fts_text("a数据b").split_whitespace().collect::<Vec<_>>(), ["a", "数", "据", "b"]);
+        assert_eq!(
+            fts_text("a数据b").split_whitespace().collect::<Vec<_>>(),
+            ["a", "数", "据", "b"]
+        );
     }
 
     #[test]
@@ -156,7 +178,10 @@ mod tests {
         assert_eq!(match_expression(&[k("migration")]), "migration");
         assert_eq!(match_expression(&[k("数据")]), "\"数 据\"");
         assert_eq!(match_expression(&[k("数据库")]), "(\"数 据\" OR \"据 库\")");
-        assert_eq!(match_expression(&[k("v2数据"), k("plan")]), "(v2 \"数 据\") OR plan");
+        assert_eq!(
+            match_expression(&[k("v2数据"), k("plan")]),
+            "(v2 \"数 据\") OR plan"
+        );
     }
 
     #[test]

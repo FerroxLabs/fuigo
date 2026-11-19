@@ -1,7 +1,7 @@
 //! Tool-call execution for `SessionActor`: a `#[path]` child of `acp_session`.
 use super::hooks::RewriteProblem;
-use super::*;
 use super::mcp_argument_coercion;
+use super::*;
 use fuigo_hooks::result::HookDecision;
 use futures::StreamExt;
 use tracing::Instrument;
@@ -324,8 +324,8 @@ fn resume_action_for(outcome: PlanApprovalOutcome, feedback: Option<String>) -> 
 /// (it pushes the call's tool result before it can return). Thread-local, one-shot, absent from release builds.
 #[cfg(test)]
 pub(crate) mod bridge_fault {
-    use agent_client_protocol as acp;
     use super::ConversationItem;
+    use agent_client_protocol as acp;
     thread_local! {
         static FAIL_CALL_ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     }
@@ -574,7 +574,10 @@ impl SessionActor {
         let (rejected, allowed): (Vec<_>, Vec<_>) = tool_calls.into_iter().partition(|call| {
             matches!(
                 kind_of(&call.function.name),
-                Some(fuigo_tools::types::tool::ToolKind::MemorySearch | fuigo_tools::types::tool::ToolKind::MemoryGet)
+                Some(
+                    fuigo_tools::types::tool::ToolKind::MemorySearch
+                        | fuigo_tools::types::tool::ToolKind::MemoryGet
+                )
             )
         });
         for call in &rejected {
@@ -619,7 +622,10 @@ impl SessionActor {
             super::refresh_classifier_transcript(&self.permissions, &conversation);
         }
         let mcp_surface_requested = tool_calls.iter().any(|c| {
-            (c.function.name == "search_tool" && !crate::session::tool_presentation::native_search_arguments(&c.function.arguments))
+            (c.function.name == "search_tool"
+                && !crate::session::tool_presentation::native_search_arguments(
+                    &c.function.arguments,
+                ))
                 || c.function.name == "use_tool"
                 || c.function
                     .name
@@ -720,7 +726,10 @@ impl SessionActor {
                 }
             }
         }
-        if approved.iter().any(|p| p.tool_name == "search_tool" && p.parsed_args.get("scope").and_then(|v| v.as_str()) != Some("native")) {
+        if approved.iter().any(|p| {
+            p.tool_name == "search_tool"
+                && p.parsed_args.get("scope").and_then(|v| v.as_str()) != Some("native")
+        }) {
             self.retry_auth_required_servers().await;
         }
         if mcp_surface_requested {
@@ -826,9 +835,9 @@ impl SessionActor {
             workflow_write_smoke_check::MAX_CONCURRENT_CHECKS,
         ));
         if should_flush_held_queue_before_wait(
-            approved
-                .iter()
-                .any(|prepared| is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args)),
+            approved.iter().any(|prepared| {
+                is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args)
+            }),
             crate::util::config::follow_up_steer_enabled().await,
             self.goal_loop_active(),
         ) {
@@ -940,13 +949,17 @@ impl SessionActor {
                                     Some(plan) if plan.serves_everything() => {
                                         Ok(plan.synthesized_result())
                                     }
-                                    Some(plan) => dispatch_tool(&workspace_ops, &prepared, &session_id)
-                                        .await
-                                        .map(|mut result| {
-                                            plan.append_notes(&mut result);
-                                            result
-                                        }),
-                                    None => dispatch_tool(&workspace_ops, &prepared, &session_id).await,
+                                    Some(plan) => {
+                                        dispatch_tool(&workspace_ops, &prepared, &session_id)
+                                            .await
+                                            .map(|mut result| {
+                                                plan.append_notes(&mut result);
+                                                result
+                                            })
+                                    }
+                                    None => {
+                                        dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                                    }
                                 }
                             };
                             let mut result = result;
@@ -1129,8 +1142,12 @@ impl SessionActor {
             let tool_loop = match result {
                 Ok(tool_result) => {
                     if !dedupe_batch_mutates {
-                        self.record_read_dedupe(&prepared, &tool_result, dedupe_plans[idx].as_ref().as_ref())
-                            .await;
+                        self.record_read_dedupe(
+                            &prepared,
+                            &tool_result,
+                            dedupe_plans[idx].as_ref().as_ref(),
+                        )
+                        .await;
                     }
                     let effective_tool_name = tool_result
                         .effective_tool_name
@@ -1196,7 +1213,10 @@ impl SessionActor {
                             batch_error.get_or_insert(error);
                         }
                     }
-                    if prepared.tool_name == "search_tool" && prepared.parsed_args.get("scope").and_then(|v| v.as_str()) != Some("native") {
+                    if prepared.tool_name == "search_tool"
+                        && prepared.parsed_args.get("scope").and_then(|v| v.as_str())
+                            != Some("native")
+                    {
                         let pi = self.chat_state_handle.get_prompt_index().await as i64;
                         self.last_search_prompt_index
                             .store(pi, std::sync::atomic::Ordering::Relaxed);
@@ -1593,12 +1613,16 @@ impl SessionActor {
         // A freeform (Responses `custom`) tool's input is raw text by contract; parsing it as JSON would only mistake
         // braces inside a patch for concatenated objects. It is delivered under the schema's input key (`patch`), so
         // hooks and the tool see the same shape as the JSON function form
-        let freeform_key = self.last_sent_tool_specs.borrow().as_ref().and_then(|specs| {
-            specs
-                .iter()
-                .find(|t| t.name == call.function.name && t.is_freeform())
-                .map(fuigo_sampling_types::ToolSpec::freeform_input_key)
-        });
+        let freeform_key = self
+            .last_sent_tool_specs
+            .borrow()
+            .as_ref()
+            .and_then(|specs| {
+                specs
+                    .iter()
+                    .find(|t| t.name == call.function.name && t.is_freeform())
+                    .map(fuigo_sampling_types::ToolSpec::freeform_input_key)
+            });
         let parse_result = match &freeform_key {
             Some(key) => Ok(json!({ key.as_str(): call.function.arguments.clone() })),
             None => serde_json::from_str::<serde_json::Value>(args_str),
@@ -1716,26 +1740,26 @@ impl SessionActor {
         // Hooks saw the model's arguments; coercion runs after them and a changed value is gated again.
         let input_before_coercion = has_pre_tool_use_hooks.then(|| raw_input.clone());
         let reminder_tag = self.reminder_wrapper_tag();
-        let mut coercion_note =
-            mcp_argument_coercion::target_name(&call.function.name, &tool_input).and_then(
-                |qualified_name| {
-                    let schema = {
-                        let snapshot = self.tool_metadata_snapshot.lock().unwrap();
-                        mcp_argument_coercion::input_schema_for(&snapshot.tools, &qualified_name)
-                            .cloned()
-                    }?;
-                    mcp_argument_coercion::apply_mcp_argument_coercion(
-                        mcp_argument_coercion::CoercionRequest {
-                            schema: &schema,
-                            wire_name: &call.function.name,
-                            qualified_name: &qualified_name,
-                            tool_input: &mut tool_input,
-                            raw_input: &mut raw_input,
-                            reminder_tag,
-                        },
-                    )
+        let mut coercion_note = mcp_argument_coercion::target_name(
+            &call.function.name,
+            &tool_input,
+        )
+        .and_then(|qualified_name| {
+            let schema = {
+                let snapshot = self.tool_metadata_snapshot.lock().unwrap();
+                mcp_argument_coercion::input_schema_for(&snapshot.tools, &qualified_name).cloned()
+            }?;
+            mcp_argument_coercion::apply_mcp_argument_coercion(
+                mcp_argument_coercion::CoercionRequest {
+                    schema: &schema,
+                    wire_name: &call.function.name,
+                    qualified_name: &qualified_name,
+                    tool_input: &mut tool_input,
+                    raw_input: &mut raw_input,
+                    reminder_tag,
                 },
-            );
+            )
+        });
         if input_before_coercion.is_some_and(|before| before != raw_input) {
             let gate = match self
                 .apply_pre_tool_use_gate(
@@ -1794,10 +1818,9 @@ impl SessionActor {
                     && !self.permissions.is_peer_influenced()
                     && !self.permissions.has_launch_policy() =>
             {
-                self
-                .plan_mode
-                .lock()
-                .should_auto_approve_edit(std::path::Path::new(path))
+                self.plan_mode
+                    .lock()
+                    .should_auto_approve_edit(std::path::Path::new(path))
             }
             _ => false,
         };
@@ -1896,7 +1919,7 @@ impl SessionActor {
             });
             // Audit S6-F4: the definition of the MCP server the call goes to, for the grant's definition check. Read here,
             // so the MCP state lock is not held while the permission check runs.
-            let mcp_definition = match &access_kind {
+            let (mcp_definition, mcp_definition_legacy) = match &access_kind {
                 fuigo_workspace::permission::AccessKind::MCPTool { name, .. } => {
                     match crate::session::mcp_servers::parse_mcp_tool_name(name) {
                         Some((server, _)) => self
@@ -1906,11 +1929,16 @@ impl SessionActor {
                             .configs
                             .iter()
                             .find(|s| crate::session::managed_mcp::mcp_server_name(s) == server)
-                            .and_then(crate::session::managed_mcp::mcp_definition_fingerprint),
-                        None => None,
+                            .map_or((None, None), |s| {
+                                (
+                                    crate::session::managed_mcp::mcp_definition_fingerprint(s),
+                                    crate::session::managed_mcp::mcp_definition_fingerprint_1045(s),
+                                )
+                            }),
+                        None => (None, None),
                     }
                 }
-                _ => None,
+                _ => (None, None),
             };
             let resolution = {
                 let _pending_guard =
@@ -1932,8 +1960,12 @@ impl SessionActor {
                         read_targets: fuigo_workspace::permission::read_targets_for(&tool_input),
                         peer_note: None,
                         mcp_definition,
+                        mcp_definition_legacy,
                         // Audit S3-F2: where a persistent shell will really start the command (its tracked directory).
-                        shell_run_dir: if matches!(access_kind, fuigo_workspace::permission::AccessKind::Bash(_)) {
+                        shell_run_dir: if matches!(
+                            access_kind,
+                            fuigo_workspace::permission::AccessKind::Bash(_)
+                        ) {
                             self.rebuild_spec.terminal_backend.get_shell_cwd().await
                         } else {
                             None
@@ -2379,7 +2411,12 @@ impl SessionActor {
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
         let (respond_to, _rx) = oneshot::channel();
         let _ = self
-            .queue_input(plan_resume_request(prompt_blocks, prompt_id, mode, respond_to))
+            .queue_input(plan_resume_request(
+                prompt_blocks,
+                prompt_id,
+                mode,
+                respond_to,
+            ))
             .await;
         SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
     }
@@ -2806,8 +2843,9 @@ impl SessionActor {
         call_id: &str,
         input: &serde_json::Value,
     ) -> fuigo_hooks::event::HookEventEnvelope {
-        let (tool_input, tool_input_truncated) =
-            fuigo_hooks::event::truncate_payload(with_retired_bash_background_field(input.clone(), self.bash_auto_background_enabled()));
+        let (tool_input, tool_input_truncated) = fuigo_hooks::event::truncate_payload(
+            with_retired_bash_background_field(input.clone(), self.bash_auto_background_enabled()),
+        );
         let note = self.pre_tool_use_peer_note();
         self.make_hook_envelope(
             fuigo_hooks::event::HookEventName::PreToolUse,
@@ -3964,7 +4002,15 @@ mod plan_resume_origin_tests {
     #[test]
     fn plan_resume_request_has_the_plan_resume_origin_whatever_the_id_says() {
         let (respond_to, _rx) = oneshot::channel();
-        let request = plan_resume_request(Vec::new(), "opaque-id".into(), PromptMode::Agent, respond_to);
-        assert_eq!(request.input_origin.as_prompt_origin(), &PromptOrigin::PlanResume);
+        let request = plan_resume_request(
+            Vec::new(),
+            "opaque-id".into(),
+            PromptMode::Agent,
+            respond_to,
+        );
+        assert_eq!(
+            request.input_origin.as_prompt_origin(),
+            &PromptOrigin::PlanResume
+        );
     }
 }

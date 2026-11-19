@@ -166,9 +166,11 @@ impl ReadDenyFilter {
         let base = RuleBase::with_physical(&self.cwd, self.physical.clone());
         let forms = path_match_forms(&dir.to_string_lossy(), Some(&base));
         self.totals.iter().any(|total| match total {
-            Total::Under(prefix) => forms
-                .iter()
-                .any(|f| f == prefix || f.strip_prefix(prefix.as_str()).is_some_and(|rest| rest.starts_with('/'))),
+            Total::Under(prefix) => forms.iter().any(|f| {
+                f == prefix
+                    || f.strip_prefix(prefix.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            }),
             // `**/P/**`: only the cwd-relative spellings are considered (an absolute one is simply not claimed).
             Total::AnyDepth(name) => forms.iter().filter(|f| !f.starts_with('/')).any(|f| {
                 f == name
@@ -197,8 +199,13 @@ enum Total {
 /// time, never hide an allowed file (a pruned directory's every child would be denied by the matcher anyway) and
 /// never reveal more than a name the policy does not deny.
 fn total_prefix(rule: &str) -> Option<Total> {
-    let prefix = rule.strip_suffix("/**/*").or_else(|| rule.strip_suffix("/**"))?;
-    let meta = |p: &str| p.chars().any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}' | '\\'));
+    let prefix = rule
+        .strip_suffix("/**/*")
+        .or_else(|| rule.strip_suffix("/**"))?;
+    let meta = |p: &str| {
+        p.chars()
+            .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}' | '\\'))
+    };
     if let Some(name) = prefix.strip_prefix("**/") {
         return (!meta(name) && !name.is_empty() && !name.starts_with('/') && !name.ends_with('/'))
             .then(|| Total::AnyDepth(name.to_string()));
@@ -219,7 +226,11 @@ pub struct ResultFilter {
 
 impl ResultFilter {
     pub fn new(cwd: &Path, globs: &[String]) -> Self {
-        Self { filter: ReadDenyFilter::new(cwd, globs), cwd: cwd.to_path_buf(), dirs: Default::default() }
+        Self {
+            filter: ReadDenyFilter::new(cwd, globs),
+            cwd: cwd.to_path_buf(),
+            dirs: Default::default(),
+        }
     }
 
     /// Whether any rule exists (otherwise nothing is ever denied).
@@ -232,7 +243,11 @@ impl ResultFilter {
         let Some(filter) = &self.filter else {
             return false;
         };
-        let abs = if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) };
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.cwd.join(path)
+        };
         if filter.denies(&abs, false) {
             return true;
         }
@@ -275,7 +290,10 @@ pub struct RgNullStream {
 
 impl RgNullStream {
     pub fn new_files(results: ResultFilter) -> Self {
-        Self { results, buf: Vec::new() }
+        Self {
+            results,
+            buf: Vec::new(),
+        }
     }
 
     /// Whether any rule exists (otherwise the caller should not ask ripgrep for `--null`).
@@ -312,7 +330,8 @@ pub async fn explicit_search_path_denied(cwd: &Path, globs: &[String], path: &Pa
     };
     let is_dir = path.is_dir();
     // Also with `.` / `..` collapsed: the tools hand ripgrep the path as it is, this only widens the refusal.
-    if filter.denies(path, is_dir) || filter.denies(&path.components().collect::<PathBuf>(), is_dir) {
+    if filter.denies(path, is_dir) || filter.denies(&path.components().collect::<PathBuf>(), is_dir)
+    {
         return true;
     }
     match crate::util::fs::try_canonicalize(path).await {
@@ -322,13 +341,20 @@ pub async fn explicit_search_path_denied(cwd: &Path, globs: &[String], path: &Pa
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn filter(cwd: &str, globs: &[&str]) -> ReadDenyFilter {
-        ReadDenyFilter::new(Path::new(cwd), &globs.iter().map(|g| g.to_string()).collect::<Vec<_>>()).unwrap()
+        ReadDenyFilter::new(
+            Path::new(cwd),
+            &globs.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -336,7 +362,10 @@ mod tests {
         let f = filter("/abs/proj", &["/abs/proj/secrets/**"]);
         assert!(f.denies(Path::new("secrets/key"), false));
         assert!(f.denies(Path::new("/abs/proj/secrets/key"), false));
-        assert!(f.denies(Path::new("secrets"), true), "a directory every child of which is denied is hidden");
+        assert!(
+            f.denies(Path::new("secrets"), true),
+            "a directory every child of which is denied is hidden"
+        );
         assert!(!f.denies(Path::new("src/a.rs"), false));
     }
 
@@ -351,21 +380,37 @@ mod tests {
     #[test]
     fn a_bare_name_denies_only_that_exact_path_like_the_policy() {
         let f = filter("/w", &["secret"]);
-        assert!(f.denies(Path::new("secret"), false), "the path `secret` is denied");
-        assert!(!f.denies(Path::new("secret/notes.txt"), false), "the policy allows a Read of secret/notes.txt");
-        assert!(!f.denies(Path::new("secret"), true), "a directory is visible when only some names inside are denied");
+        assert!(
+            f.denies(Path::new("secret"), false),
+            "the path `secret` is denied"
+        );
+        assert!(
+            !f.denies(Path::new("secret/notes.txt"), false),
+            "the policy allows a Read of secret/notes.txt"
+        );
+        assert!(
+            !f.denies(Path::new("secret"), true),
+            "a directory is visible when only some names inside are denied"
+        );
     }
 
     #[test]
     fn a_directory_is_pruned_only_when_everything_below_is_denied() {
-        for (rule, pruned) in [("dir/**", true), ("dir/x", false), ("dir/*", false), ("dir/*.pem", false), ("**/x", false)] {
+        for (rule, pruned) in [
+            ("dir/**", true),
+            ("dir/x", false),
+            ("dir/*", false),
+            ("dir/*.pem", false),
+            ("**/x", false),
+        ] {
             let f = filter("/w", &[rule]);
             assert_eq!(f.denies(Path::new("dir"), true), pruned, "rule {rule}");
         }
         let f = filter("/w", &["dir/*"]);
-        assert!(f.denies(Path::new("dir/a.txt"), false) && !f.denies(Path::new("dir/sub/a.txt"), false));
+        assert!(
+            f.denies(Path::new("dir/a.txt"), false) && !f.denies(Path::new("dir/sub/a.txt"), false)
+        );
     }
-
 
     #[test]
     fn totality_is_decided_from_the_rule_text_and_implies_every_child_is_denied() {
@@ -389,11 +434,18 @@ mod tests {
         ];
         for (rule, dir, pruned) in cases {
             let f = filter("/w", &[rule]);
-            assert_eq!(f.denies(Path::new(dir), true), pruned, "rule {rule} dir {dir}");
+            assert_eq!(
+                f.denies(Path::new(dir), true),
+                pruned,
+                "rule {rule} dir {dir}"
+            );
             if pruned {
                 // Soundness: a pruned directory hides nothing the matcher allows.
                 for child in ["a", ".hidden", "a/b", "a/.b/c.md", "x.rs"] {
-                    assert!(f.denies(&Path::new(dir).join(child), false), "{rule}: child {child} of {dir} must be denied");
+                    assert!(
+                        f.denies(&Path::new(dir).join(child), false),
+                        "{rule}: child {child} of {dir} must be denied"
+                    );
                 }
             }
         }
@@ -405,11 +457,23 @@ mod tests {
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
         std::fs::write(cwd.join("ok.txt"), "x").unwrap();
         let mut rf = ResultFilter::new(&cwd, &["secrets/**".to_string()]);
-        assert!(!rf.denies(Path::new("ok.txt")), "a resolvable allowed file is kept");
-        assert!(rf.denies(Path::new("no-such-dir/ok.txt")), "an unresolvable parent is dropped");
-        assert!(rf.denies(Path::new("/")), "a path with no parent or name is dropped");
+        assert!(
+            !rf.denies(Path::new("ok.txt")),
+            "a resolvable allowed file is kept"
+        );
+        assert!(
+            rf.denies(Path::new("no-such-dir/ok.txt")),
+            "an unresolvable parent is dropped"
+        );
+        assert!(
+            rf.denies(Path::new("/")),
+            "a path with no parent or name is dropped"
+        );
         let mut none = ResultFilter::new(&cwd, &[]);
-        assert!(!none.denies(Path::new("no-such-dir/ok.txt")), "no rules: nothing is dropped");
+        assert!(
+            !none.denies(Path::new("no-such-dir/ok.txt")),
+            "no rules: nothing is dropped"
+        );
     }
 
     /// A rule written through a symlink (`<base>/link/secrets/**`) also hides the physical path (`<base>/real/secrets/key`)
@@ -431,22 +495,55 @@ mod tests {
         let public = base.join("real/public.txt");
 
         // Resolved: the physical spelling is hidden, the sibling is not.
-        let f = ReadDenyFilter::new_with(&base, &rule, Duration::from_secs(60), physical_alias_resolution_bounded).unwrap();
-        assert!(f.denies(&secret, false), "resolved alias hides the physical path");
-        assert!(!f.denies(&public, false), "resolved alias leaves the sibling");
+        let f = ReadDenyFilter::new_with(
+            &base,
+            &rule,
+            Duration::from_secs(60),
+            physical_alias_resolution_bounded,
+        )
+        .unwrap();
+        assert!(
+            f.denies(&secret, false),
+            "resolved alias hides the physical path"
+        );
+        assert!(
+            !f.denies(&public, false),
+            "resolved alias leaves the sibling"
+        );
 
         // The resolver ran out of time, or another one is still parked: unknown, so everything is denied.
-        let f = ReadDenyFilter::new_with(&base, &rule, Duration::from_secs(60), |_, _, _| AliasResolution::Unresolved).unwrap();
-        assert!(f.denies(&secret, false), "unresolved alias must not let the physical path through");
-        assert!(f.denies(&public, false), "unresolved alias fails closed for every path");
-        assert!(f.denies(&base.join("real/secrets"), true), "and for directories");
+        let f = ReadDenyFilter::new_with(&base, &rule, Duration::from_secs(60), |_, _, _| {
+            AliasResolution::Unresolved
+        })
+        .unwrap();
+        assert!(
+            f.denies(&secret, false),
+            "unresolved alias must not let the physical path through"
+        );
+        assert!(
+            f.denies(&public, false),
+            "unresolved alias fails closed for every path"
+        );
+        assert!(
+            f.denies(&base.join("real/secrets"), true),
+            "and for directories"
+        );
 
         // A budget already spent before a rule is reached is the same unknown.
-        let f = ReadDenyFilter::new_with(&base, &rule, Duration::ZERO, |_, _, _| unreachable!("no budget left")).unwrap();
-        assert!(f.denies(&secret, false), "spent budget must not let the physical path through");
+        let f = ReadDenyFilter::new_with(&base, &rule, Duration::ZERO, |_, _, _| {
+            unreachable!("no budget left")
+        })
+        .unwrap();
+        assert!(
+            f.denies(&secret, false),
+            "spent budget must not let the physical path through"
+        );
 
         // A rule with nothing to alias is not an unknown: the rest of the tree stays visible.
-        let f = ReadDenyFilter::new_with(&base, &rule, Duration::from_secs(60), |_, _, _| AliasResolution::NoAlias).unwrap();
+        let f = ReadDenyFilter::new_with(&base, &rule, Duration::from_secs(60), |_, _, _| {
+            AliasResolution::NoAlias
+        })
+        .unwrap();
         assert!(!f.denies(&public, false), "NoAlias is a known answer");
     }
 
@@ -459,7 +556,10 @@ mod tests {
         std::fs::write(cwd.join("secrets/key"), "k").unwrap();
         std::os::unix::fs::symlink(cwd.join("secrets"), cwd.join("alias")).unwrap();
         let f = filter(cwd.to_str().unwrap(), &["secrets/**"]);
-        assert!(!f.denies(&cwd.join("alias/key"), false), "unrooted, the link hides the place");
+        assert!(
+            !f.denies(&cwd.join("alias/key"), false),
+            "unrooted, the link hides the place"
+        );
         let f = f.rooted(&cwd.join("alias"));
         assert!(f.denies(&cwd.join("alias/key"), false));
     }
@@ -467,7 +567,10 @@ mod tests {
 
 /// P198 round 2: one fixture and one set of assertions that every walker and every search tool is run against, so the
 /// three `list_dir` walkers and the three grep tools are held to the same contract through their own tool entry points.
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(all(test, unix))]
 pub(crate) mod fixture {
     use std::future::Future;
@@ -501,7 +604,12 @@ pub(crate) mod fixture {
         std::os::unix::fs::symlink("secrets/key_material.txt", proj.join("keylink")).unwrap();
         let link = base.join("link");
         std::os::unix::fs::symlink(&proj, &link).unwrap();
-        Tree { _tmp: tmp, base, proj, link }
+        Tree {
+            _tmp: tmp,
+            base,
+            proj,
+            link,
+        }
     }
 
     /// The lines of a search output in a fixed order: ripgrep walks in parallel, so two runs over the same files print
@@ -514,7 +622,12 @@ pub(crate) mod fixture {
 
     /// Whether some line of a listing is exactly the entry `name` (a name, not a substring of a longer one).
     pub(crate) fn has_name(out: &str, name: &str) -> bool {
-        out.lines().any(|l| l.trim_start_matches(['-', ' ', '\t']).trim_end_matches('/').trim() == name)
+        out.lines().any(|l| {
+            l.trim_start_matches(['-', ' ', '\t'])
+                .trim_end_matches('/')
+                .trim()
+                == name
+        })
     }
 
     /// The `list_dir` contract, run through `list(cwd, directory, deny globs) -> printed listing`.
@@ -525,19 +638,36 @@ pub(crate) mod fixture {
     {
         let t = tree();
         let abs = |rel: &str| format!("{}/{}", t.proj.display(), rel);
-        let ls = |cwd: &PathBuf, dir: &str, deny: Vec<String>| list(cwd.clone(), dir.to_string(), deny);
+        let ls =
+            |cwd: &PathBuf, dir: &str, deny: Vec<String>| list(cwd.clone(), dir.to_string(), deny);
 
         // Absolute rule on the directory: the directory name and everything under it are gone, siblings stay. Also with the
         // cwd reached through a symlink.
         for cwd in [&t.proj, &t.link] {
             let out = ls(cwd, ".", vec![abs("secrets/**")]).await;
-            assert!(!out.contains("key_material.txt"), "cwd {}: {out}", cwd.display());
-            assert!(!has_name(&out, "secrets"), "the denied directory name is hidden, cwd {}: {out}", cwd.display());
-            assert!(has_name(&out, "public.txt") && has_name(&out, "secrets-public") && has_name(&out, "secret"), "{out}");
+            assert!(
+                !out.contains("key_material.txt"),
+                "cwd {}: {out}",
+                cwd.display()
+            );
+            assert!(
+                !has_name(&out, "secrets"),
+                "the denied directory name is hidden, cwd {}: {out}",
+                cwd.display()
+            );
+            assert!(
+                has_name(&out, "public.txt")
+                    && has_name(&out, "secrets-public")
+                    && has_name(&out, "secret"),
+                "{out}"
+            );
         }
         // Control: no rule shows the name, so the checks above are not vacuous.
         let out = ls(&t.proj, ".", Vec::new()).await;
-        assert!(has_name(&out, "secrets") && out.contains("key_material.txt"), "{out}");
+        assert!(
+            has_name(&out, "secrets") && out.contains("key_material.txt"),
+            "{out}"
+        );
         // A rule outside the cwd neither breaks the listing nor hides anything in it.
         let out = ls(&t.proj, ".", vec![format!("{}/other/**", t.base.display())]).await;
         assert_eq!(out, ls(&t.proj, ".", Vec::new()).await);
@@ -545,7 +675,10 @@ pub(crate) mod fixture {
         // Bare name `secret`: matches only the path `secret`, so `secret/notes.txt` is readable (see
         // `hub_permission::tests::bare_name_and_sibling_verdicts`) and is therefore listed.
         let out = ls(&t.proj, ".", vec!["secret".to_string()]).await;
-        assert!(has_name(&out, "notes.txt") && has_name(&out, "secret"), "{out}");
+        assert!(
+            has_name(&out, "notes.txt") && has_name(&out, "secret"),
+            "{out}"
+        );
 
         // Symlink root: `alias -> secrets` under `secrets/**` shows no denied name; without the rule it shows them.
         let out = ls(&t.proj, "alias", vec!["secrets/**".to_string()]).await;
@@ -555,9 +688,19 @@ pub(crate) mod fixture {
 
         // Siblings with a common prefix are untouched.
         let out = ls(&t.proj, ".", vec!["secret/**".to_string()]).await;
-        assert!(has_name(&out, "x.txt") && out.contains("key_material.txt") && !out.contains("notes.txt"), "{out}");
+        assert!(
+            has_name(&out, "x.txt")
+                && out.contains("key_material.txt")
+                && !out.contains("notes.txt"),
+            "{out}"
+        );
         let out = ls(&t.proj, ".", vec!["secrets/**".to_string()]).await;
-        assert!(has_name(&out, "x.txt") && has_name(&out, "notes.txt") && !out.contains("key_material.txt"), "{out}");
+        assert!(
+            has_name(&out, "x.txt")
+                && has_name(&out, "notes.txt")
+                && !out.contains("key_material.txt"),
+            "{out}"
+        );
     }
 
     /// The search contract for a directory root, run through `search(cwd, path, deny globs) -> everything the tool printed`.
@@ -571,32 +714,55 @@ pub(crate) mod fixture {
         let run = |cwd: &PathBuf, path: Option<&str>, deny: Vec<String>| {
             search(cwd.clone(), path.map(str::to_string), deny)
         };
-        let secret_seen = |out: &str| out.contains("key_material.txt") || out.contains("FAKE_SECRET");
+        let secret_seen =
+            |out: &str| out.contains("key_material.txt") || out.contains("FAKE_SECRET");
 
         // KNOWN GAP (receipt, Unverified): `t.link` as the cwd is not covered here. ripgrep roots its excludes at the
         // physical cwd, so a search path spelled through the symlink is not read as under it.
         for cwd in [&t.proj] {
             for path in [None, Some("."), Some("secrets"), Some("alias")] {
                 let out = run(cwd, path, vec![abs("secrets/**")]).await;
-                assert!(!secret_seen(&out), "cwd {} path {path:?}: {out}", cwd.display());
+                assert!(
+                    !secret_seen(&out),
+                    "cwd {} path {path:?}: {out}",
+                    cwd.display()
+                );
                 if path.is_none() || path == Some(".") {
-                    assert!(out.contains("public.txt"), "an allowed file is still found, cwd {}: {out}", cwd.display());
+                    assert!(
+                        out.contains("public.txt"),
+                        "an allowed file is still found, cwd {}: {out}",
+                        cwd.display()
+                    );
                 }
             }
         }
         // Control: with no rule the denied file is found.
         assert!(secret_seen(&run(&t.proj, None, Vec::new()).await));
         // A rule outside the cwd neither breaks the search nor excludes anything in it.
-        let out = run(&t.proj, None, vec![format!("{}/other/**", t.base.display())]).await;
-        assert!(secret_seen(&out) && out.contains("public.txt") && !out.contains("outside.txt"), "{out}");
+        let out = run(
+            &t.proj,
+            None,
+            vec![format!("{}/other/**", t.base.display())],
+        )
+        .await;
+        assert!(
+            secret_seen(&out) && out.contains("public.txt") && !out.contains("outside.txt"),
+            "{out}"
+        );
         // Bare name `secret`: `secret/notes.txt` is readable, so it is found.
         let out = run(&t.proj, None, vec!["secret".to_string()]).await;
         assert!(out.contains("notes.txt"), "{out}");
         // Siblings with a common prefix are untouched.
         let out = run(&t.proj, None, vec!["secret/**".to_string()]).await;
-        assert!(out.contains("secrets-public") && secret_seen(&out) && !out.contains("notes.txt"), "{out}");
+        assert!(
+            out.contains("secrets-public") && secret_seen(&out) && !out.contains("notes.txt"),
+            "{out}"
+        );
         let out = run(&t.proj, None, vec!["secrets/**".to_string()]).await;
-        assert!(out.contains("secrets-public") && out.contains("notes.txt") && !secret_seen(&out), "{out}");
+        assert!(
+            out.contains("secrets-public") && out.contains("notes.txt") && !secret_seen(&out),
+            "{out}"
+        );
     }
 
     /// A denied explicit file is refused: no content and, whatever the spelling, not the name it really has.
@@ -607,7 +773,11 @@ pub(crate) mod fixture {
     {
         let t = tree();
         let deny = vec!["secrets/**".to_string()];
-        let direct = t.proj.join("secrets/key_material.txt").to_string_lossy().into_owned();
+        let direct = t
+            .proj
+            .join("secrets/key_material.txt")
+            .to_string_lossy()
+            .into_owned();
         let via_link = t.proj.join("keylink").to_string_lossy().into_owned();
         for path in ["secrets/key_material.txt", direct.as_str()] {
             let out = search(t.proj.clone(), path.to_string(), deny.clone()).await;
@@ -615,15 +785,26 @@ pub(crate) mod fixture {
         }
         for path in ["keylink", via_link.as_str()] {
             let out = search(t.proj.clone(), path.to_string(), deny.clone()).await;
-            assert!(!out.contains("FAKE_SECRET") && !out.contains("key_material.txt"), "{path}: {out}");
+            assert!(
+                !out.contains("FAKE_SECRET") && !out.contains("key_material.txt"),
+                "{path}: {out}"
+            );
         }
         // Controls: with no rule the same spellings do read it, and an allowed explicit file is searched under the rule.
         for path in ["secrets/key_material.txt", "keylink"] {
             let out = search(t.proj.clone(), path.to_string(), Vec::new()).await;
-            assert!(out.contains("FAKE_SECRET") || out.contains("key_material.txt") || out.contains("keylink"), "{path}: {out}");
+            assert!(
+                out.contains("FAKE_SECRET")
+                    || out.contains("key_material.txt")
+                    || out.contains("keylink"),
+                "{path}: {out}"
+            );
         }
         let out = search(t.proj.clone(), "public.txt".to_string(), deny).await;
-        assert!(out.contains("public.txt") || out.contains("FAKE_PUBLIC"), "{out}");
+        assert!(
+            out.contains("public.txt") || out.contains("FAKE_PUBLIC"),
+            "{out}"
+        );
     }
 
     /// P198 round 3: the post-filter contract, run through `search(cwd, path, deny globs) -> everything the tool printed`
@@ -687,31 +868,157 @@ pub(crate) mod fixture {
         }
         let cases = vec![
             // (1) a symlinked session cwd.
-            Case { name: "link cwd", cwd: link.clone(), path: None, deny: vec![s("secrets/**")], hidden: vec!["KEYA"], shown: vec!["pubfile"] },
-            Case { name: "link cwd, dot", cwd: link.clone(), path: Some(s(".")), deny: vec![s("secrets/**")], hidden: vec!["KEYA"], shown: vec!["pubfile"] },
-            Case { name: "link cwd, link rule", cwd: link.clone(), path: None, deny: vec![format!("{}/secrets/**", link.display())], hidden: vec!["KEYA"], shown: vec!["pubfile"] },
+            Case {
+                name: "link cwd",
+                cwd: link.clone(),
+                path: None,
+                deny: vec![s("secrets/**")],
+                hidden: vec!["KEYA"],
+                shown: vec!["pubfile"],
+            },
+            Case {
+                name: "link cwd, dot",
+                cwd: link.clone(),
+                path: Some(s(".")),
+                deny: vec![s("secrets/**")],
+                hidden: vec!["KEYA"],
+                shown: vec!["pubfile"],
+            },
+            Case {
+                name: "link cwd, link rule",
+                cwd: link.clone(),
+                path: None,
+                deny: vec![format!("{}/secrets/**", link.display())],
+                hidden: vec!["KEYA"],
+                shown: vec!["pubfile"],
+            },
             // (2) case: the policy matcher is case-insensitive.
-            Case { name: "case file", cwd: proj.clone(), path: None, deny: vec![s("**/.env")], hidden: vec![".ENV"], shown: vec!["pubfile"] },
-            Case { name: "case dir", cwd: proj.clone(), path: None, deny: vec![s("secrets/**")], hidden: vec!["KEYA", "KEYB"], shown: vec!["pubfile", "SRCA"] },
+            Case {
+                name: "case file",
+                cwd: proj.clone(),
+                path: None,
+                deny: vec![s("**/.env")],
+                hidden: vec![".ENV"],
+                shown: vec!["pubfile"],
+            },
+            Case {
+                name: "case dir",
+                cwd: proj.clone(),
+                path: None,
+                deny: vec![s("secrets/**")],
+                hidden: vec!["KEYA", "KEYB"],
+                shown: vec!["pubfile", "SRCA"],
+            },
             // (3) an absolute rule outside the cwd, reached through an ancestor search root.
-            Case { name: "outside rule", cwd: proj.clone(), path: Some(base.display().to_string()), deny: vec![format!("{}/outside/.ssh/**", base.display())], hidden: vec!["SSHKEY"], shown: vec!["OUTOK", "pubfile"] },
+            Case {
+                name: "outside rule",
+                cwd: proj.clone(),
+                path: Some(base.display().to_string()),
+                deny: vec![format!("{}/outside/.ssh/**", base.display())],
+                hidden: vec!["SSHKEY"],
+                shown: vec!["OUTOK", "pubfile"],
+            },
             // (4) braces are literal for the policy.
-            Case { name: "braces", cwd: proj.clone(), path: None, deny: vec![s("*.{pem,txt}")], hidden: vec!["BRACE"], shown: vec!["SUBPEM", "TOPPEM", "pubfile"] },
+            Case {
+                name: "braces",
+                cwd: proj.clone(),
+                path: None,
+                deny: vec![s("*.{pem,txt}")],
+                hidden: vec!["BRACE"],
+                shown: vec!["SUBPEM", "TOPPEM", "pubfile"],
+            },
             // (5) false-denial guards.
-            Case { name: "abs star pem", cwd: proj.clone(), path: None, deny: vec![abs("*.pem")], hidden: vec!["TOPPEM"], shown: vec!["SUBPEM"] },
-            Case { name: "trailing slash", cwd: proj.clone(), path: None, deny: vec![s("src/")], hidden: vec![], shown: vec!["SRCA"] },
-            Case { name: "literal child", cwd: proj.clone(), path: None, deny: vec![s("secrets/x")], hidden: vec![], shown: vec!["KEYA", "NOTESA"] },
-            Case { name: "dir star", cwd: proj.clone(), path: None, deny: vec![s("dir/*")], hidden: vec!["DIRX"], shown: vec!["DIRSUB"] },
-            Case { name: "bang rule", cwd: proj.clone(), path: None, deny: vec![s("!bang.txt")], hidden: vec!["bang"], shown: vec!["pubfile", "SRCA", "KEYA"] },
+            Case {
+                name: "abs star pem",
+                cwd: proj.clone(),
+                path: None,
+                deny: vec![abs("*.pem")],
+                hidden: vec!["TOPPEM"],
+                shown: vec!["SUBPEM"],
+            },
+            Case {
+                name: "trailing slash",
+                cwd: proj.clone(),
+                path: None,
+                deny: vec![s("src/")],
+                hidden: vec![],
+                shown: vec!["SRCA"],
+            },
+            Case {
+                name: "literal child",
+                cwd: proj.clone(),
+                path: None,
+                deny: vec![s("secrets/x")],
+                hidden: vec![],
+                shown: vec!["KEYA", "NOTESA"],
+            },
+            Case {
+                name: "dir star",
+                cwd: proj.clone(),
+                path: None,
+                deny: vec![s("dir/*")],
+                hidden: vec!["DIRX"],
+                shown: vec!["DIRSUB"],
+            },
+            Case {
+                name: "bang rule",
+                cwd: proj.clone(),
+                path: None,
+                deny: vec![s("!bang.txt")],
+                hidden: vec!["bang"],
+                shown: vec!["pubfile", "SRCA", "KEYA"],
+            },
             // (5c) an explicit directory is searched unless EVERYTHING below it is denied.
-            Case { name: "dir literal child", cwd: proj.clone(), path: Some(s("secrets")), deny: vec![s("secrets/x")], hidden: vec![], shown: vec!["KEYA", "NOTESA"] },
-            Case { name: "dir star child", cwd: proj.clone(), path: Some(s("dir")), deny: vec![s("dir/*")], hidden: vec!["DIRX"], shown: vec!["DIRSUB"] },
-            Case { name: "dir all denied", cwd: proj.clone(), path: Some(s("secrets")), deny: vec![s("secrets/**")], hidden: vec!["KEYA", "NOTESA"], shown: vec![] },
+            Case {
+                name: "dir literal child",
+                cwd: proj.clone(),
+                path: Some(s("secrets")),
+                deny: vec![s("secrets/x")],
+                hidden: vec![],
+                shown: vec!["KEYA", "NOTESA"],
+            },
+            Case {
+                name: "dir star child",
+                cwd: proj.clone(),
+                path: Some(s("dir")),
+                deny: vec![s("dir/*")],
+                hidden: vec!["DIRX"],
+                shown: vec!["DIRSUB"],
+            },
+            Case {
+                name: "dir all denied",
+                cwd: proj.clone(),
+                path: Some(s("secrets")),
+                deny: vec![s("secrets/**")],
+                hidden: vec!["KEYA", "NOTESA"],
+                shown: vec![],
+            },
             // (6) a name holding `:`.
-            Case { name: "colon", cwd: proj.clone(), path: None, deny: vec![s("COLON:FILE.txt")], hidden: vec!["COLON"], shown: vec!["pubfile"] },
+            Case {
+                name: "colon",
+                cwd: proj.clone(),
+                path: None,
+                deny: vec![s("COLON:FILE.txt")],
+                hidden: vec!["COLON"],
+                shown: vec!["pubfile"],
+            },
             // (7) a missing session cwd does not fail the spawn.
-            Case { name: "gone cwd", cwd: gone.clone(), path: Some(proj.display().to_string()), deny: vec![abs("secrets/**")], hidden: vec!["KEYA"], shown: vec!["pubfile"] },
-            Case { name: "gone cwd, no rule", cwd: gone.clone(), path: Some(proj.display().to_string()), deny: vec![], hidden: vec![], shown: vec!["pubfile", "KEYA"] },
+            Case {
+                name: "gone cwd",
+                cwd: gone.clone(),
+                path: Some(proj.display().to_string()),
+                deny: vec![abs("secrets/**")],
+                hidden: vec!["KEYA"],
+                shown: vec!["pubfile"],
+            },
+            Case {
+                name: "gone cwd, no rule",
+                cwd: gone.clone(),
+                path: Some(proj.display().to_string()),
+                deny: vec![],
+                hidden: vec![],
+                shown: vec!["pubfile", "KEYA"],
+            },
         ];
         for c in cases {
             if c.name == "gone cwd, no rule" && !gone_cwd_without_rules_runs {
@@ -719,9 +1026,18 @@ pub(crate) mod fixture {
             }
             // The policy's own verdicts, so a "shown" token is a file the policy allows.
             if let Some(f) = ReadDenyFilter::new(&c.cwd, &c.deny) {
-                for (tok, rel) in [("SRCA", "src/SRCA.txt"), ("NOTESA", "secrets/NOTESA.txt"), ("DIRSUB", "dir/sub/DIRSUB.txt"), ("SUBPEM", "sub/SUBPEM.pem")] {
+                for (tok, rel) in [
+                    ("SRCA", "src/SRCA.txt"),
+                    ("NOTESA", "secrets/NOTESA.txt"),
+                    ("DIRSUB", "dir/sub/DIRSUB.txt"),
+                    ("SUBPEM", "sub/SUBPEM.pem"),
+                ] {
                     if c.shown.contains(&tok) {
-                        assert!(!f.denies(&proj.join(rel), false), "{}: the policy must allow {rel}", c.name);
+                        assert!(
+                            !f.denies(&proj.join(rel), false),
+                            "{}: the policy must allow {rel}",
+                            c.name
+                        );
                     }
                 }
             }
@@ -730,11 +1046,19 @@ pub(crate) mod fixture {
                 assert!(!out.contains(h), "{}: `{h}` must be hidden: {out}", c.name);
             }
             for v in &c.shown {
-                assert!(out.contains(v), "{}: `{v}` must still be found: {out}", c.name);
+                assert!(
+                    out.contains(v),
+                    "{}: `{v}` must still be found: {out}",
+                    c.name
+                );
             }
             // The denied files' content never appears.
             for h in &c.hidden {
-                assert!(!out.contains(&format!("FAKE {h}")), "{}: content of `{h}`: {out}", c.name);
+                assert!(
+                    !out.contains(&format!("FAKE {h}")),
+                    "{}: content of `{h}`: {out}",
+                    c.name
+                );
             }
         }
     }
@@ -744,13 +1068,18 @@ pub(crate) mod fixture {
     pub(crate) fn write_r4_tree(proj: &std::path::Path, denied: bool) {
         use std::os::unix::ffi::OsStrExt;
         let filler = "x".repeat(79).repeat(2600);
-        let filler = filler.as_bytes().chunks(79).map(|c| format!("{}\n", std::str::from_utf8(c).unwrap())).collect::<String>();
+        let filler = filler
+            .as_bytes()
+            .chunks(79)
+            .map(|c| format!("{}\n", std::str::from_utf8(c).unwrap()))
+            .collect::<String>();
         let put = |rel: &[u8], body: Vec<u8>| {
             let p = proj.join(std::ffi::OsStr::from_bytes(rel));
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        let early_then_nul = |tag: &str| format!("FAKE_{tag}\n{filler}\0 FAKE_{tag}_LATE\n").into_bytes();
+        let early_then_nul =
+            |tag: &str| format!("FAKE_{tag}\n{filler}\0 FAKE_{tag}_LATE\n").into_bytes();
         let nul_in_match = |tag: &str| format!("{filler}x\0 FAKE_{tag}\n").into_bytes();
         put(b"pub.txt", b"FAKE_PUB\n".to_vec());
         put(b"aa_bin", early_then_nul("BIN_EARLY"));
@@ -760,11 +1089,17 @@ pub(crate) mod fixture {
         put(b"bad\xff.txt", b"FAKE_BAD\n".to_vec());
         for i in 0..12 {
             put(format!("bins/b{i:02}").as_bytes(), nul_in_match("BIN_MANY"));
-            put(format!("bins/c{i:02}").as_bytes(), early_then_nul("BIN_MANY2"));
+            put(
+                format!("bins/c{i:02}").as_bytes(),
+                early_then_nul("BIN_MANY2"),
+            );
         }
         if denied {
             for i in 0..12 {
-                put(format!("secrets/t{i:02}.txt").as_bytes(), format!("FAKE_DENIED_T{i}\n").into_bytes());
+                put(
+                    format!("secrets/t{i:02}.txt").as_bytes(),
+                    format!("FAKE_DENIED_T{i}\n").into_bytes(),
+                );
             }
             put(b"secrets/key.txt", b"FAKE_DENIED\n".to_vec());
             put(b"secrets/aa_bin.dat", early_then_nul("DENIED_BIN"));
@@ -791,23 +1126,47 @@ pub(crate) mod fixture {
         // (1) a denied file's lines and name never appear, whatever binary notices sit beside it.
         for _ in 0..5 {
             let out = search(proj.clone(), None, deny.clone()).await;
-            for bad in ["FAKE_DENIED", "key.txt", "aa_bin.dat", "zz_bin.dat", "ird:name", "secrets", "t00.txt"] {
+            for bad in [
+                "FAKE_DENIED",
+                "key.txt",
+                "aa_bin.dat",
+                "zz_bin.dat",
+                "ird:name",
+                "secrets",
+                "t00.txt",
+            ] {
                 assert!(!out.contains(bad), "`{bad}` leaked: {}", out.escape_debug());
             }
-            assert!(out.contains("pub.txt") || out.contains("FAKE_PUB"), "an allowed file is still found: {}", out.escape_debug());
+            assert!(
+                out.contains("pub.txt") || out.contains("FAKE_PUB"),
+                "an allowed file is still found: {}",
+                out.escape_debug()
+            );
         }
         // Control: without the rule the same tree does show them, so the checks above are not vacuous.
         let out = search(proj.clone(), None, Vec::new()).await;
-        assert!(out.contains("key.txt") || out.contains("FAKE_DENIED"), "control: {}", out.escape_debug());
+        assert!(
+            out.contains("key.txt") || out.contains("FAKE_DENIED"),
+            "control: {}",
+            out.escape_debug()
+        );
         // (2) a mode-000 file and directory under the denied directory make ripgrep exit 2: nothing of them is shown.
         let locked = proj.join("secrets/locked.txt");
         std::fs::write(&locked, "FAKE_LOCKED\n").unwrap();
         std::fs::create_dir_all(proj.join("secrets/lockeddir")).unwrap();
         std::fs::write(proj.join("secrets/lockeddir/in.txt"), "FAKE_LOCKED_IN\n").unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        std::fs::set_permissions(proj.join("secrets/lockeddir"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(
+            proj.join("secrets/lockeddir"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
         let out = search(proj.clone(), None, deny.clone()).await;
-        std::fs::set_permissions(proj.join("secrets/lockeddir"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            proj.join("secrets/lockeddir"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
         for bad in ["locked", "Permission denied", "secrets"] {
             assert!(!out.contains(bad), "`{bad}` leaked: {}", out.escape_debug());
@@ -820,8 +1179,16 @@ pub(crate) mod fixture {
         std::fs::write(p5.join("g.txt"), "1\nFAKE\n3\n4\n5\n6\nFAKE\n8\n").unwrap();
         let none = search(p5.clone(), None, Vec::new()).await;
         let with_rule = search(p5.clone(), None, vec!["nothing-here/**".to_string()]).await;
-        assert!(none.contains("FAKE_PUB") || none.contains("pub.txt"), "{}", none.escape_debug());
-        assert_eq!(sorted_lines(&none), sorted_lines(&with_rule), "a rule that denies nothing changes the output");
+        assert!(
+            none.contains("FAKE_PUB") || none.contains("pub.txt"),
+            "{}",
+            none.escape_debug()
+        );
+        assert_eq!(
+            sorted_lines(&none),
+            sorted_lines(&with_rule),
+            "a rule that denies nothing changes the output"
+        );
     }
 
     /// P198 round 4: `**/*[0-9]` and `**/[!.]*` are not "total" under any directory, so a directory is entered and each
@@ -835,7 +1202,11 @@ pub(crate) mod fixture {
         use super::ReadDenyFilter;
         let t = tree();
         let proj = t.base.join("r4rules");
-        for (rel, body) in [("src/README.md", "FAKE_README\n"), ("src/.env", "FAKE_DOTENV\n"), ("src/main1", "FAKE_MAIN1\n")] {
+        for (rel, body) in [
+            ("src/README.md", "FAKE_README\n"),
+            ("src/.env", "FAKE_DOTENV\n"),
+            ("src/main1", "FAKE_MAIN1\n"),
+        ] {
             let p = proj.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -843,24 +1214,59 @@ pub(crate) mod fixture {
         for rule in ["**/*[0-9]", "**/[!.]*"] {
             let deny = vec![rule.to_string()];
             let f = ReadDenyFilter::new(&proj, &deny).unwrap();
-            assert!(!f.denies(&proj.join("src"), true), "{rule}: `src` is not pruned");
+            assert!(
+                !f.denies(&proj.join("src"), true),
+                "{rule}: `src` is not pruned"
+            );
             let out = search(proj.clone(), None, deny).await;
-            for (tok, rel) in [("FAKE_README", "src/README.md"), ("FAKE_MAIN1", "src/main1")] {
+            for (tok, rel) in [
+                ("FAKE_README", "src/README.md"),
+                ("FAKE_MAIN1", "src/main1"),
+            ] {
                 let allowed = !f.denies(&proj.join(rel), false);
                 let shown = out.contains(tok) || out.contains(rel.rsplit('/').next().unwrap());
-                assert_eq!(shown, allowed, "{rule}: {rel} (policy allows: {allowed}): {}", out.escape_debug());
+                assert_eq!(
+                    shown,
+                    allowed,
+                    "{rule}: {rel} (policy allows: {allowed}): {}",
+                    out.escape_debug()
+                );
             }
             let dot_allowed = !f.denies(&proj.join("src/.env"), false);
-            assert!(dot_allowed || !out.contains("FAKE_DOTENV"), "{rule}: denied .env leaked");
+            assert!(
+                dot_allowed || !out.contains("FAKE_DOTENV"),
+                "{rule}: denied .env leaked"
+            );
         }
         // P175f: an absolute rule spelled through the symlink `base/link -> proj` also hides the physical spelling.
         let via_link = format!("{}/link/secrets/**", t.base.display());
-        let control = search(t.proj.clone(), Some(t.proj.display().to_string()), Vec::new()).await;
-        assert!(control.contains("FAKE_SECRET") || control.contains("key_material"), "control: {}", control.escape_debug());
-        for (cwd, path) in [(t.proj.clone(), Some(t.proj.display().to_string())), (t.proj.clone(), None), (t.base.clone(), Some(t.proj.display().to_string()))] {
+        let control = search(
+            t.proj.clone(),
+            Some(t.proj.display().to_string()),
+            Vec::new(),
+        )
+        .await;
+        assert!(
+            control.contains("FAKE_SECRET") || control.contains("key_material"),
+            "control: {}",
+            control.escape_debug()
+        );
+        for (cwd, path) in [
+            (t.proj.clone(), Some(t.proj.display().to_string())),
+            (t.proj.clone(), None),
+            (t.base.clone(), Some(t.proj.display().to_string())),
+        ] {
             let out = search(cwd, path.clone(), vec![via_link.clone()]).await;
-            assert!(!out.contains("FAKE_SECRET") && !out.contains("key_material"), "via link, root {path:?}: {}", out.escape_debug());
-            assert!(out.contains("FAKE_PUBLIC") || out.contains("public.txt"), "via link, root {path:?}: sibling kept: {}", out.escape_debug());
+            assert!(
+                !out.contains("FAKE_SECRET") && !out.contains("key_material"),
+                "via link, root {path:?}: {}",
+                out.escape_debug()
+            );
+            assert!(
+                out.contains("FAKE_PUBLIC") || out.contains("public.txt"),
+                "via link, root {path:?}: sibling kept: {}",
+                out.escape_debug()
+            );
         }
     }
 
@@ -880,9 +1286,16 @@ pub(crate) mod fixture {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "x").unwrap();
         }
-        for rule in ["secrets/**".to_string(), "secrets/**/*".to_string(), format!("{}/secrets/**", proj.display())] {
+        for rule in [
+            "secrets/**".to_string(),
+            "secrets/**/*".to_string(),
+            format!("{}/secrets/**", proj.display()),
+        ] {
             let out = list(proj.clone(), ".".to_string(), vec![rule.clone()]).await;
-            assert!(!has_name(&out, "secrets") && !out.contains("key.txt"), "{rule}: {out}");
+            assert!(
+                !has_name(&out, "secrets") && !out.contains("key.txt"),
+                "{rule}: {out}"
+            );
             assert!(has_name(&out, "src"), "{rule}: {out}");
         }
         for rule in ["**/*[0-9]", "**/[!.]*"] {
@@ -891,14 +1304,32 @@ pub(crate) mod fixture {
             let out = list(proj.clone(), "src".to_string(), deny).await;
             for name in ["README.md", "main1"] {
                 let allowed = !f.denies(&proj.join("src").join(name), false);
-                assert_eq!(has_name(&out, name), allowed, "{rule}: {name} (policy allows: {allowed}): {out}");
+                assert_eq!(
+                    has_name(&out, name),
+                    allowed,
+                    "{rule}: {name} (policy allows: {allowed}): {out}"
+                );
             }
             let out = list(proj.clone(), ".".to_string(), vec![rule.to_string()]).await;
-            assert!(has_name(&out, "src"), "{rule}: a directory is entered, not pruned: {out}");
+            assert!(
+                has_name(&out, "src"),
+                "{rule}: a directory is entered, not pruned: {out}"
+            );
         }
         // P175f: an absolute rule spelled through the symlink `base/link -> proj` also hides the physical spelling.
-        let out = list(t.proj.clone(), ".".to_string(), vec![format!("{}/link/secrets/**", t.base.display())]).await;
-        assert!(!out.contains("key_material.txt") && !has_name(&out, "secrets"), "via link: {out}");
-        assert!(has_name(&out, "public.txt") && has_name(&out, "secrets-public"), "via link: siblings kept: {out}");
+        let out = list(
+            t.proj.clone(),
+            ".".to_string(),
+            vec![format!("{}/link/secrets/**", t.base.display())],
+        )
+        .await;
+        assert!(
+            !out.contains("key_material.txt") && !has_name(&out, "secrets"),
+            "via link: {out}"
+        );
+        assert!(
+            has_name(&out, "public.txt") && has_name(&out, "secrets-public"),
+            "via link: siblings kept: {out}"
+        );
     }
 }

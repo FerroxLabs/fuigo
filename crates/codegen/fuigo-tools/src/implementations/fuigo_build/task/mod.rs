@@ -501,10 +501,14 @@ impl fuigo_tool_runtime::Tool for TaskTool {
 
         // A session that locked subagents to the parent model refuses an explicit choice before any validation or
         // child work, whatever the schema the model saw.
-        if model.is_some() && task_params.model_selection == model_policy::TaskModelSelection::Inherited {
+        if model.is_some()
+            && task_params.model_selection == model_policy::TaskModelSelection::Inherited
+        {
             let param_names = crate::types::tool_metadata::invoking_param_names(&ctx);
             return Err(fuigo_tool_runtime::ToolError::invalid_arguments(
-                model_policy::hidden_selection_message(param_names.resolve(model_policy::MODEL_PARAM)),
+                model_policy::hidden_selection_message(
+                    param_names.resolve(model_policy::MODEL_PARAM),
+                ),
             ));
         }
 
@@ -827,7 +831,10 @@ fn is_default_subagent_type(subagent_type: &str) -> bool {
     subagent_type.eq_ignore_ascii_case("general-purpose")
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3337,7 +3344,8 @@ mod tests {
             Some(spawned)
         });
         let result =
-            fuigo_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input).await;
+            fuigo_tool_runtime::Tool::run(&TaskTool, test_ctx(resources.into_shared()), input)
+                .await;
         let spawned = handle.await.unwrap();
         match result {
             Ok(_) => Ok(spawned.expect("a successful call spawns")),
@@ -3354,7 +3362,9 @@ mod tests {
     #[tokio::test]
     async fn omitted_type_that_is_not_allowed_is_sent_back_to_name_one() {
         let spawned = spawned_type(
-            |_, _| SubagentValidateTypeOutcome::NotAllowed { allowed: vec!["explore".into()] },
+            |_, _| SubagentValidateTypeOutcome::NotAllowed {
+                allowed: vec!["explore".into()],
+            },
             None,
             task_input("general-purpose", false),
         )
@@ -3369,13 +3379,18 @@ mod tests {
         let mut input = task_input("general-purpose", false);
         input.subagent_type_specified = true;
         let spawned = spawned_type(
-            |_, _| SubagentValidateTypeOutcome::NotAllowed { allowed: vec!["explore".into()] },
+            |_, _| SubagentValidateTypeOutcome::NotAllowed {
+                allowed: vec!["explore".into()],
+            },
             None,
             input,
         )
         .await;
         let message = spawned.expect_err("a named type outside the allowlist is refused");
-        assert!(message.contains("'general-purpose' not allowed"), "{message}");
+        assert!(
+            message.contains("'general-purpose' not allowed"),
+            "{message}"
+        );
         assert!(!message.contains("No subagent_type was given"), "{message}");
     }
 
@@ -3383,10 +3398,17 @@ mod tests {
     async fn inherited_selection_refuses_an_explicit_model_before_any_child_work() {
         let mut input = task_input("explore", false);
         input.model = Some("alpha".into());
-        let spawned =
-            spawned_type(|_, _| SubagentValidateTypeOutcome::Ok, Some(inherited_params()), input).await;
+        let spawned = spawned_type(
+            |_, _| SubagentValidateTypeOutcome::Ok,
+            Some(inherited_params()),
+            input,
+        )
+        .await;
         let message = spawned.expect_err("the model argument is locked");
-        assert!(message.contains("Explicit subagent model selection is unavailable"), "{message}");
+        assert!(
+            message.contains("Explicit subagent model selection is unavailable"),
+            "{message}"
+        );
         assert!(message.contains("without the model argument"), "{message}");
     }
 
@@ -3396,13 +3418,19 @@ mod tests {
         let mut resources = resources_for_task(backend);
         resources.insert(crate::types::resources::Params(inherited_params()));
         let mut ctx = test_ctx(resources.into_shared());
-        ctx.extensions.insert(crate::types::resources::InvokingToolParamNames(
-            [("model".to_string(), "llm".to_string())].into(),
-        ));
+        ctx.extensions
+            .insert(crate::types::resources::InvokingToolParamNames(
+                [("model".to_string(), "llm".to_string())].into(),
+            ));
         let mut input = task_input("explore", false);
         input.model = Some("alpha".into());
-        let error = fuigo_tool_runtime::Tool::run(&TaskTool, ctx, input).await.unwrap_err();
-        assert!(error.to_string().contains("without the llm argument"), "{error}");
+        let error = fuigo_tool_runtime::Tool::run(&TaskTool, ctx, input)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("without the llm argument"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

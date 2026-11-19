@@ -6,7 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::implementations::codex::grep_files::{CodexGrepFilesInput, CodexGrepFilesTool};
-use crate::implementations::fuigo_build::grep::{GrepSearchInput, GrepTool as FuigoGrep, OutputMode};
+use crate::implementations::fuigo_build::grep::{
+    GrepSearchInput, GrepTool as FuigoGrep, OutputMode,
+};
 use crate::implementations::opencode::glob::{GlobInput, GlobTool};
 use crate::implementations::opencode::grep::{GrepInput, GrepTool as OcGrep};
 use crate::types::resources::{Cwd, DenyReadGlobs, Resources};
@@ -30,21 +32,31 @@ pub(crate) fn fx() -> Fx {
     let filler: String = (0..5000).map(|_| format!("{}\n", "a".repeat(99))).collect(); // ~500 KB, beyond the first buffer
     put("README", b"FAKE root readme\n".to_vec());
     put("src/README", b"FAKE src readme\n".to_vec());
-    put("src/a.txt", b"one\nFAKE in src a\nthree\nFAKE two words here\n".to_vec());
+    put(
+        "src/a.txt",
+        b"one\nFAKE in src a\nthree\nFAKE two words here\n".to_vec(),
+    );
     put("src/sub/b.txt", b"FAKE in sub b\n".to_vec());
     put("text.txt", b"FAKE text\nother\n".to_vec());
     put("sp ace.txt", b"FAKE spaced name\n".to_vec());
-    put("long.txt", format!("FAKE{}\nFAKE short\n", "x".repeat(2000)).into_bytes());
+    put(
+        "long.txt",
+        format!("FAKE{}\nFAKE short\n", "x".repeat(2000)).into_bytes(),
+    );
     put("bin_before.bin", b"FAKE before\0tail\n".to_vec());
     put("bin_both.bin", b"FAKE one\0FAKE two\n".to_vec());
     put("bin_off7.bin", b"abcdefg\0FAKE after\n".to_vec());
-    put("far.bin", format!("FAKE early\n{filler}\0 tail\n").into_bytes());
+    put(
+        "far.bin",
+        format!("FAKE early\n{filler}\0 tail\n").into_bytes(),
+    );
     put("secrets/k.txt", b"FAKE_DENIED\n".to_vec());
     std::os::unix::fs::symlink("src/sub", root.join("link")).unwrap();
     Fx { _tmp: tmp, root }
 }
 
-pub(crate) const BIN_FILES: [&str; 4] = ["bin_before.bin", "bin_both.bin", "bin_off7.bin", "far.bin"];
+pub(crate) const BIN_FILES: [&str; 4] =
+    ["bin_before.bin", "bin_both.bin", "bin_off7.bin", "far.bin"];
 
 fn resources(cwd: &Path, deny: &Option<Vec<String>>) -> Resources {
     let mut r = Resources::new();
@@ -83,9 +95,13 @@ pub(crate) async fn fuigo_text(cwd: &Path, c: &Call, mode: OutputMode, extra: u8
         3 => input.case_insensitive = true,
         _ => {}
     }
-    let out = fuigo_tool_runtime::Tool::run(&FuigoGrep, test_ctx(resources(cwd, &c.deny).into_shared()), input)
-        .await
-        .unwrap();
+    let out = fuigo_tool_runtime::Tool::run(
+        &FuigoGrep,
+        test_ctx(resources(cwd, &c.deny).into_shared()),
+        input,
+    )
+    .await
+    .unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -93,36 +109,58 @@ pub(crate) async fn oc_grep_text(cwd: &Path, c: &Call, include: Option<&str>) ->
     let out = fuigo_tool_runtime::Tool::run(
         &OcGrep,
         test_ctx(resources(cwd, &c.deny).into_shared()),
-        GrepInput { pattern: c.pattern.clone(), path: c.path.clone(), include: include.map(str::to_string) },
+        GrepInput {
+            pattern: c.pattern.clone(),
+            path: c.path.clone(),
+            include: include.map(str::to_string),
+        },
     )
     .await
     .unwrap();
     // stdout and the stderr the model is shown
-    format!("{}\n--stderr--\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    format!(
+        "{}\n--stderr--\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
 }
 
 pub(crate) async fn oc_glob_text(cwd: &Path, c: &Call) -> String {
     let out = fuigo_tool_runtime::Tool::run(
         &GlobTool,
         test_ctx(resources(cwd, &c.deny).into_shared()),
-        GlobInput { pattern: c.pattern.clone(), path: c.path.clone() },
+        GlobInput {
+            pattern: c.pattern.clone(),
+            path: c.path.clone(),
+        },
     )
     .await
     .unwrap();
-    format!("{}\ncount={} total={}", out.tool_output_for_prompt, out.count, out.total_count)
+    format!(
+        "{}\ncount={} total={}",
+        out.tool_output_for_prompt, out.count, out.total_count
+    )
 }
 
 pub(crate) async fn codex_text(cwd: &Path, c: &Call, include: Option<&str>) -> String {
     let out = fuigo_tool_runtime::Tool::run(
         &CodexGrepFilesTool,
         test_ctx(resources(cwd, &c.deny).into_shared()),
-        CodexGrepFilesInput { pattern: c.pattern.clone(), include: include.map(str::to_string), path: c.path.clone(), limit: 100 },
+        CodexGrepFilesInput {
+            pattern: c.pattern.clone(),
+            include: include.map(str::to_string),
+            path: c.path.clone(),
+            limit: 100,
+        },
     )
     .await
     .unwrap();
     use crate::types::output::CodexGrepFilesOutput as O;
     match out {
-        O::Matches { content, file_count } => format!("{content}\ncount={file_count}"),
+        O::Matches {
+            content,
+            file_count,
+        } => format!("{content}\ncount={file_count}"),
         other => format!("{other:?}"),
     }
 }
@@ -130,20 +168,37 @@ pub(crate) async fn codex_text(cwd: &Path, c: &Call, include: Option<&str>) -> S
 /// Every output a tool gives for the call, labelled; ripgrep walks in parallel, so lines are sorted.
 pub(crate) async fn all_outputs(root: &Path, c: &Call) -> Vec<(String, String)> {
     let norm = |s: String| {
-        let mut lines: Vec<String> = s.replace(root.to_str().unwrap(), "<CWD>").lines().map(str::to_string).collect();
+        let mut lines: Vec<String> = s
+            .replace(root.to_str().unwrap(), "<CWD>")
+            .lines()
+            .map(str::to_string)
+            .collect();
         lines.sort();
         lines.join("\n")
     };
     let mut v = Vec::new();
-    for (name, mode) in [("content", OutputMode::Content), ("files", OutputMode::FilesWithMatches), ("count", OutputMode::Count)] {
+    for (name, mode) in [
+        ("content", OutputMode::Content),
+        ("files", OutputMode::FilesWithMatches),
+        ("count", OutputMode::Count),
+    ] {
         for extra in 0..4u8 {
-            v.push((format!("fuigo-{name}-{extra}"), norm(fuigo_text(root, c, mode.clone(), extra).await)));
+            v.push((
+                format!("fuigo-{name}-{extra}"),
+                norm(fuigo_text(root, c, mode.clone(), extra).await),
+            ));
         }
     }
     v.push(("oc-grep".into(), norm(oc_grep_text(root, c, None).await)));
-    v.push(("oc-grep-include".into(), norm(oc_grep_text(root, c, Some("*.txt")).await)));
+    v.push((
+        "oc-grep-include".into(),
+        norm(oc_grep_text(root, c, Some("*.txt")).await),
+    ));
     v.push(("codex".into(), norm(codex_text(root, c, None).await)));
-    v.push(("codex-include".into(), norm(codex_text(root, c, Some("*.txt")).await)));
+    v.push((
+        "codex-include".into(),
+        norm(codex_text(root, c, Some("*.txt")).await),
+    ));
     v
 }
 
@@ -171,29 +226,59 @@ pub(crate) async fn table(root: &Path, deny: &Option<Vec<String>>) -> Vec<(Strin
     let mut rows = Vec::new();
     for path in path_table(root) {
         for pat in PATTERNS {
-            let c = Call { path: path.clone(), pattern: pat.to_string(), deny: deny.clone() };
+            let c = Call {
+                path: path.clone(),
+                pattern: pat.to_string(),
+                deny: deny.clone(),
+            };
             for (tool, out) in all_outputs(root, &c).await {
-                rows.push((format!("{tool} | path={path:?} | pat={pat:?}").replace(root.to_str().unwrap(), "<CWD>"), out));
+                rows.push((
+                    format!("{tool} | path={path:?} | pat={pat:?}")
+                        .replace(root.to_str().unwrap(), "<CWD>"),
+                    out,
+                ));
             }
         }
     }
-    for path in [None, Some(".".to_string()), Some("./src".to_string()), Some("link/../README".to_string()), Some("src".to_string())] {
+    for path in [
+        None,
+        Some(".".to_string()),
+        Some("./src".to_string()),
+        Some("link/../README".to_string()),
+        Some("src".to_string()),
+    ] {
         for pat in ["**/*", "*.txt", "*.bin", "sp ace*"] {
-            let c = Call { path: path.clone(), pattern: pat.to_string(), deny: deny.clone() };
+            let c = Call {
+                path: path.clone(),
+                pattern: pat.to_string(),
+                deny: deny.clone(),
+            };
             let out = oc_glob_text(root, &c).await;
-            let mut lines: Vec<String> = out.replace(root.to_str().unwrap(), "<CWD>").lines().map(str::to_string).collect();
+            let mut lines: Vec<String> = out
+                .replace(root.to_str().unwrap(), "<CWD>")
+                .lines()
+                .map(str::to_string)
+                .collect();
             lines.sort();
-            rows.push((format!("glob | path={path:?} | pat={pat:?}"), lines.join("\n")));
+            rows.push((
+                format!("glob | path={path:?} | pat={pat:?}"),
+                lines.join("\n"),
+            ));
         }
     }
     rows
 }
 
 fn render(rows: &[(String, String)]) -> String {
-    rows.iter().map(|(k, v)| format!("=== {k}\n{v}\n")).collect()
+    rows.iter()
+        .map(|(k, v)| format!("=== {k}\n{v}\n"))
+        .collect()
 }
 
-const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/util/search_proof_golden.txt");
+const GOLDEN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/util/search_proof_golden.txt"
+);
 
 /// Writes the golden file when `P198_WRITE_GOLDEN` names one (run once on the base branch); otherwise it is a no-op.
 #[tokio::test(flavor = "current_thread")]
@@ -214,8 +299,16 @@ async fn no_rules_outputs_are_the_bases() {
         let got = render(&table(&f.root, &deny).await);
         if got != golden {
             let (g, w): (Vec<&str>, Vec<&str>) = (got.lines().collect(), golden.lines().collect());
-            let i = g.iter().zip(&w).position(|(a, b)| a != b).unwrap_or(g.len().min(w.len()));
-            panic!("differs from the base at line {i}: got {:?} want {:?}", g.get(i), w.get(i));
+            let i = g
+                .iter()
+                .zip(&w)
+                .position(|(a, b)| a != b)
+                .unwrap_or(g.len().min(w.len()));
+            panic!(
+                "differs from the base at line {i}: got {:?} want {:?}",
+                g.get(i),
+                w.get(i)
+            );
         }
     }
 }
@@ -233,7 +326,17 @@ async fn a_rule_that_denies_nothing_prints_the_no_rules_text() {
             bad.push(format!("{k}\n--- none\n{a}\n--- rule\n{b}"));
         }
     }
-    assert!(bad.is_empty(), "{} of {} differ:\n{}", bad.len(), none.len(), bad.iter().take(3).cloned().collect::<Vec<_>>().join("\n=====\n"));
+    assert!(
+        bad.is_empty(),
+        "{} of {} differ:\n{}",
+        bad.len(),
+        none.len(),
+        bad.iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n=====\n")
+    );
 }
 
 /// ITEM 3: ripgrep's own regex error is passed through with a rule present exactly as without one.
@@ -241,15 +344,28 @@ async fn a_rule_that_denies_nothing_prints_the_no_rules_text() {
 async fn a_regex_error_is_the_same_with_and_without_rules() {
     let f = fx();
     for path in [None, Some("src".to_string())] {
-        let plain = Call { path: path.clone(), pattern: "(".into(), deny: None };
-        let ruled = Call { deny: Some(vec!["secrets/**".to_string()]), ..plain.clone() };
-        let (a, b) = (all_outputs(&f.root, &plain).await, all_outputs(&f.root, &ruled).await);
+        let plain = Call {
+            path: path.clone(),
+            pattern: "(".into(),
+            deny: None,
+        };
+        let ruled = Call {
+            deny: Some(vec!["secrets/**".to_string()]),
+            ..plain.clone()
+        };
+        let (a, b) = (
+            all_outputs(&f.root, &plain).await,
+            all_outputs(&f.root, &ruled).await,
+        );
         for ((k, x), (_, y)) in a.iter().zip(&b) {
             assert_eq!(x, y, "{k} path={path:?}");
         }
         // control: the error text really is ripgrep's (not an empty result on both sides)
         let oc = &a.iter().find(|(k, _)| k == "oc-grep").unwrap().1;
-        assert!(oc.contains("regex parse error") || oc.contains("No files found"), "{oc}");
+        assert!(
+            oc.contains("regex parse error") || oc.contains("No files found"),
+            "{oc}"
+        );
     }
 }
 
@@ -274,7 +390,11 @@ pub(crate) fn reexec_as_nobody(test: &str) -> bool {
                 .env("TMPDIR", dir.path())
                 .output()
                 .expect("setpriv is required for this test");
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
             if text.contains("Text file busy") {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
@@ -282,7 +402,10 @@ pub(crate) fn reexec_as_nobody(test: &str) -> bool {
         })
         .find(|(_, t)| !t.contains("Text file busy"))
         .expect("the test binary stayed busy");
-    assert!(out.status.success() && text.contains("1 passed"), "as nobody: {text}");
+    assert!(
+        out.status.success() && text.contains("1 passed"),
+        "as nobody: {text}"
+    );
     true
 }
 
@@ -291,7 +414,9 @@ pub(crate) fn reexec_as_nobody(test: &str) -> bool {
 #[tokio::test(flavor = "current_thread")]
 async fn a_unreadable_file_under_a_denied_directory_shows_nothing() {
     use std::os::unix::fs::PermissionsExt;
-    if reexec_as_nobody("util::search_proof_tests::a_unreadable_file_under_a_denied_directory_shows_nothing") {
+    if reexec_as_nobody(
+        "util::search_proof_tests::a_unreadable_file_under_a_denied_directory_shows_nothing",
+    ) {
         return;
     }
     let f = fx();
@@ -300,28 +425,59 @@ async fn a_unreadable_file_under_a_denied_directory_shows_nothing() {
     std::fs::create_dir_all(f.root.join("secrets/lockeddir")).unwrap();
     std::fs::write(f.root.join("secrets/lockeddir/in.txt"), "FAKE_LOCKED_IN\n").unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-    std::fs::set_permissions(f.root.join("secrets/lockeddir"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::set_permissions(
+        f.root.join("secrets/lockeddir"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
     // control (no rules): ripgrep's stderr does name the locked path, so the assertions below are not vacuous
-    let plain = Call { path: None, pattern: "FAKE".into(), deny: None };
-    let rg = std::process::Command::new(std::env::var("RG_BIN_PATH").unwrap_or_else(|_| "rg".into()))
-        .args(["FAKE", "."])
-        .current_dir(&f.root)
-        .output()
-        .unwrap();
+    let plain = Call {
+        path: None,
+        pattern: "FAKE".into(),
+        deny: None,
+    };
+    let rg =
+        std::process::Command::new(std::env::var("RG_BIN_PATH").unwrap_or_else(|_| "rg".into()))
+            .args(["FAKE", "."])
+            .current_dir(&f.root)
+            .output()
+            .unwrap();
     let control = String::from_utf8_lossy(&rg.stderr).into_owned();
     // No rules: the tools behave as the base. ripgrep's stderr is shown (fuigo grep; OpenCode and Codex pass --no-messages) and Codex reports the failure
     // although files matched. A tool that took the rules path with no rules would hide both.
     let fuigo_none = fuigo_text(&f.root, &plain, OutputMode::Content, 0).await;
-    assert!(fuigo_none.contains("Permission denied"), "fuigo grep, no rules: {fuigo_none}");
+    assert!(
+        fuigo_none.contains("Permission denied"),
+        "fuigo grep, no rules: {fuigo_none}"
+    );
     let codex_none = codex_text(&f.root, &plain, None).await;
-    assert!(codex_none.contains("rg failed"), "codex, no rules: {codex_none}");
-    let ruled = Call { deny: Some(vec!["secrets/**".to_string()]), ..plain };
+    assert!(
+        codex_none.contains("rg failed"),
+        "codex, no rules: {codex_none}"
+    );
+    let ruled = Call {
+        deny: Some(vec!["secrets/**".to_string()]),
+        ..plain
+    };
     let outs = all_outputs(&f.root, &ruled).await;
-    std::fs::set_permissions(f.root.join("secrets/lockeddir"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(
+        f.root.join("secrets/lockeddir"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(control.contains("locked") || control.contains("Permission denied"), "control: {control}");
+    assert!(
+        control.contains("locked") || control.contains("Permission denied"),
+        "control: {control}"
+    );
     for (k, out) in outs {
-        for bad in ["locked", "Permission denied", "secrets", "FAKE_DENIED", "k.txt"] {
+        for bad in [
+            "locked",
+            "Permission denied",
+            "secrets",
+            "FAKE_DENIED",
+            "k.txt",
+        ] {
             assert!(!out.contains(bad), "{k}: `{bad}` leaked: {out}");
         }
     }
@@ -334,10 +490,36 @@ async fn a_unreadable_file_under_a_denied_directory_shows_nothing() {
 async fn a_newline_in_a_name_is_one_entry_only_under_rules() {
     let f = fx();
     std::fs::write(f.root.join("nl\nname.txt"), "FAKE newline name\n").unwrap();
-    let count = |s: &str| s.rsplit("count=").next().unwrap().split_whitespace().next().unwrap().parse::<usize>().unwrap();
+    let count = |s: &str| {
+        s.rsplit("count=")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+    };
     for deny in [None, Some(vec!["nothing-here/**".to_string()])] {
-        let g = oc_glob_text(&f.root, &Call { path: None, pattern: "**/*.txt".into(), deny: deny.clone() }).await;
-        let c = codex_text(&f.root, &Call { path: None, pattern: "FAKE".into(), deny: deny.clone() }, Some("*.txt")).await;
+        let g = oc_glob_text(
+            &f.root,
+            &Call {
+                path: None,
+                pattern: "**/*.txt".into(),
+                deny: deny.clone(),
+            },
+        )
+        .await;
+        let c = codex_text(
+            &f.root,
+            &Call {
+                path: None,
+                pattern: "FAKE".into(),
+                deny: deny.clone(),
+            },
+            Some("*.txt"),
+        )
+        .await;
         let (g, c) = (count(&g), count(&c));
         // text.txt, sp ace.txt, long.txt, secrets/k.txt, src/a.txt, src/sub/b.txt and the newline name (one or two)
         // glob parses the (re-rendered) text by lines again, so it counts the split name in both paths
@@ -348,13 +530,18 @@ async fn a_newline_in_a_name_is_one_entry_only_under_rules() {
 
 // ── ITEM 1: the argv every tool hands to ripgrep with no rules is the base's ──────────────────────────────────────
 
-const GOLDEN_ARGV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/util/search_proof_golden_argv.txt");
+const GOLDEN_ARGV: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/util/search_proof_golden_argv.txt"
+);
 
 /// Child half: runs the whole table with the env-named rules and a wrapper `rg` that logs its argv. Does nothing unless
 /// `P198_ARGV_OUT` is set (it is set only by the parent below, or by hand on the base branch).
 #[tokio::test(flavor = "current_thread")]
 async fn argv_child() {
-    let Ok(out) = std::env::var("P198_ARGV_OUT") else { return };
+    let Ok(out) = std::env::var("P198_ARGV_OUT") else {
+        return;
+    };
     let deny = match std::env::var("P198_ARGV_DENY").as_deref() {
         Ok("empty") => Some(Vec::new()),
         Ok("nothing") => Some(vec!["nothing-here/**".to_string()]),
@@ -370,7 +557,11 @@ async fn argv_child() {
 pub(crate) fn argv_of_run(test: &str, deny: &str) -> String {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::TempDir::new().unwrap();
-    let (log, out, wrapper) = (dir.path().join("log"), dir.path().join("out"), dir.path().join("rg"));
+    let (log, out, wrapper) = (
+        dir.path().join("log"),
+        dir.path().join("out"),
+        dir.path().join("rg"),
+    );
     let rg = std::env::var("RG_BIN_PATH").unwrap_or_else(|_| "/usr/bin/rg".into());
     std::fs::write(
         &wrapper,
@@ -386,7 +577,11 @@ pub(crate) fn argv_of_run(test: &str, deny: &str) -> String {
         .env("P198_ARGV_DENY", deny)
         .output()
         .unwrap();
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stdout));
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stdout)
+    );
     std::fs::read_to_string(out).expect("the child wrote the argv log")
 }
 
@@ -394,7 +589,11 @@ pub(crate) fn argv_of_run(test: &str, deny: &str) -> String {
 #[test]
 fn write_golden_argv_when_asked() {
     if let Ok(dest) = std::env::var("P198_WRITE_GOLDEN_ARGV") {
-        std::fs::write(dest, argv_of_run("util::search_proof_tests::argv_child", "none")).unwrap();
+        std::fs::write(
+            dest,
+            argv_of_run("util::search_proof_tests::argv_child", "none"),
+        )
+        .unwrap();
     }
 }
 
@@ -402,11 +601,20 @@ fn write_golden_argv_when_asked() {
 /// code used, for the whole path / pattern / flag table (`search_proof_golden_argv.txt`, captured at `hub/strike/p198-hl`).
 #[test]
 fn no_rules_spawn_ripgrep_with_the_bases_argv() {
-    let golden = std::fs::read_to_string(GOLDEN_ARGV).expect("argv golden captured on the base branch");
-    assert!(golden.lines().count() > 300, "{} lines", golden.lines().count());
+    let golden =
+        std::fs::read_to_string(GOLDEN_ARGV).expect("argv golden captured on the base branch");
+    assert!(
+        golden.lines().count() > 300,
+        "{} lines",
+        golden.lines().count()
+    );
     for deny in ["none", "empty"] {
         let got = argv_of_run("util::search_proof_tests::argv_child", deny);
-        assert!(got == golden, "argv differs from the base ({deny}): first difference at line {:?}", got.lines().zip(golden.lines()).position(|(a, b)| a != b));
+        assert!(
+            got == golden,
+            "argv differs from the base ({deny}): first difference at line {:?}",
+            got.lines().zip(golden.lines()).position(|(a, b)| a != b)
+        );
     }
     // control: with a rule ripgrep gets `--json` (the argv log really tells the two paths apart)
     let ruled = argv_of_run("util::search_proof_tests::argv_child", "nothing");
@@ -414,7 +622,12 @@ fn no_rules_spawn_ripgrep_with_the_bases_argv() {
 }
 
 /// P198 part G, count mode (owner override). One count-mode search of `root` with a pattern, `-U` or not, and a rule list.
-async fn count_text(root: &Path, pattern: &str, multiline: bool, deny: &Option<Vec<String>>) -> String {
+async fn count_text(
+    root: &Path,
+    pattern: &str,
+    multiline: bool,
+    deny: &Option<Vec<String>>,
+) -> String {
     let input = GrepSearchInput {
         pattern: pattern.to_string(),
         path: None,
@@ -428,9 +641,13 @@ async fn count_text(root: &Path, pattern: &str, multiline: bool, deny: &Option<V
         head_limit: None,
         multiline,
     };
-    let out = fuigo_tool_runtime::Tool::run(&FuigoGrep, test_ctx(resources(root, deny).into_shared()), input)
-        .await
-        .unwrap();
+    let out = fuigo_tool_runtime::Tool::run(
+        &FuigoGrep,
+        test_ctx(resources(root, deny).into_shared()),
+        input,
+    )
+    .await
+    .unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut lines: Vec<&str> = text.lines().collect();
     lines.sort_unstable();
@@ -467,8 +684,13 @@ const COUNT_CASES: [(&str, bool); 9] = [
 
 /// What the REAL ripgrep binary prints for the count flag fuigo grep exposes (`-c`), run with the flags the tool passes
 /// (`-U --multiline-dotall` for a multiline search): file name -> count. This is the oracle; no number is written here.
-fn real_rg_counts(root: &Path, pattern: &str, multiline: bool) -> std::collections::BTreeMap<String, String> {
-    let mut cmd = std::process::Command::new(std::env::var("RG_BIN_PATH").unwrap_or_else(|_| "rg".into()));
+fn real_rg_counts(
+    root: &Path,
+    pattern: &str,
+    multiline: bool,
+) -> std::collections::BTreeMap<String, String> {
+    let mut cmd =
+        std::process::Command::new(std::env::var("RG_BIN_PATH").unwrap_or_else(|_| "rg".into()));
     cmd.arg("-c");
     if multiline {
         cmd.arg("-U").arg("--multiline-dotall");
@@ -482,7 +704,12 @@ fn count_lines(text: &str) -> std::collections::BTreeMap<String, String> {
     text.lines()
         .filter_map(|l| l.rsplit_once(':'))
         .filter(|(path, n)| path.ends_with(".txt") && n.parse::<usize>().is_ok())
-        .map(|(path, n)| (path.rsplit(['/', '\\']).next().unwrap().to_string(), n.to_string()))
+        .map(|(path, n)| {
+            (
+                path.rsplit(['/', '\\']).next().unwrap().to_string(),
+                n.to_string(),
+            )
+        })
         .collect()
 }
 
@@ -498,12 +725,19 @@ async fn count_mode_under_rules_equals_rg_dash_c() {
         let oracle = real_rg_counts(&f.root, pat, ml);
         let none = count_text(&f.root, pat, ml, &None).await;
         let with = count_text(&f.root, pat, ml, &rule).await;
-        assert_eq!(count_lines(&with), oracle, "pattern {pat:?} multiline {ml}: {with}");
+        assert_eq!(
+            count_lines(&with),
+            oracle,
+            "pattern {pat:?} multiline {ml}: {with}"
+        );
         assert_eq!(none, with, "pattern {pat:?} multiline {ml}");
         differing.insert(oracle);
     }
     // Not vacuous: ripgrep found something, and the cases do not all give one answer.
-    assert!(differing.iter().any(|m| !m.is_empty()) && differing.len() > 1, "{differing:?}");
+    assert!(
+        differing.iter().any(|m| !m.is_empty()) && differing.len() > 1,
+        "{differing:?}"
+    );
 }
 
 /// A denied file has no count line; every other line is what it was.
@@ -514,13 +748,27 @@ async fn count_mode_under_a_deny_rule_drops_only_the_denied_file() {
     for (pat, ml) in COUNT_CASES {
         let none = count_text(&f.root, pat, ml, &None).await;
         let with = count_text(&f.root, pat, ml, &rule).await;
-        let counts = |t: &str| -> Vec<String> { t.lines().filter(|l| l.contains(".txt:")).map(str::to_string).collect() };
-        let want: Vec<String> = counts(&none).into_iter().filter(|l| !l.contains("m.txt")).collect();
+        let counts = |t: &str| -> Vec<String> {
+            t.lines()
+                .filter(|l| l.contains(".txt:"))
+                .map(str::to_string)
+                .collect()
+        };
+        let want: Vec<String> = counts(&none)
+            .into_iter()
+            .filter(|l| !l.contains("m.txt"))
+            .collect();
         assert_eq!(want, counts(&with), "pattern {pat:?} multiline {ml}");
         // The total the tool prints leaves the denied file out.
-        let sum: usize = want.iter().map(|l| l.rsplit(':').next().unwrap().parse::<usize>().unwrap()).sum();
+        let sum: usize = want
+            .iter()
+            .map(|l| l.rsplit(':').next().unwrap().parse::<usize>().unwrap())
+            .sum();
         if !want.is_empty() {
-            assert!(with.contains(&format!("Found {sum} across {} files", want.len())), "pattern {pat:?}: {with}");
+            assert!(
+                with.contains(&format!("Found {sum} across {} files", want.len())),
+                "pattern {pat:?}: {with}"
+            );
         }
         assert!(!with.contains("m.txt"));
     }

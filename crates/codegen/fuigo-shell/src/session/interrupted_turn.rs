@@ -77,7 +77,10 @@ impl InterruptedTurn {
 
     /// Closes the open `turn_started` in `events.jsonl` so the next load does not report this turn again.
     /// Reports failure: the caller must know whether the turn is still open.
-    pub(crate) fn close_events_turn(&self, session_writer: &fuigo_session_writer::SessionWriter) -> std::io::Result<()> {
+    pub(crate) fn close_events_turn(
+        &self,
+        session_writer: &fuigo_session_writer::SessionWriter,
+    ) -> std::io::Result<()> {
         close_events_turn_as(
             session_writer,
             fuigo_session_events::TurnOutcomeLabel::Interrupted,
@@ -158,7 +161,10 @@ fn take_deferred_closure(
 
 /// Closes `open` as interrupted only if it is still the newest turn event: a turn that started since (in another
 /// process that shares the session) must not be closed in its place. `Ok(false)` when it was left alone.
-fn close_if_still_open(session_writer: &fuigo_session_writer::SessionWriter, open: &OpenTurn) -> std::io::Result<bool> {
+fn close_if_still_open(
+    session_writer: &fuigo_session_writer::SessionWriter,
+    open: &OpenTurn,
+) -> std::io::Result<bool> {
     match last_turn_event(&session_writer.dir().join("events.jsonl"))? {
         Some(LastTurnEvent::Started { ts, prompt_id })
             if ts == open.ts && prompt_id == open.prompt_id =>
@@ -176,7 +182,9 @@ fn close_if_still_open(session_writer: &fuigo_session_writer::SessionWriter, ope
 /// Called by an actor right before it writes `turn_started`. If this session has a lost turn whose marker is still
 /// being written, the lost turn is closed now, so the new turn does not start inside it (and cannot later be closed
 /// by it). The marker append was queued before anything this turn persists, so it still lands ahead of the turn.
-pub(crate) fn close_deferred_turn_before_new_turn(session_writer: &fuigo_session_writer::SessionWriter) {
+pub(crate) fn close_deferred_turn_before_new_turn(
+    session_writer: &fuigo_session_writer::SessionWriter,
+) {
     let session_dir = session_writer.dir();
     let mut closures = deferred_closures();
     if closures.is_empty() {
@@ -795,7 +803,10 @@ fn newest_turn_completed(path: &Path) -> std::io::Result<Option<TerminalRecord>>
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "interrupted_turn_tests.rs"]
 mod tests;

@@ -12,8 +12,6 @@ pub mod channel;
 pub mod config;
 pub mod discovery;
 pub mod envrc;
-#[cfg(test)]
-mod repo_exec_gate_tests;
 pub mod error;
 pub mod export_github;
 pub mod file_system;
@@ -34,6 +32,8 @@ pub mod permission;
 pub mod project_config;
 pub mod publish;
 pub mod recovery;
+#[cfg(test)]
+mod repo_exec_gate_tests;
 mod restore_fetch;
 pub mod scheduler_liveness;
 pub use restore_fetch::{EnsureCommitsOutcome, ensure_commits_reachable};

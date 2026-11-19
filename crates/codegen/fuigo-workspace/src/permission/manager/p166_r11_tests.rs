@@ -7,7 +7,14 @@ use super::{ClassifierSecurityFinding, PermissionState, evaluate_bash};
 
 fn project() -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
-    for dir in ["out", "src", "scripts", "sub", ".git/hooks", ".git/modules/foo/hooks"] {
+    for dir in [
+        "out",
+        "src",
+        "scripts",
+        "sub",
+        ".git/hooks",
+        ".git/modules/foo/hooks",
+    ] {
         std::fs::create_dir_all(project.path().join(dir)).unwrap();
     }
     project
@@ -19,10 +26,15 @@ fn check(rows: &[(&str, bool)]) {
         .iter()
         .filter_map(|(cmd, blocked)| {
             let got = floor(project.path(), cmd);
-            (got.is_some() != *blocked).then(|| format!("{cmd}: expected blocked={blocked}, got {got:?}"))
+            (got.is_some() != *blocked)
+                .then(|| format!("{cmd}: expected blocked={blocked}, got {got:?}"))
         })
         .collect();
-    assert!(wrong.is_empty(), "protected floor mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "protected floor mismatches:\n{}",
+        wrong.join("\n")
+    );
 }
 
 fn exec(cmd: &str) -> bool {
@@ -37,7 +49,11 @@ fn check_exec(rows: &[(&str, bool)]) {
         .filter(|(cmd, risky)| exec(cmd) != *risky)
         .map(|(cmd, risky)| format!("{cmd}: expected exec={risky}"))
         .collect();
-    assert!(wrong.is_empty(), "exec risk mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "exec risk mismatches:\n{}",
+        wrong.join("\n")
+    );
 }
 
 /// HIGH 1 and 2 plus neighbours: a destination is skipped only for a positively remote host.
@@ -105,13 +121,28 @@ fn p166_r11_rule2_tilde_words() {
 #[test]
 fn p166_r11_rule3_git_config_commands() {
     check(&[
-        ("git config url.\"foo::bar\".insteadOf https://github.com/", true),
-        ("git config url.\"helper::x\".pushInsteadOf https://a/", true),
+        (
+            "git config url.\"foo::bar\".insteadOf https://github.com/",
+            true,
+        ),
+        (
+            "git config url.\"helper::x\".pushInsteadOf https://a/",
+            true,
+        ),
         ("git config url.\"external::x\".insteadOf https://a/", true),
         ("git config url.\"/tmp/x\".insteadOf https://a/", true),
-        ("git config url.\"ssh://git@github.com/\".pushInsteadOf https://github.com/", false),
-        ("git config url.\"https://github.com/\".insteadOf git@github.com:", false),
-        ("git config url.\"git@github.com:\".insteadOf https://github.com/", false),
+        (
+            "git config url.\"ssh://git@github.com/\".pushInsteadOf https://github.com/",
+            false,
+        ),
+        (
+            "git config url.\"https://github.com/\".insteadOf git@github.com:",
+            false,
+        ),
+        (
+            "git config url.\"git@github.com:\".insteadOf https://github.com/",
+            false,
+        ),
         ("git config tar.tar.xz.command 'xz -c'", true),
         ("git config imap.tunnel 'sh -c id'", true),
         ("git config sendemail.tocmd x", true),
@@ -129,16 +160,28 @@ fn p166_r11_rule3_git_config_commands() {
         ("git config foo.bar.driver x", true),
     ]);
     check_exec(&[
-        ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='url.ext::sh -c id.insteadof' GIT_CONFIG_VALUE_0='https://github.com/' git fetch", true),
+        (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='url.ext::sh -c id.insteadof' GIT_CONFIG_VALUE_0='https://github.com/' git fetch",
+            true,
+        ),
         ("GIT_CONFIG_COUNT=0 git log", true),
         ("GIT_CONFIG_KEY_3=user.name git log", true),
         ("GIT_CONFIG_VALUE_7=x git log", true),
-        ("GIT_CONFIG_PARAMETERS=\"'core.pager=sh -c id'\" git log", true),
+        (
+            "GIT_CONFIG_PARAMETERS=\"'core.pager=sh -c id'\" git log",
+            true,
+        ),
         ("env GIT_CONFIG_COUNT=1 git log", true),
     ]);
     check(&[
-        ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=.git/hooks git log", true),
-        ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=x.y GIT_CONFIG_VALUE_0=.git/hooks git log", true),
+        (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=.git/hooks git log",
+            true,
+        ),
+        (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=x.y GIT_CONFIG_VALUE_0=.git/hooks git log",
+            true,
+        ),
     ]);
 }
 
@@ -171,22 +214,50 @@ fn p166_r11_rule4_known_variables() {
 fn p166_r11_false_positive_suite() {
     let project = project();
     let suite = [
-        "scp build.tar host:/srv/", "scp build.tar user@build.example.com:/srv/", "scp file 10.0.0.5:/tmp/",
-        "scp file '[2001:db8::1]:/tmp/'", "rsync -a ./ user@host:proj/", "rsync -a rsync://mirror.example.org/pub/ ./mirror/",
-        "scp host:file .", "sftp host", "ls ~", "cd ~/src", "echo ~root", "cd src && ls ~+",
+        "scp build.tar host:/srv/",
+        "scp build.tar user@build.example.com:/srv/",
+        "scp file 10.0.0.5:/tmp/",
+        "scp file '[2001:db8::1]:/tmp/'",
+        "rsync -a ./ user@host:proj/",
+        "rsync -a rsync://mirror.example.org/pub/ ./mirror/",
+        "scp host:file .",
+        "sftp host",
+        "ls ~",
+        "cd ~/src",
+        "echo ~root",
+        "cd src && ls ~+",
         "git config url.\"https://github.com/\".insteadOf git@github.com:",
-        "git config url.\"ssh://git@github.com/\".pushInsteadOf https://github.com/", "git config user.name x",
-        "git config pull.rebase true", "git config init.defaultBranch main", "git config core.autocrlf input",
-        "git config merge.conflictstyle zdiff3", "git config diff.algorithm histogram", "git config rerere.enabled true",
-        "git config push.autoSetupRemote true", "git config color.ui auto", "git config alias.st status",
-        "git config alias.cmd status", "git config branch.main.rebase true", "git config core.whitespace trailing-space",
-        "git config commit.verbose true", "git config fetch.prune true", "git config status.short true",
-        "ls \"$PWD\"", "cat \"$PWD/README.md\"",
-        "touch \"$PWD/out.txt\"", "make -C \"$PWD/build\"", "docker run -v \"$PWD\":/w img", "echo $HOME",
+        "git config url.\"ssh://git@github.com/\".pushInsteadOf https://github.com/",
+        "git config user.name x",
+        "git config pull.rebase true",
+        "git config init.defaultBranch main",
+        "git config core.autocrlf input",
+        "git config merge.conflictstyle zdiff3",
+        "git config diff.algorithm histogram",
+        "git config rerere.enabled true",
+        "git config push.autoSetupRemote true",
+        "git config color.ui auto",
+        "git config alias.st status",
+        "git config alias.cmd status",
+        "git config branch.main.rebase true",
+        "git config core.whitespace trailing-space",
+        "git config commit.verbose true",
+        "git config fetch.prune true",
+        "git config status.short true",
+        "ls \"$PWD\"",
+        "cat \"$PWD/README.md\"",
+        "touch \"$PWD/out.txt\"",
+        "make -C \"$PWD/build\"",
+        "docker run -v \"$PWD\":/w img",
+        "echo $HOME",
     ];
     // Informational: exec risk on an undecodable `-C` value is unchanged by r11 (it predates the packet).
     for cmd in ["git -C \"$PWD\" status", "git -C \"$PWD/sub\" status"] {
-        eprintln!("FP-info {cmd} => floor={:?} exec={}", floor(project.path(), cmd), exec(cmd));
+        eprintln!(
+            "FP-info {cmd} => floor={:?} exec={}",
+            floor(project.path(), cmd),
+            exec(cmd)
+        );
     }
     let mut wrong = Vec::new();
     for cmd in suite {

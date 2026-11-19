@@ -11,7 +11,11 @@ use crate::session::quiesce::{self, OwedWork, ParkOp, QuiesceReport};
 impl SessionActor {
     /// Answer a park probe. Called once when the park starts (with `stop` for a `mode: "stop"` park) and
     /// again while the park waits for a running turn to end.
-    pub(super) async fn quiesce_probe(self: &Arc<Self>, park: &ParkOp, stop: bool) -> QuiesceReport {
+    pub(super) async fn quiesce_probe(
+        self: &Arc<Self>,
+        park: &ParkOp,
+        stop: bool,
+    ) -> QuiesceReport {
         let session_id = park.session.clone();
         let session_id: &str = &session_id;
         // Every side effect below runs only while `park` is still the session's park, checked under the same
@@ -26,9 +30,7 @@ impl SessionActor {
             .borrow()
             .as_ref()
             .is_some_and(|task| !task.is_finished());
-        if summary_running
-            && let Some(prompt_id) = quiesce::last_turn_summary_prompt(session_id)
-        {
+        if summary_running && let Some(prompt_id) = quiesce::last_turn_summary_prompt(session_id) {
             quiesce::with_current_owed(park, |owed| {
                 self.abort_turn_summary();
                 owed.turn_summary = Some(prompt_id);

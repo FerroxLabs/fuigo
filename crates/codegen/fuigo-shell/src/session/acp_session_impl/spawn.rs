@@ -491,7 +491,9 @@ pub(crate) async fn spawn_session_actor(
             .map(fuigo_workspace::permission::resolution::deny_read_globs_from_config)
             .unwrap_or_default();
         // 1.0.36 item a (§5): a launch policy means standalone; its asks never go to the hub transport.
-        let hub_permission = if fuigo_workspace::permission::launch_policy::governs(launch_policy.is_some()) {
+        let hub_permission = if fuigo_workspace::permission::launch_policy::governs(
+            launch_policy.is_some(),
+        ) {
             None
         } else if fuigo_workspace::permission::hitl_permission_live_enabled() {
             let server = match workspace_ops.workspace_handle() {
@@ -1352,8 +1354,14 @@ pub(crate) async fn spawn_session_actor(
         &system_prompt,
     );
     if !is_subagent_spawn {
-        repair_legacy_browser_head(&mut conversation, &session_info, &agent, &system_prompt, tool_context.cwd.as_path())
-            .await;
+        repair_legacy_browser_head(
+            &mut conversation,
+            &session_info,
+            &agent,
+            &system_prompt,
+            tool_context.cwd.as_path(),
+        )
+        .await;
     }
     let built_trusted = agent.built_project_trusted();
     let head_withheld = conversation
@@ -1977,8 +1985,13 @@ pub(crate) async fn spawn_session_actor(
     };
     // `turn_owner_lock` was taken by `spawn_session_on_thread` before this actor exists, so no `turn_started` is
     // ever written unlocked.
-    let held_wakes = super::held_wakes::HeldWakes::load(&crate::session::persistence::session_dir(&session_info), &session_writer)
-        .map_err(|e| fuigo_agent::AgentBuildError::InvalidConfig(format!("Could not load held wakes: {e}")))?;
+    let held_wakes = super::held_wakes::HeldWakes::load(
+        &crate::session::persistence::session_dir(&session_info),
+        &session_writer,
+    )
+    .map_err(|e| {
+        fuigo_agent::AgentBuildError::InvalidConfig(format!("Could not load held wakes: {e}"))
+    })?;
     let refusal_prompt = held_wakes.refusal_prompt();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         status_wake: Default::default(),
@@ -1991,7 +2004,9 @@ pub(crate) async fn spawn_session_actor(
             ),
         transient_retries_prompt_total: std::cell::Cell::new(0),
         // A cold reload recovers the override the session was created with, even when the client does not resend it.
-        system_prompt_override: std::cell::RefCell::new(initial_system_prompt_override(&session_info)),
+        system_prompt_override: std::cell::RefCell::new(initial_system_prompt_override(
+            &session_info,
+        )),
         read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(
             crate::session::read_dedupe::PruneMirror::from(&session_pruning_config),
         )),
@@ -2274,7 +2289,10 @@ pub(crate) async fn spawn_session_actor(
     if owns_permission_manager {
         session.wire_permission_prompt_notification();
     }
-    super::sampler_turn::bind_refusal_prompt(&session.session_info.id.to_string(), &session.refusal_prompt);
+    super::sampler_turn::bind_refusal_prompt(
+        &session.session_info.id.to_string(),
+        &session.refusal_prompt,
+    );
     if goal_was_restored {
         let current_tokens = session.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = session.goal_tokens(current_tokens);
@@ -3389,13 +3407,18 @@ pub(super) async fn repair_legacy_browser_head(
         .unwrap_or_else(|| system_prompt.to_owned());
     let allowed = crate::session::browser_mode::legacy_repair_allowed(&replacement, cwd, |defs| {
         (
-            defs.iter().map(|def| agent.prompt_context_for_definition(def)).collect(),
+            defs.iter()
+                .map(|def| agent.prompt_context_for_definition(def))
+                .collect(),
             std::sync::Arc::clone(agent.tool_bridge()),
         )
     })
     .await;
     if allowed {
-        let _ = fuigo_chat_state::conversation_util::replace_or_insert_system_head(conversation, &replacement);
+        let _ = fuigo_chat_state::conversation_util::replace_or_insert_system_head(
+            conversation,
+            &replacement,
+        );
         tracing::info!(session_id = %session_info.id.0, "repaired a stored browser-mode system head from an earlier version");
     }
 }

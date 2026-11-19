@@ -1648,8 +1648,8 @@ mod tests {
         // fails AFTER the delegate created the snapshot must reclaim it (call
         // delete_snapshot exactly once).
         fuigo_test_utils::require_git!();
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use fuigo_test_utils::git::{git_commit_all, init_git_repo};
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let tmp = TempDir::new().unwrap();
         // The delegate "exposes" a real git repo as the worktree so checkout_ref
@@ -1684,8 +1684,8 @@ mod tests {
     #[test]
     fn try_btrfs_delegate_no_reclaim_on_success() {
         fuigo_test_utils::require_git!();
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use fuigo_test_utils::git::{git_commit_all, init_git_repo};
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let tmp = TempDir::new().unwrap();
         let worktree = tmp.path().join("wt");

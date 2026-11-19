@@ -47,11 +47,13 @@ async fn main_shell_state_init(
             cwd: parsed_cwd,
             snapshot: rest,
             shell,
+            trust: Default::default(),
         },
         None => ShellState {
             cwd: cwd.to_path_buf(),
             snapshot: String::new(),
             shell,
+            trust: Default::default(),
         },
     }
 }

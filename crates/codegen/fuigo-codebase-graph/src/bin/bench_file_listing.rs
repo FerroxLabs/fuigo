@@ -9,14 +9,15 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use git2::{Repository, StatusOptions};
 use fuigo_codebase_graph::LanguageRegistry;
+use git2::{Repository, StatusOptions};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path_str = if let Some(p) = args.get(1) {
         p.clone()
-    } else if let Ok(p) = std::env::var("BENCH_REPO_ROOT").or_else(|_| std::env::var("FUIGO_ROOT")) {
+    } else if let Ok(p) = std::env::var("BENCH_REPO_ROOT").or_else(|_| std::env::var("FUIGO_ROOT"))
+    {
         p
     } else {
         eprintln!("Usage: bench_file_listing <path> [cli|git2|git2-index|both]");
@@ -196,7 +197,7 @@ fn collect_files_git2(root_path: &Path, registry: &LanguageRegistry) -> Vec<std:
     if let Ok(statuses) = repo.statuses(Some(&mut status_opts)) {
         for status_entry in statuses.iter() {
             if status_entry.status().is_wt_new()
-                && let Some(path_str) = status_entry.path()
+                && let Some(path_str) = status_entry.path().ok()
                 && registry.is_supported(Path::new(path_str))
             {
                 files.push(root_path.join(path_str));

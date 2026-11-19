@@ -33,7 +33,11 @@ fn capture(h: &PermissionHandle) -> Captured {
     h.set_classifier(Some(Arc::new(LlmPermissionClassifier {
         classify_text: Some(Arc::new(move |messages: Vec<ClassifierMessage>| {
             sink.lock().unwrap().push(messages);
-            Box::pin(async { Ok::<_, ClassifierFailure>(r#"{"shouldBlock":false,"reason":"ok","thinking":"t"}"#.to_owned()) })
+            Box::pin(async {
+                Ok::<_, ClassifierFailure>(
+                    r#"{"shouldBlock":false,"reason":"ok","thinking":"t"}"#.to_owned(),
+                )
+            })
         })),
         ..LlmPermissionClassifier::default()
     })));
@@ -42,14 +46,23 @@ fn capture(h: &PermissionHandle) -> Captured {
 
 async fn classify_once(h: &PermissionHandle) {
     let req = PermissionRequest::new(
-        AccessKind::MCPTool { name: "test_server__do_thing".into(), input: serde_json::Value::Null },
+        AccessKind::MCPTool {
+            name: "test_server__do_thing".into(),
+            input: serde_json::Value::Null,
+        },
         acp::ToolCallUpdate::new("t1", acp::ToolCallUpdateFields::new()),
     );
     let _ = h.request(req).await;
 }
 
 fn text_of(seen: &Captured) -> String {
-    seen.lock().unwrap().iter().flatten().map(|m| m.text.clone()).collect::<Vec<_>>().join("\n")
+    seen.lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .map(|m| m.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[tokio::test]
@@ -65,7 +78,10 @@ async fn classifier_request_carries_origin_and_flag_when_influenced() {
             h.peer_influence().set_peer_turn(true);
             classify_once(&h).await;
             let t = text_of(&seen);
-            assert!(t.contains("peer_influenced: true") && t.contains("turn origin: peer_message"), "{t}");
+            assert!(
+                t.contains("peer_influenced: true") && t.contains("turn origin: peer_message"),
+                "{t}"
+            );
         })
         .await;
 }
@@ -82,7 +98,10 @@ async fn classifier_request_is_unchanged_when_not_influenced() {
             classify_once(&h).await;
             assert!(!seen.lock().unwrap().is_empty(), "the classifier ran");
             let t = text_of(&seen);
-            assert!(!t.contains("peer_influenced") && !t.contains("turn origin"), "{t}");
+            assert!(
+                !t.contains("peer_influenced") && !t.contains("turn origin"),
+                "{t}"
+            );
             // After a clear the request is the same again.
             h.set_peer_influenced(true);
             h.set_peer_influenced(false);
@@ -102,7 +121,10 @@ fn payload_note_follows_the_flag_and_the_turn_origin() {
     let n = f.payload_note().unwrap();
     assert!(n.peer_influenced && n.origin.is_none());
     f.set_peer_turn(true);
-    assert_eq!(f.payload_note().unwrap().origin.as_deref(), Some("peer_message"));
+    assert_eq!(
+        f.payload_note().unwrap().origin.as_deref(),
+        Some("peer_message")
+    );
     // The turn flag is shared by clones, like the influenced flag.
     let g = f.clone();
     g.set(false);
@@ -112,15 +134,37 @@ fn payload_note_follows_the_flag_and_the_turn_origin() {
 
 #[test]
 fn build_classifier_messages_without_a_note_has_no_peer_text() {
-    use crate::permission::auto_mode::{ClassifierContext, ClassifierPromptType, build_classifier_messages};
+    use crate::permission::auto_mode::{
+        ClassifierContext, ClassifierPromptType, build_classifier_messages,
+    };
     let access = AccessKind::Bash("make x".into());
-    let plain = build_classifier_messages("run_terminal_command", &access, Some("make x"), &ClassifierContext::default(), ClassifierPromptType::Full);
+    let plain = build_classifier_messages(
+        "run_terminal_command",
+        &access,
+        Some("make x"),
+        &ClassifierContext::default(),
+        ClassifierPromptType::Full,
+    );
     let with = ClassifierContext {
-        peer: Some(crate::permission::PeerPayloadNote { origin: None, peer_influenced: true }),
+        peer: Some(crate::permission::PeerPayloadNote {
+            origin: None,
+            peer_influenced: true,
+        }),
         ..ClassifierContext::default()
     };
-    let noted = build_classifier_messages("run_terminal_command", &access, Some("make x"), &with, ClassifierPromptType::Full);
+    let noted = build_classifier_messages(
+        "run_terminal_command",
+        &access,
+        Some("make x"),
+        &with,
+        ClassifierPromptType::Full,
+    );
     assert_eq!(noted.len(), plain.len() + 1);
     assert!(plain.iter().all(|m| !m.text.contains("peer_influenced")));
-    assert!(noted.iter().any(|m| m.text.contains("peer_influenced: true") && m.text.contains("turn origin: not peer_message")));
+    assert!(
+        noted
+            .iter()
+            .any(|m| m.text.contains("peer_influenced: true")
+                && m.text.contains("turn origin: not peer_message"))
+    );
 }

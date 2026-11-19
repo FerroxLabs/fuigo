@@ -259,7 +259,13 @@ impl fuigo_tool_runtime::Tool for CodexReadFileTool {
                     } else {
                         fc.content
                     };
-                    (body, fc.raw_output, fc.total_lines, Some(fc.absolute_path), used)
+                    (
+                        body,
+                        fc.raw_output,
+                        fc.total_lines,
+                        Some(fc.absolute_path),
+                        used,
+                    )
                 }
                 // The first line no longer fits what earlier files left of the
                 // budget: defer the file to another call instead of reporting
@@ -355,7 +361,10 @@ pub fn read_target_paths(input: &CodexReadFileInput) -> Vec<String> {
         entries.into_iter().map(|e| e.path).collect()
     };
     let mut seen = std::collections::HashSet::new();
-    paths.into_iter().filter(|p| seen.insert(p.clone())).collect()
+    paths
+        .into_iter()
+        .filter(|p| seen.insert(p.clone()))
+        .collect()
 }
 
 /// Read one file under `byte_budget` (formatted bytes). A window over the
@@ -514,7 +523,10 @@ async fn read_one(
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,7 +934,10 @@ mod tests {
             .unwrap()
         {
             ReadFileOutput::FileContent(fc) => {
-                assert!(fc.content.contains("L2100: line 2100"), "whole file expected");
+                assert!(
+                    fc.content.contains("L2100: line 2100"),
+                    "whole file expected"
+                );
                 assert!(!fc.content.contains("truncated"));
             }
             other => panic!("expected FileContent, got {other:?}"),
@@ -930,9 +945,21 @@ mod tests {
 
         let multi = CodexReadFileInput {
             files: Some(vec![
-                CodexReadFileEntry { path: a.to_string_lossy().to_string(), offset: Some(2099), limit: None },
-                CodexReadFileEntry { path: b.to_string_lossy().to_string(), offset: None, limit: None },
-                CodexReadFileEntry { path: tmp.path().join("missing.txt").to_string_lossy().to_string(), offset: None, limit: None },
+                CodexReadFileEntry {
+                    path: a.to_string_lossy().to_string(),
+                    offset: Some(2099),
+                    limit: None,
+                },
+                CodexReadFileEntry {
+                    path: b.to_string_lossy().to_string(),
+                    offset: None,
+                    limit: None,
+                },
+                CodexReadFileEntry {
+                    path: tmp.path().join("missing.txt").to_string_lossy().to_string(),
+                    offset: None,
+                    limit: None,
+                },
             ]),
             file_path: String::new(),
             offset: 1,
@@ -945,9 +972,26 @@ mod tests {
             .unwrap()
         {
             ReadFileOutput::FileContent(fc) => {
-                assert!(fc.content.contains(&format!("==> {} <==\nL2099: line 2099\nL2100: line 2100", a.display())), "{}", fc.content);
-                assert!(fc.content.contains(&format!("==> {} <==\nL1: beta", b.display())), "{}", fc.content);
-                assert!(fc.content.contains("missing.txt") && fc.content.contains("Failed to read file"), "{}", fc.content);
+                assert!(
+                    fc.content.contains(&format!(
+                        "==> {} <==\nL2099: line 2099\nL2100: line 2100",
+                        a.display()
+                    )),
+                    "{}",
+                    fc.content
+                );
+                assert!(
+                    fc.content
+                        .contains(&format!("==> {} <==\nL1: beta", b.display())),
+                    "{}",
+                    fc.content
+                );
+                assert!(
+                    fc.content.contains("missing.txt")
+                        && fc.content.contains("Failed to read file"),
+                    "{}",
+                    fc.content
+                );
                 assert_eq!(fc.total_lines, 2100 + 1);
             }
             other => panic!("expected FileContent, got {other:?}"),
@@ -965,7 +1009,9 @@ mod tests {
             .await
             .unwrap()
         {
-            ReadFileOutput::FileReadError(msg) => assert!(msg.contains("file_path") && msg.contains("files")),
+            ReadFileOutput::FileReadError(msg) => {
+                assert!(msg.contains("file_path") && msg.contains("files"))
+            }
             other => panic!("expected FileReadError, got {other:?}"),
         }
     }
@@ -987,7 +1033,16 @@ mod tests {
             .collect();
         let shared = test_resources(tmp.path()).into_shared();
         let input = CodexReadFileInput {
-            files: Some(paths.iter().map(|p| CodexReadFileEntry { path: p.clone(), offset: None, limit: None }).collect()),
+            files: Some(
+                paths
+                    .iter()
+                    .map(|p| CodexReadFileEntry {
+                        path: p.clone(),
+                        offset: None,
+                        limit: None,
+                    })
+                    .collect(),
+            ),
             file_path: String::new(),
             offset: 1,
             limit: defaults::limit(),
@@ -999,16 +1054,33 @@ mod tests {
             .unwrap()
         {
             ReadFileOutput::FileContent(fc) => {
-                let b_start = fc.content.find(&format!("==> {} <==", paths[1])).expect("second file header");
-                assert!(!fc.content[..b_start].contains("truncated"), "first file fits whole");
-                assert!(fc.content[b_start..].contains("[... truncated at L"), "second file is cut: {}", &fc.content[b_start..b_start + 120]);
-                assert!(!fc.content.contains(&format!("==> {} <==", paths[2])), "third file is not read");
+                let b_start = fc
+                    .content
+                    .find(&format!("==> {} <==", paths[1]))
+                    .expect("second file header");
+                assert!(
+                    !fc.content[..b_start].contains("truncated"),
+                    "first file fits whole"
+                );
+                assert!(
+                    fc.content[b_start..].contains("[... truncated at L"),
+                    "second file is cut: {}",
+                    &fc.content[b_start..b_start + 120]
+                );
+                assert!(
+                    !fc.content.contains(&format!("==> {} <==", paths[2])),
+                    "third file is not read"
+                );
                 assert!(
                     fc.content.ends_with(&format!("[40 KB cap reached: 1 of 3 files not read: {}. Read them in another call.]", paths[2])),
                     "{}",
                     &fc.content[fc.content.len() - 200..]
                 );
-                assert!(fc.content.len() <= MAX_READ_BYTES + 400, "{}", fc.content.len());
+                assert!(
+                    fc.content.len() <= MAX_READ_BYTES + 400,
+                    "{}",
+                    fc.content.len()
+                );
             }
             other => panic!("expected FileContent, got {other:?}"),
         }
@@ -1037,10 +1109,26 @@ mod tests {
             .unwrap()
         {
             ReadFileOutput::FileContent(fc) => {
-                assert!(fc.content.len() <= MAX_READ_BYTES + 200, "{}", fc.content.len());
+                assert!(
+                    fc.content.len() <= MAX_READ_BYTES + 200,
+                    "{}",
+                    fc.content.len()
+                );
                 let hint = fc.content.rsplit('\n').next().unwrap();
-                assert!(hint.starts_with("[... truncated at L") && hint.contains("continue with offset="), "{hint}");
-                let last: usize = hint.split("truncated at L").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+                assert!(
+                    hint.starts_with("[... truncated at L")
+                        && hint.contains("continue with offset="),
+                    "{hint}"
+                );
+                let last: usize = hint
+                    .split("truncated at L")
+                    .nth(1)
+                    .unwrap()
+                    .split(' ')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
                 assert!(hint.contains(&format!("offset={}", last + 1)));
                 assert_eq!(fc.limit, Some(last));
             }
@@ -1048,8 +1136,16 @@ mod tests {
         }
         let multi = CodexReadFileInput {
             files: Some(vec![
-                CodexReadFileEntry { path: a.to_string_lossy().to_string(), offset: None, limit: None },
-                CodexReadFileEntry { path: b.to_string_lossy().to_string(), offset: None, limit: None },
+                CodexReadFileEntry {
+                    path: a.to_string_lossy().to_string(),
+                    offset: None,
+                    limit: None,
+                },
+                CodexReadFileEntry {
+                    path: b.to_string_lossy().to_string(),
+                    offset: None,
+                    limit: None,
+                },
             ]),
             file_path: String::new(),
             offset: 1,
@@ -1063,7 +1159,11 @@ mod tests {
         {
             ReadFileOutput::FileContent(fc) => {
                 assert!(fc.content.contains("[... truncated at L"), "{}", fc.content);
-                assert!(fc.content.contains("1 of 2 files not read") && fc.content.contains("b.txt"), "{}", fc.content);
+                assert!(
+                    fc.content.contains("1 of 2 files not read") && fc.content.contains("b.txt"),
+                    "{}",
+                    fc.content
+                );
             }
             other => panic!("expected FileContent, got {other:?}"),
         }
@@ -1080,7 +1180,11 @@ mod tests {
             path.to_string_lossy().to_string()
         };
         let (first, a, b) = (p("first.txt"), p("a.txt"), p("b.txt"));
-        let entry = |path: &str| CodexReadFileEntry { path: path.to_owned(), offset: None, limit: None };
+        let entry = |path: &str| CodexReadFileEntry {
+            path: path.to_owned(),
+            offset: None,
+            limit: None,
+        };
         let input = CodexReadFileInput {
             files: Some(vec![entry(&a), entry("  "), entry(&b), entry(&a)]),
             file_path: first.clone(),
@@ -1093,21 +1197,43 @@ mod tests {
         assert_eq!(targets, vec![first.clone(), a.clone(), b.clone()]);
         let shared = test_resources(tmp.path()).into_shared();
         let ReadFileOutput::FileContent(fc) =
-            fuigo_tool_runtime::Tool::run(&CodexReadFileTool, test_ctx(shared.clone()), input).await.unwrap()
+            fuigo_tool_runtime::Tool::run(&CodexReadFileTool, test_ctx(shared.clone()), input)
+                .await
+                .unwrap()
         else {
             panic!("expected FileContent");
         };
         let headers: Vec<&str> = fc
             .content
             .lines()
-            .filter_map(|line| line.strip_prefix("==> ").and_then(|l| l.strip_suffix(" <==")))
+            .filter_map(|line| {
+                line.strip_prefix("==> ")
+                    .and_then(|l| l.strip_suffix(" <=="))
+            })
             .collect();
-        assert_eq!(headers, targets.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            headers,
+            targets.iter().map(String::as_str).collect::<Vec<_>>()
+        );
 
         // Single-file form: only `file_path`; blank `files` entries add nothing; no path at all reads nothing.
-        let single = CodexReadFileInput { files: Some(vec![entry(" ")]), ..CodexReadFileInput { files: None, file_path: first.clone(), offset: 1, limit: defaults::limit(), mode: ReadMode::Slice, indentation: None } };
+        let single = CodexReadFileInput {
+            files: Some(vec![entry(" ")]),
+            ..CodexReadFileInput {
+                files: None,
+                file_path: first.clone(),
+                offset: 1,
+                limit: defaults::limit(),
+                mode: ReadMode::Slice,
+                indentation: None,
+            }
+        };
         assert_eq!(read_target_paths(&single), vec![first]);
-        let none = CodexReadFileInput { file_path: " ".into(), files: Some(vec![entry("")]), ..single };
+        let none = CodexReadFileInput {
+            file_path: " ".into(),
+            files: Some(vec![entry("")]),
+            ..single
+        };
         assert!(read_target_paths(&none).is_empty());
     }
 
@@ -1149,7 +1275,9 @@ mod tests {
         .await
         .unwrap();
         match denied {
-            ReadFileOutput::FileReadError(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            ReadFileOutput::FileReadError(msg) => {
+                assert!(msg.contains("ignored by .gitignore"), "{msg}")
+            }
             other => panic!("expected the gitignore denial, got {other:?}"),
         }
         let allowed = fuigo_tool_runtime::Tool::run(
@@ -1159,6 +1287,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(allowed, ReadFileOutput::FileContent(_)), "{allowed:?}");
+        assert!(
+            matches!(allowed, ReadFileOutput::FileContent(_)),
+            "{allowed:?}"
+        );
     }
 }

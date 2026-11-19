@@ -7,8 +7,8 @@
 
 mod otlp_collector;
 
-use otlp_collector as col;
 use fuigo_telemetry::external;
+use otlp_collector as col;
 
 #[test]
 fn refuses_to_activate_when_internal_consumed_standard_vars() {

@@ -10,20 +10,20 @@ pub mod credential_scrub;
 mod ext_parsers;
 pub mod feedback_client;
 pub mod folder_trust;
+pub(crate) mod handlers;
 pub(crate) mod helper_epoch;
 #[cfg(test)]
 mod helper_epoch_tests;
-pub(crate) mod handlers;
 pub mod init;
 pub mod init_flags;
 /// Provider credentials already present in the environment, for first run.
 pub mod key_discovery;
 pub mod model_providers;
 pub mod models;
-pub mod programmatic_tools;
 pub mod mvp_agent;
 pub(crate) mod otel_gate;
 pub(crate) mod park_hold;
+pub mod programmatic_tools;
 pub(crate) mod proxy;
 pub mod relay;
 pub(crate) mod relay_credentials;

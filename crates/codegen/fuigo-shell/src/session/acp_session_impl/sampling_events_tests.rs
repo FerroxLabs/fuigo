@@ -1468,7 +1468,8 @@ async fn a_redacted_thinking_event_is_forwarded_in_order_on_the_buffered_rail() 
 
             let mut updates = Vec::new();
             while let Ok(event) = event_rx.try_recv() {
-                if let SessionEvent::Notification(SessionNotification::Fuigo(notification)) = event {
+                if let SessionEvent::Notification(SessionNotification::Fuigo(notification)) = event
+                {
                     updates.push(notification.update);
                 }
             }

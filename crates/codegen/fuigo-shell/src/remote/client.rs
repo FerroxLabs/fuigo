@@ -80,8 +80,13 @@ async fn add_bundle_fetch_headers(
     if deployment_key.is_none()
         && let Some(auth) = &resolved_auth
     {
-        crate::auth::session_delivery::service_session_gate(auth, url, Some(service_base), "bundle_fetch")
-            .map_err(|refused| BackendError::SessionDestinationRefused(refused.to_string()))?;
+        crate::auth::session_delivery::service_session_gate(
+            auth,
+            url,
+            Some(service_base),
+            "bundle_fetch",
+        )
+        .map_err(|refused| BackendError::SessionDestinationRefused(refused.to_string()))?;
     }
     let mut credentials = crate::util::fuigo_auth_credentials::FuigoAuthCredentials::new(
         resolved_auth.as_ref().map(|auth| auth.key.clone()),
@@ -106,11 +111,10 @@ async fn add_bundle_fetch_headers(
     let mut builder = credentials
         .apply(builder, url)
         .headers(identity.header_map(pairs));
-    builder = builder
-        .header(
-            crate::http::CLIENT_MODE_HEADER,
-            crate::http::process_client_mode(),
-        );
+    builder = builder.header(
+        crate::http::CLIENT_MODE_HEADER,
+        crate::http::process_client_mode(),
+    );
     Ok(fuigo_file_utils::trace_context::inject_trace_context_into_request(builder))
 }
 /// Fetch the bundled subagent cache payload from cli-chat-proxy `GET /v1/subagents/bundle`.
@@ -157,7 +161,10 @@ pub async fn fetch_subagent_bundle(
 const MAX_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Read a response body, failing once it exceeds `cap` bytes (declared length first, then while streaming).
-async fn read_body_capped(mut response: reqwest::Response, cap: u64) -> Result<Vec<u8>, BackendError> {
+async fn read_body_capped(
+    mut response: reqwest::Response,
+    cap: u64,
+) -> Result<Vec<u8>, BackendError> {
     let too_large = || BackendError::RequestFailed {
         status: 413,
         body: format!("bundle response is larger than the {cap} byte limit"),
@@ -403,7 +410,8 @@ impl Default for BackendClient {
 }
 /// Set once a backend has refused a save carrying compaction checkpoints and accepted it without them: later saves in
 /// this process leave the checkpoints out instead of failing twice.
-static CHECKPOINTS_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CHECKPOINTS_REFUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 /// A 4xx that can mean "this backend does not take that message". Auth (401, 403) and transient (408, 429) failures
 /// are not refusals.
 fn is_checkpoint_refusal(status: u16) -> bool {
@@ -617,24 +625,31 @@ impl BackendClient {
         messages: &[ExportedMessage],
         metadata: Option<&ExportedMetadata>,
     ) -> Result<(), BackendError> {
-        let has_checkpoints = messages.iter().any(ExportedMessage::is_compaction_checkpoint);
+        let has_checkpoints = messages
+            .iter()
+            .any(ExportedMessage::is_compaction_checkpoint);
         if !has_checkpoints {
             return self.post_session_data(session_id, messages, metadata).await;
         }
-        let only_checkpoints = messages.iter().all(ExportedMessage::is_compaction_checkpoint);
+        let only_checkpoints = messages
+            .iter()
+            .all(ExportedMessage::is_compaction_checkpoint);
         if CHECKPOINTS_REFUSED.load(std::sync::atomic::Ordering::Relaxed) {
             if only_checkpoints {
                 // Nothing but checkpoints is left once they are filtered out: there is nothing to send.
                 return Ok(());
             }
-            return self.post_without_checkpoints(session_id, messages, metadata).await;
+            return self
+                .post_without_checkpoints(session_id, messages, metadata)
+                .await;
         }
         match self.post_session_data(session_id, messages, metadata).await {
             Err(BackendError::RequestFailed { status, .. }) if is_checkpoint_refusal(status) => {
                 // A batch of only checkpoints has no retry to prove anything with: a 4xx on it is the refusal, and
                 // the checkpoint is dropped from the pending set instead of being posted again on every flush.
                 if !only_checkpoints {
-                    self.post_without_checkpoints(session_id, messages, metadata).await?;
+                    self.post_without_checkpoints(session_id, messages, metadata)
+                        .await?;
                 }
                 // Remember only once the retry proved the checkpoints were the problem.
                 // A 413 may mean only this one was too large, so it does not disable later (smaller) checkpoints.
@@ -778,9 +793,9 @@ impl SettingsFetch {
     pub fn into_option(self) -> Option<crate::util::config::RemoteSettings> {
         match self {
             SettingsFetch::Fetched(s) => Some(*s),
-            SettingsFetch::Rejected | SettingsFetch::Retry | SettingsFetch::DestinationRefused(_) => {
-                None
-            }
+            SettingsFetch::Rejected
+            | SettingsFetch::Retry
+            | SettingsFetch::DestinationRefused(_) => None,
         }
     }
 }

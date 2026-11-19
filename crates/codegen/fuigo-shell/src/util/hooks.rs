@@ -221,7 +221,10 @@ pub(crate) fn discover_hooks_for_cwd(
 ) -> (fuigo_hooks::discovery::HookRegistry, Vec<HookError>) {
     let trusted = trusted.into();
     let git_root = fuigo_workspace::session::git::find_git_root_from_path(cwd).ok();
-    let subdirs = git_root.as_deref().map(|root| project_hook_subdirs(cwd, root)).unwrap_or_default();
+    let subdirs = git_root
+        .as_deref()
+        .map(|root| project_hook_subdirs(cwd, root))
+        .unwrap_or_default();
     let config_layers = fuigo_config::hook_config_layers();
     let sources = discover_hook_source_paths_with_dirs(
         fuigo_config::user_fuigo_home().as_deref(),
@@ -249,7 +252,9 @@ fn note_hooks_skipped_untrusted(
     static TOLD: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
     let user_skipped = !trust.user
-        && (config_layers.iter().any(|l| !l.provenance().is_managed_policy())
+        && (config_layers
+            .iter()
+            .any(|l| !l.provenance().is_managed_policy())
             || sources.global.iter().any(|p| p.exists()));
     let project_skipped = !trust.folder && sources.project.iter().any(|p| p.exists());
     if !user_skipped && !project_skipped {
@@ -314,7 +319,10 @@ fn assemble_hooks_from_sources(
     )
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,7 +351,10 @@ mod tests {
         let sources =
             discover_hook_source_paths_in(Some(fuigo_home.path()), Some(home.path()), None, compat);
         assert!(
-            sources.global.iter().all(|p| p.starts_with(fuigo_home.path()) || p.starts_with(home.path())),
+            sources
+                .global
+                .iter()
+                .all(|p| p.starts_with(fuigo_home.path()) || p.starts_with(home.path())),
             "every global hook source must sit under a root this test owns: {:?}",
             sources.global
         );
@@ -377,14 +388,31 @@ mod tests {
             ] } ] } })
             .to_string()
         };
-        std::fs::write(system.path().join("requirements.toml"), toml_hook("/opt/policy/managed.sh")).unwrap();
-        std::fs::write(fuigo_home.path().join("config.toml"), toml_hook("/home/u/user-config.sh")).unwrap();
+        std::fs::write(
+            system.path().join("requirements.toml"),
+            toml_hook("/opt/policy/managed.sh"),
+        )
+        .unwrap();
+        std::fs::write(
+            fuigo_home.path().join("config.toml"),
+            toml_hook("/home/u/user-config.sh"),
+        )
+        .unwrap();
         std::fs::create_dir_all(fuigo_home.path().join("hooks")).unwrap();
-        std::fs::write(fuigo_home.path().join("hooks/user.json"), json_hook("/home/u/user-file.sh")).unwrap();
+        std::fs::write(
+            fuigo_home.path().join("hooks/user.json"),
+            json_hook("/home/u/user-file.sh"),
+        )
+        .unwrap();
         std::fs::create_dir_all(repo.path().join(".fuigo/hooks")).unwrap();
-        std::fs::write(repo.path().join(".fuigo/hooks/project.json"), json_hook("/repo/project-file.sh")).unwrap();
+        std::fs::write(
+            repo.path().join(".fuigo/hooks/project.json"),
+            json_hook("/repo/project-file.sh"),
+        )
+        .unwrap();
 
-        let layers = fuigo_config::hook_config_layers_at(Some(system.path()), Some(fuigo_home.path()));
+        let layers =
+            fuigo_config::hook_config_layers_at(Some(system.path()), Some(fuigo_home.path()));
         let compat = fuigo_tools::types::compat::CompatConfig::default();
         let sources = discover_hook_source_paths_in(
             Some(fuigo_home.path()),
@@ -392,7 +420,11 @@ mod tests {
             Some(repo.path()),
             &compat,
         );
-        TierFixture { _dirs: vec![system, fuigo_home, home, repo], layers, sources }
+        TierFixture {
+            _dirs: vec![system, fuigo_home, home, repo],
+            layers,
+            sources,
+        }
     }
 
     fn running(fx: &TierFixture, trust: impl Into<HookTrust>) -> Vec<String> {
@@ -423,7 +455,12 @@ mod tests {
     #[test]
     fn trusted_runs_every_tier() {
         let fx = tier_fixture();
-        let all = ["managed.sh", "project-file.sh", "user-config.sh", "user-file.sh"];
+        let all = [
+            "managed.sh",
+            "project-file.sh",
+            "user-config.sh",
+            "user-file.sh",
+        ];
         assert_eq!(running(&fx, HookTrust::new(true, false)), all);
         assert_eq!(running(&fx, true), all);
         assert_eq!(running(&fx, HookTrust::new(true, true)), all);

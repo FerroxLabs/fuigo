@@ -129,7 +129,12 @@ pub enum McpServerConfig {
 impl std::fmt::Debug for McpServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Http { url, scope, scope_id, scope_name } => f
+            Self::Http {
+                url,
+                scope,
+                scope_id,
+                scope_name,
+            } => f
                 .debug_struct("Http")
                 .field("url", &fuigo_auth::redact_url(url))
                 .field("scope", scope)
@@ -140,7 +145,12 @@ impl std::fmt::Debug for McpServerConfig {
                 .debug_struct("Stdio")
                 .field("command", command)
                 .field("args", &format_args!("<{} args redacted>", args.len()))
-                .field("env", &env.iter().map(|v| (&v.name, "<redacted>")).collect::<Vec<_>>())
+                .field(
+                    "env",
+                    &env.iter()
+                        .map(|v| (&v.name, "<redacted>"))
+                        .collect::<Vec<_>>(),
+                )
                 .finish(),
             Self::ManagedGateway => f.write_str("ManagedGateway"),
         }
@@ -157,10 +167,7 @@ pub struct McpEnvVar {
 /// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
 impl std::fmt::Debug for McpEnvVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self {
-            name,
-            value,
-        } = self;
+        let Self { name, value } = self;
         f.debug_struct("McpEnvVar")
             .field("name", name)
             .field("value", &"<redacted>")
@@ -300,8 +307,9 @@ fn auth_refusals_for(configs: &[acp::McpServer]) -> HashMap<String, String> {
     configs
         .iter()
         .filter_map(|config| match config {
-            acp::McpServer::Http(http) => fuigo_mcp::auth_refusal_for_url(&http.url)
-                .map(|reason| (http.name.clone(), reason)),
+            acp::McpServer::Http(http) => {
+                fuigo_mcp::auth_refusal_for_url(&http.url).map(|reason| (http.name.clone(), reason))
+            }
             _ => None,
         })
         .collect()
@@ -358,10 +366,10 @@ pub struct McpToolsChanged {
 // This import from `session` into `extensions` inverts the typical `extensions` to `session` flow
 // Moving the types here would require either making the dispatcher import from `extensions` (the same inversion) or duplicating the schema
 // Leaving the re-export here keeps the single import point without duplicating definitions
-pub use fuigo_mcp::servers::McpFailureKind;
 pub use crate::session::mcp_dispatcher::{
     McpServerStatus, McpServerStatusPayload, McpServerStatusReason, SERVER_STATUS_METHOD,
 };
+pub use fuigo_mcp::servers::McpFailureKind;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -902,13 +910,20 @@ fn drop_policy_blocked(
 /// The servers of `configs` the agent pool (sessionless ACP `mcp/call`, `mcp/read_resource`) may spawn.
 /// P169 (Astra r1 #3): only what managed policy allows, the same verdict as the session merge; review M-1: nor a
 /// server the session merge drops as disabled, an unapproved campaign stdio server included (C7-02).
-pub(crate) fn agent_pool_spawnable(configs: Vec<acp::McpServer>, cwd: &std::path::Path) -> Vec<acp::McpServer> {
+pub(crate) fn agent_pool_spawnable(
+    configs: Vec<acp::McpServer>,
+    cwd: &std::path::Path,
+) -> Vec<acp::McpServer> {
     let disabled = crate::util::config::disabled_mcp_server_names(cwd);
     let configs = configs
         .into_iter()
         .filter(|server| !disabled.contains(crate::session::mcp_servers::mcp_server_name(server)))
         .collect();
-    drop_policy_blocked(configs, fuigo_workspace::permission::resolution::managed_settings(), cwd)
+    drop_policy_blocked(
+        configs,
+        fuigo_workspace::permission::resolution::managed_settings(),
+        cwd,
+    )
 }
 
 /// Spawn config.toml MCP clients into the agent pool. Handshakes happen lazily on first `CallMcpTool`.
@@ -1971,7 +1986,10 @@ pub(crate) fn policy_enable_error(
 
 /// [`policy_enable_error`] plus the `enable_all_project_mcp_servers = false` pin for a project-declared server (P169):
 /// the runtime gate for the setup and toggle paths.
-pub(crate) fn policy_enable_error_in(cwd: &std::path::Path, server: &acp::McpServer) -> Option<String> {
+pub(crate) fn policy_enable_error_in(
+    cwd: &std::path::Path,
+    server: &acp::McpServer,
+) -> Option<String> {
     let ms = fuigo_workspace::permission::resolution::managed_settings();
     policy_enable_error(&ms.mcp_allowlist, server).or_else(|| project_pin_error(ms, cwd, server))
 }
@@ -2366,7 +2384,10 @@ fn untrusted_upsert(mut req: McpUpsertRequest) -> Option<McpUpsertRequest> {
     req.config = req.config.without_saved_key_references(&req.server_name)?;
     // A `bearer_token_file` names a path and, with the URL, where its content goes: a client may not choose that for the
     // user's own config.toml, where the untrusted mark that makes it inert is something a refusal note tells users to delete.
-    req.config.drop_bearer_token_file(&req.server_name, "a definition supplied by an ACP client (`mcp/upsert`)");
+    req.config.drop_bearer_token_file(
+        &req.server_name,
+        "a definition supplied by an ACP client (`mcp/upsert`)",
+    );
     Some(req)
 }
 
@@ -2388,9 +2409,12 @@ async fn handle_upsert(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Say so: the upsert succeeds with the reference removed, and nothing else would tell the user. (Collected before
     // a failure returns, so the scope is always closed.)
     for notice in notice_scope.notes() {
-        let _ = handle.cmd_tx.send(crate::session::SessionCommand::NotifyConfigNotice { notice });
+        let _ = handle
+            .cmd_tx
+            .send(crate::session::SessionCommand::NotifyConfigNotice { notice });
     }
-    let req = req.ok_or_else(|| crate::acp_error::invalid_params("server config could not be checked"))?;
+    let req =
+        req.ok_or_else(|| crate::acp_error::invalid_params("server config could not be checked"))?;
 
     // Build the ACP server config before persisting so a refused upsert
     // leaves no state behind.
@@ -2478,7 +2502,10 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     to_ext_response(Ok(McpToggleResponse { ok: true }))
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3165,7 +3192,8 @@ mod tests {
         let ok = http("ok", "https://ok.example.com/mcp");
         let mut ms = fuigo_workspace::permission::resolution::ManagedSettings::default();
         ms.mcp_allowlist = deny_evil_corp();
-        let refused = cli_add_refusal(&ms, tmp.path(), &evil, false).expect("denied server refused");
+        let refused =
+            cli_add_refusal(&ms, tmp.path(), &evil, false).expect("denied server refused");
         assert!(refused.contains("organization policy"), "{refused}");
         assert_eq!(cli_add_refusal(&ms, tmp.path(), &ok, false), None);
         assert!(cli_enable_refusal(&ms, tmp.path(), "exfil", Some(&evil)).is_some());
@@ -3180,7 +3208,11 @@ mod tests {
             cli_add_refusal(&ms, tmp.path(), &ok, true).is_some(),
             "a --scope project add is project-declared: the pin refuses an ungranted server"
         );
-        assert_eq!(cli_add_refusal(&ms, tmp.path(), &ok, false), None, "a user-scope add is not");
+        assert_eq!(
+            cli_add_refusal(&ms, tmp.path(), &ok, false),
+            None,
+            "a user-scope add is not"
+        );
 
         let mut lock = fuigo_workspace::permission::resolution::ManagedSettings::default();
         lock.mcp_allowlist = McpServerAllowlist::new(
@@ -3215,13 +3247,20 @@ mod tests {
                 acp::McpServerHttp::new(name, "https://repo.example.com/mcp").headers(vec![]),
             )
         };
-        assert_eq!(upsert_refusal(&ms, repo.path(), &server("repo-tool")), None, "no pin, no refusal");
+        assert_eq!(
+            upsert_refusal(&ms, repo.path(), &server("repo-tool")),
+            None,
+            "no pin, no refusal"
+        );
         ms.project_mcp = PolicyPin::Disabled {
             source: std::path::PathBuf::from("/etc/fuigo/requirements.toml"),
             ownership: PolicyLayerOwnership::Admin,
         };
         let refused = upsert_refusal(&ms, repo.path(), &server("repo-tool")).unwrap();
-        assert!(refused.contains("organization policy") && refused.contains("requirements.toml"), "{refused}");
+        assert!(
+            refused.contains("organization policy") && refused.contains("requirements.toml"),
+            "{refused}"
+        );
         assert_eq!(upsert_refusal(&ms, repo.path(), &server("my-tool")), None);
     }
 
@@ -3307,7 +3346,8 @@ mod tests {
         .await
         .expect_err("denied upsert must be refused");
         assert!(
-            err.contains("blocked by an organization policy") && err.contains("managed_config.toml"),
+            err.contains("blocked by an organization policy")
+                && err.contains("managed_config.toml"),
             "got: {err}"
         );
         assert!(
@@ -3493,7 +3533,9 @@ mod tests {
             tools: vec![],
             auth_required: false,
             setup_required: false,
-            blocked_reason: Some("The server x is blocked by an organization policy (managed_config.toml).".into()),
+            blocked_reason: Some(
+                "The server x is blocked by an organization policy (managed_config.toml).".into(),
+            ),
             unavailable_reason: None,
         };
         let json = serde_json::to_value(&state).unwrap();
@@ -3507,7 +3549,12 @@ mod tests {
             unavailable_reason: None,
             ..state
         };
-        assert!(serde_json::to_value(&clean).unwrap().get("blockedReason").is_none());
+        assert!(
+            serde_json::to_value(&clean)
+                .unwrap()
+                .get("blockedReason")
+                .is_none()
+        );
     }
 
     /// P152: the `/mcps` list carries the recorded start/handshake failure of a server that is not connected, and only
@@ -3519,7 +3566,9 @@ mod tests {
             .init_failed
             .insert("dead".into(), "MCP handshake timed out after 2s".into());
         snapshot.init_failed.insert("blank".into(), "  ".into());
-        snapshot.init_failed.insert("later-ok".into(), "old failure".into());
+        snapshot
+            .init_failed
+            .insert("later-ok".into(), "old failure".into());
         snapshot.init_failed.insert("oauth".into(), "401".into());
         snapshot.auth_required.insert("oauth".into());
         snapshot.clients.push(McpClientStatus {
@@ -3537,10 +3586,14 @@ mod tests {
         assert_eq!(unavailable_reason(&snapshot, "oauth"), None);
         assert_eq!(unavailable_reason(&snapshot, "never-seen"), None);
         // K7: a server waiting on auth says why only when its refresh was refused
-        snapshot
-            .auth_refusals
-            .insert("oauth".into(), "refusing to send OAuth credentials to https://idp.example/token: refused".into());
-        snapshot.auth_refusals.insert("dead".into(), "not shown for a server that is not waiting on auth".into());
+        snapshot.auth_refusals.insert(
+            "oauth".into(),
+            "refusing to send OAuth credentials to https://idp.example/token: refused".into(),
+        );
+        snapshot.auth_refusals.insert(
+            "dead".into(),
+            "not shown for a server that is not waiting on auth".into(),
+        );
         assert_eq!(
             unavailable_reason(&snapshot, "oauth").as_deref(),
             Some("refusing to send OAuth credentials to https://idp.example/token: refused")

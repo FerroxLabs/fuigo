@@ -753,8 +753,14 @@ fn the_plugin_list_writer_stages_outside_the_lock() {
     let during = std::fs::read_to_string(&path).unwrap();
     drop(held);
     writer.join().unwrap().unwrap();
-    assert!(temp_seen, "the temp must be staged while another writer holds the lock");
-    assert!(!during.contains("/new"), "renamed without the lock: {during}");
+    assert!(
+        temp_seen,
+        "the temp must be staged while another writer holds the lock"
+    );
+    assert!(
+        !during.contains("/new"),
+        "renamed without the lock: {during}"
+    );
     let v: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let paths: Vec<&str> = v["plugins"]["paths"]
         .as_array()

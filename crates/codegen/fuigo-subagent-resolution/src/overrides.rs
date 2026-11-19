@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
-use fuigo_tools::implementations::fuigo_build::task::types::SubagentRuntimeOverrides;
 use fuigo_tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
+use fuigo_tools::implementations::fuigo_build::task::types::SubagentRuntimeOverrides;
+use serde::de::DeserializeOwned;
 
 use crate::config::{SubagentPersona, SubagentRole};
 use crate::types::EffectiveRuntimeConfig;
@@ -805,7 +805,8 @@ mod tests {
         std::fs::write(outside.path().join("secret.md"), "OUTSIDE-SECRET").unwrap();
         let roles = project.path().join(".fuigo/roles");
         std::fs::create_dir_all(&roles).unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret.md"), roles.join("role.md")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.md"), roles.join("role.md"))
+            .unwrap();
         let pinned = fuigo_dirs::contained::PinnedRoot::pin(project.path()).unwrap();
         let overrides = make_overrides(None, None, None, None, None);
 
@@ -823,7 +824,10 @@ mod tests {
             Some(project.path()),
             None,
         );
-        assert!(result.role_prompt.is_none(), "outside role prompt must not be read");
+        assert!(
+            result.role_prompt.is_none(),
+            "outside role prompt must not be read"
+        );
         assert!(result.role_prompt_warning.is_some());
 
         // Project persona: instructions_file linked outside is refused.
@@ -856,8 +860,11 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.md"), "OUTSIDE-SECRET").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret.md"), project.path().join("inline.md"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.md"),
+            project.path().join("inline.md"),
+        )
+        .unwrap();
         let overrides = make_overrides(None, None, None, None, None);
         let inline = SubagentRole {
             prompt_file: Some("inline.md".into()),
@@ -870,7 +877,10 @@ mod tests {
             Some(project.path()),
             None,
         );
-        assert!(result.role_prompt.is_none(), "cwd-relative link outside must not be read");
+        assert!(
+            result.role_prompt.is_none(),
+            "cwd-relative link outside must not be read"
+        );
     }
 
     #[cfg(unix)]
@@ -880,7 +890,8 @@ mod tests {
         std::fs::write(project.path().join("shared.md"), "INSIDE").unwrap();
         let roles = project.path().join(".fuigo/roles");
         std::fs::create_dir_all(&roles).unwrap();
-        std::os::unix::fs::symlink(project.path().join("shared.md"), roles.join("role.md")).unwrap();
+        std::os::unix::fs::symlink(project.path().join("shared.md"), roles.join("role.md"))
+            .unwrap();
         let role = SubagentRole {
             prompt_file: Some("role.md".into()),
             source_dir: Some(roles),

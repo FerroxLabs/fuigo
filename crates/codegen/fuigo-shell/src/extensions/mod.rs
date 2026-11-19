@@ -1,6 +1,6 @@
 pub mod auth;
-pub mod background_task;
 pub(crate) mod auth_gate;
+pub mod background_task;
 pub mod billing;
 pub(crate) mod btw;
 pub mod bundle;

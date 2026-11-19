@@ -89,13 +89,25 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-agent/src/plugins/manifest.rs", 2),
     ("crates/codegen/fuigo-auth/src/auth_provider.rs", 9), // P70a (R087): +4 are the quoted field names `"user_id"`, `"team_id"`, `"deployment_id"`, `"organization_id"` in `CredentialSnapshot`'s hand-written redacting `Debug` (it prints what the derive it replaced printed); +1 is a unit-test fixture literal `user_id: Some("p70-user")`. No body site
     ("crates/codegen/fuigo-config/src/managed_cache.rs", 3),
-    ("crates/codegen/fuigo-config/src/managed_cache/claim_tests.rs", 4),
+    (
+        "crates/codegen/fuigo-config/src/managed_cache/claim_tests.rs",
+        4,
+    ),
     ("crates/codegen/fuigo-config/src/managed_cache/tests.rs", 49), // 26-6a: +2 are test fixture literals `principal: Some("team-a")` / `Some("dep-1")` in the compromise-reason test; no body site
     ("crates/codegen/fuigo-config/src/signed_policy.rs", 2), // delta review (old-marker upgrade): `deployment_id`, `team_id` read from the local sidecar's payload to seed a pre-upgrade floor; no body site
-    ("crates/codegen/fuigo-config/src/signed_policy/claim_tests.rs", 1),
+    (
+        "crates/codegen/fuigo-config/src/signed_policy/claim_tests.rs",
+        1,
+    ),
     ("crates/codegen/fuigo-config/src/signed_policy/tests.rs", 31), // review u45 D2-04: +2 test fixtures (`principal` in an old test marker and in a test `SyncMarker`, for the legacy-floor migration); delta review (old-marker upgrade): +3 test fixtures (`team_id`, `deployment_id` in a test envelope, `principal` in a test marker); review R06/R07: +5 test fixtures (per-identity revision floors: `deployment_id` in signed test envelopes, `principal` in test marker files); audit S12-F2: +2 test-fixture sites, `"team_id"` in a signed-policy envelope and `"principal"` in a marker file, both in unit tests of the revision floor; no body site
-    ("crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs", 1),
-    ("crates/codegen/fuigo-fast-worktree/src/git/safety_tests/git_dir.rs", 2),
+    (
+        "crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-fast-worktree/src/git/safety_tests/git_dir.rs",
+        2,
+    ),
     ("crates/codegen/fuigo-hunk-tracker/src/actor/tests.rs", 3),
     ("crates/codegen/fuigo-hunk-tracker/src/loc/mod.rs", 7),
     ("crates/codegen/fuigo-hunk-tracker/src/loc/tests.rs", 2),
@@ -104,88 +116,235 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-mixpanel/src/lib.rs", 1),
     ("crates/codegen/fuigo-pager-minimal/src/panel.rs", 1), // P77: `hostname: None` in a session-row fixture; local UI
     ("crates/codegen/fuigo-pager-pty-harness/src/flows.rs", 2),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/background.rs", 3),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/background.rs",
+        3,
+    ),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/mcp.rs", 5),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/mod.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/permissions.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/routing.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/session_notification.rs", 2),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/folder_trust_reload.rs", 1), // F5 1.0.41: in-process AgentId field of a `TaskResult::SessionLoaded` test fixture (pager tab key, never a request body).
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/goals.rs", 2),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/interactions.rs", 7),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/mod.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/queue_and_adoption.rs", 8),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/settings.rs", 3),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/turn_completion.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/acp_handler/workflow_ingest.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/actions.rs", 140), // 26-6d: +2 `agent_id` fields of `Effect::SetContextWindow` / `TaskResult::ContextWindowSet` (in-process agent-view key; the request is `session/set_model` with `_meta.contextWindow`, no new identity). R-xs-p12: +2 `agent_id: AgentId` fields of `Effect::PeerRpc` / `Action::PeerRpcDone`: the pager's in-process agent-view key that routes the answer back; the request body is `PeerCall::params` (sessionId, heldId, token, action) and carries no identity. Keep. F5 1.0.41: +3 `agent_id: AgentId` fields of `TaskResult::FolderTrustLoaded` / `FolderTrustClosed` / `Effect::FolderTrustLoad` (in-process AgentId field of a task result or effect; pager tab key, never a request body).
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/permissions.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/routing.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/session_notification.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/tests/folder_trust_reload.rs",
+        1,
+    ), // F5 1.0.41: in-process AgentId field of a `TaskResult::SessionLoaded` test fixture (pager tab key, never a request body).
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/tests/goals.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/tests/interactions.rs",
+        7,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/tests/mod.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/tests/queue_and_adoption.rs",
+        8,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/tests/settings.rs",
+        3,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/tests/turn_completion.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/acp_handler/workflow_ingest.rs",
+        1,
+    ),
+    ("crates/codegen/fuigo-pager/src/app/actions.rs", 141), // 1.0.46 rustfmt: +1, the one-line `Effect::FolderTrustClose { agent_id: AgentId, .. }` field now sits on its own line (a reflow of the existing field, no new site). 26-6d: +2 `agent_id` fields of `Effect::SetContextWindow` / `TaskResult::ContextWindowSet` (in-process agent-view key; the request is `session/set_model` with `_meta.contextWindow`, no new identity). R-xs-p12: +2 `agent_id: AgentId` fields of `Effect::PeerRpc` / `Action::PeerRpcDone`: the pager's in-process agent-view key that routes the answer back; the request body is `PeerCall::params` (sessionId, heldId, token, action) and carries no identity. Keep. F5 1.0.41: +3 `agent_id: AgentId` fields of `TaskResult::FolderTrustLoaded` / `FolderTrustClosed` / `Effect::FolderTrustLoad` (in-process AgentId field of a task result or effect; pager tab key, never a request body).
     ("crates/codegen/fuigo-pager/src/app/agent_view/cta.rs", 3),
-    ("crates/codegen/fuigo-pager/src/app/agent_view/dock_input_tests.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/agent_view/key_owner_tests.rs", 6), // R-guard54: +1 `"email"` in an MCP elicitation-form test (4784cfc4); fixture JSON, no request body. Keep.
+    (
+        "crates/codegen/fuigo-pager/src/app/agent_view/dock_input_tests.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/agent_view/key_owner_tests.rs",
+        6,
+    ), // R-guard54: +1 `"email"` in an MCP elicitation-form test (4784cfc4); fixture JSON, no request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/agent_view/paste.rs", 3),
-    ("crates/codegen/fuigo-pager/src/app/agent_view/shell_completion.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/agent_view/workflows_overlay.rs", 2),
+    (
+        "crates/codegen/fuigo-pager/src/app/agent_view/shell_completion.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/agent_view/workflows_overlay.rs",
+        2,
+    ),
     ("crates/codegen/fuigo-pager/src/app/app_view.rs", 4), // P77: +1 `hostname` field of the session-picker row; local UI
     ("crates/codegen/fuigo-pager/src/app/app_view_tests.rs", 8), // P77: +3 `hostname: None` fixtures
     ("crates/codegen/fuigo-pager/src/app/dispatch/auth.rs", 3), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/billing.rs", 2),
     ("crates/codegen/fuigo-pager/src/app/dispatch/cta.rs", 6),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/dashboard.rs", 2),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/interject.rs", 2),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/dashboard.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/interject.rs",
+        2,
+    ),
     ("crates/codegen/fuigo-pager/src/app/dispatch/notes.rs", 10),
     ("crates/codegen/fuigo-pager/src/app/dispatch/peer.rs", 2), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/prompt.rs", 7),
     ("crates/codegen/fuigo-pager/src/app/dispatch/queue.rs", 5), // R-guard54: +1 `agent_id: AgentId` parameter of `send_held_side_question` (d52be8ca, P193): the pager-local tab id, passed in-process to `start_side_question`; not the machine id. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/rewind.rs", 9), // LEFTOVERS: +1 `agent_id: AgentId` parameter of `start_forced` (the TUI /rewind files restore); pager-local tab id, passed in-process; never a request body. Keep. Earlier: pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/router.rs", 19), // 26-6d: the `Effect::SetContextWindow` constructor repeats the in-process `agent_id`; no body site
-    ("crates/codegen/fuigo-pager/src/app/dispatch/session/fork.rs", 5),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/session/lifecycle.rs", 7), // U33-TUI: in-process `agent_id` params/test literals, never a request body. Keep. // 26-6d: `handle_context_window_set(agent_id)`, in-process routing key; no body site
-    ("crates/codegen/fuigo-pager/src/app/dispatch/session/load.rs", 4),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/session/modal.rs", 2),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/settings/setters.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/settings/ui.rs", 1),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/session/fork.rs",
+        5,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/session/lifecycle.rs",
+        7,
+    ), // U33-TUI: in-process `agent_id` params/test literals, never a request body. Keep. // 26-6d: `handle_context_window_set(agent_id)`, in-process routing key; no body site
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/session/load.rs",
+        4,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/session/modal.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/settings/setters.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/settings/ui.rs",
+        1,
+    ),
     ("crates/codegen/fuigo-pager/src/app/dispatch/status.rs", 13),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/auth.rs", 7), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/auth.rs",
+        7,
+    ), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
     // P119 (+4): test fixtures for typed verdicts building `TaskResult::PromptResponse`; no request body. Keep.
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/billing.rs", 21),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/cta_e2e.rs", 57),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/dashboard.rs", 3),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/mod.rs", 3), // P77: +1 `hostname: None` fixture
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/notes.rs", 18), // 1.0.42: +4 `agent_id: id` in TaskResult test literals (pager-local tab id, in-process, never a request body). Keep. P152: +2 `agent_id:` are the pager's local tab id in `TaskResult::FeedbackComplete` test literals (an in-process action, never a request body).
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs", 53), // P152: +2, W3-B: +1, 1.0.40 P2 image tests: +3 `agent_id:` are the pager's local tab id in test action literals (in-process, never a request body).
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/queue_release.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/rewind.rs", 22), // 1.0.42: +1 `agent_id: id` in a TaskResult test literal (pager-local tab id, in-process, never a request body). Keep. LEFTOVERS: +8 `agent_id:` fields of `TaskResult::RewindExecuteComplete` test literals and `files_response` fixtures (rewind files restore); pager-local tab id, in-process, no body. Keep. Earlier: pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/router.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/fork.rs", 18), // 1.0.36 (7ac81cb38/82701a6e1): +1 `agent_id:` test-literal field (pager-local AgentId of an in-process action); never a request body. Keep. // U33-TUI: in-process `agent_id` params/test literals, never a request body. Keep. // ROWS-A2 (5103ae922): +2 `agent_id:` test-literal fields, the pager-local tab id of an in-process action; never a request body. Keep.
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/lifecycle.rs", 31), // 1.0.36 (7ac81cb38/82701a6e1): +1 `agent_id:` test-literal field (pager-local AgentId of an in-process action); never a request body. Keep. // U33-TUI: in-process `agent_id` params/test literals, never a request body. Keep. // P66 (97efd30a) deleted the dead local-workspace tests; pager-local fixtures, no body site (re-pinned by P54-K, R080 §11)
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/load.rs", 64), // Rows B2b: +1 `agent_id:` field of a test literal (pager-local tab id, no body). Keep. P30-PERM-R2: +2 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (1) test literals (refused-/resume closes the picker); pager-local tab id, no body. Keep. P30-PERM: +4 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (3) test literals (refused-/resume tests); pager-local tab id, no body. Keep. R-guard54: +9 `agent_id:` fields of `TaskResult::SessionLoadFailed/SessionRestoreFailed/SessionCreated/ForkSessionFailed` test literals (P193: 8ef61a39, 7b190af9, e661ed68); pager-local tab id, no body. Keep.
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/modal.rs", 6),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/settings.rs", 4),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/status.rs", 27),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/task_result.rs", 40), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep. // 26-6d: pager-local fixtures for `ContextWindowSet`; no body site F5 1.0.41: +1 `agent_id: AgentId(0)` field of a `TaskResult::RenameSessionFailed` test fixture (in-process AgentId field; pager tab key, never a request body).
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/transcript.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/turn.rs", 7),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/transcript.rs", 9),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/billing.rs",
+        21,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/cta_e2e.rs",
+        57,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/dashboard.rs",
+        3,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/mod.rs",
+        3,
+    ), // P77: +1 `hostname: None` fixture
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/notes.rs",
+        18,
+    ), // 1.0.42: +4 `agent_id: id` in TaskResult test literals (pager-local tab id, in-process, never a request body). Keep. P152: +2 `agent_id:` are the pager's local tab id in `TaskResult::FeedbackComplete` test literals (an in-process action, never a request body).
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs",
+        53,
+    ), // P152: +2, W3-B: +1, 1.0.40 P2 image tests: +3 `agent_id:` are the pager's local tab id in test action literals (in-process, never a request body).
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/queue_release.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/rewind.rs",
+        22,
+    ), // 1.0.42: +1 `agent_id: id` in a TaskResult test literal (pager-local tab id, in-process, never a request body). Keep. LEFTOVERS: +8 `agent_id:` fields of `TaskResult::RewindExecuteComplete` test literals and `files_response` fixtures (rewind files restore); pager-local tab id, in-process, no body. Keep. Earlier: pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep.
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/router.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/session/fork.rs",
+        18,
+    ), // 1.0.36 (7ac81cb38/82701a6e1): +1 `agent_id:` test-literal field (pager-local AgentId of an in-process action); never a request body. Keep. // U33-TUI: in-process `agent_id` params/test literals, never a request body. Keep. // ROWS-A2 (5103ae922): +2 `agent_id:` test-literal fields, the pager-local tab id of an in-process action; never a request body. Keep.
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/session/lifecycle.rs",
+        31,
+    ), // 1.0.36 (7ac81cb38/82701a6e1): +1 `agent_id:` test-literal field (pager-local AgentId of an in-process action); never a request body. Keep. // U33-TUI: in-process `agent_id` params/test literals, never a request body. Keep. // P66 (97efd30a) deleted the dead local-workspace tests; pager-local fixtures, no body site (re-pinned by P54-K, R080 §11)
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/session/load.rs",
+        64,
+    ), // Rows B2b: +1 `agent_id:` field of a test literal (pager-local tab id, no body). Keep. P30-PERM-R2: +2 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (1) test literals (refused-/resume closes the picker); pager-local tab id, no body. Keep. P30-PERM: +4 `agent_id:` fields of `TaskResult::SessionCreated` (1) and `TaskResult::SessionLoadFailed` (3) test literals (refused-/resume tests); pager-local tab id, no body. Keep. R-guard54: +9 `agent_id:` fields of `TaskResult::SessionLoadFailed/SessionRestoreFailed/SessionCreated/ForkSessionFailed` test literals (P193: 8ef61a39, 7b190af9, e661ed68); pager-local tab id, no body. Keep.
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/session/modal.rs",
+        6,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/settings.rs",
+        4,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/status.rs",
+        27,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/task_result.rs",
+        40,
+    ), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep. // 26-6d: pager-local fixtures for `ContextWindowSet`; no body site F5 1.0.41: +1 `agent_id: AgentId(0)` field of a `TaskResult::RenameSessionFailed` test fixture (in-process AgentId field; pager tab key, never a request body).
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/transcript.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/tests/turn.rs",
+        7,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/dispatch/transcript.rs",
+        9,
+    ),
     ("crates/codegen/fuigo-pager/src/app/effects/helpers.rs", 4), // P77: +1 reads `hostname` from a session-list entry (inbound); local UI
-    ("crates/codegen/fuigo-pager/src/app/effects/tests.rs", 3), // P77: +1 fixture
+    ("crates/codegen/fuigo-pager/src/app/effects/tests.rs", 3),   // P77: +1 fixture
     ("crates/codegen/fuigo-pager/src/app/event_loop.rs", 8), // P66 (97efd30a) deleted the dead local-workspace feature; pager-local, no body site (re-pinned by P54-K, R080 §11)
     ("crates/codegen/fuigo-pager/src/app/external_editor.rs", 10),
-    ("crates/codegen/fuigo-pager/src/app/folder_trust_reload.rs", 2), // F5 1.0.41: in-process AgentId args of `handle_closed` / `handle_loaded` (pager tab key, never a request body).
+    (
+        "crates/codegen/fuigo-pager/src/app/folder_trust_reload.rs",
+        3,
+    ), // F5 1.0.41: in-process AgentId args of `handle_closed` / `handle_loaded` (pager tab key, never a request body). 1.0.46 rustfmt: +1, the `agent_id: *agent_id` field of the existing `Effect::FolderTrustClose` literal is now on its own line (a reflow, no new site).
     ("crates/codegen/fuigo-pager/src/app/foreign_sessions.rs", 2), // P77: `hostname: None` rows; local UI
     ("crates/codegen/fuigo-pager/src/app/modals.rs", 1), // P77: `hostname: None` row; local UI
     ("crates/codegen/fuigo-pager/src/app/queue_edit.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/session_load_barrier.rs", 3),
-    ("crates/codegen/fuigo-pager/src/app/status_line_policy.rs", 4),
+    (
+        "crates/codegen/fuigo-pager/src/app/session_load_barrier.rs",
+        3,
+    ),
+    (
+        "crates/codegen/fuigo-pager/src/app/status_line_policy.rs",
+        4,
+    ),
     ("crates/codegen/fuigo-pager/src/app/turn_completion.rs", 1),
     ("crates/codegen/fuigo-pager/src/plugin_cmd.rs", 1),
     ("crates/codegen/fuigo-pager/src/views/dashboard/state.rs", 1),
-    ("crates/codegen/fuigo-pager/src/views/elicitation_view/tests.rs", 5),
+    (
+        "crates/codegen/fuigo-pager/src/views/elicitation_view/tests.rs",
+        5,
+    ),
     ("crates/codegen/fuigo-pager/src/views/modal.rs", 1),
     ("crates/codegen/fuigo-pager/src/views/session_picker.rs", 1), // P77: `hostname: None` fixture
     ("crates/codegen/fuigo-pager/src/views/tasks_pane.rs", 2),
     ("crates/codegen/fuigo-pager/src/views/welcome/mod.rs", 1), // P77: `hostname: None` fixture
     ("crates/codegen/fuigo-pager/src/views/workflows.rs", 11), // B2a-FIX: +1 `agent_id:` field of a `WorkflowAgentRowView` test literal (done_over_total_counts_only_finished_agents; a view row, never a request body). Keep. ROWS-B2a/B2b: +1 `agent_id:` field of a test literal (pager-local agent id, no body). Keep.
-    ("crates/codegen/fuigo-pager/tests/pty_e2e/subscription_watch_and_gate_verify_pty.rs", 2),
+    (
+        "crates/codegen/fuigo-pager/tests/pty_e2e/subscription_watch_and_gate_verify_pty.rs",
+        2,
+    ),
     ("crates/codegen/fuigo-plugin-marketplace/src/git.rs", 1),
     ("crates/codegen/fuigo-plugin-marketplace/src/index.rs", 1),
     ("crates/codegen/fuigo-ratatui-inline/benches/bench.rs", 2),
@@ -200,22 +359,52 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/agent/chat_modes.rs", 1),
     ("crates/codegen/fuigo-shell/src/agent/config.rs", 4),
     ("crates/codegen/fuigo-shell/src/agent/feedback_client.rs", 6),
-    ("crates/codegen/fuigo-shell/src/agent/mvp_agent/acp_agent.rs", 9), // P77: +1 ACP `initialize` `_meta.hostname` (stdio to the local client: keep; over a bridged relay it is withheld by `relay_outbound_frame` in agent/relay.rs); +1 `RegisterRequest.hostname` (gated by `register_body_for`, P54). P81 (R086): the same response's `_meta.agentId` (`agent_id()`, R063 row 12) is NOT stdio-only: over a bridged relay it is replaced by the relay-origin pseudonym in `relay_outbound_frame`; stdio / IPC: kept
-    ("crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs", 4),
+    (
+        "crates/codegen/fuigo-shell/src/agent/mvp_agent/acp_agent.rs",
+        9,
+    ), // P77: +1 ACP `initialize` `_meta.hostname` (stdio to the local client: keep; over a bridged relay it is withheld by `relay_outbound_frame` in agent/relay.rs); +1 `RegisterRequest.hostname` (gated by `register_body_for`, P54). P81 (R086): the same response's `_meta.agentId` (`agent_id()`, R063 row 12) is NOT stdio-only: over a bridged relay it is replaced by the relay-origin pseudonym in `relay_outbound_frame`; stdio / IPC: kept
+    (
+        "crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs",
+        4,
+    ),
     ("crates/codegen/fuigo-shell/src/agent/mvp_agent/mod.rs", 17), // P81 (R086): 2 of these are `email:` / `team_id:` of `auth::AuthMeta` in `auth_response_with_meta` (the `authenticate` response's `_meta`, and `fuigo/auth/check_subscription`): the local ACP client keeps them; over a bridged relay that is not FluxRouter-operated they are withheld by `relay_outbound_frame` (agent/relay.rs)
-    ("crates/codegen/fuigo-shell/src/agent/mvp_agent/settings_manager.rs", 2),
-    ("crates/codegen/fuigo-shell/src/agent/mvp_agent/tests.rs", 16), // 1.0.30: +2 in `concurrent_subscription_checks_share_one_live_check_and_both_see_fresh_meta`: the test `FuigoAuth { user_id }` and the mock `/user` reply's `"userId"` (inbound fixture). Test only; no body site
-    ("crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs", 2), // P83 (d042e473) teardown test: `email:` + `team_id:` fields of a local `FuigoAuth` fixture; test-only, no body site (R092)
-    ("crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p81_relay_bridge_tests.rs", 17), // P81 tests: the real agent's `initialize`, `fuigo/auth/info` and auth metadata through the relay writer (4 `"agentId"`, 3 `"hostname"`, 3 `"email"`, 2 `"team_id"`, 1 `"teamId"`, 1 `agent_id()` call; 3 fields of a session fixture: `email:`, `team_id:`, `organization_id:`)
+    (
+        "crates/codegen/fuigo-shell/src/agent/mvp_agent/settings_manager.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/agent/mvp_agent/tests.rs",
+        16,
+    ), // 1.0.30: +2 in `concurrent_subscription_checks_share_one_live_check_and_both_see_fresh_meta`: the test `FuigoAuth { user_id }` and the mock `/user` reply's `"userId"` (inbound fixture). Test only; no body site
+    (
+        "crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs",
+        2,
+    ), // P83 (d042e473) teardown test: `email:` + `team_id:` fields of a local `FuigoAuth` fixture; test-only, no body site (R092)
+    (
+        "crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p81_relay_bridge_tests.rs",
+        17,
+    ), // P81 tests: the real agent's `initialize`, `fuigo/auth/info` and auth metadata through the relay writer (4 `"agentId"`, 3 `"hostname"`, 3 `"email"`, 2 `"team_id"`, 1 `"teamId"`, 1 `agent_id()` call; 3 fields of a session fixture: `email:`, `team_id:`, `organization_id:`)
     ("crates/codegen/fuigo-shell/src/agent/relay.rs", 159), // audit X1-F5: +1 `user_id:` test fixture field in the relay-bearer credential test (tests 149 of 159, not production); the rest: The relay socket writer's filter (`relay_outbound_frame`) and its tests. Production (10): 2 `"hostname"` (P77: withheld from `result._meta` of ACP initialize and from the `fuigo/session/list` rows), 2 `"agentId"` (P81: the machine id in `result._meta` becomes the relay-origin pseudonym), 2 `"email"`, 1 `"team_id"`, 2 `"teamId"`, 1 `"userId"` (P81: the key lists of the account fields withheld from the auth responses and of the owner ids withheld from the cloud-environment responses). Tests (148): 48 `"hostname"`, 42 `"agentId"`, 21 `"email"`, 15 `"userId"`, 10 `"teamId"`, 5 `"team_id"`, 1 `agent_id()` call, 6 fixture fields (2 `user_id:`, 2 `team_id:`, `hostname:`, `email:`). All of it applies only to a relay that is not FluxRouter-operated
-    ("crates/codegen/fuigo-shell/src/agent/session_registry_client.rs", 22), // P77: +9 `hostname` of the registry register body (omitted at a non-FluxRouter registry by `register_body_for`, P54), the list entry (inbound) and tests
-    ("crates/codegen/fuigo-shell/src/agent/subagent/handle_request.rs", 3),
+    (
+        "crates/codegen/fuigo-shell/src/agent/session_registry_client.rs",
+        22,
+    ), // P77: +9 `hostname` of the registry register body (omitted at a non-FluxRouter registry by `register_body_for`, P54), the list entry (inbound) and tests
+    (
+        "crates/codegen/fuigo-shell/src/agent/subagent/handle_request.rs",
+        3,
+    ),
     ("crates/codegen/fuigo-shell/src/agent/subagent/mod.rs", 2),
-    ("crates/codegen/fuigo-shell/src/agent/subscription_check.rs", 7),
+    (
+        "crates/codegen/fuigo-shell/src/agent/subscription_check.rs",
+        7,
+    ),
     // FLUX-TRAFFIC A: two `user_id` fields inside MOCK RESPONSE bodies in tests (a fake /key/info answer); no request body.
     ("crates/codegen/fuigo-shell/src/auth/api_key_probe.rs", 2),
     ("crates/codegen/fuigo-shell/src/auth/config.rs", 3),
-    ("crates/codegen/fuigo-shell/src/auth/credential_provider.rs", 9),
+    (
+        "crates/codegen/fuigo-shell/src/auth/credential_provider.rs",
+        9,
+    ),
     ("crates/codegen/fuigo-shell/src/auth/device_code.rs", 1),
     ("crates/codegen/fuigo-shell/src/auth/external_auth.rs", 5),
     ("crates/codegen/fuigo-shell/src/auth/flow.rs", 10),
@@ -226,8 +415,14 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/auth/oidc/login.rs", 1),
     ("crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs", 22),
     ("crates/codegen/fuigo-shell/src/auth/oidc/refresh.rs", 4),
-    ("crates/codegen/fuigo-shell/src/auth/oidc/test_helpers.rs", 2),
-    ("crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs", 1), // P47: FuigoAuth test fixture
+    (
+        "crates/codegen/fuigo-shell/src/auth/oidc/test_helpers.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs",
+        1,
+    ), // P47: FuigoAuth test fixture
     ("crates/codegen/fuigo-shell/src/auth/recovery.rs", 4),
     (
         "crates/codegen/fuigo-shell/src/auth/refresh/auth_backend_contract_tests.rs",
@@ -254,62 +449,173 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/extensions/auth.rs", 7), // P81 (R086): the `fuigo/auth/info` response (`email:`, `team_id:`, `organization_id:` of `AuthInfoResponse`, declared and filled) and the `"email"` of `fuigo/auth/logout`: the local ACP client keeps them; over a bridged relay that is not FluxRouter-operated they are withheld by `relay_outbound_frame` (agent/relay.rs)
     ("crates/codegen/fuigo-shell/src/extensions/bundle.rs", 8),
     ("crates/codegen/fuigo-shell/src/extensions/feedback.rs", 9),
-    ("crates/codegen/fuigo-shell/src/extensions/notification.rs", 1),
-    ("crates/codegen/fuigo-shell/src/extensions/session_admin.rs", 1),
+    (
+        "crates/codegen/fuigo-shell/src/extensions/notification.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/extensions/session_admin.rs",
+        1,
+    ),
     ("crates/codegen/fuigo-shell/src/extensions/share.rs", 1),
     ("crates/codegen/fuigo-shell/src/extensions/worktree.rs", 1),
     ("crates/codegen/fuigo-shell/src/leader/server.rs", 5), // P77: the hub registration `metadata.hostname` (key, removal, parameter), gated by `hub_registration_identity`
     ("crates/codegen/fuigo-shell/src/leader/server_tests.rs", 6), // P77 (R082): the mock hub's hello ACK fixture names "user_id" (inbound, test only); the rest are `hostname` assertions of the P77 tests
-    ("crates/codegen/fuigo-shell/src/managed_config/response.rs", 2),
+    (
+        "crates/codegen/fuigo-shell/src/managed_config/response.rs",
+        2,
+    ),
     ("crates/codegen/fuigo-shell/src/managed_config/store.rs", 4),
-    ("crates/codegen/fuigo-shell/src/managed_config/supervisor.rs", 4),
-    ("crates/codegen/fuigo-shell/src/managed_config/tests.rs", 22), // review R06/R07: +3 test markers and a test `ManagedConfigResponse` (`principal`, `deployment_id: None`, `team_id`), parsed, never sent. P147: +2 are `deployment_id: None` / `team_id: None` in a test `ManagedConfigResponse` (a FluxRouter response being parsed, not a body Fuigo sends). P167: +1 is the `team_id` of a local test login written to a temp `FUIGO_AUTH_PATH` file (read back, never sent). dfix5-3: +3 are the `deployment_id`, `team_id` and marker `principal` of a test payload applied to a temp home (parsed, never sent).
+    (
+        "crates/codegen/fuigo-shell/src/managed_config/supervisor.rs",
+        4,
+    ),
+    ("crates/codegen/fuigo-shell/src/managed_config/tests.rs", 27), // u46-w3fix: +3 are the `deployment_id`, `team_id` and marker `principal` of test `apply_under_lock_refuses_to_replace_the_policy_when_the_floor_cannot_be_persisted` (signed payload and marker written to a temp home, parsed, never sent; same class as dfix5-3). 1.0.46 rustfmt: +2, the `deployment_id: None` / `team_id: None` fields of the existing one-line `withdrawn` test `ManagedConfigResponse` now sit on their own lines (a reflow, no new site; parsed, never sent). review R06/R07: +3 test markers and a test `ManagedConfigResponse` (`principal`, `deployment_id: None`, `team_id`), parsed, never sent. P147: +2 are `deployment_id: None` / `team_id: None` in a test `ManagedConfigResponse` (a FluxRouter response being parsed, not a body Fuigo sends). P167: +1 is the `team_id` of a local test login written to a temp `FUIGO_AUTH_PATH` file (read back, never sent). dfix5-3: +3 are the `deployment_id`, `team_id` and marker `principal` of a test payload applied to a temp home (parsed, never sent).
     ("crates/codegen/fuigo-shell/src/relay/sync.rs", 14), // P77: the relay-sync `initialize` `_meta.hostname`, gated by `relay_initialize_meta` (parameter, key, removal), and its tests (`hostname` and "agentId" fixtures); 1 is the pre-P77 session-scoped "agentId"
     ("crates/codegen/fuigo-shell/src/remote/client.rs", 6),
     ("crates/codegen/fuigo-shell/src/remote/client_tests.rs", 17),
     ("crates/codegen/fuigo-shell/src/remote/mod.rs", 2),
-    ("crates/codegen/fuigo-shell/src/remote/model_source/oai.rs", 2),
+    (
+        "crates/codegen/fuigo-shell/src/remote/model_source/oai.rs",
+        2,
+    ),
     ("crates/codegen/fuigo-shell/src/remote/skills_client.rs", 49), // P70a (R087): +2 are the quoted field names `"user_id"`, `"email"` in `SkillsAuthCandidate`'s hand-written redacting `Debug`. No body site
     ("crates/codegen/fuigo-shell/src/remote/sync.rs", 3),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_impl/laziness.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_impl/memory_dream.rs", 2),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_impl/recap.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs", 3),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_impl/side_call.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_impl/turn.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_impl/workflow.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_tests/auth_error_no_retry_tests.rs", 4),
-    ("crates/codegen/fuigo-shell/src/session/acp_session_tests/cancel_running_task_tests.rs", 8),
-    ("crates/codegen/fuigo-shell/src/session/feedback_manager.rs", 2),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_impl/laziness.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_impl/memory_dream.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_impl/recap.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs",
+        3,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_impl/side_call.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_impl/turn.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_impl/workflow.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_tests/auth_error_no_retry_tests.rs",
+        4,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/acp_session_tests/cancel_running_task_tests.rs",
+        8,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/feedback_manager.rs",
+        2,
+    ),
     ("crates/codegen/fuigo-shell/src/session/fork.rs", 2),
-    ("crates/codegen/fuigo-shell/src/session/goal_classifier/evidence.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/goal_evaluator.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/helpers/session_compact.rs", 3),
-    ("crates/codegen/fuigo-shell/src/session/helpers/session_compact_reasoning_compaction_regression_tests.rs", 2),
-    ("crates/codegen/fuigo-shell/src/session/mcp_elicitation.rs", 1),
+    (
+        "crates/codegen/fuigo-shell/src/session/goal_classifier/evidence.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/goal_evaluator.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/helpers/session_compact.rs",
+        3,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/helpers/session_compact_reasoning_compaction_regression_tests.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/mcp_elicitation.rs",
+        1,
+    ),
     ("crates/codegen/fuigo-shell/src/session/merge.rs", 6), // P77: `hostname` of merged session rows (from the registry list). Serialised into the `fuigo/session/list` response: local over stdio/IPC; over a bridged relay withheld by `relay_outbound_frame`
-    ("crates/codegen/fuigo-shell/src/session/persistence_feedback_tests.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/slash_commands.rs", 15),
-    ("crates/codegen/fuigo-shell/src/session/slash_commands_tests.rs", 19),
-    ("crates/codegen/fuigo-shell/src/session/tool_index_tests.rs", 2),
-    ("crates/codegen/fuigo-shell/src/session/unified_list/cursor.rs", 1), // P77: fixture
-    ("crates/codegen/fuigo-shell/src/session/unified_list/facets.rs", 5), // P77: fixtures
-    ("crates/codegen/fuigo-shell/src/session/unified_list/mod.rs", 3), // P77: fixtures of the `fuigo/session/list` response (see session/merge.rs)
-    ("crates/codegen/fuigo-shell/src/session/unified_list/row.rs", 1), // P77: `hostname: None` row (see session/merge.rs)
-    ("crates/codegen/fuigo-shell/src/session/workflow/host_service.rs", 4),
-    ("crates/codegen/fuigo-shell/src/session/workflow/notify.rs", 1),
-    ("crates/codegen/fuigo-shell/src/session/workflow/tracker.rs", 6),
+    (
+        "crates/codegen/fuigo-shell/src/session/persistence_feedback_tests.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/slash_commands.rs",
+        15,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/slash_commands_tests.rs",
+        19,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/tool_index_tests.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/unified_list/cursor.rs",
+        1,
+    ), // P77: fixture
+    (
+        "crates/codegen/fuigo-shell/src/session/unified_list/facets.rs",
+        5,
+    ), // P77: fixtures
+    (
+        "crates/codegen/fuigo-shell/src/session/unified_list/mod.rs",
+        3,
+    ), // P77: fixtures of the `fuigo/session/list` response (see session/merge.rs)
+    (
+        "crates/codegen/fuigo-shell/src/session/unified_list/row.rs",
+        1,
+    ), // P77: `hostname: None` row (see session/merge.rs)
+    (
+        "crates/codegen/fuigo-shell/src/session/workflow/host_service.rs",
+        4,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/workflow/notify.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/src/session/workflow/tracker.rs",
+        6,
+    ),
     ("crates/codegen/fuigo-shell/src/session/worktree.rs", 3),
-    ("crates/codegen/fuigo-shell/src/test_support/lsp_runtime.rs", 2),
+    (
+        "crates/codegen/fuigo-shell/src/test_support/lsp_runtime.rs",
+        2,
+    ),
     ("crates/codegen/fuigo-shell/src/tools/config.rs", 2),
-    ("crates/codegen/fuigo-shell/src/upload/feedback_archive.rs", 7),
+    (
+        "crates/codegen/fuigo-shell/src/upload/feedback_archive.rs",
+        7,
+    ),
     ("crates/codegen/fuigo-shell/src/upload/gcs.rs", 1),
     ("crates/codegen/fuigo-shell/src/util/user_identity.rs", 19),
     ("crates/codegen/fuigo-shell/tests/common/mod.rs", 4),
-    ("crates/codegen/fuigo-shell/tests/external_auth_expired_credential.rs", 2),
-    ("crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs", 5), // P70a (R087): +2 are `"user_id": ""` and `"email": null` in the `auth.json` fixture a test writes to its sandbox (`seed_auth_json`); a local file, no body site
-    ("crates/codegen/fuigo-shell/tests/subagent_sweep_support/mod.rs", 1),
-    ("crates/codegen/fuigo-shell/tests/test_startup_prefetch_repair_skip.rs", 2),
+    (
+        "crates/codegen/fuigo-shell/tests/external_auth_expired_credential.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs",
+        5,
+    ), // P70a (R087): +2 are `"user_id": ""` and `"email": null` in the `auth.json` fixture a test writes to its sandbox (`seed_auth_json`); a local file, no body site
+    (
+        "crates/codegen/fuigo-shell/tests/subagent_sweep_support/mod.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-shell/tests/test_startup_prefetch_repair_skip.rs",
+        2,
+    ),
     ("crates/codegen/fuigo-telemetry/src/client.rs", 40),
     ("crates/codegen/fuigo-telemetry/src/events/mod.rs", 6),
     ("crates/codegen/fuigo-telemetry/src/external/emit.rs", 4),
@@ -320,67 +626,167 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs", 63),
     ("crates/codegen/fuigo-telemetry/src/otel_layer/redact.rs", 4),
     ("crates/codegen/fuigo-telemetry/src/sentry.rs", 1), // audit S11-F8: `email: Some(secret)` in a unit test of the Sentry event scrubber; no body site
-    ("crates/codegen/fuigo-telemetry/tests/agent_id_prewarm.rs", 2),
-    ("crates/codegen/fuigo-telemetry/tests/external_otlp_gates_on.rs", 9),
-    ("crates/codegen/fuigo-telemetry/tests/machine_id_off_boot_path.rs", 2),
-    ("crates/codegen/fuigo-telemetry/tests/manual_auth_emit.rs", 5),
+    (
+        "crates/codegen/fuigo-telemetry/tests/agent_id_prewarm.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-telemetry/tests/external_otlp_gates_on.rs",
+        9,
+    ),
+    (
+        "crates/codegen/fuigo-telemetry/tests/machine_id_off_boot_path.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-telemetry/tests/manual_auth_emit.rs",
+        5,
+    ),
     ("crates/codegen/fuigo-test-support/src/mock_server.rs", 3),
     ("crates/codegen/fuigo-test-support/src/sandbox.rs", 1),
-    ("crates/codegen/fuigo-tools/src/computer/local/restore_guard.rs", 1), // u35: the `hostname` shell command in the guard's list of safe-listed program names; not a body
-    ("crates/codegen/fuigo-tools/src/mcp_elicitation/schema.rs", 1),
-    ("crates/codegen/fuigo-tools/src/mcp_elicitation/schema_tests.rs", 5),
+    (
+        "crates/codegen/fuigo-tools/src/computer/local/restore_guard.rs",
+        1,
+    ), // u35: the `hostname` shell command in the guard's list of safe-listed program names; not a body
+    (
+        "crates/codegen/fuigo-tools/src/mcp_elicitation/schema.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-tools/src/mcp_elicitation/schema_tests.rs",
+        5,
+    ),
     ("crates/codegen/fuigo-tools/src/mcp_elicitation/types.rs", 4),
-    ("crates/codegen/fuigo-tools/src/mcp_elicitation/validate_tests.rs", 7),
+    (
+        "crates/codegen/fuigo-tools/src/mcp_elicitation/validate_tests.rs",
+        7,
+    ),
     ("crates/codegen/fuigo-workflow/src/engine.rs", 1),
     ("crates/codegen/fuigo-workflow/src/host.rs", 1),
     ("crates/codegen/fuigo-workflow/src/validate.rs", 1),
     ("crates/codegen/fuigo-workspace-types/src/rpc/git.rs", 1),
-    ("crates/codegen/fuigo-workspace-types/src/types/config.rs", 2), // P70a (R087): +1 is the quoted field name `"agent_id"` in `AgentSessionConfig`'s hand-written redacting `Debug`. No body site
-    ("crates/codegen/fuigo-workspace-types/src/types/session.rs", 1),
-    ("crates/codegen/fuigo-workspace-types/tests/wire_round_trip.rs", 2),
-    ("crates/codegen/fuigo-workspace/src/bin/workspace_server_probe.rs", 1),
+    (
+        "crates/codegen/fuigo-workspace-types/src/types/config.rs",
+        2,
+    ), // P70a (R087): +1 is the quoted field name `"agent_id"` in `AgentSessionConfig`'s hand-written redacting `Debug`. No body site
+    (
+        "crates/codegen/fuigo-workspace-types/src/types/session.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-workspace-types/tests/wire_round_trip.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-workspace/src/bin/workspace_server_probe.rs",
+        1,
+    ),
     ("crates/codegen/fuigo-workspace/src/config.rs", 3),
     ("crates/codegen/fuigo-workspace/src/handle_tests.rs", 1),
     ("crates/codegen/fuigo-workspace/src/hub_auth/mod.rs", 20), // audit X1-F5: +1 `"user_id": "u1"` in a unit-test auth.json fixture for the hub-session-token credential test; no body site | P70a (R087): +1 is the quoted field name `"user_id"` in `AuthEntry`'s hand-written redacting `Debug`, +1 is `"user_id": "p70-user"` in a unit-test JSON fixture; no body site | P47 (d429c380) deleted a loopback test whose auth.json fixture quoted "user_id"; local file read, no body site (re-pinned by P54-K, R080 §11)
-    ("crates/codegen/fuigo-workspace/src/hub_auth/proactive_tests.rs", 2),
-    ("crates/codegen/fuigo-workspace/src/permission/auto_mode/mod.rs", 1), // P77: the `hostname` shell command in an allowlist; not a body
-    ("crates/codegen/fuigo-workspace/src/permission/manager/mod.rs", 3), // P77: the `hostname` shell command in allowlists and a test; not a body
-    ("crates/codegen/fuigo-workspace/src/permission/manager/u35_classify_tests.rs", 1), // u35: the `hostname` shell command in a read-only regression table; not a body
-    ("crates/codegen/fuigo-workspace/src/permission/safe_forms.rs", 1), // u35: the `hostname` shell command, matched to judge its options; not a body
+    (
+        "crates/codegen/fuigo-workspace/src/hub_auth/proactive_tests.rs",
+        2,
+    ),
+    (
+        "crates/codegen/fuigo-workspace/src/permission/auto_mode/mod.rs",
+        1,
+    ), // P77: the `hostname` shell command in an allowlist; not a body
+    (
+        "crates/codegen/fuigo-workspace/src/permission/manager/mod.rs",
+        2,
+    ), // P77: the `hostname` shell command in allowlists; not a body (the test assertion moved to manager/tests/mod.rs)
+    (
+        "crates/codegen/fuigo-workspace/src/permission/manager/tests/mod.rs",
+        1,
+    ), // P77: the `is_safe_command("hostname")` test assertion, moved here unchanged from manager/mod.rs by the 1.0.46 test split; not a body
+    (
+        "crates/codegen/fuigo-workspace/src/permission/manager/u35_classify_tests.rs",
+        1,
+    ), // u35: the `hostname` shell command in a read-only regression table; not a body
+    (
+        "crates/codegen/fuigo-workspace/src/permission/safe_forms.rs",
+        1,
+    ), // u35: the `hostname` shell command, matched to judge its options; not a body
     ("crates/codegen/fuigo-workspace/src/publish.rs", 1),
     ("crates/codegen/fuigo-workspace/src/sandbox/grants.rs", 3), // U32-P3: `self.engage()` is `WorkspaceSandbox::engage`, which builds the folder's sandbox grant store; it is not a Mixpanel profile write. No body site
     ("crates/codegen/fuigo-workspace/src/sandbox/mod.rs", 1), // U32-P3: the `engage()` call in `engage_unless_off`; same method, no body site
-    ("crates/codegen/fuigo-workspace/src/sandbox/network_tests.rs", 1), // U32-P3: a test's `sandbox.engage()`; no body site
+    (
+        "crates/codegen/fuigo-workspace/src/sandbox/network_tests.rs",
+        1,
+    ), // U32-P3: a test's `sandbox.engage()`; no body site
     ("crates/codegen/fuigo-workspace/src/sandbox/tests.rs", 4), // U32-P3: tests' `sandbox.engage()` / `linked.engage()` calls; no body site
-    ("crates/codegen/fuigo-workspace/src/session/git_gate_tests.rs", 1),
-    ("crates/codegen/fuigo-workspace/src/session/git_restore_code_tests.rs", 3), // 1.0.42: +1 `git config user.email` in a throwaway test repo (local git config, never a request body). Keep.
+    (
+        "crates/codegen/fuigo-workspace/src/session/git_gate_tests.rs",
+        1,
+    ),
+    (
+        "crates/codegen/fuigo-workspace/src/session/git_restore_code_tests.rs",
+        3,
+    ), // 1.0.42: +1 `git config user.email` in a throwaway test repo (local git config, never a request body). Keep.
     ("crates/codegen/fuigo-workspace/src/session/git_tests.rs", 3),
-    ("crates/codegen/fuigo-workspace/src/upload/environment.rs", 12), // 7 `user_id` tokens (R063). P71v2 (R073): +1, a test's key list asserting "user_id" is null for a third-party proxy. P77: +3 `hostname` (`$HOSTNAME`) of the workspace environment upload (field, parameter, a test key) and, s20 restack, +1 `"hostname"` in that same P71v2 key list. The record is gated since P71v2: `for_method` nulls `hostname`, `server_id`, `user_id`, `principal_id` for a storage proxy that is not FluxRouter-operated (R082 s20 addendum)
+    (
+        "crates/codegen/fuigo-workspace/src/upload/environment.rs",
+        12,
+    ), // 7 `user_id` tokens (R063). P71v2 (R073): +1, a test's key list asserting "user_id" is null for a third-party proxy. P77: +3 `hostname` (`$HOSTNAME`) of the workspace environment upload (field, parameter, a test key) and, s20 restack, +1 `"hostname"` in that same P71v2 key list. The record is gated since P71v2: `for_method` nulls `hostname`, `server_id`, `user_id`, `principal_id` for a storage proxy that is not FluxRouter-operated (R082 s20 addendum)
     ("crates/common/fuigo-computer-hub-core/src/local.rs", 1),
     ("crates/common/fuigo-computer-hub-core/src/registry.rs", 1),
     ("crates/common/fuigo-computer-hub-core/src/remote.rs", 2),
     ("crates/common/fuigo-computer-hub-core/src/transport.rs", 1),
-    ("crates/common/fuigo-computer-hub-core/tests/compound_resolver.rs", 1),
-    ("crates/common/fuigo-computer-hub-core/tests/inner_dispatch.rs", 1),
-    ("crates/common/fuigo-computer-hub-core/tests/local_transport.rs", 1),
-    ("crates/common/fuigo-computer-hub-core/tests/tool_registry.rs", 2),
+    (
+        "crates/common/fuigo-computer-hub-core/tests/compound_resolver.rs",
+        1,
+    ),
+    (
+        "crates/common/fuigo-computer-hub-core/tests/inner_dispatch.rs",
+        1,
+    ),
+    (
+        "crates/common/fuigo-computer-hub-core/tests/local_transport.rs",
+        1,
+    ),
+    (
+        "crates/common/fuigo-computer-hub-core/tests/tool_registry.rs",
+        2,
+    ),
     ("crates/common/fuigo-computer-hub-sdk/src/auth.rs", 1),
     ("crates/common/fuigo-computer-hub-sdk/src/connection.rs", 3),
-    ("crates/common/fuigo-computer-hub-sdk/src/connection_borrow.rs", 1),
-    ("crates/common/fuigo-computer-hub-sdk/src/connection_tests.rs", 10), // P47: +1 mock hub reply in a test
+    (
+        "crates/common/fuigo-computer-hub-sdk/src/connection_borrow.rs",
+        1,
+    ),
+    (
+        "crates/common/fuigo-computer-hub-sdk/src/connection_tests.rs",
+        10,
+    ), // P47: +1 mock hub reply in a test
     ("crates/common/fuigo-computer-hub-sdk/src/harness.rs", 2), // P173 (R173 round 4): +1 is `"user_id": "test"` in the permission mock hub's hello ACK fixture (inbound, test only), like the leader/server_tests.rs mock; no body site
-    ("crates/common/fuigo-computer-hub-sdk/src/oidc_provider.rs", 4),
+    (
+        "crates/common/fuigo-computer-hub-sdk/src/oidc_provider.rs",
+        4,
+    ),
     ("crates/common/fuigo-computer-hub-sdk/src/pool.rs", 1),
-    ("crates/common/fuigo-message-delivery-core/src/envelope.rs", 3),
+    (
+        "crates/common/fuigo-message-delivery-core/src/envelope.rs",
+        3,
+    ),
     ("crates/common/fuigo-test-utils/src/git.rs", 1),
     ("crates/common/fuigo-tool-protocol/src/bot_relay.rs", 47),
     ("crates/common/fuigo-tool-protocol/src/frames.rs", 13), // P77: `ServerIdentityMetadata.hostname` (type, lenient reader, tests); the only producer is the leader hub registration
     ("crates/common/fuigo-tool-protocol/src/handshake.rs", 1),
     ("crates/common/fuigo-tool-protocol/src/registration.rs", 2),
-    ("crates/common/fuigo-tool-protocol/tests/bot_relay_conformance.rs", 3),
-    ("crates/common/fuigo-tool-protocol/tests/serde_roundtrip.rs", 7),
+    (
+        "crates/common/fuigo-tool-protocol/tests/bot_relay_conformance.rs",
+        3,
+    ),
+    (
+        "crates/common/fuigo-tool-protocol/tests/serde_roundtrip.rs",
+        7,
+    ),
     ("crates/common/fuigo-tool-types/src/ext.rs", 4),
-    ("prod/mc/cli-chat-proxy-types/src/deployment_config_types.rs", 7),
+    (
+        "prod/mc/cli-chat-proxy-types/src/deployment_config_types.rs",
+        7,
+    ),
     ("prod/mc/cli-chat-proxy-types/src/feedback_types.rs", 3),
     ("prod/mc/cli-chat-proxy-types/src/metadata_types.rs", 14),
     ("prod/mc/cli-chat-proxy-types/src/sandbox_types.rs", 2), // `user_id` / `team_id` of `SandboxEnvironment` (the backend's record of who owns a cloud environment). P81 (R086): the agent returns it in the `fuigo/cloud/env/list`, `create` and `update` responses; the local ACP client keeps the ids, over a bridged relay that is not FluxRouter-operated they are withheld by `relay_outbound_frame` (agent/relay.rs)
@@ -464,7 +870,9 @@ fn scan() -> (BTreeMap<String, usize>, usize) {
     let mut total = 0;
     for path in &files {
         if path.file_name() == Some(this_file.as_os_str())
-            && path.parent().is_some_and(|p| p.ends_with("fuigo-extra-ca/tests"))
+            && path
+                .parent()
+                .is_some_and(|p| p.ends_with("fuigo-extra-ca/tests"))
         {
             continue;
         }
@@ -520,13 +928,19 @@ fn scanner_counts_every_spelling_of_body_identity() {
 #[test]
 fn body_scan_reaches_the_known_sites() {
     let (counts, files) = scan();
-    assert!(files > 1000, "only {files} .rs files scanned: the walk is not reaching the tree");
+    assert!(
+        files > 1000,
+        "only {files} .rs files scanned: the walk is not reaching the tree"
+    );
     for known in [
         "crates/codegen/fuigo-telemetry/src/client.rs",
         "crates/codegen/fuigo-shell/src/agent/session_registry_client.rs",
         "crates/codegen/fuigo-shell/src/remote/client.rs",
     ] {
-        assert!(counts.get(known).is_some_and(|n| *n > 0), "{known} not found by the scan");
+        assert!(
+            counts.get(known).is_some_and(|n| *n > 0),
+            "{known} not found by the scan"
+        );
     }
 }
 
@@ -535,8 +949,10 @@ fn body_scan_reaches_the_known_sites() {
 #[test]
 fn body_identity_sites_are_exactly_the_reviewed_ones() {
     let (actual, _) = scan();
-    let expected: BTreeMap<String, usize> =
-        EXPECTED.iter().map(|(path, n)| ((*path).to_string(), *n)).collect();
+    let expected: BTreeMap<String, usize> = EXPECTED
+        .iter()
+        .map(|(path, n)| ((*path).to_string(), *n))
+        .collect();
     if actual != expected {
         let mut table = String::new();
         for (path, n) in &actual {
@@ -545,7 +961,10 @@ fn body_identity_sites_are_exactly_the_reviewed_ones() {
         let mut diff = String::new();
         for (path, n) in &actual {
             if expected.get(path) != Some(n) {
-                diff.push_str(&format!("  {path}: expected {:?}, found {n}\n", expected.get(path)));
+                diff.push_str(&format!(
+                    "  {path}: expected {:?}, found {n}\n",
+                    expected.get(path)
+                ));
             }
         }
         for (path, n) in &expected {

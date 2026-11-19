@@ -61,7 +61,9 @@ pub(crate) async fn accept_from_slot<S: PendingInstance>(
         };
         match result {
             Ok(()) => {
-                let connected = slot.take().ok_or_else(|| std::io::Error::other("pending instance vanished"))?;
+                let connected = slot
+                    .take()
+                    .ok_or_else(|| std::io::Error::other("pending instance vanished"))?;
                 // Best effort: if creating the successor fails here, the next accept creates it.
                 *slot = create().ok();
                 return Ok(connected);
@@ -78,7 +80,8 @@ pub(crate) async fn accept_from_slot<S: PendingInstance>(
     if slot.is_none() {
         *slot = create().ok();
     }
-    Err(last_err.unwrap_or_else(|| std::io::Error::other("LeaderListener: accept exhausted retries")))
+    Err(last_err
+        .unwrap_or_else(|| std::io::Error::other("LeaderListener: accept exhausted retries")))
 }
 
 #[cfg(windows)]
@@ -103,7 +106,9 @@ mod windows_impl {
 
     /// The pid of the process that owns the SERVER end of the named pipe `client_end` is connected to, from the OS
     /// (`GetNamedPipeServerProcessId`). Unlike any pid a peer reports in a message, a peer cannot choose this one.
-    pub(crate) fn pipe_server_pid_of_handle(client_end: std::os::windows::io::RawHandle) -> Option<u32> {
+    pub(crate) fn pipe_server_pid_of_handle(
+        client_end: std::os::windows::io::RawHandle,
+    ) -> Option<u32> {
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
         let mut pid: u32 = 0;
@@ -222,9 +227,15 @@ mod windows_impl {
 
         /// The raw handle of the pre-created pending instance, if any.
         #[cfg(test)]
-        pub(crate) async fn pending_raw_handle_for_test(&self) -> Option<std::os::windows::io::RawHandle> {
+        pub(crate) async fn pending_raw_handle_for_test(
+            &self,
+        ) -> Option<std::os::windows::io::RawHandle> {
             use std::os::windows::io::AsRawHandle;
-            self.next_server.lock().await.as_ref().map(|s| s.as_raw_handle())
+            self.next_server
+                .lock()
+                .await
+                .as_ref()
+                .map(|s| s.as_raw_handle())
         }
 
         /// Wait for the next incoming connection.
@@ -397,22 +408,42 @@ mod accept_slot_tests {
             let (created, notify, ready) = (created.clone(), notify.clone(), ready.clone());
             move || {
                 let id = created.fetch_add(1, Ordering::SeqCst);
-                Ok(Fake { id, connected: notify.clone(), ready: ready.clone() })
+                Ok(Fake {
+                    id,
+                    connected: notify.clone(),
+                    ready: ready.clone(),
+                })
             }
         };
         let mut slot = Some(create().unwrap());
         // Cancelled: the timeout wins, as an event branch would in the leader's select!.
-        let cancelled =
-            tokio::time::timeout(Duration::from_millis(20), accept_from_slot(&mut slot, &create, 3, Duration::ZERO)).await;
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(20),
+            accept_from_slot(&mut slot, &create, 3, Duration::ZERO),
+        )
+        .await;
         assert!(cancelled.is_err(), "nobody connected yet");
-        assert_eq!(slot.as_ref().map(|f| f.id), Some(0), "the pending instance survived the cancellation");
-        assert_eq!(created.load(Ordering::SeqCst), 1, "no instance was destroyed and recreated");
+        assert_eq!(
+            slot.as_ref().map(|f| f.id),
+            Some(0),
+            "the pending instance survived the cancellation"
+        );
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            1,
+            "no instance was destroyed and recreated"
+        );
 
         // The client connects to that instance; the next accept returns it and pre-creates the successor.
         ready.store(true, Ordering::SeqCst);
         notify.notify_waiters();
-        let got = accept_from_slot(&mut slot, &create, 3, Duration::ZERO).await.unwrap();
-        assert_eq!(got.id, 0, "the client is served on the instance it connected to");
+        let got = accept_from_slot(&mut slot, &create, 3, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(
+            got.id, 0,
+            "the client is served on the instance it connected to"
+        );
         assert_eq!(slot.as_ref().map(|f| f.id), Some(1), "successor pending");
     }
 
@@ -440,7 +471,11 @@ mod accept_slot_tests {
         .err()
         .expect("all attempts fail");
         assert_eq!(err.to_string(), "broken");
-        assert_eq!(created.load(Ordering::SeqCst), 4, "one per attempt plus the refill");
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            4,
+            "one per attempt plus the refill"
+        );
         assert!(slot.is_some(), "the slot is refilled for the next accept");
     }
 }
@@ -452,8 +487,14 @@ mod os_server_pid_tests {
     use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
     #[tokio::test]
     async fn the_client_handle_reports_the_pid_of_the_process_serving_the_pipe() {
-        let name = format!(r"\\.\pipe\fuigo-test-r2-os-server-pid-{}", std::process::id());
-        let server = ServerOptions::new().first_pipe_instance(true).create(&name).unwrap();
+        let name = format!(
+            r"\\.\pipe\fuigo-test-r2-os-server-pid-{}",
+            std::process::id()
+        );
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
         let client = ClientOptions::new().open(&name).unwrap();
         server.connect().await.unwrap();
         assert_eq!(

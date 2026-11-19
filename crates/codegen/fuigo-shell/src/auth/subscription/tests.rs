@@ -130,12 +130,17 @@ async fn callback_wrong_or_missing_state_then_correct_completes_login() {
                     let reply = callback_request(
                         (std::net::Ipv4Addr::LOCALHOST, port).into(),
                         &format!("{path}?code=fake-code&{query}"),
-                    ).await;
+                    )
+                    .await;
                     assert!(reply.starts_with("HTTP/1.1 400"));
                     assert!(server.requests.lock().unwrap().is_empty());
                     assert!(!temp.path().join("subscriptions/credentials.json").exists());
                 }
-                assert!(callback(port, &path, &state).await.starts_with("HTTP/1.1 200"));
+                assert!(
+                    callback(port, &path, &state)
+                        .await
+                        .starts_with("HTTP/1.1 200")
+                );
             }
         );
         result.unwrap();
@@ -176,7 +181,11 @@ async fn callback_junk_never_ends_the_login_and_the_real_callback_still_complete
         async {
             // Far more than any request budget: ignored requests are never counted.
             for _ in 0..40 {
-                assert!(callback(port, &path, "wrong-state").await.starts_with("HTTP/1.1 400"));
+                assert!(
+                    callback(port, &path, "wrong-state")
+                        .await
+                        .starts_with("HTTP/1.1 400")
+                );
             }
             let junk: [&[u8]; 6] = [
                 b"\xff\xfe GET / HTTP/1.1\r\n\r\n",
@@ -192,7 +201,10 @@ async fn callback_junk_never_ends_the_login_and_the_real_callback_still_complete
             }
             // Malformed heads carrying THIS attempt's state, with a code or with an error:
             // ignored too, neither exchanged nor ending the login.
-            for query in [format!("code=x&state={state}"), format!("state={state}&error=access_denied")] {
+            for query in [
+                format!("code=x&state={state}"),
+                format!("state={state}&error=access_denied"),
+            ] {
                 for head in [
                     format!("GET {path}?{query}\r\n\r\n"),
                     format!("GET {path}?{query} HTTP/1.1 extra\r\n\r\n"),
@@ -200,7 +212,9 @@ async fn callback_junk_never_ends_the_login_and_the_real_callback_still_complete
                     format!("GET {path}?{query} HTTP/1.1\r\nno-colon-header\r\n\r\n"),
                     format!("GET  {path}?{query} HTTP/1.1\r\n\r\n"),
                     format!("GET {path}?{query} HTTP/1.1\n\n"),
-                    format!("GET {path}?{query} HTTP/1.1\r\nHost: localhost\r\nBad(Name): x\r\n\r\n"),
+                    format!(
+                        "GET {path}?{query} HTTP/1.1\r\nHost: localhost\r\nBad(Name): x\r\n\r\n"
+                    ),
                     format!("GET {path}?{query} HTTP/1.1\r\nHost: local\u{0}host\r\n\r\n"),
                     format!("GET {path}?{query} HTTP/1.1\r\nHost: local\u{7f}host\r\n\r\n"),
                     format!("GET {path}?{query}&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
@@ -218,7 +232,11 @@ async fn callback_junk_never_ends_the_login_and_the_real_callback_still_complete
                     .starts_with("HTTP/1.1 404")
             );
             assert!(server.requests.lock().unwrap().is_empty());
-            assert!(callback(port, &path, &state).await.starts_with("HTTP/1.1 200"));
+            assert!(
+                callback(port, &path, &state)
+                    .await
+                    .starts_with("HTTP/1.1 200")
+            );
         }
     );
     result.unwrap();
@@ -275,10 +293,7 @@ async fn callback_correct_state_with_provider_error_still_aborts() {
     let target = format!("{path}?state={state}&error=access_denied");
     let (result, reply) = tokio::join!(
         attempt.finish_with_timeout(&store, CancellationToken::new(), Duration::from_secs(5)),
-        callback_request(
-            (std::net::Ipv4Addr::LOCALHOST, port).into(),
-            &target,
-        )
+        callback_request((std::net::Ipv4Addr::LOCALHOST, port).into(), &target,)
     );
     assert!(matches!(result, Err(SubscriptionError::Callback)));
     assert!(reply.starts_with("HTTP/1.1 400"));
@@ -289,7 +304,9 @@ async fn callback_correct_state_with_provider_error_still_aborts() {
 async fn callback_wrong_state_still_obeys_overall_timeout() {
     let temp = tempfile::tempdir().unwrap();
     let store = SubscriptionStore::new(temp.path());
-    let attempt = LoginAttempt::bind(SubscriptionProvider::Xai, 0).await.unwrap();
+    let attempt = LoginAttempt::bind(SubscriptionProvider::Xai, 0)
+        .await
+        .unwrap();
     let (port, path, _, _) = attempt_parts(&attempt);
     let (result, reply) = tokio::join!(
         attempt.finish_with_timeout(&store, CancellationToken::new(), Duration::from_millis(500)),
@@ -324,11 +341,19 @@ async fn chatgpt_listener_reserves_both_families_and_accepts_ipv6() {
         .unwrap()
         .with_endpoint(server.endpoint.clone());
     let (port, path, state, _) = attempt_parts(&attempt);
-    assert!(TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await.is_err());
+    assert!(
+        TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err()
+    );
     let target = format!("{path}?code=fake-code&state={state}");
     let address: std::net::SocketAddr = if host_has_ipv6_loopback().await {
         // The IPv6 side of the redirect is ours: nobody else can bind it ...
-        assert!(TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).await.is_err());
+        assert!(
+            TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
+                .await
+                .is_err()
+        );
         // ... and a browser that resolves localhost to ::1 completes the login there.
         (std::net::Ipv6Addr::LOCALHOST, port).into()
     } else {
@@ -346,14 +371,18 @@ async fn chatgpt_listener_reserves_both_families_and_accepts_ipv6() {
 
 #[tokio::test]
 async fn chatgpt_listener_fails_if_either_loopback_family_is_occupied() {
-    let occupied = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let occupied = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
     let port = occupied.local_addr().unwrap().port();
     assert!(matches!(
         LoginAttempt::bind(SubscriptionProvider::Chatgpt, port).await,
         Err(SubscriptionError::Listener)
     ));
     if host_has_ipv6_loopback().await {
-        let occupied = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).await.unwrap();
+        let occupied = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let port = occupied.local_addr().unwrap().port();
         assert!(matches!(
             LoginAttempt::bind(SubscriptionProvider::Chatgpt, port).await,
@@ -399,10 +428,14 @@ async fn chatgpt_listener_continues_on_ipv4_when_the_host_has_no_ipv6_loopback()
         let temp = tempfile::tempdir().unwrap();
         let store = SubscriptionStore::new(temp.path());
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let attempt = LoginAttempt::bind_with(provider, 0, ipv6_bind_fails_with(Some(error), attempts.clone()))
-            .await
-            .expect("no IPv6 loopback is not a reason to refuse sign-in")
-            .with_endpoint(server.endpoint.clone());
+        let attempt = LoginAttempt::bind_with(
+            provider,
+            0,
+            ipv6_bind_fails_with(Some(error), attempts.clone()),
+        )
+        .await
+        .expect("no IPv6 loopback is not a reason to refuse sign-in")
+        .with_endpoint(server.endpoint.clone());
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(!attempt.listens_on_ipv6());
         let (port, path, state, _) = attempt_parts(&attempt);
@@ -444,18 +477,28 @@ async fn chatgpt_listener_aborts_when_ipv6_loopback_is_held_or_fails_otherwise()
     let attempt = LoginAttempt::bind_with(
         SubscriptionProvider::Xai,
         0,
-        ipv6_bind_fails_with(Some(|| std::io::Error::from(std::io::ErrorKind::AddrInUse)), attempts.clone()),
+        ipv6_bind_fails_with(
+            Some(|| std::io::Error::from(std::io::ErrorKind::AddrInUse)),
+            attempts.clone(),
+        ),
     )
     .await
     .unwrap();
     assert!(!attempt.listens_on_ipv6());
     assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
     // An IPv4 failure aborts before IPv6 is tried.
-    let occupied = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let occupied = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
     let port = occupied.local_addr().unwrap().port();
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     assert!(matches!(
-        LoginAttempt::bind_with(SubscriptionProvider::Chatgpt, port, ipv6_bind_fails_with(None, attempts.clone())).await,
+        LoginAttempt::bind_with(
+            SubscriptionProvider::Chatgpt,
+            port,
+            ipv6_bind_fails_with(None, attempts.clone())
+        )
+        .await,
         Err(SubscriptionError::Listener)
     ));
     assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -702,7 +745,10 @@ async fn logout_all_waits_for_an_in_flight_refresh_so_it_cannot_write_the_tokens
     store.logout_all().await.unwrap();
     assert!(refresh.await.unwrap().is_ok());
     let path = temp.path().join("subscriptions/credentials.json");
-    assert!(!path.exists(), "a refresh wrote the tokens back after logout");
+    assert!(
+        !path.exists(),
+        "a refresh wrote the tokens back after logout"
+    );
     let client = flow::TokenClient::local(provider, server.endpoint.clone());
     assert!(matches!(
         store.access_with(provider, None, client).await,
@@ -715,7 +761,10 @@ async fn logout_all_waits_for_an_in_flight_refresh_so_it_cannot_write_the_tokens
 async fn logout_all_deletes_only_inside_the_subscription_store() {
     let temp = tempfile::tempdir().unwrap();
     let store = SubscriptionStore::new(temp.path());
-    store.save(record(SubscriptionProvider::Xai, "a")).await.unwrap();
+    store
+        .save(record(SubscriptionProvider::Xai, "a"))
+        .await
+        .unwrap();
     let root = temp.path().join("subscriptions");
     // A write interrupted by a crash leaves its temp file: a full copy of the records.
     std::fs::write(root.join(".tmpAbC123"), b"fake-refresh-orphan").unwrap();
@@ -741,7 +790,10 @@ async fn logout_all_deletes_only_inside_the_subscription_store() {
 async fn logout_all_removes_corrupt_credentials_without_parsing_them() {
     let temp = tempfile::tempdir().unwrap();
     let store = SubscriptionStore::new(temp.path());
-    store.save(record(SubscriptionProvider::Xai, "a")).await.unwrap();
+    store
+        .save(record(SubscriptionProvider::Xai, "a"))
+        .await
+        .unwrap();
     let path = temp.path().join("subscriptions/credentials.json");
     std::fs::write(&path, b"corrupt-fake-token").unwrap();
     store.logout_all().await.unwrap();
@@ -1361,7 +1413,10 @@ async fn manual_tty_restores_echo_on_completion_and_cancellation() {
 async fn manual_controlling_terminal_registers_with_async_reader() {
     let file = super::manual::open_terminal().expect("open concrete controlling terminal");
     let reader =
-        tokio::io::unix::AsyncFd::new(file).expect("register concrete terminal with async reader");
+        // SAFETY: `File` owns the open terminal descriptor until the reader is dropped.
+        unsafe { tokio::io::unix::AsyncFd::register(file) }
+            .map_err(std::io::Error::from)
+            .expect("register concrete terminal with async reader");
     drop(reader); // No terminal input is read and no echo settings change.
 }
 
@@ -1713,10 +1768,16 @@ async fn a_certificate_rejected_under_a_configured_ca_bundle_is_a_local_tls_erro
 
 #[test]
 fn a_local_tls_error_is_not_reported_to_sampling_as_a_login_problem() {
-    let tls = inference::sampling_error(SubscriptionProvider::Xai, SubscriptionError::LocalTls("detail".into())).to_string();
+    let tls = inference::sampling_error(
+        SubscriptionProvider::Xai,
+        SubscriptionError::LocalTls("detail".into()),
+    )
+    .to_string();
     assert!(tls.contains("TLS/CA configuration"), "{tls}");
     assert!(!tls.contains("fuigo login"), "{tls}");
-    let login = inference::sampling_error(SubscriptionProvider::Xai, SubscriptionError::LoginRequired).to_string();
+    let login =
+        inference::sampling_error(SubscriptionProvider::Xai, SubscriptionError::LoginRequired)
+            .to_string();
     assert!(login.contains("fuigo login"), "{login}");
 }
 
@@ -1794,7 +1855,13 @@ async fn tui_sign_in_completes_from_the_browser_callback_without_printing() {
         let (_keep_open, rx) = tokio::sync::mpsc::unbounded_channel();
         let (result, _) = tokio::join!(
             super::flow::finish_for_tui(attempt, &store, rx, false),
-            async { assert!(callback(port, &path, &state).await.starts_with("HTTP/1.1 200")) }
+            async {
+                assert!(
+                    callback(port, &path, &state)
+                        .await
+                        .starts_with("HTTP/1.1 200")
+                )
+            }
         );
         result.unwrap();
         let status = store.status(provider).await.unwrap();
@@ -1817,14 +1884,21 @@ async fn tui_sign_in_accepts_a_pasted_code_and_rejects_a_pasted_url() {
         .with_endpoint(server.endpoint.clone());
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tx.send("fake-pasted-code".to_string()).unwrap();
-    super::flow::finish_for_tui(attempt, &store, rx, false).await.unwrap();
+    super::flow::finish_for_tui(attempt, &store, rx, false)
+        .await
+        .unwrap();
     assert_eq!(store.status(provider).await.unwrap()[0].account, "pasted");
-    assert_eq!(server.requests.lock().unwrap()[0]["code"], "fake-pasted-code");
+    assert_eq!(
+        server.requests.lock().unwrap()[0]["code"],
+        "fake-pasted-code"
+    );
 
     let attempt = LoginAttempt::bind(provider, 0).await.unwrap();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tx.send("https://evil.example/?code=x".to_string()).unwrap();
-    let err = super::flow::finish_for_tui(attempt, &store, rx, false).await.unwrap_err();
+    let err = super::flow::finish_for_tui(attempt, &store, rx, false)
+        .await
+        .unwrap_err();
     assert!(matches!(err, SubscriptionError::Callback));
 }
 
@@ -1976,26 +2050,50 @@ async fn paste_prompt_is_silent_before_it_is_shown_and_flushes_through_the_excha
 }
 
 fn id_token(claims: serde_json::Value) -> String {
-    format!("h.{}.s", URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap()))
+    format!(
+        "h.{}.s",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+    )
 }
 
 #[test]
 fn display_identity_prefers_email_then_name_then_username_and_never_the_account_id() {
     let body = |claims| serde_json::json!({ "id_token": id_token(claims) });
     assert_eq!(
-        flow::display_identity(&body(serde_json::json!({"email":"sam@example.com","name":"Sam","sub":"acct-1"}))),
+        flow::display_identity(&body(
+            serde_json::json!({"email":"sam@example.com","name":"Sam","sub":"acct-1"})
+        )),
         Some("sam@example.com".into())
     );
-    assert_eq!(flow::display_identity(&body(serde_json::json!({"name":"Sam Doe","sub":"acct-1"}))), Some("Sam Doe".into()));
     assert_eq!(
-        flow::display_identity(&body(serde_json::json!({"preferred_username":"sam","sub":"acct-1"}))),
+        flow::display_identity(&body(serde_json::json!({"name":"Sam Doe","sub":"acct-1"}))),
+        Some("Sam Doe".into())
+    );
+    assert_eq!(
+        flow::display_identity(&body(
+            serde_json::json!({"preferred_username":"sam","sub":"acct-1"})
+        )),
         Some("sam".into())
     );
     // Only opaque ids, blank values, control characters, no id token: nothing to show.
-    assert_eq!(flow::display_identity(&body(serde_json::json!({"sub":"acct-1","principal_id":"p"}))), None);
-    assert_eq!(flow::display_identity(&body(serde_json::json!({"email":"  ","sub":"acct-1"}))), None);
-    assert_eq!(flow::display_identity(&body(serde_json::json!({"email":"a\u{1b}[31m@x.com"}))), None);
-    assert_eq!(flow::display_identity(&serde_json::json!({"access_token":"x"})), None);
+    assert_eq!(
+        flow::display_identity(&body(
+            serde_json::json!({"sub":"acct-1","principal_id":"p"})
+        )),
+        None
+    );
+    assert_eq!(
+        flow::display_identity(&body(serde_json::json!({"email":"  ","sub":"acct-1"}))),
+        None
+    );
+    assert_eq!(
+        flow::display_identity(&body(serde_json::json!({"email":"a\u{1b}[31m@x.com"}))),
+        None
+    );
+    assert_eq!(
+        flow::display_identity(&serde_json::json!({"access_token":"x"})),
+        None
+    );
 }
 
 #[tokio::test]
@@ -2014,14 +2112,28 @@ async fn the_exchange_returns_the_display_identity_from_the_id_token_and_stores_
         })
         .await;
         let client = flow::TokenClient::local(provider, with_id.endpoint.clone());
-        let (credential, identity) = client.exchange("c", "v", "http://127.0.0.1/cb").await.unwrap();
+        let (credential, identity) = client
+            .exchange("c", "v", "http://127.0.0.1/cb")
+            .await
+            .unwrap();
         assert_eq!(identity.as_deref(), Some("sam@example.com"));
         store.save(credential).await.unwrap();
-        let disk = std::fs::read_to_string(temp.path().join("subscriptions/credentials.json")).unwrap();
-        assert!(!disk.contains("sam@example.com"), "identity is display only, never persisted");
+        let disk =
+            std::fs::read_to_string(temp.path().join("subscriptions/credentials.json")).unwrap();
+        assert!(
+            !disk.contains("sam@example.com"),
+            "identity is display only, never persisted"
+        );
         // A response with no id token carries no identity.
         let bare = server(move |_| response(provider, "acct-77")).await;
         let client = flow::TokenClient::local(provider, bare.endpoint.clone());
-        assert_eq!(client.exchange("c", "v", "http://127.0.0.1/cb").await.unwrap().1, None);
+        assert_eq!(
+            client
+                .exchange("c", "v", "http://127.0.0.1/cb")
+                .await
+                .unwrap()
+                .1,
+            None
+        );
     }
 }

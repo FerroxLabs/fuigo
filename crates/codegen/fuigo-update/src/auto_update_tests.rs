@@ -658,7 +658,10 @@ async fn test_cleanup_old_downloads_does_not_touch_other_binaries() {
         d.join("fuigo-pager-0.1.141-macos-aarch64").exists(),
         "pager untouched"
     );
-    assert!(d.join("grok-0.1.100-macos-aarch64").exists(), "upstream-owned binary untouched");
+    assert!(
+        d.join("grok-0.1.100-macos-aarch64").exists(),
+        "upstream-owned binary untouched"
+    );
 }
 
 /// Backdate a file's mtime past [`STALE_TMP_AGE`] so cleanup treats it as an abandoned download / genuinely old binary.
@@ -922,10 +925,7 @@ async fn test_cleanup_old_downloads_mixed_stable_and_alpha() {
 fn test_reinstall_hint_npm_mentions_npm_command() {
     let hint = reinstall_hint("npm", "stable");
     assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
-    assert!(
-        hint.contains("fuigo"),
-        "should name the package: {hint}"
-    );
+    assert!(hint.contains("fuigo"), "should name the package: {hint}");
 }
 
 #[test]
@@ -1393,9 +1393,18 @@ fn test_installer_allows_downgrade_gh_release_only_when_forced() {
 #[test]
 fn gh_sums_entry_matches_the_exact_asset_name() {
     let sums = "AAAA  fuigo-1.0.21-linux-x86_64.tar.gz\nbbbb  fuigo-1.0.21-linux-x86_64\ncccc *fuigo-1.0.21-macos-aarch64\n";
-    assert_eq!(gh_sums_entry(sums, "fuigo-1.0.21-linux-x86_64").as_deref(), Some("bbbb"));
-    assert_eq!(gh_sums_entry(sums, "fuigo-1.0.21-macos-aarch64").as_deref(), Some("cccc"));
-    assert_eq!(gh_sums_entry(sums, "fuigo-1.0.21-linux-x86_64.tar.gz").as_deref(), Some("aaaa"));
+    assert_eq!(
+        gh_sums_entry(sums, "fuigo-1.0.21-linux-x86_64").as_deref(),
+        Some("bbbb")
+    );
+    assert_eq!(
+        gh_sums_entry(sums, "fuigo-1.0.21-macos-aarch64").as_deref(),
+        Some("cccc")
+    );
+    assert_eq!(
+        gh_sums_entry(sums, "fuigo-1.0.21-linux-x86_64.tar.gz").as_deref(),
+        Some("aaaa")
+    );
     assert_eq!(gh_sums_entry(sums, "fuigo-1.0.21-linux"), None);
 }
 
@@ -1821,7 +1830,10 @@ async fn p30_local_npm_copy_has_no_installer() {
     unsafe {
         std::env::set_var("FUIGO_NPM_LOCAL", "1");
         std::env::set_var("FUIGO_MANAGED_BY_NPM", "1");
-        std::env::set_var("npm_config_user_agent", "npm/10.2.0 node/v20.11.0 linux x64");
+        std::env::set_var(
+            "npm_config_user_agent",
+            "npm/10.2.0 node/v20.11.0 linux x64",
+        );
     }
     assert!(is_npm_local_copy());
     assert_eq!(get_installer().await, None);
@@ -1853,7 +1865,10 @@ async fn p30_explicit_installer_and_non_local_values_are_not_local() {
 async fn p30_update_in_a_local_copy_prints_the_local_hint_and_does_nothing() {
     let _g = InstallerEnvGuard::isolate();
     unsafe { std::env::set_var("FUIGO_NPM_LOCAL", "1") };
-    assert!(NPM_LOCAL_UPDATE_HINT.contains("npm i fuigo@latest") && NPM_LOCAL_UPDATE_HINT.contains("npx fuigo@latest"));
+    assert!(
+        NPM_LOCAL_UPDATE_HINT.contains("npm i fuigo@latest")
+            && NPM_LOCAL_UPDATE_HINT.contains("npx fuigo@latest")
+    );
     let mut uc = UpdateConfig {
         proxy_base_url: String::new(),
         auth_scope: String::new(),
@@ -1862,7 +1877,9 @@ async fn p30_update_in_a_local_copy_prints_the_local_hint_and_does_nothing() {
         channel: "stable".to_string(),
         npm_registry: None,
     };
-    let r = run_update(false, None, None, &mut uc, CliUpdateTrigger::UserCommand).await.unwrap();
+    let r = run_update(false, None, None, &mut uc, CliUpdateTrigger::UserCommand)
+        .await
+        .unwrap();
     assert_eq!(r, None);
 }
 
@@ -1870,7 +1887,9 @@ async fn p30_update_in_a_local_copy_prints_the_local_hint_and_does_nothing() {
 #[test]
 fn p30_masked_or_empty_npm_root_is_not_usable() {
     assert!(root_is_usable("/usr/local/lib/node_modules"));
-    assert!(root_is_usable(r"C:\Users\a\AppData\Roaming\npm\node_modules"));
+    assert!(root_is_usable(
+        r"C:\Users\a\AppData\Roaming\npm\node_modules"
+    ));
     assert!(!root_is_usable("/home/u/***/g/lib/node_modules"));
     assert!(!root_is_usable(""));
 }
@@ -2047,11 +2066,22 @@ fn s8_f3_temp_npmrc_does_not_follow_a_planted_symlink() {
     std::os::unix::fs::symlink(&victim, &planted).unwrap();
     let result = create_temp_npmrc(None);
     let guard = result.unwrap().expect("file written");
-    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched\n", "token written through a planted symlink");
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "untouched\n",
+        "token written through a planted symlink"
+    );
     assert_ne!(guard.0, planted);
     let parent = guard.0.parent().unwrap();
-    assert_eq!(std::fs::metadata(parent).unwrap().permissions().mode() & 0o777, 0o700);
-    assert!(std::fs::read_to_string(&guard.0).unwrap().contains("s8f3-secret"));
+    assert_eq!(
+        std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(
+        std::fs::read_to_string(&guard.0)
+            .unwrap()
+            .contains("s8f3-secret")
+    );
     drop(guard);
     let _ = std::fs::remove_file(&planted);
 }
@@ -2633,7 +2663,10 @@ fn s8_f12_same_file_content_compares_bytes_not_just_length() {
     );
     let _ = std::fs::remove_dir_all(&dir);
     assert!(same, "identical bytes are the same");
-    assert!(!different, "equal length with different content is not the same");
+    assert!(
+        !different,
+        "equal length with different content is not the same"
+    );
     assert!(!missing);
 }
 
@@ -2656,7 +2689,10 @@ async fn s8_f12_completion_write_does_not_follow_a_symlink() {
         std::fs::read_dir(&dir).unwrap().count(),
     );
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(victim_after, b"keep me", "the symlink target must be untouched");
+    assert_eq!(
+        victim_after, b"keep me",
+        "the symlink target must be untouched"
+    );
     assert_eq!(fresh_after, b"completions");
     assert_eq!(leftovers, 3, "no temp file may be left behind");
 }
@@ -2675,10 +2711,20 @@ async fn l26_a_symlink_into_the_home_folder_is_written_through() {
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let marker = home.path().join("warned");
     write_completion_file_in(&link, b"new completions", home.path(), &marker).await;
-    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link stays a link"
+    );
     assert_eq!(std::fs::read(&real).unwrap(), b"new completions");
     assert!(!marker.exists(), "nothing to warn about");
-    assert_eq!(std::fs::read_dir(&dotfiles).unwrap().count(), 1, "no temp file left behind");
+    assert_eq!(
+        std::fs::read_dir(&dotfiles).unwrap().count(),
+        1,
+        "no temp file left behind"
+    );
 }
 
 /// Review L26: a symlink to a file outside the home folder is left alone, and the user is told once, not on every update.
@@ -2696,13 +2742,28 @@ async fn l26_a_symlink_outside_the_home_folder_warns_once() {
     let after_first = std::fs::read_to_string(&marker).unwrap_or_default();
     write_completion_file_in(&link, b"new", home.path(), &marker).await;
     let after_second = std::fs::read_to_string(&marker).unwrap_or_default();
-    assert_eq!(std::fs::read(&victim).unwrap(), b"keep me", "the target outside home is untouched");
-    assert_eq!(after_first.lines().count(), 1, "the first update records the warning");
-    assert_eq!(after_second, after_first, "the second update does not warn again");
+    assert_eq!(
+        std::fs::read(&victim).unwrap(),
+        b"keep me",
+        "the target outside home is untouched"
+    );
+    assert_eq!(
+        after_first.lines().count(),
+        1,
+        "the first update records the warning"
+    );
+    assert_eq!(
+        after_second, after_first,
+        "the second update does not warn again"
+    );
     let other = home.path().join("other.fish");
     std::os::unix::fs::symlink(&victim, &other).unwrap();
     write_completion_file_in(&other, b"new", home.path(), &marker).await;
-    assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 2, "each file is told about once");
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().lines().count(),
+        2,
+        "each file is told about once"
+    );
 }
 
 /// Review L24: a base that does not publish the per-binary digest is refused with an error that names the file to
@@ -2712,10 +2773,17 @@ async fn l24_a_missing_digest_error_names_the_file_to_publish() {
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("fuigo-9.9.9-test");
     std::fs::write(&binary, b"binary").unwrap();
-    let err = verify_internal_download("https://digest-test.invalid/base", "fuigo-9.9.9-test", &binary)
-        .await
-        .unwrap_err();
+    let err = verify_internal_download(
+        "https://digest-test.invalid/base",
+        "fuigo-9.9.9-test",
+        &binary,
+    )
+    .await
+    .unwrap_err();
     let msg = format!("{err:#}");
-    assert!(msg.contains("must publish `fuigo-9.9.9-test.sha256`"), "{msg}");
+    assert!(
+        msg.contains("must publish `fuigo-9.9.9-test.sha256`"),
+        "{msg}"
+    );
     assert!(msg.contains("RELEASE.md"), "{msg}");
 }

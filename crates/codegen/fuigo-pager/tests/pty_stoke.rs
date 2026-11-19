@@ -61,11 +61,26 @@ fn assert_tui_holds_the_terminal(harness: &PtyHarness) {
 /// The terminal a shell gets back after the pager is gone.
 fn assert_terminal_restored(harness: &PtyHarness, how: &str) {
     let modes = harness.terminal_modes();
-    assert!(!modes.alt_screen, "{how}: left the alternate screen on: {modes:?}");
-    assert!(!modes.bracketed_paste, "{how}: left bracketed paste on: {modes:?}");
-    assert!(!modes.mouse_reporting, "{how}: left mouse reporting on: {modes:?}");
-    assert!(!modes.focus_in_out, "{how}: left focus reporting on: {modes:?}");
-    assert!(modes.show_cursor, "{how}: left the cursor hidden: {modes:?}");
+    assert!(
+        !modes.alt_screen,
+        "{how}: left the alternate screen on: {modes:?}"
+    );
+    assert!(
+        !modes.bracketed_paste,
+        "{how}: left bracketed paste on: {modes:?}"
+    );
+    assert!(
+        !modes.mouse_reporting,
+        "{how}: left mouse reporting on: {modes:?}"
+    );
+    assert!(
+        !modes.focus_in_out,
+        "{how}: left focus reporting on: {modes:?}"
+    );
+    assert!(
+        modes.show_cursor,
+        "{how}: left the cursor hidden: {modes:?}"
+    );
     #[cfg(unix)]
     assert_eq!(
         harness.is_raw_mode(),
@@ -95,7 +110,10 @@ async fn close_with(key: &[u8], how: &str) {
     harness
         .wait_for_text_absent(STOKE_LABEL, Duration::from_secs(10))
         .unwrap_or_else(|e| {
-            panic!("{how} must close the fire: {e:#}\nscreen:\n{}", harness.screen_contents())
+            panic!(
+                "{how} must close the fire: {e:#}\nscreen:\n{}",
+                harness.screen_contents()
+            )
         });
     assert!(
         harness.contains_text(PROMPT_HINT),
@@ -131,7 +149,15 @@ async fn stoke_resize_mid_animation_neither_panics_nor_strands_the_terminal() {
     let content = ContentController::start().await.expect("start content");
     let mut harness = open_stoke(&content).await;
     assert_animating(&mut harness);
-    for (rows, cols) in [(20, 60), (9, 30), (60, 200), (1, 1), (3, 10), (30, 100), (50, 120)] {
+    for (rows, cols) in [
+        (20, 60),
+        (9, 30),
+        (60, 200),
+        (1, 1),
+        (3, 10),
+        (30, 100),
+        (50, 120),
+    ] {
         harness.resize(rows, cols).expect("resize");
         harness.update(Duration::from_millis(150));
         assert!(
@@ -162,7 +188,9 @@ async fn signalled_while_stoke_is_open(signal: i32, expected_code: u32, how: &st
     let content = ContentController::start().await.expect("start content");
     let mut harness = open_stoke(&content).await;
     assert_tui_holds_the_terminal(&harness);
-    harness.send_signal(signal).unwrap_or_else(|e| panic!("{how}: signal: {e:#}"));
+    harness
+        .send_signal(signal)
+        .unwrap_or_else(|e| panic!("{how}: signal: {e:#}"));
     let code = harness
         .wait_for_exit_and_drain(Duration::from_secs(20), Duration::from_secs(2))
         .unwrap_or_else(|e| panic!("{how}: pager did not exit: {e:#}"));

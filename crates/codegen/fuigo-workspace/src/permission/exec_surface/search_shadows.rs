@@ -15,8 +15,23 @@ const UGREP_SHORT_VALUE: &str = "ABCDdefgJKMmNOt";
 
 /// Long options of ugrep that also accept their value as the next word (the legacy `--opt VALUE` form).
 const UGREP_LONG_SEPARATE_VALUE: &[&str] = &[
-    "after-context", "before-context", "binary-files", "context", "depth", "devices", "directories", "exclude",
-    "exclude-dir", "exclude-from", "file", "from", "include", "include-dir", "include-from", "label", "regexp",
+    "after-context",
+    "before-context",
+    "binary-files",
+    "context",
+    "depth",
+    "devices",
+    "directories",
+    "exclude",
+    "exclude-dir",
+    "exclude-from",
+    "file",
+    "from",
+    "include",
+    "include-dir",
+    "include-from",
+    "label",
+    "regexp",
 ];
 
 /// ugrep long options that run another program, write a file, or search files the command line does not name.
@@ -28,7 +43,9 @@ const UGREP_FLOORED_LONG: &[&str] = &["filter", "pager", "view", "query", "save-
 /// `--config[=FILE]` and `---FILE`. Either loads a configuration file from the working directory or the home
 /// directory, which can set `filter=` or `pager=`.
 pub(super) fn ugrep_loads_config(args: &[String]) -> bool {
-    args.iter().take_while(|word| *word != "--").any(|word| word.starts_with("---") || word.starts_with("--config"))
+    args.iter()
+        .take_while(|word| *word != "--")
+        .any(|word| word.starts_with("---") || word.starts_with("--config"))
 }
 
 /// Whether a `grep` run as ugrep runs another program, writes a file, or reads beyond the paths it names.
@@ -72,7 +89,9 @@ pub(super) fn ugrep_option_floors(args: &[String]) -> bool {
             }
             // `-Z` (fuzzy) takes an optional glued value.
             let fuzzy_value = rest.starts_with(&['b', 'e', 's', 't'])
-                || rest.first().is_some_and(|c| *c == '=' || c.is_ascii_digit() || "+-~".contains(*c));
+                || rest
+                    .first()
+                    .is_some_and(|c| *c == '=' || c.is_ascii_digit() || "+-~".contains(*c));
             if *option == 'Z' && fuzzy_value {
                 break;
             }
@@ -83,11 +102,57 @@ pub(super) fn ugrep_option_floors(args: &[String]) -> bool {
 
 /// bfs primaries and options that take one argument.
 const BFS_ONE_ARG: &[&str] = &[
-    "-amin", "-anewer", "-asince", "-atime", "-Bmin", "-Bnewer", "-Bsince", "-Btime", "-cmin", "-cnewer", "-context",
-    "-csince", "-ctime", "-flags", "-fls", "-fprint", "-fprint0", "-fstype", "-gid", "-group", "-ilname", "-iname",
-    "-inum", "-ipath", "-iregex", "-iwholename", "-limit", "-links", "-lname", "-maxdepth", "-mindepth", "-mmin",
-    "-mnewer", "-msince", "-mtime", "-name", "-path", "-perm", "-printf", "-regex", "-regextype", "-samefile",
-    "-since", "-size", "-type", "-uid", "-used", "-user", "-wholename", "-xattrname", "-xtype",
+    "-amin",
+    "-anewer",
+    "-asince",
+    "-atime",
+    "-Bmin",
+    "-Bnewer",
+    "-Bsince",
+    "-Btime",
+    "-cmin",
+    "-cnewer",
+    "-context",
+    "-csince",
+    "-ctime",
+    "-flags",
+    "-fls",
+    "-fprint",
+    "-fprint0",
+    "-fstype",
+    "-gid",
+    "-group",
+    "-ilname",
+    "-iname",
+    "-inum",
+    "-ipath",
+    "-iregex",
+    "-iwholename",
+    "-limit",
+    "-links",
+    "-lname",
+    "-maxdepth",
+    "-mindepth",
+    "-mmin",
+    "-mnewer",
+    "-msince",
+    "-mtime",
+    "-name",
+    "-path",
+    "-perm",
+    "-printf",
+    "-regex",
+    "-regextype",
+    "-samefile",
+    "-since",
+    "-size",
+    "-type",
+    "-uid",
+    "-used",
+    "-user",
+    "-wholename",
+    "-xattrname",
+    "-xtype",
 ];
 
 /// bfs flags (`-H`, `-L`, ...): they may appear anywhere and are not part of the expression.
@@ -112,7 +177,9 @@ pub(super) fn bfs_option_floors(args: &[String]) -> bool {
         match word {
             "-rm" | "-f" | "-files0-from" | "-help" | "--help" => return true,
             "--" => {}
-            "(" | ")" | "!" | "," | "-not" | "-a" | "-and" | "-o" | "-or" | "-exclude" => in_expression = true,
+            "(" | ")" | "!" | "," | "-not" | "-a" | "-and" | "-o" | "-or" | "-exclude" => {
+                in_expression = true
+            }
             "-fprintf" => {
                 i += 2;
                 in_expression = true;

@@ -14,6 +14,8 @@ use crate::storage_client::{Auth401AttributionCallback, HttpUploadError};
 use crate::{BlobCompression, TraceExportConfig, UploadMethod};
 use anyhow::Context;
 use async_compression::tokio::bufread::ZstdEncoder;
+use fuigo_auth::AuthCredentialProvider;
+use fuigo_circuit_breaker::{Disposition, RetryPolicy};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -24,8 +26,6 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::Instrument;
-use fuigo_circuit_breaker::{Disposition, RetryPolicy};
-use fuigo_auth::AuthCredentialProvider;
 /// Resolves current upload credentials at upload time, plus optional
 /// hooks the queue worker uses to wire refresh-aware credentials and
 /// `auth_401_attribution` emission into the per-upload `StorageClient`.
@@ -2071,7 +2071,10 @@ async fn upload_with_retries(
     // path (shell, workspace) and every spill recovered from an earlier run is covered. The spill file itself is not
     // rewritten (its sidecar's sha256 must keep matching for restart recovery): when the filter changes the bytes, a
     // filtered copy is what is sent, with the same compression and multipart routing.
-    let filtered = match crate::payload_filter::filtered_copy(item.source.path(), &item.content_type) {
+    let filtered = match crate::payload_filter::filtered_copy(
+        item.source.path(),
+        &item.content_type,
+    ) {
         Ok(filtered) => filtered,
         Err(error) => {
             tracing::warn!(%error, "upload queue: could not read an artifact to filter it; not uploading it");
@@ -2089,18 +2092,15 @@ async fn upload_with_retries(
         let result = if should_compress {
             stream_compress_upload(&wrapped, &item.gcs_path, source).await
         } else {
-            upload_file(
-                &wrapped,
-                &item.gcs_path,
-                source,
-                &item.content_type,
-            )
-            .await
-            .map(|url| {
-                // P149 (Astra r3 #6): a filtered copy is what was stored.
-                let stored = filtered.as_ref().map_or(original_size, |c| file_size(c.path()));
-                (url, BlobCompression::None, stored)
-            })
+            upload_file(&wrapped, &item.gcs_path, source, &item.content_type)
+                .await
+                .map(|url| {
+                    // P149 (Astra r3 #6): a filtered copy is what was stored.
+                    let stored = filtered
+                        .as_ref()
+                        .map_or(original_size, |c| file_size(c.path()));
+                    (url, BlobCompression::None, stored)
+                })
         };
         match result {
             Ok(r) => {

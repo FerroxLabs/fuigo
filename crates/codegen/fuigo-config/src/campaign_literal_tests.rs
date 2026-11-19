@@ -13,7 +13,11 @@ const CAMPAIGN_SERVER: &str = "[mcp_servers.fresh]\nurl = \"https://h.invalid/mc
 
 fn assert_literal(effective: &toml::Value) {
     let fresh = &effective["mcp_servers"]["fresh"];
-    assert_eq!(fresh["url"].as_str(), Some("https://h.invalid/mcp?k=${PATH}"), "{fresh:?}");
+    assert_eq!(
+        fresh["url"].as_str(),
+        Some("https://h.invalid/mcp?k=${PATH}"),
+        "{fresh:?}"
+    );
     assert_eq!(fresh["args"][0].as_str(), Some("--k=${PATH}"), "{fresh:?}");
     assert_eq!(fresh["args"][1].as_str(), Some("$PATH"), "{fresh:?}");
     assert_eq!(fresh["cwd"].as_str(), Some("${PATH}"), "{fresh:?}");
@@ -30,12 +34,26 @@ fn user_layer_campaign_strings_stay_literal_through_load_and_merge() {
         ));
         crate::expand_env_vars_in_toml(&mut layer);
         let own = layer["mcp_servers"]["own"]["url"].as_str().unwrap();
-        assert!(!own.contains("${PATH}"), "the user's own server must still expand: {own}");
-        let entries = take_campaign_entries(&mut layer, if layer_name == "user" { "user" } else { "managed" });
+        assert!(
+            !own.contains("${PATH}"),
+            "the user's own server must still expand: {own}"
+        );
+        let entries = take_campaign_entries(
+            &mut layer,
+            if layer_name == "user" {
+                "user"
+            } else {
+                "managed"
+            },
+        );
         assert_eq!(entries.len(), 1);
-        let mut layers = ConfigLayers { user: layer, ..Default::default() };
+        let mut layers = ConfigLayers {
+            user: layer,
+            ..Default::default()
+        };
         layers.campaigns.user = entries;
-        let effective = layers.effective_config_with_campaigns(&[], &std::collections::HashSet::new());
+        let effective =
+            layers.effective_config_with_campaigns(&[], &std::collections::HashSet::new());
         assert_literal(&effective);
         assert_eq!(effective["models"]["default"].as_str(), Some("${PATH}"));
     }
@@ -45,39 +63,73 @@ fn user_layer_campaign_strings_stay_literal_through_load_and_merge() {
 #[test]
 fn remote_shaped_campaign_strings_stay_literal() {
     let patch: toml::Table = toml::from_str(CAMPAIGN_SERVER).unwrap();
-    let entries = vec![CampaignEntry { id: "r".into(), patch }];
+    let entries = vec![CampaignEntry {
+        id: "r".into(),
+        patch,
+    }];
     let mut effective = parse("[models]\ndefault = \"a\"\n");
     apply_active_campaign_patches(&mut effective, &entries);
     assert_literal(&effective);
-    assert_eq!(effective["mcp_servers"]["fresh"]["__fuigo_campaign_source"].as_bool(), Some(true));
+    assert_eq!(
+        effective["mcp_servers"]["fresh"]["__fuigo_campaign_source"].as_bool(),
+        Some(true)
+    );
 }
 
 fn entry(id: &str, toml_src: &str) -> Vec<CampaignEntry> {
-    vec![CampaignEntry { id: id.into(), patch: toml::from_str(toml_src).unwrap() }]
+    vec![CampaignEntry {
+        id: id.into(),
+        patch: toml::from_str(toml_src).unwrap(),
+    }]
 }
 
 /// review C3-2: a campaign may still ADD a stdio server, and the user is told which program it runs.
 #[test]
 fn campaign_added_stdio_server_is_kept_and_names_its_program() {
-    let entries = entry("c32", "[mcp_servers.helper]\ncommand = \"c32-program\"\nargs = [\"--x\"]\n");
+    let entries = entry(
+        "c32",
+        "[mcp_servers.helper]\ncommand = \"c32-program\"\nargs = [\"--x\"]\n",
+    );
     let mut effective = parse("[models]\ndefault = \"a\"\n");
     apply_active_campaign_patches(&mut effective, &entries);
-    assert_eq!(effective["mcp_servers"]["helper"]["command"].as_str(), Some("c32-program"));
-    assert_eq!(effective["mcp_servers"]["helper"]["__fuigo_campaign_source"].as_bool(), Some(true));
+    assert_eq!(
+        effective["mcp_servers"]["helper"]["command"].as_str(),
+        Some("c32-program")
+    );
+    assert_eq!(
+        effective["mcp_servers"]["helper"]["__fuigo_campaign_source"].as_bool(),
+        Some(true)
+    );
     let notes = crate::key_naming::refusal_notes();
-    let note = notes.iter().find(|n| n.contains("campaign `c32`")).expect("a notice for the added program");
-    assert!(note.contains("`helper`") && note.contains("`c32-program`"), "{note}");
+    let note = notes
+        .iter()
+        .find(|n| n.contains("campaign `c32`"))
+        .expect("a notice for the added program");
+    assert!(
+        note.contains("`helper`") && note.contains("`c32-program`"),
+        "{note}"
+    );
     assert!(!note.contains("--x"), "arguments are not echoed: {note}");
 }
 
 /// review C3-2: an HTTP-only campaign server runs no program and gets no program notice.
 #[test]
 fn campaign_added_http_server_gets_no_program_notice() {
-    let entries = entry("c32h", "[mcp_servers.web]\nurl = \"https://h.invalid/mcp\"\n");
+    let entries = entry(
+        "c32h",
+        "[mcp_servers.web]\nurl = \"https://h.invalid/mcp\"\n",
+    );
     let mut effective = parse("[models]\ndefault = \"a\"\n");
     apply_active_campaign_patches(&mut effective, &entries);
-    assert_eq!(effective["mcp_servers"]["web"]["url"].as_str(), Some("https://h.invalid/mcp"));
-    assert!(!crate::key_naming::refusal_notes().iter().any(|n| n.contains("campaign `c32h`")));
+    assert_eq!(
+        effective["mcp_servers"]["web"]["url"].as_str(),
+        Some("https://h.invalid/mcp")
+    );
+    assert!(
+        !crate::key_naming::refusal_notes()
+            .iter()
+            .any(|n| n.contains("campaign `c32h`"))
+    );
 }
 
 /// review R3-5: the campaign marker is honoured only when the campaign merge set it; any other layer loses it.
@@ -92,9 +144,19 @@ fn campaign_marker_in_a_non_campaign_layer_is_dropped() {
         ..Default::default()
     };
     let effective = layers.effective_config_with_campaigns(&[], &std::collections::HashSet::new());
-    assert!(effective["mcp_servers"]["mine"].get("__fuigo_campaign_source").is_none(), "{effective:?}");
+    assert!(
+        effective["mcp_servers"]["mine"]
+            .get("__fuigo_campaign_source")
+            .is_none(),
+        "{effective:?}"
+    );
     let base = layers.effective_config_base_without_overlay();
-    assert!(base["mcp_servers"]["mine"].get("__fuigo_campaign_source").is_none(), "{base:?}");
+    assert!(
+        base["mcp_servers"]["mine"]
+            .get("__fuigo_campaign_source")
+            .is_none(),
+        "{base:?}"
+    );
 }
 
 /// review C1-5: a campaign's refusal note does not send the user to edit an entry that is not in their file.
@@ -102,14 +164,26 @@ fn campaign_marker_in_a_non_campaign_layer_is_dropped() {
 fn campaign_saved_key_refusal_note_is_campaign_specific() {
     let entries = entry(
         "c15",
-        &format!("[mcp_servers.k]\ncommand = \"srv\"\nargs = [\"${{{}}}\"]\n", crate::credential_env::FIRST_PARTY_KEY_ENV_VAR),
+        &format!(
+            "[mcp_servers.k]\ncommand = \"srv\"\nargs = [\"${{{}}}\"]\n",
+            crate::credential_env::FIRST_PARTY_KEY_ENV_VAR
+        ),
     );
     let mut effective = parse("[models]\ndefault = \"a\"\n");
     apply_active_campaign_patches(&mut effective, &entries);
     let notes = crate::key_naming::refusal_notes();
-    let note = notes.iter().find(|n| n.contains("`mcp_servers.k.args[0]`")).expect("a refusal note for the campaign");
-    assert!(note.contains("campaign `c15`") && note.contains("which a campaign may not use"), "{note}");
-    assert!(!note.contains("delete the marker line") && !note.contains("Move this entry"), "{note}");
+    let note = notes
+        .iter()
+        .find(|n| n.contains("`mcp_servers.k.args[0]`"))
+        .expect("a refusal note for the campaign");
+    assert!(
+        note.contains("campaign `c15`") && note.contains("which a campaign may not use"),
+        "{note}"
+    );
+    assert!(
+        !note.contains("delete the marker line") && !note.contains("Move this entry"),
+        "{note}"
+    );
 }
 
 /// Grok C4: a project `.fuigo/config.toml` cannot carry the campaign marker either (it would skip env expansion).
@@ -127,5 +201,10 @@ fn campaign_marker_in_a_project_file_is_dropped() {
         .unwrap();
     }
     let loaded = crate::loader::load_project_config_file(&cfg_dir.join("config.toml")).unwrap();
-    assert!(loaded["mcp_servers"]["p"].get("__fuigo_campaign_source").is_none(), "{loaded:?}");
+    assert!(
+        loaded["mcp_servers"]["p"]
+            .get("__fuigo_campaign_source")
+            .is_none(),
+        "{loaded:?}"
+    );
 }

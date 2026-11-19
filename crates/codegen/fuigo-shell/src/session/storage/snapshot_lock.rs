@@ -22,8 +22,9 @@ pub(crate) const SNAPSHOT_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Test seam: the lock files some caller found held, so a test can wait for a caller to be at the lock instead of sleeping.
 #[cfg(test)]
-pub(crate) static CONTENDED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+pub(crate) static CONTENDED: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashSet<PathBuf>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
 
 /// How long the persistence actor keeps the snapshot lock for one turn start before it asks whether the turn is still alive
 /// (P135). A turn start ends the hold explicitly, by a drop guard on an in-process channel; this is the bound for a turn that
@@ -34,11 +35,13 @@ pub(crate) const SNAPSHOT_HOLD_MAX: Duration = Duration::from_secs(120);
 
 /// Test seam: milliseconds that replace [`SNAPSHOT_HOLD_MAX`] when non-zero.
 #[cfg(test)]
-pub(crate) static HOLD_MAX_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static HOLD_MAX_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Test seam: how many times the time limit released a hold (a fork waiting at the lock can win the race for it then).
 #[cfg(test)]
-pub(crate) static EXPIRY_RELEASES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static EXPIRY_RELEASES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn hold_max() -> Duration {
     #[cfg(test)]
@@ -61,8 +64,17 @@ pub(crate) struct SnapshotHold {
 }
 
 impl SnapshotHold {
-    pub(crate) fn new(turn_id: u64, file: crate::session::storage::jsonl::HeldLock, alive: std::sync::Weak<()>) -> Self {
-        Self { turn_id, since: Instant::now(), alive, _file: file }
+    pub(crate) fn new(
+        turn_id: u64,
+        file: crate::session::storage::jsonl::HeldLock,
+        alive: std::sync::Weak<()>,
+    ) -> Self {
+        Self {
+            turn_id,
+            since: Instant::now(),
+            alive,
+            _file: file,
+        }
     }
     /// Whether the turn that holds the lock still exists.
     pub(crate) fn turn_alive(&self) -> bool {
@@ -115,10 +127,20 @@ fn open(path: &Path, opener: Opener<'_>) -> io::Result<Option<std::fs::File>> {
 
 /// Owner-only like every session file (P120): a lock file other users can open is a lock they can hold.
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, reason = "test fixture: a session lock held by path, as another process would hold it")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test fixture: a session lock held by path, as another process would hold it"
+)]
 fn open_unowned_source(path: &Path) -> io::Result<std::fs::File> {
     // F5-A: test fixture only (a lock held by path, as another process would hold it)
-    super::owner_only::open(std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false), path)
+    super::owner_only::open(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        path,
+    )
 }
 
 /// Open a lock sidecar (`snapshot.lock`, `<file>.jsonl.lock`) of a fork's SOURCE (design F5 §5.5, §5.6; box B6). Through
@@ -134,7 +156,8 @@ pub(crate) fn open_source_sidecar(
         match writer.rel_of(path).and_then(|rel| writer.open_lock(rel)) {
             Ok(file) => return Ok(file),
             Err(error)
-                if fuigo_session_writer::refusal(&error) == Some(fuigo_session_writer::Refusal::HeldElsewhere) =>
+                if fuigo_session_writer::refusal(&error)
+                    == Some(fuigo_session_writer::Refusal::HeldElsewhere) =>
             {
                 held_elsewhere = true;
             }
@@ -144,14 +167,16 @@ pub(crate) fn open_source_sidecar(
     match std::fs::File::open(path) {
         // Review r1 H2: the other process's writer makes its sidecars when its hold attaches, so a missing one means that
         // session is only now being made. Copying it unlocked could split a turn start; refuse as retryable.
-        Err(error) if held_elsewhere && error.kind() == io::ErrorKind::NotFound => Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            format!(
-                "Cannot copy the session: it is open in another Fuigo window and {} is not there yet. Nothing was \
+        Err(error) if held_elsewhere && error.kind() == io::ErrorKind::NotFound => {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                format!(
+                    "Cannot copy the session: it is open in another Fuigo window and {} is not there yet. Nothing was \
                  created; try again.",
-                path.display()
-            ),
-        )),
+                    path.display()
+                ),
+            ))
+        }
         opened => opened,
     }
 }
@@ -159,7 +184,10 @@ pub(crate) fn open_source_sidecar(
 /// Take `path` (a lock file) exclusively, waiting at most [`SNAPSHOT_LOCK_WAIT`] (polling, so the wait blocks the calling
 /// thread). `Ok(None)`: the lock file cannot be opened or locked at all. `Err(Interrupted)`: it stayed held (retryable).
 #[cfg(test)]
-pub(crate) fn acquire_blocking(path: &Path, what: &Path) -> io::Result<Option<crate::session::storage::jsonl::HeldLock>> {
+pub(crate) fn acquire_blocking(
+    path: &Path,
+    what: &Path,
+) -> io::Result<Option<crate::session::storage::jsonl::HeldLock>> {
     acquire_blocking_as(Opener::UnownedSource, path, what)
 }
 
@@ -182,7 +210,10 @@ pub(crate) fn acquire_blocking_as(
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::Interrupted,
-                        format!("Cannot copy the session: {} is being written. Nothing was created; try again.", what.display()),
+                        format!(
+                            "Cannot copy the session: {} is being written. Nothing was created; try again.",
+                            what.display()
+                        ),
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(5));
@@ -224,7 +255,10 @@ pub(crate) async fn acquire_async(
     }
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create and remove files in test-owned temp dirs; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create and remove files in test-owned temp dirs; no product session writer runs there"
+)]
 #[cfg(test)]
 #[path = "snapshot_lock_tests.rs"]
 mod tests;

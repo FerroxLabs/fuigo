@@ -2450,8 +2450,9 @@ impl fuigo_file_utils::queue::TraceExportSource for HeldSource {
     }
     fn resolve_async(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = fuigo_file_utils::TraceExportConfig> + Send + '_>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = fuigo_file_utils::TraceExportConfig> + Send + '_>,
+    > {
         Box::pin(async move {
             self.release.notified().await;
             self.resolve()
@@ -2506,17 +2507,37 @@ async fn environment_artifact_follows_the_destination_class() {
         release: release.clone(),
     });
     let (handle, home) = make_queue_backed_handle_with_source(identity(), false, source);
-    handle.emit_environment_artifact("sess-p71", cwd, None).await.expect("enqueued");
+    handle
+        .emit_environment_artifact("sess-p71", cwd, None)
+        .await
+        .expect("enqueued");
     let record = spilled_environment_record(home.path());
     assert!(record.contains("sess-p71"), "the record exists: {record}");
     for leaked in ["acct-71-owner", "team-71-owner", "rowan-71"] {
-        assert!(!record.contains(leaked), "class 3 record carries {leaked}: {record}");
+        assert!(
+            !record.contains(leaked),
+            "class 3 record carries {leaked}: {record}"
+        );
     }
     release.notify_one();
     // Nothing left in the queue: the attempt ran to its end (withheld, or sent), it was not cut short.
-    assert_eq!(handle.shared().upload_queue().expect("queue").drain(std::time::Duration::from_secs(20)).await, 0);
-    third_party.settle(std::time::Duration::from_millis(300)).await;
-    assert_eq!(third_party.connections(), 0, "the environment record reached a third-party proxy");
+    assert_eq!(
+        handle
+            .shared()
+            .upload_queue()
+            .expect("queue")
+            .drain(std::time::Duration::from_secs(20))
+            .await,
+        0
+    );
+    third_party
+        .settle(std::time::Duration::from_millis(300))
+        .await;
+    assert_eq!(
+        third_party.connections(),
+        0,
+        "the environment record reached a third-party proxy"
+    );
 
     // Class 1 (FluxRouter-class loopback).
     let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
@@ -2526,15 +2547,32 @@ async fn environment_artifact_follows_the_destination_class() {
         release: release.clone(),
     });
     let (handle, home) = make_queue_backed_handle_with_source(identity(), false, source);
-    handle.emit_environment_artifact("sess-p71", cwd, None).await.expect("enqueued");
+    handle
+        .emit_environment_artifact("sess-p71", cwd, None)
+        .await
+        .expect("enqueued");
     let record = spilled_environment_record(home.path());
     for kept in ["acct-71-owner", "team-71-owner", "rowan-71"] {
-        assert!(record.contains(kept), "class 1 record lost {kept}: {record}");
+        assert!(
+            record.contains(kept),
+            "class 1 record lost {kept}: {record}"
+        );
     }
     release.notify_one();
     // Nothing left in the queue: the attempt ran to its end (withheld, or sent), it was not cut short.
-    assert_eq!(handle.shared().upload_queue().expect("queue").drain(std::time::Duration::from_secs(20)).await, 0);
-    assert!(fluxrouter_class.received_contains(b"acct-71-owner"), "class 1 did not receive the record");
+    assert_eq!(
+        handle
+            .shared()
+            .upload_queue()
+            .expect("queue")
+            .drain(std::time::Duration::from_secs(20))
+            .await,
+        0
+    );
+    assert!(
+        fluxrouter_class.received_contains(b"acct-71-owner"),
+        "class 1 did not receive the record"
+    );
 
     // Class 2 (the operator's own S3 bucket): the record is unchanged.
     let bucket = RecordingEndpoint::third_party().await;
@@ -2544,21 +2582,40 @@ async fn environment_artifact_follows_the_destination_class() {
             bucket: "operator-bucket".to_string(),
             region: "us-east-1".to_string(),
             credentials_file: None,
-            credentials_content: Some(r#"{"aws_access_key_id":"t","aws_secret_access_key":"t"}"#.to_string()),
+            credentials_content: Some(
+                r#"{"aws_access_key_id":"t","aws_secret_access_key":"t"}"#.to_string(),
+            ),
             endpoint_url: Some(bucket.endpoint_url()),
         },
         release: release.clone(),
     });
     let (handle, home) = make_queue_backed_handle_with_source(identity(), false, source);
-    handle.emit_environment_artifact("sess-p71", cwd, None).await.expect("enqueued");
+    handle
+        .emit_environment_artifact("sess-p71", cwd, None)
+        .await
+        .expect("enqueued");
     let record = spilled_environment_record(home.path());
     for kept in ["acct-71-owner", "team-71-owner", "rowan-71"] {
-        assert!(record.contains(kept), "class 2 record lost {kept}: {record}");
+        assert!(
+            record.contains(kept),
+            "class 2 record lost {kept}: {record}"
+        );
     }
     release.notify_one();
     // Nothing left in the queue: the attempt ran to its end (withheld, or sent), it was not cut short.
-    assert_eq!(handle.shared().upload_queue().expect("queue").drain(std::time::Duration::from_secs(20)).await, 0);
-    assert!(bucket.received_contains(b"acct-71-owner"), "the operator's bucket did not receive the record");
+    assert_eq!(
+        handle
+            .shared()
+            .upload_queue()
+            .expect("queue")
+            .drain(std::time::Duration::from_secs(20))
+            .await,
+        0
+    );
+    assert!(
+        bucket.received_contains(b"acct-71-owner"),
+        "the operator's bucket did not receive the record"
+    );
 }
 /// Without a queue (tests / local mode) emission is a silent no-op.
 #[tokio::test]
@@ -9255,6 +9312,14 @@ async fn cancel_tool_call_leaves_parallel_calls_active() {
     tracker.tool_call_started("par-c2", "run_terminal_command", Some("par-sess"));
     tracker.tool_call_started("oth-c1", "run_terminal_command", Some("other-sess"));
     handle.cancel_tool_call("par-sess", "par-c1");
-    assert_eq!(tracker.snapshot_session("par-sess").active_tool_calls, 1, "the sibling call stays active");
-    assert_eq!(tracker.snapshot_session("other-sess").active_tool_calls, 1, "another session is untouched");
+    assert_eq!(
+        tracker.snapshot_session("par-sess").active_tool_calls,
+        1,
+        "the sibling call stays active"
+    );
+    assert_eq!(
+        tracker.snapshot_session("other-sess").active_tool_calls,
+        1,
+        "another session is untouched"
+    );
 }

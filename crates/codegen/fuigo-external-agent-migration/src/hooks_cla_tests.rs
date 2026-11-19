@@ -32,12 +32,14 @@ fn extract_hooks_basic_command() {
             {"type":"command","command":"echo hi","timeout":7}]}]}}"#,
     );
     let items = extract_hooks_from_settings_file(&path);
-    let [ImportableItem::Hook {
-        event,
-        matcher,
-        command,
-        timeout,
-    }] = items.as_slice()
+    let [
+        ImportableItem::Hook {
+            event,
+            matcher,
+            command,
+            timeout,
+        },
+    ] = items.as_slice()
     else {
         panic!("expected exactly one Hook, got {items:?}");
     };
@@ -107,9 +109,11 @@ fn extract_hooks_empty_matcher_is_none_and_empty_command_is_kept() {
         r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":""}]}]}}"#,
     );
     let items = extract_hooks_from_settings_file(&path);
-    let [ImportableItem::Hook {
-        matcher, command, ..
-    }] = items.as_slice()
+    let [
+        ImportableItem::Hook {
+            matcher, command, ..
+        },
+    ] = items.as_slice()
     else {
         panic!("expected one hook, got {items:?}");
     };
@@ -142,7 +146,10 @@ fn merge_dedups_on_event_matcher_and_command() {
             hook("PreToolUse", None, "echo x", None),
         ],
     );
-    assert_eq!(added, 3, "same command under another matcher, or none, is a new hook");
+    assert_eq!(
+        added, 3,
+        "same command under another matcher, or none, is a new hook"
+    );
     assert_eq!(json["hooks"]["PreToolUse"].as_array().unwrap().len(), 4);
 }
 
@@ -150,15 +157,25 @@ fn merge_dedups_on_event_matcher_and_command() {
 fn merge_refreshes_or_removes_the_timeout_in_place() {
     let current = r#"{"hooks":{"PreToolUse":[
         {"matcher":"Bash","hooks":[{"type":"command","command":"echo x","timeout":5}]}]}}"#;
-    let (json, added) = merged(Some(current), &[hook("PreToolUse", Some("Bash"), "echo x", Some(60))]);
+    let (json, added) = merged(
+        Some(current),
+        &[hook("PreToolUse", Some("Bash"), "echo x", Some(60))],
+    );
     assert_eq!(added, 0, "a refresh is not a new hook");
     let groups = json["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups.first().unwrap()["hooks"][0]["timeout"], 60);
 
-    let (json, added) = merged(Some(current), &[hook("PreToolUse", Some("Bash"), "echo x", None)]);
+    let (json, added) = merged(
+        Some(current),
+        &[hook("PreToolUse", Some("Bash"), "echo x", None)],
+    );
     assert_eq!(added, 0);
-    assert!(json["hooks"]["PreToolUse"][0]["hooks"][0].get("timeout").is_none());
+    assert!(
+        json["hooks"]["PreToolUse"][0]["hooks"][0]
+            .get("timeout")
+            .is_none()
+    );
 }
 
 #[test]
@@ -182,9 +199,13 @@ fn merge_replaces_malformed_json_but_refuses_the_wrong_shape() {
     assert_eq!(added, 1);
     assert!(json["hooks"]["Stop"].is_array());
 
-    let err = merge_hooks(target, Some("[1,2]"), &items).unwrap_err().to_string();
+    let err = merge_hooks(target, Some("[1,2]"), &items)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("root is not a JSON object"), "{err}");
-    let err = merge_hooks(target, Some(r#"{"hooks":[]}"#), &items).unwrap_err().to_string();
+    let err = merge_hooks(target, Some(r#"{"hooks":[]}"#), &items)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("hooks is not a JSON object"), "{err}");
     let err = merge_hooks(target, Some(r#"{"hooks":{"Stop":{}}}"#), &items)
         .unwrap_err()
@@ -194,6 +215,14 @@ fn merge_replaces_malformed_json_but_refuses_the_wrong_shape() {
 
 #[test]
 fn debug_output_hides_commands() {
-    let shown = format!("{:?}", hook("PreToolUse", None, "curl -H 'Authorization: Bearer sekrit'", None));
+    let shown = format!(
+        "{:?}",
+        hook(
+            "PreToolUse",
+            None,
+            "curl -H 'Authorization: Bearer sekrit'",
+            None
+        )
+    );
     assert!(!shown.contains("sekrit"), "{shown}");
 }

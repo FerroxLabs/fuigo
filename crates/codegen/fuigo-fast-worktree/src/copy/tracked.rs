@@ -240,14 +240,23 @@ mod tests {
     fn untracked_failure_only_warns() {
         fuigo_test_utils::require_git!();
         let dir = repo();
-        check_copy_failures(dir.path(), dir.path(), None, &stats(vec![failure("untracked.txt", false)])).unwrap();
+        check_copy_failures(
+            dir.path(),
+            dir.path(),
+            None,
+            &stats(vec![failure("untracked.txt", false)]),
+        )
+        .unwrap();
     }
 
     #[test]
     fn tracked_failure_aborts_with_typed_error() {
         fuigo_test_utils::require_git!();
         let dir = repo();
-        let err = check_copy_failures(dir.path(), dir.path(), None,
+        let err = check_copy_failures(
+            dir.path(),
+            dir.path(),
+            None,
             &stats(vec![
                 failure("untracked.txt", false),
                 failure("sub/tracked.txt", false),
@@ -267,7 +276,13 @@ mod tests {
     fn failed_directory_covers_tracked_files_beneath_it() {
         fuigo_test_utils::require_git!();
         let dir = repo();
-        let err = check_copy_failures(dir.path(), dir.path(), None, &stats(vec![failure("sub", false)])).unwrap_err();
+        let err = check_copy_failures(
+            dir.path(),
+            dir.path(),
+            None,
+            &stats(vec![failure("sub", false)]),
+        )
+        .unwrap_err();
         assert!(err.downcast_ref::<TrackedCopyError>().is_some());
     }
 
@@ -275,7 +290,10 @@ mod tests {
     fn several_failures_are_counted_in_one_line() {
         fuigo_test_utils::require_git!();
         let dir = repo();
-        let err = check_copy_failures(dir.path(), dir.path(), None,
+        let err = check_copy_failures(
+            dir.path(),
+            dir.path(),
+            None,
             &stats(vec![
                 failure("sub/tracked.txt", false),
                 failure("top.txt", false),
@@ -292,8 +310,13 @@ mod tests {
     fn disk_full_aborts_even_for_untracked_and_stays_typed() {
         fuigo_test_utils::require_git!();
         let dir = repo();
-        let err = check_copy_failures(dir.path(), dir.path(), None, &stats(vec![failure("untracked.txt", true)]))
-            .unwrap_err();
+        let err = check_copy_failures(
+            dir.path(),
+            dir.path(),
+            None,
+            &stats(vec![failure("untracked.txt", true)]),
+        )
+        .unwrap_err();
         assert!(
             err.chain().any(|c| c
                 .downcast_ref::<std::io::Error>()
@@ -368,20 +391,10 @@ mod tests {
             storage_full: false,
         };
         // U+FFFD lossy conversion would conflate both names; they must stay distinct.
-        check_copy_failures(
-            dir.path(),
-            dir.path(),
-            None,
-            &stats(vec![fail(untracked)]),
-        )
-        .expect("untracked non-UTF-8 name only warns");
-        let err = check_copy_failures(
-            dir.path(),
-            dir.path(),
-            None,
-            &stats(vec![fail(tracked)]),
-        )
-        .unwrap_err();
+        check_copy_failures(dir.path(), dir.path(), None, &stats(vec![fail(untracked)]))
+            .expect("untracked non-UTF-8 name only warns");
+        let err = check_copy_failures(dir.path(), dir.path(), None, &stats(vec![fail(tracked)]))
+            .unwrap_err();
         assert!(err.downcast_ref::<TrackedCopyError>().is_some());
     }
 

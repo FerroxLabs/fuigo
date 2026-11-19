@@ -54,7 +54,11 @@ mod tests {
                 u64::MAX
             },
         );
-        assert_eq!(calls.get(), 0, "CGEventSourceFlagsState must not be called without a GUI session");
+        assert_eq!(
+            calls.get(),
+            0,
+            "CGEventSourceFlagsState must not be called without a GUI session"
+        );
         assert_eq!(state, ModifierState::default());
     }
 
@@ -66,7 +70,12 @@ mod tests {
         );
         assert_eq!(
             state,
-            ModifierState { command: true, option: false, shift: true, control: false }
+            ModifierState {
+                command: true,
+                option: false,
+                shift: true,
+                control: false
+            }
         );
     }
 

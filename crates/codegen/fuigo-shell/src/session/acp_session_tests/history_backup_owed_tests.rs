@@ -55,15 +55,24 @@ async fn a_head_rewrite_while_the_backup_is_owed_says_the_file_was_not_rewritten
         .run_until(async {
             let (gateway_tx, mut gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = Arc::new(create_test_actor(1_000, 200_000, 85, gateway_tx, persistence_tx).await);
-            actor
-                .chat_state_handle
-                .replace_conversation(vec![ConversationItem::system("sys"), ConversationItem::user("hello")]);
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(1_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user("hello"),
+            ]);
             owe_backup(&actor);
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
-            actor.handle_session_mode(acp::SessionModeId::new("default")).await;
-            actor.handle_session_mode(acp::SessionModeId::new("browser_use")).await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("default"))
+                .await;
+            actor
+                .handle_session_mode(acp::SessionModeId::new("browser_use"))
+                .await;
             settle().await;
             let sent = drain_gateway_debug(&mut gateway_rx);
             assert_eq!(
@@ -81,7 +90,10 @@ async fn a_head_rewrite_while_the_backup_is_owed_says_the_file_was_not_rewritten
                 1,
                 "one note for three head writes while the backup is owed, sent: {sent}"
             );
-            assert!(sent.contains("not rewritten"), "the note says the file was not rewritten, sent: {sent}");
+            assert!(
+                sent.contains("not rewritten"),
+                "the note says the file was not rewritten, sent: {sent}"
+            );
         })
         .await;
 }
@@ -100,8 +112,10 @@ async fn an_image_strip_refused_for_the_backup_says_the_saved_history_kept_the_i
         .run_until(async {
             let (gateway_tx, mut gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             owe_backup(&actor);
             let url = "data:image/png;base64,P123";
             let mut user = match ConversationItem::user("look at this") {
@@ -109,10 +123,15 @@ async fn an_image_strip_refused_for_the_backup_says_the_saved_history_kept_the_i
                 _ => unreachable!(),
             };
             user.add_image(url);
-            actor.chat_state_handle.push_user_message(ConversationItem::User(user));
+            actor
+                .chat_state_handle
+                .push_user_message(ConversationItem::User(user));
             let rid = RequestId::from("req-p123");
             let (tx, _rx) = tokio::sync::oneshot::channel();
-            actor.turn_stream_drained.lock().insert(rid.clone(), Some(tx));
+            actor
+                .turn_stream_drained
+                .lock()
+                .insert(rid.clone(), Some(tx));
             actor
                 .handle_sampling_event(SamplingEvent::ImagesStripped {
                     request_id: rid.clone(),
@@ -165,13 +184,18 @@ async fn a_system_prompt_override_while_the_backup_is_owed_says_the_file_was_not
         .run_until(async {
             let (gateway_tx, mut gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = Arc::new(create_test_actor(1_000, 200_000, 85, gateway_tx, persistence_tx).await);
-            actor
-                .chat_state_handle
-                .replace_conversation(vec![ConversationItem::system("old prompt"), ConversationItem::user("hello")]);
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(1_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("old prompt"),
+                ConversationItem::user("hello"),
+            ]);
             owe_backup(&actor);
-            actor.handle_replace_system_prompt("a new system prompt".to_string()).await;
+            actor
+                .handle_replace_system_prompt("a new system prompt".to_string())
+                .await;
             settle().await;
             let sent = drain_gateway_debug(&mut gateway_rx);
             assert!(

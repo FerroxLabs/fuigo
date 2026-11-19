@@ -48,7 +48,11 @@ fn skip_if_enforcement_unavailable() -> bool {
     let require = std::env::var(REQUIRE_ENV).is_ok();
     let support = fuigo_sandbox::SandboxManager::support_info();
     if !support.is_supported {
-        assert!(!require, "enforcement required but unsupported: {}", support.details);
+        assert!(
+            !require,
+            "enforcement required but unsupported: {}",
+            support.details
+        );
         eprintln!("skipping: sandbox not supported ({})", support.details);
         return true;
     }
@@ -64,7 +68,10 @@ fn skip_if_enforcement_unavailable() -> bool {
 fn is_denied(e: &std::io::Error) -> bool {
     matches!(
         e.raw_os_error(),
-        Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::EROFS) | Some(libc::EBUSY)
+        Some(libc::EACCES)
+            | Some(libc::EPERM)
+            | Some(libc::EROFS)
+            | Some(libc::EBUSY)
             | Some(libc::EXDEV)
     )
 }
@@ -208,7 +215,10 @@ fn workspace_scenario(ws: &Path) {
     }
     expect_denied(
         "plant hooks/pre-commit",
-        fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\ntouch /tmp/pwned\n"),
+        fs::write(
+            git.join("hooks/pre-commit"),
+            "#!/bin/sh\ntouch /tmp/pwned\n",
+        ),
     );
     expect_denied("mkdir in hooks", fs::create_dir(git.join("hooks/sub")));
     expect_denied(
@@ -223,7 +233,8 @@ fn workspace_scenario(ws: &Path) {
     // `info/` stays writable: Fuigo's commit workflow seeds `info/exclude`
     expect_ok(
         "seed info/exclude",
-        fs::create_dir_all(git.join("info")).and_then(|()| fs::write(git.join("info/exclude"), "x\n")),
+        fs::create_dir_all(git.join("info"))
+            .and_then(|()| fs::write(git.join("info/exclude"), "x\n")),
     );
     expect_denied(
         "plant hooksPath hook",
@@ -271,7 +282,10 @@ fn home_writable_scenario(home: &Path) {
             ),
         );
     }
-    expect_ok("write other home file", fs::write(home.join("notes.txt"), "x"));
+    expect_ok(
+        "write other home file",
+        fs::write(home.join("notes.txt"), "x"),
+    );
 }
 
 #[test]
@@ -326,7 +340,10 @@ fn p158_spoofed_bwrap_marker_fails_git_verification() {
             fs::remove_file(ws.join(".git/config")).unwrap();
         }
         let (ok, stderr) = run_scenario("spoof", &home, &fuigo, &ws);
-        assert!(ok, "spoof scenario failed (hooks={with_hooks})\nstderr: {stderr}");
+        assert!(
+            ok,
+            "spoof scenario failed (hooks={with_hooks})\nstderr: {stderr}"
+        );
         assert!(
             stderr.contains("OK: spoofed bwrap refused"),
             "missing refusal (hooks={with_hooks})\nstderr: {stderr}"

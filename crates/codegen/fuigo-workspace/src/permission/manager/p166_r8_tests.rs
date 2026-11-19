@@ -4,7 +4,10 @@
 
 use super::{PermissionState, bash_protected_write_target, evaluate_bash};
 
-fn floor_in(cwd: &std::path::Path, cmd: &str) -> Option<crate::permission::shell_access::ProtectedEditReason> {
+fn floor_in(
+    cwd: &std::path::Path,
+    cmd: &str,
+) -> Option<crate::permission::shell_access::ProtectedEditReason> {
     let state = PermissionState::default();
     let evaluation = evaluate_bash(cmd, &state, true);
     bash_protected_write_target(&evaluation, cwd, None)
@@ -22,7 +25,11 @@ fn check(rows: &[(&str, bool)]) {
             wrong.push(format!("{cmd}: expected blocked={blocked}, got {got:?}"));
         }
     }
-    assert!(wrong.is_empty(), "protected floor mismatches:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "protected floor mismatches:\n{}",
+        wrong.join("\n")
+    );
 }
 
 const PY_ENV: &str = "python3 -c 'import os; open(os.environ[\"VAR\"],\"w\").write(\"p\")'";
@@ -36,7 +43,10 @@ fn p166_r8_a1_brace_expansion() {
         ("touch .{mcp,zz}.json", true),
         ("touch {x,{y,.git}}/hooks/pre-commit", true),
         ("touch {.git/hooks/pre-commit,x}", true),
-        ("python3 -c 'import sys; [open(a,\"w\") for a in sys.argv[1:]]' {x,.git}/hooks/pre-commit", true),
+        (
+            "python3 -c 'import sys; [open(a,\"w\") for a in sys.argv[1:]]' {x,.git}/hooks/pre-commit",
+            true,
+        ),
         ("gunzip -k .{mcp,zz}.json.gz", true),
         ("touch {x,y}/hooks/pre-commit", false),
         ("printf '%s\\n' {a,b,c}", false),
@@ -64,7 +74,10 @@ fn p166_r8_a2_ansi_c_quoting() {
         ("touch $'.git\\x2fhooks\\x2fpre-commit'", true),
         ("touch $'.mcp.json'", true),
         ("gunzip -k $'.mcp.json'.gz", true),
-        ("python3 -c $'open(\".git/hooks/pre-commit\",\"w\").write(\"p\")'", true),
+        (
+            "python3 -c $'open(\".git/hooks/pre-commit\",\"w\").write(\"p\")'",
+            true,
+        ),
         ("touch $'a\\n'", false),
         ("echo $'a\\n'", false),
         ("python3 -c $'print(1)'", false),
@@ -97,7 +110,10 @@ fn p166_r8_a4_here_strings_and_documents() {
         (format!("{PY_STDIN} <<< '.git/hooks/pre-commit'"), true),
         (format!("{PY_STDIN} <<EOF\n.mcp.json\nEOF"), true),
         (format!("{PY_STDIN} <<'EOF'\n.mcp.json\nEOF"), true),
-        (format!("{PY_STDIN} <<-EOF\n\t.git/hooks/pre-commit\nEOF"), true),
+        (
+            format!("{PY_STDIN} <<-EOF\n\t.git/hooks/pre-commit\nEOF"),
+            true,
+        ),
         (format!("{PY_STDIN} <<EOF | cat\n.mcp.json\nEOF"), true),
         ("bash <<< 'cp evil .git/hooks/pre-commit'".to_owned(), true),
         ("cat <<< hello".to_owned(), false),
@@ -112,8 +128,14 @@ fn p166_r8_a4_here_strings_and_documents() {
 #[test]
 fn p166_r8_a5_env_chdir() {
     check(&[
-        ("env -C .git/hooks python3 -c 'open(\"pre-commit\",\"w\").write(\"p\")'", true),
-        ("env --chdir=.git/hooks python3 -c 'open(\"pre-commit\",\"w\")'", true),
+        (
+            "env -C .git/hooks python3 -c 'open(\"pre-commit\",\"w\").write(\"p\")'",
+            true,
+        ),
+        (
+            "env --chdir=.git/hooks python3 -c 'open(\"pre-commit\",\"w\")'",
+            true,
+        ),
         ("env --chdir .git/hooks python3 x.py pre-commit", true),
         ("env -C.git/hooks python3 x.py pre-commit", true),
         ("env -C src python3 -c 'open(\"../.mcp.json\",\"w\")'", true),
@@ -126,7 +148,10 @@ fn p166_r8_a5_env_chdir() {
 #[test]
 fn p166_r8_a6_separate_option_values() {
     check(&[
-        ("docker run -v .git/hooks:/h --rm alpine touch /h/pre-commit", true),
+        (
+            "docker run -v .git/hooks:/h --rm alpine touch /h/pre-commit",
+            true,
+        ),
         ("podman run --volume .git/hooks:/h alpine ls", true),
         ("scp -o 'UserKnownHostsFile=.mcp.json' host:x out/", true),
         ("wget https://x.invalid -P .mcp.json", true),
@@ -139,7 +164,10 @@ fn p166_r8_a6_separate_option_values() {
         ("rsync -a -b --backup-dir .git/hooks src/ dest/", true),
         ("rsync -a --partial-dir .git/hooks src/ dest/", true),
         ("docker run --rm -v \"$PWD\":/w alpine ls /w", false),
-        ("docker run --rm -v \"$PWD/.git/hooks\":/h alpine ls /h", true),
+        (
+            "docker run --rm -v \"$PWD/.git/hooks\":/h alpine ls /h",
+            true,
+        ),
         ("docker build -t x .", false),
         ("tar -cf out.tar src", false),
         ("tar -cf out.tar .mcp.json", false),
@@ -218,17 +246,50 @@ fn p166_r8_false_positive_suite() {
     std::fs::create_dir_all(cwd.join("out")).unwrap();
     std::fs::create_dir_all(cwd.join("src")).unwrap();
     let suite = [
-        "ffmpeg -i a.mp4 out/b.mp4", "convert a.png b.png", "zip out.zip src/*", "vim README.md",
-        "docker cp c:/x ./out", "git checkout main", "git switch main", "git pull", "git stash pop", "cat ~/.bashrc",
-        "grep -r hooks .git/hooks", "ls -la .git/hooks", "rsync -a src/ dst/", "python3 script.py", "node build.js",
-        "cp a b", "sed -n 1,5p .mcp.json", "echo $'a\\n'", "printf '%s\\n' {a,b,c}", "FOO=bar make",
-        "env NODE_ENV=production node build.js", "cat <<< hello", "ls src/*.rs",
-        "docker run --rm -v \"$PWD\":/w alpine ls /w", "docker build -t x .", "tar -cf out.tar src",
-        "curl -o out.bin https://x.invalid/f", "wget -P downloads https://x.invalid/f", "scp host:x out/",
-        "rsync -a src/ dst/ --exclude .git", "less README.md", "git add .mcp.json", "grep -r hooks .git/hooks",
-        "wc -l ~/.bashrc", "jq . .mcp.json", "python3 tools/lint.py src", "vim docs/my.mcp.json.md",
+        "ffmpeg -i a.mp4 out/b.mp4",
+        "convert a.png b.png",
+        "zip out.zip src/*",
+        "vim README.md",
+        "docker cp c:/x ./out",
+        "git checkout main",
+        "git switch main",
+        "git pull",
+        "git stash pop",
+        "cat ~/.bashrc",
+        "grep -r hooks .git/hooks",
+        "ls -la .git/hooks",
+        "rsync -a src/ dst/",
+        "python3 script.py",
+        "node build.js",
+        "cp a b",
+        "sed -n 1,5p .mcp.json",
+        "echo $'a\\n'",
+        "printf '%s\\n' {a,b,c}",
+        "FOO=bar make",
+        "env NODE_ENV=production node build.js",
+        "cat <<< hello",
+        "ls src/*.rs",
+        "docker run --rm -v \"$PWD\":/w alpine ls /w",
+        "docker build -t x .",
+        "tar -cf out.tar src",
+        "curl -o out.bin https://x.invalid/f",
+        "wget -P downloads https://x.invalid/f",
+        "scp host:x out/",
+        "rsync -a src/ dst/ --exclude .git",
+        "less README.md",
+        "git add .mcp.json",
+        "grep -r hooks .git/hooks",
+        "wc -l ~/.bashrc",
+        "jq . .mcp.json",
+        "python3 tools/lint.py src",
+        "vim docs/my.mcp.json.md",
     ];
-    let git_rows = ["git checkout main", "git switch main", "git pull", "git stash pop"];
+    let git_rows = [
+        "git checkout main",
+        "git switch main",
+        "git pull",
+        "git stash pop",
+    ];
     let mut loud = Vec::new();
     for cmd in suite {
         let got = floor_in(cwd, cmd);

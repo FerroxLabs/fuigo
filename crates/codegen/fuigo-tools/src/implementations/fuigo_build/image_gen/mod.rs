@@ -368,11 +368,26 @@ impl std::fmt::Debug for ImageGenConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disabled => f.write_str("Disabled"),
-            Self::Enabled { api_key: _, base_url, extra_headers, image_gen_enabled, image_edit_enabled, model_override, edit_model_override, tier_restricted } => f
+            Self::Enabled {
+                api_key: _,
+                base_url,
+                extra_headers,
+                image_gen_enabled,
+                image_edit_enabled,
+                model_override,
+                edit_model_override,
+                tier_restricted,
+            } => f
                 .debug_struct("Enabled")
                 .field("api_key", &"<redacted>")
                 .field("base_url", &fuigo_auth::redact_url(base_url))
-                .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+                .field(
+                    "extra_headers",
+                    &extra_headers
+                        .iter()
+                        .map(|(k, _)| (k, "<redacted>"))
+                        .collect::<Vec<_>>(),
+                )
                 .field("image_gen_enabled", image_gen_enabled)
                 .field("image_edit_enabled", image_edit_enabled)
                 .field("model_override", model_override)

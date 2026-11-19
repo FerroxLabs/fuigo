@@ -200,7 +200,8 @@ pub fn tighten_own_regular_file_owner_only(file: &std::fs::File, path: &std::pat
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let (Ok(open_meta), Ok(path_meta)) = (file.metadata(), std::fs::symlink_metadata(path)) else {
+        let (Ok(open_meta), Ok(path_meta)) = (file.metadata(), std::fs::symlink_metadata(path))
+        else {
             return;
         };
         // SAFETY: geteuid has no preconditions and cannot fail.
@@ -221,7 +222,10 @@ pub fn tighten_own_regular_file_owner_only(file: &std::fs::File, path: &std::pat
 /// Create (truncate) `path` owner-only (0600 on Unix, tightened if it existed looser) and return it for writing.
 pub fn create_file_owner_only(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let file = owner_only_file_options(
-        std::fs::OpenOptions::new().write(true).create(true).truncate(true),
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
     )
     .open(path)?;
     tighten_file_owner_only(&file, path);
@@ -229,14 +233,20 @@ pub fn create_file_owner_only(path: &std::path::Path) -> std::io::Result<std::fs
 }
 
 /// `std::fs::write`, owner-only (see [`create_file_owner_only`]).
-pub fn write_file_owner_only(path: &std::path::Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+pub fn write_file_owner_only(
+    path: &std::path::Path,
+    bytes: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
     use std::io::Write as _;
     create_file_owner_only(path)?.write_all(bytes.as_ref())
 }
 
 /// Build the CWD-level session directory path: `fuigo_home()/sessions/{encode_cwd_dirname(cwd)}`.
 /// Does **not** create the directory on disk; use [`ensure_sessions_cwd_dir`] when the directory must exist.
-#[allow(clippy::disallowed_methods, reason = "the producer definitions: resolve the cwd bucket <fuigo_home>/sessions/<cwd>/ and create only the sessions root and that bucket, never a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the producer definitions: resolve the cwd bucket <fuigo_home>/sessions/<cwd>/ and create only the sessions root and that bucket, never a session folder"
+)]
 pub fn sessions_cwd_dir(cwd: &str) -> PathBuf {
     sessions_cwd_dir_in(&fuigo_home(), cwd)
 }
@@ -248,12 +258,16 @@ pub fn sessions_cwd_dir_in(fuigo_home: &std::path::Path, cwd: &str) -> PathBuf {
 
 /// Create the CWD-level session directory and write a `.cwd` metadata file when hash-based encoding is used (long paths).
 /// For short paths the `.cwd` file is not written because the directory name itself is reversible via URL-decoding.
-#[allow(clippy::disallowed_methods, reason = "the producer definitions: resolve the cwd bucket <fuigo_home>/sessions/<cwd>/ and create only the sessions root and that bucket, never a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the producer definitions: resolve the cwd bucket <fuigo_home>/sessions/<cwd>/ and create only the sessions root and that bucket, never a session folder"
+)]
 pub fn ensure_sessions_cwd_dir(cwd: &str) -> std::io::Result<PathBuf> {
     ensure_sessions_cwd_dir_in(&fuigo_home(), cwd)
 }
 
-static SESSION_PERSISTENCE_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SESSION_PERSISTENCE_OFF: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// F12 (`--no-session-persistence`): from now until the process exits nothing under `<fuigo_home>/sessions` is created,
 /// written or removed. The switch lives here, the lowest crate every writer of that tree depends on (the session
@@ -270,7 +284,10 @@ pub fn session_persistence_disabled() -> bool {
 
 /// [`ensure_sessions_cwd_dir`] with an injectable fuigo home. With session persistence off (F12) nothing is created and
 /// the call fails with `PermissionDenied`.
-#[allow(clippy::disallowed_methods, reason = "the producer definitions: resolve the cwd bucket <fuigo_home>/sessions/<cwd>/ and create only the sessions root and that bucket, never a session folder")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the producer definitions: resolve the cwd bucket <fuigo_home>/sessions/<cwd>/ and create only the sessions root and that bucket, never a session folder"
+)]
 pub fn ensure_sessions_cwd_dir_in(
     fuigo_home: &std::path::Path,
     cwd: &str,
@@ -291,7 +308,9 @@ pub fn ensure_sessions_cwd_dir_in(
     // O_CREAT|O_EXCL via create_new avoids TOCTOU races with parallel session starts
     if encoded_name != urlencoding::encode(cwd).as_ref() {
         let cwd_file = dir.join(".cwd");
-        match owner_only_file_options(std::fs::OpenOptions::new().write(true).create_new(true)).open(&cwd_file) {
+        match owner_only_file_options(std::fs::OpenOptions::new().write(true).create_new(true))
+            .open(&cwd_file)
+        {
             Ok(mut f) => {
                 std::io::Write::write_all(&mut f, cwd.as_bytes())?;
                 // Fsync the write-capable create_new handle before drop.
@@ -322,7 +341,10 @@ fn slugify(input: &str, max_len: usize) -> String {
     trimmed.chars().take(max_len).collect()
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,7 +509,11 @@ mod tests {
         let dir = ensure_sessions_cwd_dir_in(home.path(), &long_cwd).unwrap();
         assert_eq!(unix_mode(&dir), 0o700);
         assert_eq!(std::fs::read_to_string(dir.join(".cwd")).unwrap(), long_cwd);
-        assert_eq!(unix_mode(&dir.join(".cwd")), 0o600, "P150: the .cwd marker is owner-only");
+        assert_eq!(
+            unix_mode(&dir.join(".cwd")),
+            0o600,
+            "P150: the .cwd marker is owner-only"
+        );
     }
 
     #[test]

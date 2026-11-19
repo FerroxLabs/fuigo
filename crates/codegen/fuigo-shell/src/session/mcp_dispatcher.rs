@@ -71,14 +71,14 @@ pub struct McpServerStatusPayload {
     pub tools: Option<serde_json::Value>,
 }
 
-fn lenient_failure_kind<'de, D>(d: D) -> Result<Option<fuigo_mcp::servers::McpFailureKind>, D::Error>
+fn lenient_failure_kind<'de, D>(
+    d: D,
+) -> Result<Option<fuigo_mcp::servers::McpFailureKind>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let v = Option::<serde_json::Value>::deserialize(d)?;
-    Ok(v.map(|v| {
-        serde_json::from_value(v).unwrap_or(fuigo_mcp::servers::McpFailureKind::Unknown)
-    }))
+    Ok(v.map(|v| serde_json::from_value(v).unwrap_or(fuigo_mcp::servers::McpFailureKind::Unknown)))
 }
 
 /// Status enum sent on the wire. Lowercase serialization to match the existing pager `McpSessionStatus` family.
@@ -281,7 +281,12 @@ pub(crate) fn build_payload(
             McpServerStatusReason::TransportClosed,
             None,
         ),
-        (McpClientEventKind::HandshakeFailed, McpClientEvent::HandshakeFailed { reason, failure, .. }) => {
+        (
+            McpClientEventKind::HandshakeFailed,
+            McpClientEvent::HandshakeFailed {
+                reason, failure, ..
+            },
+        ) => {
             let detail = reason.clone();
             failure_kind = Some(*failure);
             (
@@ -941,9 +946,19 @@ mod tests {
         assert_eq!(payload.failure_kind, Some(McpFailureKind::NeedsAuth));
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("\"failureKind\":\"needs_auth\""), "{json}");
-        let ready = build_payload("s", &("svr".to_string(), McpClientEventKind::Ready), &McpClientEvent::Ready { server: "svr".into() });
+        let ready = build_payload(
+            "s",
+            &("svr".to_string(), McpClientEventKind::Ready),
+            &McpClientEvent::Ready {
+                server: "svr".into(),
+            },
+        );
         assert_eq!(ready.failure_kind, None);
-        assert!(!serde_json::to_string(&ready).unwrap().contains("failureKind"));
+        assert!(
+            !serde_json::to_string(&ready)
+                .unwrap()
+                .contains("failureKind")
+        );
         let old = r#"{"sessionId":"s","name":"a","source":"local","status":"unavailable","reason":"handshake_failed","tools":null,"someFutureField":1}"#;
         let decoded: McpServerStatusPayload = serde_json::from_str(old).unwrap();
         assert_eq!(decoded.failure_kind, None);

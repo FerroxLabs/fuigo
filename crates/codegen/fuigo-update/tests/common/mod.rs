@@ -296,7 +296,11 @@ impl FakeBinGuard {
 
     /// Make every invocation hang for `secs` (an unreachable registry that never answers).
     pub fn set_sleep(&self, secs: u32) {
-        std::fs::write(self.dir().join(format!("{}-sleep", self.name)), secs.to_string()).unwrap();
+        std::fs::write(
+            self.dir().join(format!("{}-sleep", self.name)),
+            secs.to_string(),
+        )
+        .unwrap();
     }
 
     /// Make every invocation start a long-lived grandchild (a lifecycle script) and record its pid.
@@ -306,16 +310,23 @@ impl FakeBinGuard {
 
     /// Make only `npm i ...` start a long-lived grandchild (its lifecycle script) and record its pid.
     pub fn set_install_grandchild(&self) {
-        std::fs::write(self.dir().join(format!("{}-install-grandchild", self.name)), "1").unwrap();
+        std::fs::write(
+            self.dir().join(format!("{}-install-grandchild", self.name)),
+            "1",
+        )
+        .unwrap();
     }
 
     /// Pid of the grandchild started by [`Self::set_install_grandchild`].
     pub fn install_grandchild_pid(&self) -> Option<i32> {
-        std::fs::read_to_string(self.dir().join(format!("{}-install-grandchild.pid", self.name)))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+        std::fs::read_to_string(
+            self.dir()
+                .join(format!("{}-install-grandchild.pid", self.name)),
+        )
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
     }
 
     /// Pid of the grandchild started by [`Self::set_grandchild`].

@@ -10,21 +10,90 @@
 /// how later words, directories or options are read. None of them is a plain program word.
 const NOT_PLAIN_PROGRAMS: &[&str] = &[
     // Wrappers and launchers.
-    "env", "command", "builtin", "exec", "timeout", "nice", "nohup", "stdbuf", "xargs", "parallel", "sudo", "sudoedit",
-    "doas", "run0", "pkexec", "su", "runuser", "time", "ionice", "chrt", "taskset", "setsid", "flock", "watch",
-    "unbuffer", "script", "nsenter", "unshare", "chroot", "strace", "ltrace", "caffeinate", "systemd-run", "firejail",
+    "env",
+    "command",
+    "builtin",
+    "exec",
+    "timeout",
+    "nice",
+    "nohup",
+    "stdbuf",
+    "xargs",
+    "parallel",
+    "sudo",
+    "sudoedit",
+    "doas",
+    "run0",
+    "pkexec",
+    "su",
+    "runuser",
+    "time",
+    "ionice",
+    "chrt",
+    "taskset",
+    "setsid",
+    "flock",
+    "watch",
+    "unbuffer",
+    "script",
+    "nsenter",
+    "unshare",
+    "chroot",
+    "strace",
+    "ltrace",
+    "caffeinate",
+    "systemd-run",
+    "firejail",
     "bwrap",
     // Builtins that change shell state, the directory, or how later words are parsed.
-    "set", "shopt", "cd", "pushd", "popd", "eval", "source", ".", "alias", "unalias", "export", "unset", "declare",
-    "typeset", "local", "readonly", "enable", "hash", "trap", "let", "read", "mapfile", "readarray", "fc", "bind",
+    "set",
+    "shopt",
+    "cd",
+    "pushd",
+    "popd",
+    "eval",
+    "source",
+    ".",
+    "alias",
+    "unalias",
+    "export",
+    "unset",
+    "declare",
+    "typeset",
+    "local",
+    "readonly",
+    "enable",
+    "hash",
+    "trap",
+    "let",
+    "read",
+    "mapfile",
+    "readarray",
+    "fc",
+    "bind",
     // Reserved words.
-    "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do", "done", "in",
-    "function", "coproc",
+    "if",
+    "then",
+    "else",
+    "elif",
+    "fi",
+    "case",
+    "esac",
+    "for",
+    "select",
+    "while",
+    "until",
+    "do",
+    "done",
+    "in",
+    "function",
+    "coproc",
 ];
 
 /// One unquoted word character: `[A-Za-z0-9._/:=@%+,-]`.
 fn is_plain_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | ':' | '=' | '@' | '%' | '+' | ',' | '-')
+    c.is_ascii_alphanumeric()
+        || matches!(c, '.' | '_' | '/' | ':' | '=' | '@' | '%' | '+' | ',' | '-')
 }
 
 /// Whether a word may end before `c`: a blank, a newline, a connector character, or the end of the command.
@@ -110,8 +179,15 @@ fn plain_commands(cmd: &str) -> Option<Vec<Vec<String>>> {
             '\'' | '"' => {
                 let close = chars[i + 1..].iter().position(|&q| q == c)? + i + 1;
                 let body = &chars[i + 1..close];
-                let forbidden: &[char] = if c == '\'' { &['\n'] } else { &['\n', '$', '`', '\\', '!'] };
-                if body.is_empty() || body.iter().any(|ch| forbidden.contains(ch)) || !ends_word(chars.get(close + 1)) {
+                let forbidden: &[char] = if c == '\'' {
+                    &['\n']
+                } else {
+                    &['\n', '$', '`', '\\', '!']
+                };
+                if body.is_empty()
+                    || body.iter().any(|ch| forbidden.contains(ch))
+                    || !ends_word(chars.get(close + 1))
+                {
                     return None;
                 }
                 current.push(Word {
@@ -122,7 +198,10 @@ fn plain_commands(cmd: &str) -> Option<Vec<Vec<String>>> {
                 i = close + 1;
             }
             c if is_plain_char(c) => {
-                let len = chars[i..].iter().take_while(|&&ch| is_plain_char(ch)).count();
+                let len = chars[i..]
+                    .iter()
+                    .take_while(|&&ch| is_plain_char(ch))
+                    .count();
                 if !ends_word(chars.get(i + len)) {
                     return None;
                 }
@@ -181,7 +260,10 @@ fn dev_null_redirect(chars: &[char], at: usize) -> Option<usize> {
         i += 1;
     }
     const TARGET: &str = "/dev/null";
-    let len = chars[i..].iter().take_while(|&&ch| is_plain_char(ch)).count();
+    let len = chars[i..]
+        .iter()
+        .take_while(|&&ch| is_plain_char(ch))
+        .count();
     let target: String = chars[i..i + len].iter().collect();
     (target == TARGET && ends_word(chars.get(i + len))).then_some(i + len)
 }
@@ -223,7 +305,10 @@ mod tests {
         }
         assert_eq!(
             plain_commands("cat 'a b' | wc -l"),
-            Some(vec![vec!["cat".to_owned(), "a b".to_owned()], vec!["wc".to_owned(), "-l".to_owned()]])
+            Some(vec![
+                vec!["cat".to_owned(), "a b".to_owned()],
+                vec!["wc".to_owned(), "-l".to_owned()]
+            ])
         );
     }
 
@@ -316,7 +401,10 @@ mod tests {
             "ls >\"/dev/null\"",
             "ls > /dev/nullx",
         ] {
-            assert!(!is_plain_text_command(cmd), "{cmd:?} must not pass the gate");
+            assert!(
+                !is_plain_text_command(cmd),
+                "{cmd:?} must not pass the gate"
+            );
         }
     }
 }

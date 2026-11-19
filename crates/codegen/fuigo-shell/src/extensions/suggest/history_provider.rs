@@ -374,7 +374,10 @@ fn load_fish_history(path: &std::path::Path) -> Vec<String> {
     commands
 }
 
-#[allow(clippy::disallowed_methods, reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,7 +755,10 @@ mod tests {
             _ = &mut refresh => panic!("the refresh finished before its scan was released"),
             _ = std::future::ready(()) => {}
         }
-        assert!(FLAG.load(std::sync::atomic::Ordering::Acquire), "a parked refresh must hold the flag");
+        assert!(
+            FLAG.load(std::sync::atomic::Ordering::Acquire),
+            "a parked refresh must hold the flag"
+        );
         drop(refresh);
         assert!(
             !FLAG.load(std::sync::atomic::Ordering::Acquire),
@@ -760,7 +766,11 @@ mod tests {
         );
         drop(release);
         let again = refresh_cross_cwd_cache(&swap, &FLAG, || vec!["fresh".to_string()]).await;
-        assert_eq!(again.prompts, ["fresh"], "a later refresh must run, not be skipped");
+        assert_eq!(
+            again.prompts,
+            ["fresh"],
+            "a later refresh must run, not be skipped"
+        );
     }
 
     /// Same property for the shell-history refresh; see the cross-cwd test above for why it is deterministic.
@@ -782,7 +792,10 @@ mod tests {
             _ = &mut refresh => panic!("the refresh finished before its scan was released"),
             _ = std::future::ready(()) => {}
         }
-        assert!(FLAG.load(std::sync::atomic::Ordering::Acquire), "a parked refresh must hold the flag");
+        assert!(
+            FLAG.load(std::sync::atomic::Ordering::Acquire),
+            "a parked refresh must hold the flag"
+        );
         drop(refresh);
         assert!(
             !FLAG.load(std::sync::atomic::Ordering::Acquire),
@@ -790,6 +803,10 @@ mod tests {
         );
         drop(release);
         let again = refresh_shell_history_cache(&swap, &FLAG, || vec!["fresh".to_string()]).await;
-        assert_eq!(again.commands, ["fresh"], "a later refresh must run, not be skipped");
+        assert_eq!(
+            again.commands,
+            ["fresh"],
+            "a later refresh must run, not be skipped"
+        );
     }
 }

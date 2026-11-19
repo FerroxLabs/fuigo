@@ -201,7 +201,11 @@ fn pruned_symlink_keeps_the_worktree_and_an_empty_one_does_not() {
     std::fs::write(empty.join("testdata/README"), b"ordinary\n").unwrap();
 
     assert_eq!(
-        reclaim_after_snapshot(&empty, &fixture.source, "refs/fuigo/subagents/empty-dot-git"),
+        reclaim_after_snapshot(
+            &empty,
+            &fixture.source,
+            "refs/fuigo/subagents/empty-dot-git"
+        ),
         Safety::Delete,
         "an empty .git holds nothing to lose"
     );

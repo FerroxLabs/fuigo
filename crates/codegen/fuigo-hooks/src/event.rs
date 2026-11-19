@@ -475,7 +475,11 @@ pub enum HookPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
         /// `true` when the session has read peer messages (S6.7); absent otherwise.
-        #[serde(rename = "peerInfluenced", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "peerInfluenced",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         peer_influenced: Option<bool>,
     },
     PostToolUse {
@@ -541,10 +545,18 @@ pub enum HookPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
         /// The peer sender's address (a claim by a same-user process; never the release token).
-        #[serde(rename = "peerSender", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "peerSender",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         peer_sender: Option<String>,
         /// The mode the sender claims to run in.
-        #[serde(rename = "peerClaimedMode", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "peerClaimedMode",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         peer_claimed_mode: Option<String>,
     },
     Notification {

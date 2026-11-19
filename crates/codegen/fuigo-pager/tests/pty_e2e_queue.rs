@@ -68,11 +68,11 @@ mod send_now_tip_after_mid_turn_queue;
 mod send_then_ctrlc_rewinds_to_composer_no_history_dup;
 #[path = "pty_e2e/shift_tab_plan_nudge_from_always_approve_enters_plan.rs"]
 mod shift_tab_plan_nudge_from_always_approve_enters_plan;
+#[path = "pty_e2e/tmux_key_decoding.rs"]
+mod tmux_key_decoding;
 #[path = "pty_e2e/up_focuses_queue_bottom_row.rs"]
 mod up_focuses_queue_bottom_row;
 #[path = "pty_e2e/verify_bashq_claim2_force_interject.rs"]
 mod verify_bashq_claim2_force_interject;
 #[path = "pty_e2e/verify_bashq_claim3_edit_keeps_bash.rs"]
 mod verify_bashq_claim3_edit_keeps_bash;
-#[path = "pty_e2e/tmux_key_decoding.rs"]
-mod tmux_key_decoding;
