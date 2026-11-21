@@ -422,6 +422,8 @@ sessions = true   # staged; no scanner consumer yet
 skills = true     # scan ~/.agents/skills/ and <dir>/.agents/skills/ (vendor-neutral layout)
 ```
 
+`[compat.claude] rules = false` stops only `.claude/rules/` from loading, and `agents = false` stops only `~/.claude/` and `<dir>/.claude/CLAUDE*.md`. The root `CLAUDE.md`, `Claude.md` and `CLAUDE.local.md` files are generic project instruction files, like `AGENTS.md`: they load regardless of `[compat.claude]`. To stop one loading, rename or remove it.
+
 Codex's `skills`, `rules`, `agents`, `mcps`, and `hooks` cells are reserved and currently inert — they do not enable `.codex` discovery. The `agents` vendor is the vendor-neutral `.agents/` directory; only its `skills` cell is consumed (`FUIGO_AGENTS_SKILLS_ENABLED`).
 
 For Claude and Cursor, `rules` and `agents` are independent: turning off named instruction files doesn't disable the home or project rules directory, and turning off rules doesn't disable named files. Claude's `agents` cell gates home-level `~/.claude/` named files and project `<dir>/.claude/CLAUDE*.md`; generic top-level `Claude.md`, `CLAUDE.md`, and `CLAUDE.local.md` stay recognized. Project rule paths are scanned at every directory from the repo root down to the current one.

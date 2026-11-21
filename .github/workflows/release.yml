@@ -508,6 +508,25 @@ jobs:
           tenant-id: 11fd2488-ed71-47ba-aad3-6c19d6e911ab
           allow-no-subscriptions: true
 
+      # Trust PSGallery and install the signing module (the version the pinned action installs) with a bounded retry,
+      # so a slow gallery does not fail the signing step. Nothing here signs, tags or publishes.
+      - name: Install the Artifact Signing module from PSGallery
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+              Install-Module -Name ArtifactSigning -RequiredVersion 0.1.8 -Force -Repository PSGallery
+              break
+            } catch {
+              if ($attempt -eq 5) { throw }
+              Write-Host "attempt $attempt failed: $($_.Exception.Message)"
+              Start-Sleep -Seconds (15 * $attempt)
+            }
+          }
+
       # The action downloads its signing module from the PowerShell Gallery on every run, and that download fails
       # now and then. Try once more before failing; the Authenticode gate below still checks every binary.
       - name: Sign with Azure Artifact Signing
@@ -1040,6 +1059,8 @@ jobs:
           audit_dir="${{ runner.temp }}/audit-signatures-${{ matrix.platform }}"
           mkdir -p "$audit_dir"
           cd "$audit_dir"
+          npm install -g npm@12.2.3
+          npm --version
           npm init -y >/dev/null
           # The registry can lag a few minutes after publish (a 404 on a just-published version); retry, bounded.
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -1047,7 +1068,14 @@ jobs:
             if [ "$attempt" = 10 ]; then echo "fuigo@$VERSION did not install after 10 attempts" >&2; exit 1; fi
             sleep 30
           done
-          npm audit signatures
+          # A just-published version can fail with EMISSINGSIGNATUREKEY while the registry catches up; retry only
+          # that error, bounded. Any other failure fails at once.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if npm audit signatures >audit.log 2>&1; then cat audit.log; break; fi
+            cat audit.log
+            if ! grep -q EMISSINGSIGNATUREKEY audit.log || [ "$attempt" = 10 ]; then exit 1; fi
+            sleep 30
+          done
 
       # The github-release job compares these digests with the release assets.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

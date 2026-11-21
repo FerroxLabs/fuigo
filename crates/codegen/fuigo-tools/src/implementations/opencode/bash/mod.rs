@@ -465,7 +465,7 @@ impl fuigo_tool_runtime::Tool for BashTool {
             truncated: result.truncated,
             signal: result.signal,
             timed_out: result.timed_out,
-            description: Some(input.description),
+            description: Some(input.description).filter(|d| !d.trim().is_empty()),
             current_dir: cwd.to_string_lossy().to_string(),
             output_file: output_file.to_string_lossy().to_string(),
             total_bytes: result.total_bytes,

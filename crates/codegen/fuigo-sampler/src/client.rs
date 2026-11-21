@@ -110,6 +110,17 @@ pub(crate) const H_CLIENT_VERSION: &str = "x-fuigo-client-version";
 /// Client-level IDENTITY header: which Ferrox client is calling.
 pub(crate) const H_CLIENT_IDENTIFIER: &str = "x-fuigo-client-identifier";
 
+/// Provider-documented cache-routing headers (not `x-fuigo-*`). Both carry the session id, the same
+/// per-session random that `prompt_cache_key` and `x-fuigo-session-id` already send to every destination.
+/// xAI: `x-grok-conv-id` pins a conversation to one cache. OpenRouter: `x-session-id` is the sticky-routing key.
+/// Other hosts ignore unknown headers.
+#[cfg(test)]
+const PROVIDER_CACHE_HEADERS: [&str; 2] = [H_GROK_CONV_ID, H_OPENROUTER_SESSION_ID];
+/// xAI sticky-cache header (docs.x.ai prompt-caching).
+pub(crate) const H_GROK_CONV_ID: &str = "x-grok-conv-id";
+/// OpenRouter sticky-routing header (openrouter.ai prompt-caching guide).
+pub(crate) const H_OPENROUTER_SESSION_ID: &str = "x-session-id";
+
 /// The per-request `x-fuigo-*` names that go to **every** destination.
 ///
 /// `cfg(test)` because the product reads the individual `H_*` consts directly; this array is
@@ -209,6 +220,8 @@ impl FuigoRequestHeaders<'_> {
             .header(H_CONV_ID, self.conv_id)
             .header(H_REQ_ID, self.req_id)
             .header(H_SESSION_ID, self.session_id)
+            .header(H_GROK_CONV_ID, self.session_id)
+            .header(H_OPENROUTER_SESSION_ID, self.session_id)
             .header(H_MODEL_OVERRIDE, self.model_id);
         if let Some(idx) = self.turn_idx {
             b = b.header(H_TURN_IDX, idx);
@@ -3388,6 +3401,40 @@ mod tests {
                 Some(expected),
                 "{name} did not reach a third-party destination with its value"
             );
+        }
+    }
+
+    /// The provider cache headers reach every destination class with the session id, never the
+    /// per-call conv id (a side call labels its conv id `btw-`/`recap-` but shares the parent cache).
+    #[test]
+    fn provider_cache_headers_carry_the_session_id_everywhere() {
+        for identity in [
+            IdentityDisclosure::WITHHELD,
+            IdentityDisclosure::for_destination("https://api.fluxrouter.ai/v1"),
+        ] {
+            let h = FuigoRequestHeaders {
+                conv_id: "btw-label",
+                req_id: "req",
+                model_id: "model",
+                session_id: "sess-4d0e",
+                turn_idx: None,
+                transient_retry: None,
+                agent_id: "agent",
+                deployment_id: None,
+                user_id: None,
+                identity,
+            };
+            let request = h
+                .apply(probe_builder("https://api.x.ai/v1"))
+                .build()
+                .expect("request builds");
+            for name in PROVIDER_CACHE_HEADERS {
+                assert_eq!(
+                    request.headers().get(name).and_then(|v| v.to_str().ok()),
+                    Some("sess-4d0e"),
+                    "{name}"
+                );
+            }
         }
     }
 
