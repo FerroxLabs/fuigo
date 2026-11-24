@@ -794,6 +794,8 @@ struct TrustPolicies {
     project_prompt: PromptPolicy,
     base: Option<CompiledPolicy>,
     base_prompt: PromptPolicy,
+    /// S1 (1.0.47): the rules of `base` (CLI and user tiers, never the project tier), for the outside-change pre-allow.
+    base_rules: Vec<crate::permission::types::PermissionRule>,
 }
 
 impl TrustPolicies {
@@ -802,6 +804,7 @@ impl TrustPolicies {
         let prompt = config.as_ref().map(|c| c.prompt_policy).unwrap_or_default();
         Self {
             generation: 0,
+            base_rules: config.as_ref().map(|c| c.rules.clone()).unwrap_or_default(),
             base: config.clone().map(CompiledPolicy::new),
             base_prompt: prompt,
             project: config.map(CompiledPolicy::new),
@@ -824,6 +827,7 @@ impl TrustPolicies {
         };
         Self {
             generation,
+            base_rules: base.as_ref().map(|c| c.rules.clone()).unwrap_or_default(),
             base_prompt: prompt(&base),
             project_prompt: prompt(&project),
             base: base.map(CompiledPolicy::new),
@@ -1363,6 +1367,36 @@ fn with_env_steering_note(update: &acp::ToolCallUpdate, var: Option<&str>) -> ac
         ));
     }
     update
+}
+
+/// S1 (1.0.47): the outside-change note on the prompt card, after the action it asks about.
+fn with_outside_note(
+    update: &acp::ToolCallUpdate,
+    change: &crate::permission::shell_access::OutsideChange,
+) -> acp::ToolCallUpdate {
+    let mut update = update.clone();
+    let title = update
+        .fields
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("this command");
+    update.fields.title = Some(format!("{title} — {}", change.prompt_note()));
+    update
+}
+
+/// S1 (1.0.47): where a shell command really starts, by the runner's own precedence: the tool's `workdir`, then the
+/// persistent shell's tracked directory, then the request's directory.
+pub(crate) fn outside_exec_dir(
+    request: &PermissionRequest,
+    request_dir: &Path,
+) -> std::path::PathBuf {
+    request
+        .exec_cwd
+        .clone()
+        .or_else(|| request.shell_run_dir.clone())
+        .unwrap_or_else(|| request_dir.to_path_buf())
 }
 
 fn unparseable_exec_risk(cmd: &str) -> bool {
@@ -2183,6 +2217,81 @@ impl PermissionHandle {
     }
 
     /// `Some(reason)` when the peer guard denies this request (S6.3). `None` for a session that is not peer-influenced.
+    /// S1 (1.0.47): the session's outside-change guard (typed paths, approvals, created files; memory only).
+    pub fn outside_guard(&self) -> crate::permission::shell_access::OutsideGuard {
+        self.peer_influence().outside().clone()
+    }
+
+    /// S1 (1.0.47): the paths the user typed in a `PromptOrigin::User` prompt, for the outside-change exemption.
+    pub fn note_user_text(&self, text: &str, session_root: &Path, shell_cwd: Option<&Path>) {
+        self.peer_influence()
+            .outside()
+            .note_user_text(text, session_root, shell_cwd);
+    }
+
+    /// Give the guard the allow rules loaded at session start, once: the actor answers after every earlier command,
+    /// so the session's policy inputs (CLI and user tiers, no project tier) are applied first.
+    async fn seal_outside_rules(&self, guard: &crate::permission::shell_access::OutsideGuard) {
+        match self {
+            PermissionHandle::Actor { cmd_tx, .. } => {
+                let (tx, rx) = oneshot::channel();
+                let mut rules = Vec::new();
+                if cmd_tx.send(PermissionCommand::SealOutsideRules(tx)).is_ok() {
+                    rules = rx.await.unwrap_or_default();
+                }
+                guard.set_rules_once(rules);
+            }
+            PermissionHandle::AllowAll(_) => guard.set_rules_once(Vec::new()),
+        }
+    }
+
+    /// What the outside-change guard finds for one request (shell effects, or the files an edit tool rewrites).
+    fn outside_verdict(
+        &self,
+        guard: &crate::permission::shell_access::OutsideGuard,
+        request: &PermissionRequest,
+    ) -> crate::permission::shell_access::OutsideVerdict {
+        use crate::permission::shell_access::{EffectKind, Final, S1Effect, s1_effects};
+        let fallback = match self {
+            PermissionHandle::Actor { mode_view, .. } => mode_view.fallback_cwd.clone(),
+            PermissionHandle::AllowAll(_) => None,
+        };
+        let request_dir = request.path_context.as_ref().map(|c| c.real_cwd.clone());
+        let session_root = fallback
+            .or_else(|| request_dir.clone())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let base = request_dir.unwrap_or_else(|| session_root.clone());
+        let edit_paths: Vec<String> = match (&request.access, &request.edit_targets) {
+            (_, Some(EditTargets::Paths(paths))) => paths.clone(),
+            (AccessKind::Edit(path), None) => vec![path.clone()],
+            (AccessKind::Bash(_), None) => Vec::new(),
+            _ => return Default::default(),
+        };
+        guard.ensure_env(&session_root);
+        match &request.access {
+            AccessKind::Bash(cmd) if request.edit_targets.is_none() => {
+                let exec_dir = outside_exec_dir(request, &base);
+                let effects = s1_effects(cmd, &exec_dir, guard.home().as_deref());
+                guard.evaluate(&effects, true)
+            }
+            _ => {
+                let effects: Vec<S1Effect> = edit_paths
+                    .iter()
+                    .map(|path| S1Effect {
+                        path: base.join(path),
+                        kind: EffectKind::Overwrite,
+                        fin: Final::Follow,
+                        segment: String::new(),
+                        links: Vec::new(),
+                        wide: false,
+                    })
+                    .collect();
+                guard.evaluate(&effects, false)
+            }
+        }
+    }
+
     pub fn peer_guard_denial_for(&self, request: &PermissionRequest) -> Option<String> {
         if !self.is_peer_influenced() {
             return None;
@@ -2545,8 +2654,23 @@ impl PermissionHandle {
                 event: None,
             };
         }
+        // S1 (1.0.47, DS-04): a destructive change outside the workspace asks in every mode, bypass included, and is
+        // denied where no prompt can be shown, unless an exemption covers the path. Always recomputed here.
+        let guard = self.peer_influence().outside().clone();
+        if !guard.rules_sealed() {
+            self.seal_outside_rules(&guard).await;
+        }
+        let verdict = self.outside_verdict(&guard, &request);
+        request.outside_change = verdict.change.clone();
         match self {
             PermissionHandle::AllowAll(_) => {
+                if let Some(change) = &request.outside_change {
+                    return PermissionResolution {
+                        decision: Decision::PolicyDeny(change.deny_text()),
+                        event: None,
+                    };
+                }
+                guard.after_decision(&verdict, true);
                 if let Some(ask) = &request.hook_ask {
                     tracing::debug!(
                         hook_name = %ask.hook_name,
@@ -2576,7 +2700,13 @@ impl PermissionHandle {
                 }
 
                 match rx.await {
-                    Ok(resolution) => resolution,
+                    Ok(resolution) => {
+                        guard.after_decision(
+                            &verdict,
+                            matches!(resolution.decision, Decision::Allow),
+                        );
+                        resolution
+                    }
                     Err(e) => {
                         tracing::error!(?e, "failed to receive permission decision");
                         PermissionResolution {
@@ -2839,6 +2969,7 @@ pub(crate) fn approved_without_grant(
         | R::BashRequestFloor
         | R::OpaqueShell
         | R::HookAsk
+        | R::OutsideChange
         | R::RequesterGone => true,
     };
     without_grant && !facts.call_granted
@@ -3371,6 +3502,10 @@ fn spawn_permission_manager_with_pin(
                     policies = TrustPolicies::resolve(&inputs).await;
                     session_inputs = Some(inputs);
                 }
+                PermissionCommand::SealOutsideRules(done) => {
+                    // The handle seals its own guard: the session swaps the handle's peer influence after spawn.
+                    let _ = done.send(policies.base_rules.clone());
+                }
                 PermissionCommand::ResetState => {
                     state = PermissionState::default();
                     replace_state_on_disk(&cwd, &state, client_id_ref).await;
@@ -3423,6 +3558,7 @@ fn spawn_permission_manager_with_pin(
                                 shell_run_dir,
                                 mcp_definition,
                                 mcp_definition_legacy,
+                                outside_change,
                             },
                             respond_to,
                         )) = pending.take()
@@ -3474,6 +3610,10 @@ fn spawn_permission_manager_with_pin(
                                 with_read_target_locations(tool_call_update, &targets.paths)
                             }
                             _ => tool_call_update,
+                        };
+                        let tool_call_update = match &outside_change {
+                            Some(change) => with_outside_note(&tool_call_update, change),
+                            None => tool_call_update,
                         };
                         let request_cwd = path_context
                             .as_ref()
@@ -3840,7 +3980,9 @@ fn spawn_permission_manager_with_pin(
                         }
                         let policy_forced_prompt = preflight.policy_forced_prompt();
                         let shell_forced_prompt = preflight.shell_forced_prompt();
-                        let hook_forced_prompt = hook_ask.is_some();
+                        // S1 (1.0.47): an outside change forces the prompt at every approving site, like a hook ask.
+                        let s1_forced_prompt = outside_change.is_some();
+                        let hook_forced_prompt = hook_ask.is_some() || s1_forced_prompt;
                         let pre_classifier_forced_prompt =
                             policy_forced_prompt || shell_forced_prompt || hook_forced_prompt;
                         let mut auto_forced_prompt = false;
@@ -3881,6 +4023,33 @@ fn spawn_permission_manager_with_pin(
                                 false,
                                 None,
                                 Some(reasons::POLICY_DENY),
+                            );
+                            let _ = respond_to.send(PermissionResolution {
+                                decision,
+                                event: Some(event),
+                            });
+                            continue;
+                        }
+
+                        // S1 (1.0.47): after the deny rules and the launch-policy refusal, before every approving path.
+                        // Refused where base had no prompt path for this command: dontAsk; `alwaysAllow`, where nobody
+                        // may be there to answer (Fable r3 M12); and bypass on a client that is not a recognised Fuigo
+                        // client and did not declare `fuigo/permissionPrompts` (headless, DS-04). In Default and Auto
+                        // such a client gets the prompt exactly as base sends it every other prompt.
+                        if let Some(change) = &outside_change
+                            && (matches!(prompt_policy, PromptPolicy::Deny | PromptPolicy::Allow)
+                                || (yolo_mode
+                                    && !(client_type.can_present_permission_prompt()
+                                        || change.client_prompts)))
+                        {
+                            tracing::info!(tool = %tool_name, "outside change refused: no prompt can be shown");
+                            let decision = Decision::PolicyDeny(change.deny_text());
+                            let event = emit_event(
+                                &decision,
+                                false,
+                                false,
+                                None,
+                                Some(reasons::OUTSIDE_CHANGE),
                             );
                             let _ = respond_to.send(PermissionResolution {
                                 decision,
@@ -3981,7 +4150,11 @@ fn spawn_permission_manager_with_pin(
                         // the classifier is never asked about it. Rules, hooks and the peer guard have already run above.
                         let auto_exempt =
                             matches!(&access, AccessKind::Tool(name) if is_auto_allowed_tool(name));
-                        if auto_mode && !auto_exempt && preflight.admits_auto_classifier() {
+                        if auto_mode
+                            && !auto_exempt
+                            && !s1_forced_prompt
+                            && preflight.admits_auto_classifier()
+                        {
                             use crate::permission::auto_mode::{
                                 AutoFastPath, access_requires_user_interaction, auto_mode_fast_path,
                             };
@@ -4606,7 +4779,9 @@ fn spawn_permission_manager_with_pin(
                         });
                         let prompt_trigger = preflight
                             .prompt_trigger(auto_prompt_reason)
-                            .unwrap_or(if hook_forced_prompt {
+                            .unwrap_or(if s1_forced_prompt {
+                                reasons::OUTSIDE_CHANGE
+                            } else if hook_forced_prompt {
                                 reasons::HOOK_ASK
                             } else if opaque_floor {
                                 reasons::OPAQUE_SHELL

@@ -307,6 +307,7 @@ impl MemoryStorage {
 
     /// Path to the workspace sessions directory.
     pub fn sessions_dir(&self) -> PathBuf {
+        // at-rest: outside-roots the memory store's own workspace folder (<memory root>/<workspace>/sessions), not <fuigo_home>/sessions
         self.workspace_dir.join("sessions")
     }
 
@@ -420,8 +421,9 @@ impl MemoryStorage {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(&recovery, std::fs::Permissions::from_mode(0o700))?;
                 }
+                // at-rest: at-rest memory recovery backup, written through at_rest::transform_whole
                 let mut backup = tempfile::NamedTempFile::new_in(&recovery)?;
-                backup.write_all(old.as_bytes())?;
+                backup.write_all(&fuigo_secrets::at_rest::transform_whole(old.as_bytes()))?;
                 backup.as_file().sync_all()?;
                 backup.keep().map_err(|e| e.error)?;
                 #[cfg(unix)]
@@ -514,17 +516,7 @@ impl MemoryStorage {
         from: Option<usize>,
         lines: Option<usize>,
     ) -> std::io::Result<String> {
-        // Security: canonicalize both sides; fail hard if either doesn't exist
-        let canonical = dunce::canonicalize(path)?;
-        if !self.allows_path(&canonical) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "memory path is outside this workspace and global MEMORY.md",
-            ));
-        }
-
-        // Read the canonicalized path, not the original, to prevent TOCTOU races.
-        let content = crate::safety::filter_memory_lines(&std::fs::read_to_string(&canonical)?);
+        let content = crate::safety::filter_memory_lines(&self.read_unfiltered(path)?);
 
         let from = from.unwrap_or(0);
         match lines {
@@ -538,6 +530,20 @@ impl MemoryStorage {
             }
             None => Ok(content),
         }
+    }
+
+    /// The path-checked raw bytes behind [`Self::read_file`], before line filtering.
+    pub(crate) fn read_unfiltered(&self, path: &Path) -> std::io::Result<String> {
+        // Security: canonicalize both sides; fail hard if either doesn't exist
+        let canonical = dunce::canonicalize(path)?;
+        if !self.allows_path(&canonical) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "memory path is outside this workspace and global MEMORY.md",
+            ));
+        }
+        // Read the canonicalized path, not the original, to prevent TOCTOU races.
+        std::fs::read_to_string(&canonical)
     }
 
     /// List all memory files (`.md`) across global and workspace directories. Symbolic links are not listed.
@@ -886,8 +892,9 @@ fn update_file_checked(
         Err(e) => return Err(e),
     };
     let content = update(&old)?;
+    // at-rest: at-rest memory file update, written through at_rest::transform_whole
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(content.as_bytes())?;
+    temp.write_all(&fuigo_secrets::at_rest::transform_whole(content.as_bytes()))?;
     temp.as_file().sync_all()?;
     // Detect edits by non-cooperating editors made while preparing the replacement.
     let current = match std::fs::read_to_string(path) {
@@ -1156,6 +1163,7 @@ fn recorded_workspace_paths(legacy_dir: &Path) -> Option<std::collections::BTree
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return None,
     }
+    // at-rest: outside-roots the memory store's legacy folder, read only (<memory root>/<workspace>/sessions), not <fuigo_home>/sessions
     match std::fs::read_dir(legacy_dir.join("sessions")) {
         Ok(entries) => {
             for entry in entries {

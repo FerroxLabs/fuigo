@@ -435,7 +435,16 @@ pub(crate) struct PromptResponseMeta {
     pub cached_read_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
-    /// Whole-prompt billing (sibling token fields are last call only).
+    /// The last call's billed sum over every resend; the unprefixed siblings are its last attempt, on `totalTokens`' basis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billed_total_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billed_input_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billed_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billed_cached_read_tokens: Option<u32>,
+    /// Whole-prompt billing (sibling token fields are the last call's last attempt only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::extensions::notification::PromptUsage>,
     /// Why the turn ended early (`cancellation_category_meta`).
@@ -468,6 +477,8 @@ pub(crate) struct PromptResponseMetaArgs<'a> {
     pub total_tokens: u64,
     pub model_id: &'a str,
     pub last_turn_usage: Option<&'a fuigo_sampling_types::TokenUsage>,
+    /// The last attempt of that call; `None` falls back to `last_turn_usage`.
+    pub last_attempt_usage: Option<&'a fuigo_sampling_types::TokenUsage>,
     pub prompt_usage: Option<crate::extensions::notification::PromptUsage>,
     pub cancellation_category: Option<String>,
     pub cancellation_context: Option<serde_json::Value>,
@@ -485,6 +496,7 @@ pub(crate) fn build_prompt_response_meta(
         total_tokens,
         model_id,
         last_turn_usage,
+        last_attempt_usage,
         prompt_usage,
         cancellation_category,
         cancellation_context,
@@ -497,16 +509,21 @@ pub(crate) fn build_prompt_response_meta(
         Some(Err(error)) => (None, Some(error)),
         None => (None, None),
     };
+    let attempt = last_attempt_usage.or(last_turn_usage);
     let meta = PromptResponseMeta {
         session_id: session_id.to_string(),
         request_id: prompt_id.to_string(),
         prompt_id: prompt_id.to_string(),
         total_tokens,
         model_id: model_id.to_string(),
-        input_tokens: last_turn_usage.map(|u| u.prompt_tokens),
-        output_tokens: last_turn_usage.map(|u| u.completion_tokens),
-        cached_read_tokens: last_turn_usage.map(|u| u.cached_prompt_tokens),
-        reasoning_tokens: last_turn_usage.map(|u| u.reasoning_tokens),
+        input_tokens: attempt.map(|u| u.prompt_tokens),
+        output_tokens: attempt.map(|u| u.completion_tokens),
+        cached_read_tokens: attempt.map(|u| u.cached_prompt_tokens),
+        reasoning_tokens: attempt.map(|u| u.reasoning_tokens),
+        billed_total_tokens: last_turn_usage.map(|u| u.total_tokens),
+        billed_input_tokens: last_turn_usage.map(|u| u.prompt_tokens),
+        billed_output_tokens: last_turn_usage.map(|u| u.completion_tokens),
+        billed_cached_read_tokens: last_turn_usage.map(|u| u.cached_prompt_tokens),
         usage: prompt_usage,
         cancellation_category,
         cancellation_context,
@@ -1512,9 +1529,12 @@ impl MvpAgent {
         let Some(updates_path) = updates_file_path else {
             return Vec::new();
         };
-        let contents = match std::fs::read_to_string(updates_path) {
-            Ok(c) => c,
+        let bytes = match crate::session::storage::updates_cache::read(updates_path) {
+            Ok(b) => b,
             Err(_) => return Vec::new(),
+        };
+        let Ok(contents) = crate::session::storage::updates_cache::utf8(&bytes) else {
+            return Vec::new();
         };
         let all_lines: Vec<&str> = contents
             .lines()

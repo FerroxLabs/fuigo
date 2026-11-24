@@ -92,6 +92,9 @@ async fn minimal_flush_left_no_hpad() {
         "permission modal",
     );
     // Allow once (Enter on the preselected row, P152) so the turn settles, then wait for idle.
+    // The card opened within the typing window of the prompt's Enter, so an Enter now is held as typing (audit S9-F4).
+    // A user reads the card first: let the window pass, then answer.
+    harness.update(Duration::from_millis(1000));
     harness.inject_keys(b"\r").expect("allow once");
     harness
         .wait_for_text("PERMISSION_SETTLED", Duration::from_secs(30))

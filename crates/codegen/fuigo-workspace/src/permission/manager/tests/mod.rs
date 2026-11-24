@@ -11,6 +11,13 @@ mod t1_trust_tests;
 #[path = "launch_policy_tests.rs"]
 mod launch_policy_tests;
 
+#[cfg(unix)]
+#[path = "s1_outside_tests.rs"]
+mod s1_outside_tests;
+
+#[path = "s1_generic_diff_tests.rs"]
+mod s1_generic_diff_tests;
+
 async fn decide(
     handle: &PermissionHandle,
     access: AccessKind,
@@ -941,17 +948,23 @@ async fn managed_bash_deny_env_split_string_yolo() {
                     "env -iS 'rm -rf /tmp/victim'",
                     "env -P /usr/bin -S 'echo $HOME'",
                 ];
+                // S1 (1.0.47): a hidden command cannot be judged for outside changes, so this Generic client in
+                // bypass (no prompt it can show) is refused by the outside-change guard instead of prompted.
+                let mut asked = 0;
                 for cmd in uncertain {
                     let d = decide(&mgr, AccessKind::Bash(cmd.into()), tool_call())
                         .await;
-                    assert!(
-                        matches!(d, Decision::Reject(_)),
-                        "uncertain env -S must prompt under YOLO (reject answer), not Allow/PolicyDeny: {cmd}, got {d:?}"
-                    );
+                    match &d {
+                        Decision::Reject(_) => asked += 1,
+                        Decision::PolicyDeny(why) if why.contains("outside the workspace") => {}
+                        _ => panic!(
+                            "uncertain env -S must prompt or take the S1 refusal under YOLO, not Allow: {cmd}, got {d:?}"
+                        ),
+                    }
                 }
                 assert_eq!(
                     prompts.borrow().len(),
-                    uncertain.len(),
+                    asked,
                     "each uncertain env -S shape must hit the user prompt once under YOLO"
                 );
                 let d = decide(&mgr, AccessKind::Bash("env FOO=1 rm -rf /tmp/victim".into()), tool_call())
@@ -962,7 +975,7 @@ async fn managed_bash_deny_env_split_string_yolo() {
                 );
                 assert_eq!(
                     prompts.borrow().len(),
-                    uncertain.len(),
+                    asked,
                     "ordinary env assignment PolicyDeny must not add prompts"
                 );
             })
@@ -4494,6 +4507,8 @@ async fn protected_edit_floor_covers_auto_config_allow_and_dont_ask() {
                 let mut deny = crate::permission::types::PermissionConfig::new(vec![]);
                 deny.prompt_policy = PromptPolicy::Deny;
 
+                // S1 (1.0.47): `/etc/hosts` is outside the workspace, and this client gets the one prompt it got on
+                // base (Default/Auto keep their prompt path for unrecognised clients).
                 for (name, config, expected_prompts, policy_deny) in [
                     ("auto", auto, 1, false),
                     ("configured allow", allow, 1, false),
@@ -8705,10 +8720,22 @@ async fn auto_mode_gate_allowlist_classifier_and_yolo() {
             mgr.set_yolo_mode(true);
             assert!(mgr.is_yolo_mode());
             assert!(!mgr.is_auto_mode(), "enabling yolo clears auto");
-            let d = decide(&mgr, AccessKind::Bash("rm -rf /".into()), dummy_update).await;
+            // S1 (1.0.47): an inside delete is still allowed by yolo without the classifier; `rm -rf /` is an outside
+            // change, refused for this headless client in bypass.
+            let d = decide(
+                &mgr,
+                AccessKind::Bash("rm -rf target".into()),
+                dummy_update.clone(),
+            )
+            .await;
             assert!(
                 matches!(d, Decision::Allow),
                 "yolo must allow without classifier, got {d:?}"
+            );
+            let d = decide(&mgr, AccessKind::Bash("rm -rf /".into()), dummy_update).await;
+            assert!(
+                matches!(&d, Decision::PolicyDeny(t) if t.starts_with("Not run: this command would delete")),
+                "yolo must not run rm -rf / for a headless client, got {d:?}"
             );
         })
         .await;
@@ -8784,10 +8811,16 @@ async fn auto_mode_heuristic_allows_cargo_without_user_prompt() {
             assert!(event.classifier_latency_ms.is_some());
             assert_eq!(event.auto_denials_consecutive, Some(0));
             assert_eq!(event.auto_denials_total, Some(0));
-            let d = decide(&mgr, AccessKind::Bash("rm -rf /".into()), dummy_update).await;
+            // An unavailable classifier still stops a dangerous command inside the workspace (base coverage).
+            let d = decide(
+                &mgr,
+                AccessKind::Bash("git push --force origin main".into()),
+                dummy_update.clone(),
+            )
+            .await;
             assert!(
                 matches!(d, Decision::Reject(_)),
-                "dangerous rm -rf / must still prompt, got {d:?}"
+                "dangerous command must still prompt, got {d:?}"
             );
             let event = events.try_recv().expect("event must be emitted");
             assert_eq!(
@@ -8798,6 +8831,19 @@ async fn auto_mode_heuristic_allows_cargo_without_user_prompt() {
             assert!(event.classifier_latency_ms.is_some());
             assert_eq!(event.auto_denials_consecutive, Some(0));
             assert_eq!(event.auto_denials_total, Some(0));
+            // S1 (1.0.47): `rm -rf /` is an outside change: it is still stopped, by the prompt S1 forces (this client
+            // cannot answer it), and the classifier is not consulted.
+            let d = decide(&mgr, AccessKind::Bash("rm -rf /".into()), dummy_update).await;
+            assert!(
+                matches!(d, Decision::Reject(_) | Decision::PolicyDeny(_)),
+                "dangerous rm -rf / must still be stopped, got {d:?}"
+            );
+            let event = events.try_recv().expect("event must be emitted");
+            assert!(
+                event.classifier_source.is_none(),
+                "the classifier is not consulted: {:?}",
+                event.decision_reason
+            );
         })
         .await;
 }

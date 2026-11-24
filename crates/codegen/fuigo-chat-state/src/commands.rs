@@ -131,6 +131,9 @@ pub enum ChatStateCommand {
     /// Overwrites any previously stashed value.
     RecordLastTurnUsage { usage: TokenUsage },
 
+    /// Stash the last attempt's own usage (`None` clears it); `RecordLastTurnUsage` keeps the billed sum.
+    RecordLastAttemptUsage { usage: Option<TokenUsage> },
+
     RecordModelCallUsage {
         model_id: Option<String>,
         usage: TokenUsage,
@@ -300,6 +303,10 @@ pub enum ChatStateCommand {
     /// Retrieve the most recent stashed per-turn `TokenUsage`. Returns
     /// `None` until at least one `RecordLastTurnUsage` has been processed.
     GetLastTurnUsage {
+        reply: oneshot::Sender<Option<TokenUsage>>,
+    },
+
+    GetLastAttemptUsage {
         reply: oneshot::Sender<Option<TokenUsage>>,
     },
 

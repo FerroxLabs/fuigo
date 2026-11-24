@@ -45,6 +45,9 @@ pub(super) enum HistoryRewrite {
     ImageStrip,
 }
 
+/// Hard-cleared bytes that trigger the batched `chat_history.jsonl` rewrite (F6).
+pub(super) const PRUNE_PERSIST_BYTES: usize = 1024 * 1024;
+
 impl ChatStateActor {
     /// Apply `mutate` to the conversation and drive the derived-state matrix
     /// for `kind` (see [`HistoryRewrite`]). Persists only when `mutate`
@@ -66,9 +69,11 @@ impl ChatStateActor {
         let mut disk_ack = None;
         if changed > 0 {
             match kind {
-                HistoryRewrite::IntegrityRepair | HistoryRewrite::RetainedPrune => {
+                HistoryRewrite::IntegrityRepair => {
                     self.persistence.replace_history(&self.state.conversation);
                 }
+                // Batched by `prune_retained_conversation` (F6).
+                HistoryRewrite::RetainedPrune => {}
                 HistoryRewrite::ImageStrip => {
                     disk_ack = Some(
                         self.persistence
@@ -509,6 +514,13 @@ impl ChatStateActor {
 
         if cleared > 0 {
             let after_bytes = self.conversation_content_bytes();
+            // F6: the prune is memory management, so the whole-file rewrite waits until enough is freed. Until then the
+            // file keeps the full old results, and a resumed session clears them again when its state is restored.
+            self.unpersisted_prune_bytes += before_bytes.saturating_sub(after_bytes);
+            if self.unpersisted_prune_bytes >= PRUNE_PERSIST_BYTES {
+                self.persistence.replace_history(&self.state.conversation);
+                self.unpersisted_prune_bytes = 0;
+            }
             tracing::debug!(
                 hard_cleared = cleared,
                 bytes_freed = before_bytes.saturating_sub(after_bytes),
@@ -744,6 +756,9 @@ impl ChatStateActor {
         self.state.credentials = snap.credentials;
         // Drop abandoned prompt billing; session ledger is lifetime.
         self.state.prompt_usage = None;
+        // F6 (review M1): the history on disk may still hold results the live session had cleared. Clear them here, in
+        // memory, so a reader before the first prompt (`/compact`, recap, export) sees what the live session saw.
+        self.prune_retained_conversation();
     }
 
     /// If turn capture is active, append the current turn's tail items into

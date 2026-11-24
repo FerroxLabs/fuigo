@@ -104,7 +104,7 @@ mod inner {
     }
 
     fn resolve_log_path() -> Option<PathBuf> {
-        let default_path = || fuigo_home().join("logs").join("memory.log");
+        let default_path = || fuigo_config::logs_dir().join("memory.log");
         let raw = match std::env::var(ENV_MEMORY_LOG) {
             Ok(val) => val,
             Err(_) => return Some(default_path()),

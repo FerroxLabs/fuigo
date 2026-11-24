@@ -52,6 +52,7 @@ fn session(
             blocked_reason: None,
             unavailable_reason: None,
         }),
+        held_digest: None,
     }
 }
 

@@ -192,6 +192,9 @@ pub(crate) fn handle_ask_user_question(
                         LocalQuestionKind::FreeUsageUpsell => "usage-limit notice",
                         LocalQuestionKind::AgentTypeMismatch { .. } => "model switch",
                         LocalQuestionKind::DeleteCurrentSession => "/delete",
+                        LocalQuestionKind::McpHeld { .. } => {
+                            "MCP server approval (turn it on in /mcp)"
+                        }
                         LocalQuestionKind::Feedback | LocalQuestionKind::FeedbackTrace { .. } => {
                             "/feedback"
                         }

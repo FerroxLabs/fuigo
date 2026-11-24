@@ -141,7 +141,7 @@ fn session_created_sets_session_id() {
         }),
         &mut app,
     );
-    assert_eq!(effects.len(), 7);
+    assert_eq!(effects.len(), 8);
     assert!(matches!(
         &effects[0],
         Effect::FetchPromptHistory { session_id, .. } if session_id == "new-session-123"
@@ -151,16 +151,18 @@ fn session_created_sets_session_id() {
         &effects[2],
         Effect::RefreshAvailableCommands { .. }
     ));
+    // MC-03: the held-server preview for the startup question.
+    assert!(matches!(&effects[3], Effect::CheckHeldMcpServers { .. }));
     assert!(matches!(
-        &effects[3],
+        &effects[4],
         Effect::CheckMarketplaceUpdates { .. }
     ));
-    assert!(matches!(&effects[4], Effect::FetchPluginCtaCatalog { .. }));
+    assert!(matches!(&effects[5], Effect::FetchPluginCtaCatalog { .. }));
     assert!(matches!(
-        &effects[5],
+        &effects[6],
         Effect::FetchBilling { silent: true, .. }
     ));
-    assert!(matches!(&effects[6], Effect::RegisterActiveSession { .. }));
+    assert!(matches!(&effects[7], Effect::RegisterActiveSession { .. }));
     assert_eq!(
         app.agents[&id]
             .session

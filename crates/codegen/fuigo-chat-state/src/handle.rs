@@ -537,6 +537,20 @@ impl ChatStateHandle {
     /// Retrieve the most recent stashed per-turn `TokenUsage`. Returns
     /// `None` if no model turn has completed in this session yet, or if
     /// the actor channel is closed.
+    pub fn record_last_attempt_usage(&self, usage: Option<TokenUsage>) {
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::RecordLastAttemptUsage { usage });
+    }
+
+    pub async fn get_last_attempt_usage(&self) -> Option<TokenUsage> {
+        self.query("GetLastAttemptUsage", |reply| {
+            ChatStateCommand::GetLastAttemptUsage { reply }
+        })
+        .await
+        .flatten()
+    }
+
     pub async fn get_last_turn_usage(&self) -> Option<TokenUsage> {
         self.query("GetLastTurnUsage", |reply| {
             ChatStateCommand::GetLastTurnUsage { reply }

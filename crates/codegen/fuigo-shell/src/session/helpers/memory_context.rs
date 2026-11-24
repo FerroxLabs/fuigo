@@ -100,6 +100,7 @@ pub(crate) fn load_or_create_nonce(path: &std::path::Path) -> std::io::Result<St
         .ok_or_else(|| std::io::Error::other("nonce path has no parent"))?;
     std::fs::create_dir_all(dir)?;
     let nonce = uuid::Uuid::new_v4().simple().to_string();
+    // at-rest: outside-roots a random nonce in the Fuigo home root, not under sessions/ or logs/
     let mut temp = tempfile::NamedTempFile::new_in(dir)?;
     std::io::Write::write_all(&mut temp, nonce.as_bytes())?;
     temp.as_file().sync_all()?;

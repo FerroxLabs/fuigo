@@ -166,6 +166,11 @@ pub enum Action {
     DeleteCurrentSessionAnswered {
         confirmed: bool,
     },
+    /// MC-03: the session-start question about held MCP servers was answered; turn on (and so approve) these.
+    McpHeldAnswered {
+        /// (name, the digest the question showed).
+        approve: Vec<(String, String)>,
+    },
     /// Re-check subscription status via the shell's `fuigo/auth/check_subscription`.
     CheckSubscription,
     /// Open an arbitrary URL in the system browser (with scheme validation).
@@ -481,6 +486,8 @@ pub enum Action {
     ToggleMcpServer {
         server_name: String,
         enabled: bool,
+        /// Digest of the held definition the panel shows; sent so only that definition is approved.
+        digest: Option<String>,
     },
     /// Toggle a skill enable/disable via fuigo/skills/toggle.
     ToggleSkill {
@@ -2011,6 +2018,11 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
+    /// MC-03: preview, at session start, which configured MCP servers the launch gate holds (for the startup question).
+    CheckHeldMcpServers {
+        agent_id: AgentId,
+        cwd: std::path::PathBuf,
+    },
     /// Background check and auto-update for marketplace plugins on session start.
     CheckMarketplaceUpdates {
         agent_id: AgentId,
@@ -2095,6 +2107,8 @@ pub enum Effect {
         session_id: acp::SessionId,
         server_name: String,
         enabled: bool,
+        /// The held definition's digest the user was shown; the shell approves only that one.
+        digest: Option<String>,
     },
     /// Toggle a single MCP tool via fuigo/mcp/toggle_tool.
     ToggleMcpTool {
@@ -2924,6 +2938,11 @@ pub enum TaskResult {
     SkillsToggleDone {
         agent_id: AgentId,
         result: Result<Vec<fuigo_tools::implementations::skills::types::SkillInfo>, String>,
+    },
+    /// MC-03: the held MCP servers to ask about (switched-off ones and an unreadable approvals file left out).
+    HeldMcpServers {
+        agent_id: AgentId,
+        held: Vec<fuigo_shell::util::config::HeldMcpDefinition>,
     },
     /// Background marketplace auto-update completed.
     MarketplaceUpdatesAvailable {

@@ -60,6 +60,17 @@ where
     Option::<T>::deserialize(deserializer).map(|opt| opt.unwrap_or_default())
 }
 
+/// A string keeps its value; `null` or any other shape becomes `None` instead of failing the chunk.
+fn string_or_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match Value::deserialize(deserializer)? {
+        Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -698,6 +709,13 @@ pub struct ChatChunkDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
+    /// Ollama's (and OpenRouter's) name for `reasoning_content`; read only when that is absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "string_or_none"
+    )]
+    pub reasoning: Option<String>,
     /// A JSON `null` deserializes as an empty vec.
     #[serde(
         default,
@@ -1772,6 +1790,26 @@ mod tests {
         assert_eq!(delta.role, Some(Role::Assistant));
         assert_eq!(delta.content, Some("".to_string()));
         assert!(delta.tool_calls.is_empty());
+        assert_eq!(delta.reasoning, None);
+    }
+
+    /// Ollama streams reasoning as `reasoning`; it parses, and a non-string value never fails the chunk.
+    #[test]
+    fn chat_chunk_delta_parses_ollama_reasoning_field() {
+        let ollama = r#"{"role":"assistant","content":"","reasoning":"Okay"}"#;
+        let delta: ChatChunkDelta = serde_json::from_str(ollama).unwrap();
+        assert_eq!(delta.reasoning.as_deref(), Some("Okay"));
+        assert_eq!(delta.reasoning_content, None);
+
+        let both = r#"{"reasoning_content":"rc","reasoning":"r"}"#;
+        let delta: ChatChunkDelta = serde_json::from_str(both).unwrap();
+        assert_eq!(delta.reasoning_content.as_deref(), Some("rc"));
+        assert_eq!(delta.reasoning.as_deref(), Some("r"));
+
+        let object = r#"{"content":"hi","reasoning":{"effort":"low"}}"#;
+        let delta: ChatChunkDelta = serde_json::from_str(object).unwrap();
+        assert_eq!(delta.reasoning, None);
+        assert_eq!(delta.content.as_deref(), Some("hi"));
     }
 
     /// Regression test: cloning `Box<dyn TraceContext>` must not infinitely recurse.

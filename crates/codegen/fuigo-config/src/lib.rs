@@ -108,10 +108,11 @@ pub use paths::{
     claude_managed_settings_path, claude_managed_settings_probe_path, create_dir_all_owner_only,
     create_file_owner_only, decode_cwd_from_dirname, default_fuigo_home,
     disable_session_persistence, encode_cwd_dirname, ensure_sessions_cwd_dir,
-    ensure_sessions_cwd_dir_in, fuigo_application, fuigo_application_in, fuigo_home,
-    owner_only_file_options, session_persistence_disabled, sessions_cwd_dir, sessions_cwd_dir_in,
-    set_dir_owner_only, system_config_dir, tighten_file_owner_only,
-    tighten_own_regular_file_owner_only, user_fuigo_home, write_file_owner_only,
+    ensure_sessions_cwd_dir_in, fuigo_application, fuigo_application_in, fuigo_home, logs_dir,
+    logs_dir_in, owner_only_file_options, session_persistence_disabled, sessions_cwd_dir,
+    sessions_cwd_dir_in, sessions_root, sessions_root_in, set_dir_owner_only, system_config_dir,
+    tighten_file_owner_only, tighten_own_regular_file_owner_only, user_fuigo_home,
+    write_file_owner_only,
 };
 pub use validation::{
     AdminFileClass, AdminFileState, AdminLockdown, BrokenAdminFile, LOCKDOWN_UNSET,

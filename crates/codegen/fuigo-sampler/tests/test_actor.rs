@@ -2198,3 +2198,881 @@ async fn a_call_cancelled_at_the_second_gate_refunds_its_slot() {
         "the cancelled, never-sent attempt kept its slot"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Think-only replies (ollama qwen3:8b, canary b20-12 / b20-15)
+// ---------------------------------------------------------------------------
+
+/// Captured from ollama: `reasoning` deltas only, then `finish_reason: "stop"`, no content, no tool calls.
+const B20_12: [&str; 3] = [
+    include_str!("fixtures/ollama_think_only/b20-12-1.sse"),
+    include_str!("fixtures/ollama_think_only/b20-12-2.sse"),
+    include_str!("fixtures/ollama_think_only/b20-12-3.sse"),
+];
+const B20_15: [&str; 3] = [
+    include_str!("fixtures/ollama_think_only/b20-15-1.sse"),
+    include_str!("fixtures/ollama_think_only/b20-15-2.sse"),
+    include_str!("fixtures/ollama_think_only/b20-15-3.sse"),
+];
+/// Captured from the same rig (b20-13): the two planned `use_tool` calls, `finish_reason: "tool_calls"`.
+const B20_13_TOOLS: &str = include_str!("fixtures/ollama_think_only/b20-13-tools.sse");
+
+/// Serve `bodies` as raw SSE, one per request (the last repeats), and record every request body.
+async fn scripted_chat_server(
+    bodies: Vec<String>,
+) -> (MockServer, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_handler = Arc::clone(&seen);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let seen = Arc::clone(&seen_handler);
+            let bodies = bodies.clone();
+            async move {
+                let n = {
+                    let mut seen = seen.lock().unwrap();
+                    seen.push(body);
+                    seen.len()
+                };
+                let body = bodies[(n - 1).min(bodies.len() - 1)].clone();
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    body,
+                )
+            }
+        }),
+    );
+    (MockServer::spawn(app).await, seen)
+}
+
+fn ollama_body(deltas: &[(serde_json::Value, Option<&str>)]) -> String {
+    let mut out = String::new();
+    for (delta, finish) in deltas {
+        let chunk = json!({
+            "id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 0,
+            "model": "test-model", "system_fingerprint": "fp_ollama",
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }]
+        });
+        out.push_str(&format!("data: {chunk}\n\n"));
+    }
+    out.push_str("data: [DONE]\n\n");
+    out
+}
+
+fn messages(body: &serde_json::Value) -> Vec<serde_json::Value> {
+    body["messages"].as_array().cloned().unwrap_or_default()
+}
+
+/// The production budget (the test default of 2 would cap every chain at one resend).
+fn think_only_config(base_url: String) -> SamplerConfig {
+    let mut cfg = test_config(base_url, "test-model");
+    cfg.max_retries = Some(fuigo_sampler::DEFAULT_MAX_RETRIES);
+    cfg
+}
+
+/// The six captured think-only replies (b20-12 then b20-15), first `n` of them.
+fn think_only_chain(n: usize) -> Vec<String> {
+    B20_12
+        .iter()
+        .chain(B20_15.iter())
+        .take(n)
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn retrying_events(events: &[SamplingEvent]) -> Vec<(u32, u32, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::Retrying {
+                attempt,
+                max_retries,
+                reason,
+                ..
+            } => Some((*attempt, *max_retries, reason.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A think-only chain of up to five captured replies is resent unchanged until the model's tool-call reply completes the turn.
+/// The reasoning in ollama's `reasoning` field is recognised: it streams on the reasoning channel and labels each resend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ollama_think_only_chain_of_up_to_five_is_resent_unchanged_then_completes() {
+    for think_only in [1, 5] {
+        let mut bodies = think_only_chain(think_only);
+        bodies.push(B20_13_TOOLS.to_string());
+        let (server, seen) = scripted_chat_server(bodies).await;
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let handle = SamplerActor::spawn(
+            think_only_config(server.base_url()),
+            RetryPolicy::default(),
+            event_tx,
+        );
+        handle.submit(
+            RequestId::from("req-think-only"),
+            user_request("Make exactly two tool calls in order."),
+        );
+        let events = drain_until_terminal(&mut event_rx, Duration::from_secs(40)).await;
+        server.shutdown();
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                SamplingEvent::ChannelToken {
+                    channel: SamplingChannel::Reasoning,
+                    ..
+                }
+            )),
+            "ollama `reasoning` deltas stream as reasoning"
+        );
+        let retrying = retrying_events(&events);
+        assert_eq!(
+            retrying.len(),
+            think_only,
+            "one resend per think-only reply"
+        );
+        for (n, (attempt, max, reason)) in retrying.iter().enumerate() {
+            assert_eq!(
+                (*attempt, *max),
+                (n as u32 + 1, 6),
+                "resend {n} announces x/6"
+            );
+            assert!(reason.contains("reasoning_only") && reason.contains("think-only"));
+        }
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                let a = response.assistant().expect("assistant");
+                assert_eq!(a.tool_calls.len(), 2, "the planned tool calls arrive");
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), think_only + 1);
+        for body in seen.iter() {
+            assert_eq!(
+                serde_json::to_vec(body).unwrap(),
+                serde_json::to_vec(&seen[0]).unwrap(),
+                "every resend is byte-identical to the first request"
+            );
+        }
+    }
+}
+
+/// Six think-only replies in a row end as a think-only failure after exactly six attempts, not a generic empty one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ollama_think_only_six_times_surfaces_think_only_after_six_attempts() {
+    let (server, seen) = scripted_chat_server(think_only_chain(6)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    handle.submit(
+        RequestId::from("req-think-only-six"),
+        user_request("Make exactly two tool calls in order."),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(40)).await;
+    server.shutdown();
+
+    assert_eq!(retrying_events(&events).len(), 5, "five resends");
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind.as_str(), "empty_response");
+            let context = error.empty_response_context.as_ref().expect("context");
+            assert_eq!(
+                context.reason,
+                fuigo_sampling_types::EmptyReason::ReasoningOnly
+            );
+            assert!(context.had_reasoning);
+            assert_eq!(context.finish_reason.as_deref(), Some("stop"));
+            assert_eq!(context.attempts, Some(6));
+            assert!(
+                error.message.contains("think-only"),
+                "honest label: {}",
+                error.message
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 6, "exactly six attempts");
+    assert!(seen.iter().all(|b| *b == seen[0]), "all resends unchanged");
+}
+
+/// A stop after the second think-only reply ends the turn during the resend wait: no third request is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_after_the_second_think_only_reply_makes_no_further_requests() {
+    let (server, seen) = scripted_chat_server(think_only_chain(6)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let rid = RequestId::from("req-think-only-stop");
+    handle.submit(
+        rid.clone(),
+        user_request("Make exactly two tool calls in order."),
+    );
+    let mut resends = 0;
+    while resends < 2 {
+        match tokio::time::timeout(Duration::from_secs(20), event_rx.recv()).await {
+            Ok(Some(SamplingEvent::Retrying { .. })) => resends += 1,
+            Ok(Some(SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. })) => {
+                panic!("terminal before the second think-only reply")
+            }
+            Ok(Some(_)) => {}
+            other => panic!("event stream ended: {other:?}"),
+        }
+    }
+    // The second Retrying is announced after attempt 2 came back think-only, before the 2 s resend wait
+    handle.cancel(rid);
+    let started = tokio::time::Instant::now();
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(5)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the stop ends the turn promptly"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => assert_eq!(error.kind.as_str(), "cancelled"),
+        other => panic!("expected the cancelled terminal, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    server.shutdown();
+    assert_eq!(seen.lock().unwrap().len(), 2, "no request after the stop");
+}
+
+/// A reasoning reply that streamed a partial tool call is a tool-call reply, never a think-only one: it is not resent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_partial_tool_call_after_reasoning_is_never_resent_as_think_only() {
+    let partial = ollama_body(&[
+        (
+            json!({"role": "assistant", "content": "", "reasoning": "Call the tool."}),
+            None,
+        ),
+        (
+            json!({"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                "function": {"name": "use_tool"}}]}),
+            Some("stop"),
+        ),
+    ]);
+    let (server, seen) = scripted_chat_server(vec![partial]).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    handle.submit(RequestId::from("req-partial"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(20)).await;
+    server.shutdown();
+    assert!(retrying_events(&events).is_empty(), "no resend");
+    assert!(
+        !matches!(events.last().unwrap(), SamplingEvent::Failed { error, .. } if error.kind.as_str() == "empty_response"),
+        "never classified empty: {:?}",
+        events.last()
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+/// A stop while think-only resend #2 is still streaming ends the turn promptly: the open stream is dropped and no
+/// further request is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_during_the_second_think_only_resend_stream_makes_no_further_requests() {
+    let requests = Arc::new(AtomicU32::new(0));
+    let requests_handler = Arc::clone(&requests);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let n = requests_handler.fetch_add(1, Ordering::SeqCst) as usize;
+            async move {
+                let body = if n < 2 {
+                    stream::iter(vec![Ok::<_, std::convert::Infallible>(
+                        B20_12[n].to_string(),
+                    )])
+                    .boxed()
+                } else {
+                    // Resend #2 streams its first captured reasoning delta, then hangs mid-stream
+                    let first = B20_12[2].split_inclusive("\n\n").next().unwrap();
+                    stream::iter(vec![Ok(first.to_string())])
+                        .chain(stream::pending())
+                        .boxed()
+                };
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    axum::body::Body::from_stream(body),
+                )
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let rid = RequestId::from("req-think-only-stop-in-stream");
+    handle.submit(
+        rid.clone(),
+        user_request("Make exactly two tool calls in order."),
+    );
+    let mut resends = 0;
+    while resends < 2 {
+        match tokio::time::timeout(Duration::from_secs(20), event_rx.recv()).await {
+            Ok(Some(SamplingEvent::Retrying { .. })) => resends += 1,
+            Ok(Some(SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. })) => {
+                panic!("terminal before the second think-only resend")
+            }
+            Ok(Some(_)) => {}
+            other => panic!("event stream ended: {other:?}"),
+        }
+    }
+    // The next reasoning token comes from resend #2's response, which is now streaming
+    await_event_matching(
+        &mut event_rx,
+        |e| {
+            matches!(
+                e,
+                SamplingEvent::ChannelToken {
+                    channel: SamplingChannel::Reasoning,
+                    ..
+                }
+            )
+        },
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("resend #2 is streaming");
+    assert_eq!(requests.load(Ordering::SeqCst), 3, "resend #2 is in flight");
+    handle.cancel(rid);
+    let started = tokio::time::Instant::now();
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(5)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the stop ends the turn promptly"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => assert_eq!(error.kind.as_str(), "cancelled"),
+        other => panic!("expected the cancelled terminal, got {other:?}"),
+    }
+    assert!(
+        retrying_events(&events).is_empty(),
+        "no resend after the stop"
+    );
+    // Longer than the 2 s resend wait: a resend that slipped through would have been made by now
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    server.shutdown();
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        3,
+        "no request after the stop"
+    );
+}
+
+/// The extra think-only resends end at the 180 s window from the first think-only reply, end to end on a mocked clock.
+/// Resend #3 starts 120 s after the first think-only reply and is allowed; its reply is evaluated 190 s in, so the turn
+/// fails think-only after 4 requests instead of 6.
+#[tokio::test]
+async fn think_only_resends_stop_at_the_wall_cap_from_the_first_think_only_reply() {
+    think_only_wall_cap_chain().await;
+}
+
+/// The same 180 s window caps a think-only chain under Murage's `FUIGO_MAX_RETRIES=3` pin, read from the env.
+#[tokio::test]
+async fn think_only_resends_stop_at_the_wall_cap_under_fuigo_max_retries_3() {
+    if in_max_retries_env_child(
+        "think_only_resends_stop_at_the_wall_cap_under_fuigo_max_retries_3",
+        "3",
+    )
+    .await
+    {
+        think_only_wall_cap_chain().await;
+    }
+}
+
+async fn think_only_wall_cap_chain() {
+    let (server, seen) = scripted_chat_server(think_only_chain(6)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    handle.submit(
+        RequestId::from("req-think-only-wall-cap"),
+        user_request("Make exactly two tool calls in order."),
+    );
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(20), event_rx.recv())
+            .await
+            .expect("event before the timeout")
+            .expect("event stream open");
+        let resend = matches!(event, SamplingEvent::Retrying { .. });
+        let terminal = matches!(
+            event,
+            SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. }
+        );
+        events.push(event);
+        if terminal {
+            break;
+        }
+        if resend {
+            // Move the clock during the resend wait, while no request is in flight: 60 s, 60 s, then 70 s
+            let step = if retrying_events(&events).len() < 3 {
+                60
+            } else {
+                70
+            };
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(step)).await;
+            tokio::time::resume();
+        }
+    }
+    server.shutdown();
+
+    assert_eq!(
+        retrying_events(&events).len(),
+        3,
+        "resend #3 is inside the window"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind.as_str(), "empty_response");
+            assert!(
+                error.message.contains("(reasoning_only) - think-only"),
+                "honest label: {}",
+                error.message
+            );
+            let context = error.empty_response_context.as_ref().expect("context");
+            assert_eq!(
+                context.reason,
+                fuigo_sampling_types::EmptyReason::ReasoningOnly
+            );
+            assert_eq!(context.attempts, Some(4));
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() < 6, "the window ends the chain before the cap");
+    assert_eq!(seen.len(), 4, "no resend after the window");
+}
+
+/// An attempt that streamed visible text after its reasoning is a reply, never a think-only one: one request, no resend.
+/// Covers the text arriving on the finishing chunk, and the text followed by an empty finishing chunk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reasoning_then_visible_text_is_never_resent_as_think_only() {
+    let reasoning = (
+        json!({"role": "assistant", "content": "", "reasoning": "Plan the reply."}),
+        None,
+    );
+    let shapes = [
+        ollama_body(&[
+            reasoning.clone(),
+            (
+                json!({"role": "assistant", "content": "Done."}),
+                Some("stop"),
+            ),
+        ]),
+        ollama_body(&[
+            reasoning.clone(),
+            (json!({"role": "assistant", "content": "Done."}), None),
+            (json!({"role": "assistant", "content": ""}), Some("stop")),
+        ]),
+    ];
+    for (shape, body) in shapes.into_iter().enumerate() {
+        let (server, seen) = scripted_chat_server(vec![body]).await;
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let handle = SamplerActor::spawn(
+            think_only_config(server.base_url()),
+            RetryPolicy::default(),
+            event_tx,
+        );
+        handle.submit(RequestId::from("req-visible-text"), user_request("hi"));
+        let events = drain_until_terminal(&mut event_rx, Duration::from_secs(20)).await;
+        server.shutdown();
+        assert!(
+            retrying_events(&events).is_empty(),
+            "shape {shape}: no Retrying"
+        );
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.assistant_text(), "Done.", "shape {shape}")
+            }
+            other => panic!("shape {shape}: expected Completed, got {other:?}"),
+        }
+        assert_eq!(seen.lock().unwrap().len(), 1, "shape {shape}: one request");
+    }
+}
+
+/// Turns that do not stop think-only send exactly what they sent before the fix:
+/// a normal reasoning-and-text turn makes one request, and a fully empty reply is resent byte-identical.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_think_only_turns_make_unchanged_requests() {
+    let normal = ollama_body(&[
+        (
+            json!({"role": "assistant", "content": "", "reasoning": "Short."}),
+            None,
+        ),
+        (json!({"role": "assistant", "content": "ok"}), Some("stop")),
+    ]);
+    let (server, seen) = scripted_chat_server(vec![normal.clone()]).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let request = user_request("hi");
+    let _ = handle
+        .submit_and_collect(RequestId::from("req-normal"), request)
+        .await
+        .expect("normal turn ok");
+    server.shutdown();
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "no extra round trip");
+        assert_eq!(
+            messages(&seen[0]),
+            vec![json!({"role": "user", "content": "hi"})],
+            "the request carries only the conversation"
+        );
+    }
+
+    let empty = ollama_body(&[(json!({"role": "assistant", "content": ""}), Some("stop"))]);
+    let (server, seen) = scripted_chat_server(vec![empty, normal]).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let _ = handle
+        .submit_and_collect(RequestId::from("req-empty"), user_request("hi"))
+        .await
+        .expect("resend recovers");
+    server.shutdown();
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[0], seen[1],
+            "a no_visible_content reply is resent unchanged"
+        );
+    }
+
+    // Fully empty replies keep the old budget of three attempts on the production budget.
+    let empty = ollama_body(&[(json!({"role": "assistant", "content": ""}), Some("stop"))]);
+    let (server, seen) = scripted_chat_server(vec![empty]).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let err = handle
+        .submit_and_collect(RequestId::from("req-empty-budget"), user_request("hi"))
+        .await
+        .expect_err("empty every time");
+    server.shutdown();
+    match err {
+        fuigo_sampling_types::SamplingError::EmptyResponse { context } => {
+            assert_eq!(
+                context.reason,
+                fuigo_sampling_types::EmptyReason::NoVisibleContent
+            );
+            assert_eq!(context.attempts, Some(3));
+        }
+        other => panic!("expected EmptyResponse, got {other:?}"),
+    }
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        3,
+        "old budget for no_visible_content"
+    );
+}
+
+/// Run one turn and return the response and the request body the server saw.
+async fn one_chat_turn(
+    sse_body: String,
+    request: ConversationRequest,
+) -> (
+    fuigo_sampling_types::ConversationResponse,
+    serde_json::Value,
+) {
+    let (server, seen) = scripted_chat_server(vec![sse_body]).await;
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let (response, _) = handle
+        .submit_and_collect(RequestId::from("req-turn"), request)
+        .await
+        .expect("turn ok");
+    server.shutdown();
+    let body = seen.lock().unwrap()[0].clone();
+    (response, body)
+}
+
+/// The turn-2 conversation: the turn-1 user message, the response items, then a new user message.
+fn second_turn(response: &fuigo_sampling_types::ConversationResponse) -> ConversationRequest {
+    let mut request = user_request("hi");
+    request.items.extend(response.items.iter().cloned());
+    request.items.extend(user_request("again").items);
+    request
+}
+
+fn text_turn(reasoning: serde_json::Value) -> String {
+    ollama_body(&[
+        (reasoning, None),
+        (json!({"role": "assistant", "content": "ok"}), Some("stop")),
+    ])
+}
+
+/// Reasoning read from `delta.reasoning` is shown and stored, but never sent back.
+/// Turn 2 is exactly what 1a61f452 sent: that code never read `reasoning`, so it stored no reasoning item.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delta_reasoning_is_display_only_and_never_echoed() {
+    let turn1 = text_turn(json!({"role": "assistant", "content": "", "reasoning": "Plan."}));
+    let (response, _) = one_chat_turn(turn1.clone(), user_request("hi")).await;
+    let reasoning: Vec<_> = response.reasoning_items().collect();
+    assert_eq!(reasoning.len(), 1, "the reasoning is stored");
+    assert!(fuigo_sampling_types::is_display_only_reasoning_item(
+        reasoning[0]
+    ));
+
+    let (_, body) = one_chat_turn(turn1.clone(), second_turn(&response)).await;
+    assert!(
+        !messages(&body)
+            .iter()
+            .any(|m| m.to_string().contains("reasoning")),
+        "no reasoning field is sent back: {body}"
+    );
+    // What 1a61f452 sent: the same history with no reasoning item
+    let mut old = response.clone();
+    old.items
+        .retain(|i| !matches!(i, ConversationItem::Reasoning(_)));
+    let (_, old_body) = one_chat_turn(turn1, second_turn(&old)).await;
+    assert_eq!(body, old_body, "turn 2 is unchanged from 1a61f452");
+    assert_eq!(
+        messages(&body),
+        vec![
+            json!({"role": "user", "content": "hi"}),
+            json!({"role": "assistant", "content": "ok", "model_id": "test-model"}),
+            json!({"role": "user", "content": "again"}),
+        ]
+    );
+}
+
+/// Reasoning that arrives as `reasoning_content` is still echoed back as `reasoning_content`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reasoning_content_is_still_echoed() {
+    let turn1 =
+        text_turn(json!({"role": "assistant", "content": "", "reasoning_content": "Plan."}));
+    let (response, _) = one_chat_turn(turn1.clone(), user_request("hi")).await;
+    let reasoning: Vec<_> = response.reasoning_items().collect();
+    assert_eq!(reasoning.len(), 1);
+    assert!(!fuigo_sampling_types::is_display_only_reasoning_item(
+        reasoning[0]
+    ));
+
+    let (_, body) = one_chat_turn(turn1, second_turn(&response)).await;
+    assert_eq!(messages(&body)[1]["reasoning_content"], json!("Plan."));
+}
+
+/// An empty `reasoning_content` does not hide a non-empty `reasoning` in the same delta.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_reasoning_content_does_not_hide_reasoning() {
+    let turn1 = text_turn(
+        json!({"role": "assistant", "content": "", "reasoning_content": "", "reasoning": "Plan."}),
+    );
+    let (response, _) = one_chat_turn(turn1, user_request("hi")).await;
+    let reasoning: Vec<_> = response.reasoning_items().collect();
+    assert_eq!(reasoning.len(), 1, "the reasoning is read");
+    assert_eq!(
+        fuigo_sampling_types::reasoning_item_text(reasoning[0]),
+        "Plan."
+    );
+    assert!(fuigo_sampling_types::is_display_only_reasoning_item(
+        reasoning[0]
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// FUIGO_MAX_RETRIES from the process env (Murage pins 3 on every bot turn)
+// ---------------------------------------------------------------------------
+
+const MAX_RETRIES_ENV_CHILD: &str = "FUIGO_SAMPLER_MAX_RETRIES_ENV_CHILD";
+
+/// Production reads `FUIGO_MAX_RETRIES` from the process env (`resolve_max_retries`), and the env is process-wide, so a
+/// witness re-runs itself in a child test process with the variable set. Returns true in the child (run the body);
+/// in the parent it runs the child, asserts that `test` ran and passed there, and returns false.
+async fn in_max_retries_env_child(test: &str, value: &str) -> bool {
+    if std::env::var_os(MAX_RETRIES_ENV_CHILD).is_some() {
+        assert_eq!(std::env::var("FUIGO_MAX_RETRIES").as_deref(), Ok(value));
+        return true;
+    }
+    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(MAX_RETRIES_ENV_CHILD, "1")
+        .env("FUIGO_MAX_RETRIES", value)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "FUIGO_MAX_RETRIES={value} child run of {test}:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
+/// Under `FUIGO_MAX_RETRIES=3`, a think-only chain on Chat Completions still gets its own six attempts: six requests,
+/// resends announced 1/6..5/6, which the shell logs as `think-only resend attempt 2/6 .. 6/6`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn think_only_chain_under_fuigo_max_retries_3_gets_its_own_six_attempts() {
+    if !in_max_retries_env_child(
+        "think_only_chain_under_fuigo_max_retries_3_gets_its_own_six_attempts",
+        "3",
+    )
+    .await
+    {
+        return;
+    }
+    let (server, seen) = scripted_chat_server(think_only_chain(6)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    handle.submit(
+        RequestId::from("req-think-only-env-3"),
+        user_request("Make exactly two tool calls in order."),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(40)).await;
+    server.shutdown();
+
+    let retrying = retrying_events(&events);
+    let announced: Vec<(u32, u32)> = retrying.iter().map(|(a, m, _)| (*a, *m)).collect();
+    assert_eq!(announced, vec![(1, 6), (2, 6), (3, 6), (4, 6), (5, 6)]);
+    // The shell's `shell.turn.think_only_resend` line is `attempt + 1`/`max_retries` of each Retrying
+    let last = retrying.last().expect("resends");
+    assert_eq!(
+        format!(
+            "think-only resend attempt {}/{} reason=think_only",
+            last.0 + 1,
+            last.1
+        ),
+        "think-only resend attempt 6/6 reason=think_only"
+    );
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert!(error.message.contains("think-only"), "{}", error.message);
+            let context = error.empty_response_context.as_ref().expect("context");
+            assert_eq!(context.attempts, Some(6));
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(seen.lock().unwrap().len(), 6, "six requests");
+}
+
+/// Under `FUIGO_MAX_RETRIES=3`, a dead Router still ends in bounded time: a refused connection and a 5xx each stop at
+/// three attempts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_router_under_fuigo_max_retries_3_still_stops_at_three_attempts() {
+    if !in_max_retries_env_child(
+        "dead_router_under_fuigo_max_retries_3_still_stops_at_three_attempts",
+        "3",
+    )
+    .await
+    {
+        return;
+    }
+    // Connection refused: a held closed loopback port
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(format!("{}/v1", fuigo_test_support::refused_loopback_url())),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    handle.submit(RequestId::from("req-refused-env-3"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(30)).await;
+    let announced: Vec<(u32, u32)> = retrying_events(&events)
+        .iter()
+        .map(|(a, m, _)| (*a, *m))
+        .collect();
+    assert_eq!(announced, vec![(1, 3), (2, 3)], "refused: three attempts");
+    assert!(matches!(events.last(), Some(SamplingEvent::Failed { .. })));
+
+    // 5xx
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({ "error": { "message": "router down" } }).to_string(),
+                )
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    handle.submit(RequestId::from("req-5xx-env-3"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(30)).await;
+    server.shutdown();
+    assert!(matches!(events.last(), Some(SamplingEvent::Failed { .. })));
+    assert_eq!(retrying_events(&events).len(), 2);
+    assert_eq!(counter.load(Ordering::SeqCst), 3, "5xx: three attempts");
+}
+
+/// `FUIGO_MAX_RETRIES=0` (resends disabled) still turns think-only resends off: one request, no Retrying.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fuigo_max_retries_0_turns_think_only_resends_off() {
+    if !in_max_retries_env_child("fuigo_max_retries_0_turns_think_only_resends_off", "0").await {
+        return;
+    }
+    let (server, seen) = scripted_chat_server(think_only_chain(6)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    handle.submit(
+        RequestId::from("req-think-only-env-0"),
+        user_request("Make exactly two tool calls in order."),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(20)).await;
+    server.shutdown();
+    assert!(retrying_events(&events).is_empty(), "no think-only resend");
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind.as_str(), "empty_response");
+            let context = error.empty_response_context.as_ref().expect("context");
+            assert_eq!(
+                context.reason,
+                fuigo_sampling_types::EmptyReason::ReasoningOnly
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(seen.lock().unwrap().len(), 1, "one request");
+}

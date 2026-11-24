@@ -49,6 +49,14 @@ pub fn scrub_upload_text(buf: Vec<u8>) -> Vec<u8> {
         fuigo_telemetry::sent_credentials::record(&key);
     }
     for name in fuigo_secrets::child_env::inherited_fuigo_secret_names() {
+        // Recording pins the value at rest too: the launch policy path and hash are not secrets, and pinned they
+        // rewrote the session's policy marker so every later session/load conflicted (1.0.47 canary C, second path).
+        if !name
+            .to_str()
+            .is_some_and(fuigo_secrets::at_rest::is_secret_env_name)
+        {
+            continue;
+        }
         if let Some(value) = std::env::var_os(&name).and_then(|v| v.into_string().ok()) {
             fuigo_telemetry::sent_credentials::record(&value);
         }
@@ -1580,6 +1588,19 @@ mod tests {
         let err = build_session_archive_with_caps(dir.path(), "sid", FLUX, &caps)
             .expect_err("all-skipped session must not produce an archive");
         assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    /// 1.0.47 S2 round-trip audit: an upload scrub in the agent process must not pin the launch policy hash at rest.
+    /// The variable is set in lowercase: Fuigo's credential match folds case, but no launch-policy reader sees it.
+    #[test]
+    fn s2_upload_scrub_never_pins_the_launch_policy_hash_at_rest() {
+        const NAME: &str = "fuigo_policy_sha256";
+        const HASH: &str = "5d0c7e19a4b3f2e8d6c1a09b7e4f3d2c1b0a99887766554433221100ffeeddcc";
+        // SAFETY: test-only; no other test reads this lowercase name.
+        unsafe { std::env::set_var(NAME, HASH) };
+        let _ = scrub_upload_text(b"upload".to_vec());
+        unsafe { std::env::remove_var(NAME) };
+        assert!(!fuigo_secrets::at_rest::contains_any(HASH.as_bytes()));
     }
 
     /// P149 (S14/K16, Astra r1 #2): the memory archive (`memory.tar.gz`) was uploaded as `application/gzip`, which no

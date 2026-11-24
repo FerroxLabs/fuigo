@@ -2322,6 +2322,32 @@ async fn an_unreadable_abandoned_checkpoint_does_not_block_a_fork() {
     assert_eq!(forked, serde_json::to_value(chat).unwrap());
 }
 
+/// Grok r2 #1 (1.0.47 S2): a fork killed after staging leaves its staged transcript under `sessions/<cwd>/` (swept a day
+/// later); every staged line went through the at-rest layer, so it holds no recorded value.
+#[test]
+fn a_killed_forks_staged_transcript_holds_no_recorded_value() {
+    let value = concat!("fk", "_live_StagedFork9Qx").to_owned();
+    fuigo_secrets::at_rest::record(&value);
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source-updates.jsonl");
+    let update = fork_agent_chunk("src", &format!("the token is {value}."));
+    let mut line =
+        serde_json::to_vec(&super::SessionUpdateEnvelope::from_update(&update).unwrap()).unwrap();
+    line.push(b'\n');
+    std::fs::write(&source, &line).unwrap();
+    assert!(String::from_utf8_lossy(&line).contains(&value));
+    let staging = super::private_staging_dir(parent.path()).unwrap();
+    let staged = staging.dir.path().join("updates.jsonl");
+    let copied =
+        super::copy_updates_streaming(&source, &staged, &acp::SessionId::new("dst"), None, None)
+            .unwrap();
+    assert_eq!(copied.count, 1);
+    // The process dies here: nothing moves the staged file in or removes it.
+    let text = std::fs::read_to_string(&staged).unwrap();
+    assert!(!text.contains(&value), "{text}");
+    assert!(text.contains("<redacted>"), "{text}");
+}
+
 /// P111 (Astra r2): the staged cut is session content; its directory is owner-only.
 #[cfg(unix)]
 #[test]
@@ -4150,4 +4176,80 @@ async fn r1h4_a_rename_runs_as_the_session_writer_resident_or_dormant() {
         let text = std::fs::read_to_string(dir.join("summary.json")).unwrap();
         assert!(text.contains(&format!("r1h4 {resident}")), "{text}");
     }
+}
+
+/// F4: a fork at turn 100 of a 500-turn session whose older rows live in `usage_turns.jsonl` gets exactly the totals of
+/// turns 1..=100, and its own archive holds none of the parent's later rows.
+#[tokio::test]
+async fn fork_at_an_archived_turn_gets_exact_totals() {
+    use crate::session::usage_file::{SessionUsageFile, UsageSummary};
+    const USAGE_ARCHIVE_FILE: &str = "usage_turns.jsonl";
+
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("src-usage-archive"),
+        cwd: "/src".to_string(),
+    };
+    adapter
+        .init_session(&source, default_model_id())
+        .await
+        .unwrap();
+    let one = || UsageSummary {
+        input_tokens: 10,
+        total_tokens: 10,
+        model_calls: 1,
+        ..Default::default()
+    };
+    let mut usage = SessionUsageFile::new(source.id.to_string());
+    for n in 1..500 {
+        usage.apply_turn(n, format!("t{n}"), &one(), None);
+    }
+    adapter.write_usage(&source, &usage).await.unwrap();
+    // Turn 500 goes through the per-turn writer, which archives rows 1..=300.
+    adapter
+        .update_usage(
+            &source,
+            Box::new(move |file| {
+                let mut file = file.unwrap();
+                file.apply_turn(500, "t500", &one(), None);
+                file
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        adapter
+            .usage_file(&source)
+            .with_file_name(USAGE_ARCHIVE_FILE)
+            .is_file()
+    );
+
+    let target = Info {
+        id: acp::SessionId::new("tgt-usage-archive"),
+        cwd: "/tgt".to_string(),
+    };
+    adapter
+        .copy_session_data(
+            &source,
+            &target,
+            CopySessionOptions {
+                target_prompt_index: Some(99),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let copied = adapter.read_usage(&target).await.unwrap().unwrap();
+    assert_eq!(copied.turns.len(), 100);
+    assert_eq!(copied.turns.last().unwrap().turn_number, 100);
+    assert_eq!(copied.session.turn_count, 100);
+    assert_eq!(copied.session.input_tokens, 10 * 100);
+    assert!(
+        !adapter
+            .usage_file(&target)
+            .with_file_name(USAGE_ARCHIVE_FILE)
+            .exists()
+    );
 }

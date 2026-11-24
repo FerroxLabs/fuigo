@@ -19,6 +19,15 @@ mod manager;
 mod recovery;
 mod source;
 
+/// Held by every test that records into, or clears, the process-wide at-rest set (one test simulates a process without
+/// a variable by clearing it).
+#[cfg(test)]
+pub(crate) fn at_rest_set_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub use manager::{
     SearchIndexManager, SearchIndexStatus, SessionSearchRequest, SessionSearchResponse,
     evict_session, execute_search,

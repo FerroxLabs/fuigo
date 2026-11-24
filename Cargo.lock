@@ -3605,9 +3605,9 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -4322,6 +4322,7 @@ dependencies = [
  "chrono",
  "dunce",
  "fuigo-gix-status",
+ "fuigo-secrets",
  "fuigo-test-utils",
  "fuigo-tty-utils",
  "gix",
@@ -4387,6 +4388,7 @@ dependencies = [
  "fuigo-config",
  "fuigo-extra-ca",
  "fuigo-sandbox",
+ "fuigo-secrets",
  "fuigo-session-events",
  "fuigo-telemetry",
  "fuigo-tool-protocol",
@@ -4547,6 +4549,7 @@ dependencies = [
  "fuigo-ratatui-textarea",
  "fuigo-sandbox",
  "fuigo-secrets",
+ "fuigo-session-writer",
  "fuigo-shell",
  "fuigo-status-line",
  "fuigo-telemetry",
@@ -4619,6 +4622,7 @@ dependencies = [
  "fuigo-pager-minimal",
  "fuigo-pager-pty-harness",
  "fuigo-sandbox",
+ "fuigo-secrets",
  "fuigo-shell",
  "fuigo-telemetry",
  "fuigo-test-support",
@@ -4717,6 +4721,7 @@ dependencies = [
  "fuigo-paths",
  "fuigo-ratatui-inline",
  "fuigo-ratatui-textarea",
+ "fuigo-secrets",
  "fuigo-shared",
  "fuigo-telemetry",
  "fuigo-tools",
@@ -4917,6 +4922,7 @@ dependencies = [
  "fuigo-dirs",
  "fuigo-file-lock",
  "fuigo-sandbox",
+ "fuigo-secrets",
  "fuigo-session-writer",
  "fuigo-test-support",
  "fuigo-tty-utils",
@@ -4943,8 +4949,12 @@ dependencies = [
 name = "fuigo-secrets"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
+ "blake3",
+ "memchr",
  "regex",
  "serde_json",
+ "tracing",
  "url",
  "windows 0.61.3",
 ]
@@ -4972,6 +4982,7 @@ dependencies = [
  "chrono",
  "fs2",
  "fuigo-config",
+ "fuigo-secrets",
  "fuigo-sqlite-journal",
  "fuigo-telemetry",
  "libc",
@@ -4990,9 +5001,11 @@ name = "fuigo-session-writer"
 version = "0.1.0"
 dependencies = [
  "dunce",
+ "fs2",
  "fuigo-config",
  "fuigo-secrets",
  "libc",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
@@ -5650,7 +5663,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.46"
+version = "1.0.47"
 dependencies = [
  "semver",
 ]
@@ -14285,9 +14298,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

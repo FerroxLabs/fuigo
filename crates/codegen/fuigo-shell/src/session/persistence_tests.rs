@@ -2779,3 +2779,31 @@ fn ensure_owner_only_session_dir_in_with(
     )?;
     Ok(dir)
 }
+
+/// Fable code review #6 (1.0.47 S2): a session whose `summary.json` the at-rest layer withheld is still listed for its
+/// cwd, with a rebuilt summary.
+#[test]
+fn a_withheld_summary_is_still_listed() {
+    let root = tempfile::TempDir::new().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("0b4f0c55-5e2a-4d43-9a60-3c1a7b9e2f10"),
+        cwd: "/test/withheld".to_string(),
+    };
+    let adapter =
+        crate::session::storage::JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let dir = adapter.session_dir(&info);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("summary.json"),
+        fuigo_secrets::at_rest::WITHHELD_MARKER,
+    )
+    .unwrap();
+    let listed = local_summaries_for_cwd_sync_in_root(
+        &info.cwd,
+        RecentSessionSelection::Any,
+        &fuigo_config::sessions_root_in(root.path()),
+    )
+    .unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].info.id, info.id);
+}

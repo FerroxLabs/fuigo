@@ -340,6 +340,8 @@ fn prepare_workspace_boundary(cwd: &std::path::Path) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     // SAFETY: first operation at process entry, before any worker threads exist.
     unsafe { fuigo_sandbox::consume_startup_warnings() };
+    // S2 (SL-06): Fuigo's own secret-named environment values are recorded before anything is written at rest.
+    fuigo_secrets::at_rest::capture_env();
     // u35 t1: folder trust gates every git, jj and direnv this hub starts; installed before anything can spawn.
     fuigo_workspace::folder_trust::install_process_judges();
     // P149 (S14/K16): every storage upload this server makes sends its text through the upload scrub.

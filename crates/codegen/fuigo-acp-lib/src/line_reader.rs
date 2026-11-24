@@ -27,7 +27,7 @@ use futures::{
 /// Prevents unbounded memory growth if a peer sends data without newlines.
 /// 64 MiB accommodates the largest legitimate ACP messages (e.g. a
 /// multi-megabyte file read response after JSON string escaping).
-pub(crate) const MAX_LINE_SIZE: usize = 64 * 1024 * 1024;
+pub const MAX_LINE_SIZE: usize = 64 * 1024 * 1024;
 
 /// An [`AsyncRead`] that only yields complete `\n`-delimited lines.
 ///
@@ -71,6 +71,14 @@ impl LineBufferedRead {
             loop {
                 match read_line_capped(&mut reader, &mut line).await {
                     Ok(0) => break,
+                    Ok(_) if is_json_array_line(&line) => {
+                        // Never a message: the acp crate's derived envelope would take a positional array
+                        // (`[id, method, params]`) as one, past every gate that inspects message objects.
+                        tracing::warn!(
+                            len = line.len(),
+                            "dropped a JSON array line on the ACP input (batches are not supported)"
+                        );
+                    }
                     Ok(_) => {
                         if tx.send(Ok(line.split_off(0))).await.is_err() {
                             break;
@@ -130,6 +138,11 @@ impl AsyncRead for LineBufferedRead {
             Poll::Pending => Poll::Pending,
         }
     }
+}
+
+/// Whether `line` is a JSON array (a JSON-RPC batch, or a positional message): its first non-whitespace byte is `[`.
+pub(crate) fn is_json_array_line(line: &[u8]) -> bool {
+    line.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'[')
 }
 
 /// Read a single `\n`-delimited line into `buf`, capped at [`MAX_LINE_SIZE`].
@@ -225,6 +238,30 @@ mod tests {
             .block_on(async {
                 tokio::task::LocalSet::new().run_until(f).await;
             });
+    }
+
+    /// u47 fuzz crash: the acp 0.10.4 envelope accepts this positional array as a message; the reader drops it (and a
+    /// batch) while the lines around it pass through untouched.
+    #[test]
+    fn json_array_lines_never_reach_the_acp_parser() {
+        let positional = br#"["nu\/","","0","ws(c",[0,"(c",[0,""]]]"#;
+        assert!(
+            serde_json::from_slice::<agent_client_protocol::RawIncomingMessage>(positional).is_ok()
+        );
+        run(async {
+            let mut input = b"{\"id\":1}\n".to_vec();
+            input.extend_from_slice(positional);
+            input.extend_from_slice(
+                b"\n  [1,\"session/prompt\",{}]\r\n[{\"id\":2,\"method\":\"x\"}]\n{\"id\":3}\n",
+            );
+            let mut reader = LineBufferedRead::spawn_local(Cursor::new(input));
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, b"{\"id\":1}\n{\"id\":3}\n");
+        });
+        assert!(is_json_array_line(b" \t["));
+        assert!(!is_json_array_line(b"{\"a\":[1]}\n"));
+        assert!(!is_json_array_line(b"\n"));
     }
 
     #[test]

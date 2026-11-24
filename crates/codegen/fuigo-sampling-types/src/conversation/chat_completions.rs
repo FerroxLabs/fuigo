@@ -187,6 +187,8 @@ pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRe
 
     for item in items {
         match item {
+            // Display-only reasoning is never echoed, but still sits between its user and assistant
+            ConversationItem::Reasoning(r) if is_display_only_reasoning_item(&r) => {}
             ConversationItem::Reasoning(r) => {
                 let text = reasoning_item_text(&r);
                 if !text.is_empty() {

@@ -401,6 +401,25 @@ impl SessionActor {
                         "reason": fuigo_telemetry::sent_credentials::truncate_chars(&reason, 300).0,
                     })),
                 );
+                // One countable line per think-only resend; the sampler's Display headline names the reason
+                if kind == fuigo_sampler::SamplingErrorKind::EmptyResponse
+                    && reason.contains("(reasoning_only)")
+                {
+                    fuigo_telemetry::unified_log::warn(
+                        "shell.turn.think_only_resend",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "sampler_request_id": request_id.as_str(),
+                            "line": format!(
+                                "think-only resend attempt {}/{max_retries} reason=think_only",
+                                attempt + 1
+                            ),
+                            "attempt": attempt + 1,
+                            "max_attempts": max_retries,
+                            "reason": "think_only",
+                        })),
+                    );
+                }
                 self.send_fuigo_notification(FuigoSessionUpdate::RetryState(
                     crate::extensions::notification::RetryState::Retrying {
                         attempt,

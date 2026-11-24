@@ -164,10 +164,18 @@ async fn drag_select_autoscroll_full_scrollout_copy_pty() {
         joined.contains(ANCHOR_LAST),
         "clipboard must contain the anchor block's late lines; payloads={payloads:?}"
     );
-    // The selection stays pinned to the anchor block's range: no filler lines.
+    // A text drag extends across blocks (upstream 78.F2): the head followed the autoscroll into the filler.
+    // The copy runs in transcript order from the anchor line, with the anchor block whole before any filler line.
     assert!(
-        !joined.contains("MARKER-"),
-        "clipboard must not contain lines from the filler block; payloads={payloads:?}"
+        joined.starts_with(ANCHOR_FIRST),
+        "clipboard must start at the anchor line; payloads={payloads:?}"
+    );
+    let omega = joined
+        .find(ANCHOR_LAST)
+        .expect("anchor last line checked above");
+    assert!(
+        joined.find("MARKER-").is_none_or(|marker| omega < marker),
+        "the anchor block must precede the filler lines in the copy; payloads={payloads:?}"
     );
     assert!(
         !harness.contains_text("panicked"),

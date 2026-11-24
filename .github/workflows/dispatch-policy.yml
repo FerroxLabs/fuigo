@@ -52,6 +52,16 @@ jobs:
           scripts/ci/session-writer-crates.sh 2>&1 | tee dispatch-receipts/session-writer-crates.log
           # The six negative controls: five clippy fixtures and one scan fixture, each must fail with its diagnostic.
           scripts/ci/session-writer-controls.sh dispatch-receipts 2>&1 | tee dispatch-receipts/session-writer-controls.log
+      - name: Prove the at-rest path inventory (1.0.47 S2, design §3 E2)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Negative controls first (design test 10): each must fail the check, the clean fixture must pass.
+          python3 scripts/ci/at-rest-roots.py --selftest 2>&1 | tee dispatch-receipts/at-rest-controls.log
+          # Every root-producer call classified, no hand-built root path, no raw write beside a classified site.
+          python3 scripts/ci/at-rest-roots.py 2>&1 | tee dispatch-receipts/at-rest-roots.log
+          # The generated schema-word list (value floor, Astra r2 A#10) matches the tree.
+          python3 scripts/ci/at-rest-schema-words.py --check 2>&1 | tee dispatch-receipts/at-rest-schema-words.log
       - name: Check shipping libraries and binaries
         shell: bash
         run: |

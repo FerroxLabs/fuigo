@@ -89,6 +89,10 @@ pub(crate) fn update_import_state(f: impl FnMut(&mut ImportState)) -> std::io::R
 }
 
 /// [`update_import_state`] at an explicit path.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: the Claude-import state file in the Fuigo home, outside the at-rest roots (sessions/, logs/)"
+)]
 pub(crate) fn update_import_state_at(
     path: &Path,
     mut f: impl FnMut(&mut ImportState),

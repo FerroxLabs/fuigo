@@ -33,6 +33,8 @@ pub struct ChatStateActor {
     state: ChatState,
     /// Pruning configuration for tool-result trimming.
     pruning_config: PruningConfig,
+    /// Content bytes hard-cleared in memory since the history was last rewritten on disk (audit 1.0.47 F6).
+    unpersisted_prune_bytes: usize,
     /// Persistence implementation — owned exclusively, called with `&mut self`.
     persistence: Box<dyn ChatPersistence>,
     /// Channel to receive commands from handles.
@@ -84,6 +86,7 @@ impl ChatStateActor {
             compaction_epoch: 0,
             state: ChatState::new(initial_conversation, sampling_config),
             pruning_config,
+            unpersisted_prune_bytes: 0,
             persistence,
             cmd_rx,
             event_tx,
@@ -265,6 +268,9 @@ impl ChatStateActor {
             }
             ChatStateCommand::RecordLastTurnUsage { usage } => {
                 self.record_last_turn_usage(usage);
+            }
+            ChatStateCommand::RecordLastAttemptUsage { usage } => {
+                self.state.last_attempt_usage = usage;
             }
             ChatStateCommand::RecordModelCallUsage {
                 model_id,
@@ -451,6 +457,9 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetLastTurnUsage { reply } => {
                 let _ = reply.send(self.state.last_turn_usage.clone());
+            }
+            ChatStateCommand::GetLastAttemptUsage { reply } => {
+                let _ = reply.send(self.state.last_attempt_usage.clone());
             }
             ChatStateCommand::GetPromptUsage { reply } => {
                 let _ = reply.send(self.state.prompt_usage.clone());

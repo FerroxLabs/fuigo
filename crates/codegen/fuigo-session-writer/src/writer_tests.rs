@@ -853,7 +853,7 @@ fn write_api_round_trip() {
         .expect("copy_in");
     rt.block_on(w.remove("mcp/c1.corrupt")).expect("remove");
     let lock = w.open_lock("turn_owner.lock").expect("lock sidecar");
-    lock.try_lock().expect("lock it");
+    lock.try_lock_exclusive().expect("lock it");
     let seen = w
         .summary(|summary, lock| Ok((summary.to_path_buf(), lock.to_path_buf())))
         .expect("summary");

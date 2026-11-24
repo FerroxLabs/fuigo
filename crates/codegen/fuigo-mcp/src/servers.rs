@@ -5457,6 +5457,7 @@ impl McpClient {
             for (file_name, bytes) in files {
                 let path = tools_dir.join(&file_name);
                 let write_result =
+                    // at-rest: outside-roots the MCP descriptor root (workspace_mcps_root), never under sessions/ or logs/
                     tempfile::NamedTempFile::new_in(&tools_dir).and_then(|mut tmp| {
                         std::io::Write::write_all(&mut tmp, &bytes)?;
                         tmp.persist(&path).map_err(|e| e.error)
@@ -5708,7 +5709,7 @@ fn sanitize_mcp_log_filename(name: &str) -> String {
 /// Copy an MCP server's stderr to `~/.fuigo/logs/mcp/<server>.stderr.log`
 /// in a background task. Truncated per spawn.
 fn drain_mcp_stderr_to_log(server_name: &str, mut stderr: tokio::process::ChildStderr) {
-    let log_dir = fuigo_config::fuigo_home().join("logs").join("mcp");
+    let log_dir = fuigo_config::logs_dir().join("mcp");
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         tracing::warn!("MCP stderr drain: failed to create log dir: {e}");
         return;
@@ -5720,6 +5721,7 @@ fn drain_mcp_stderr_to_log(server_name: &str, mut stderr: tokio::process::ChildS
 
     let file = match std::fs::OpenOptions::new()
         .create(true)
+        // at-rest: opened only for the AtRestStream copy below
         .write(true)
         .truncate(true)
         .open(&log_path)
@@ -5736,7 +5738,30 @@ fn drain_mcp_stderr_to_log(server_name: &str, mut stderr: tokio::process::ChildS
     let mut file = tokio::fs::File::from_std(file);
     let server_name = server_name.to_string();
     tokio::spawn(async move {
-        if let Err(e) = tokio::io::copy(&mut stderr, &mut file).await {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        // S2 (design §2.5): stderr goes through the at-rest stream; EOF or an error releases what it holds back.
+        let mut stream = fuigo_secrets::at_rest::AtRestStream::new();
+        let (mut buf, mut out) = (vec![0u8; 8192], Vec::new());
+        let copied: std::io::Result<()> = async {
+            loop {
+                let n = stderr.read(&mut buf).await?;
+                if n == 0 {
+                    return Ok(());
+                }
+                out.clear();
+                stream.push(&buf[..n], &mut out);
+                file.write_all(&out).await?;
+            }
+        }
+        .await;
+        out.clear();
+        stream.finish(&mut out);
+        let finished = async {
+            file.write_all(&out).await?;
+            file.flush().await
+        }
+        .await;
+        if let Err(e) = copied.and(finished) {
             tracing::warn!("MCP stderr drain '{server_name}': {e}");
         }
     });

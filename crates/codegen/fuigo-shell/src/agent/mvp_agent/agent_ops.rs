@@ -501,7 +501,11 @@ impl MvpAgent {
                         remote_settings.as_ref(),
                         false,
                     );
-                    folder_trust::filter_untrusted_project_mcp(&cwd, local)
+                    // MC-03: the sessionless pool installs only what the launch gate admits.
+                    crate::session::mcp_admission::admit_mcp_launch(
+                        folder_trust::filter_untrusted_project_mcp(&cwd, local),
+                    )
+                    .servers()
                 })
                 .await
             {
@@ -3815,8 +3819,14 @@ impl MvpAgent {
             );
             std::sync::Arc::new(TerminalRunner::new(notifier, session_info.id.clone()))
         };
+        // S1 (1.0.47): a neutral capability, so any ACP host that answers `session/request_permission` gets S1's asks.
+        let client_prompts = [init.meta.as_ref(), init.client_capabilities.meta.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|m| m.get("fuigo/permissionPrompts").and_then(|v| v.as_bool()) == Some(true));
         let startup_hints = crate::session::StartupHints {
             headless_session: is_headless,
+            client_prompts,
             ..startup_hints_from_meta(session_meta, init.meta.as_ref())
         };
         let hunk_plan = plan_hunk_tracking(

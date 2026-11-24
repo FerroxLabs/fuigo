@@ -146,7 +146,10 @@ pub(crate) fn write_compaction_witness_sync(
         Err(error) => return Err(error),
     };
     // The rewrite writes the projection with the same serializer.
-    let rewrite_bytes = crate::session::storage::to_jsonl_bytes(&checkpoint.compacted_history)?;
+    // S2 (design §2.6): fingerprinted as the rewrite lands, through the at-rest layer.
+    let rewrite_bytes = fuigo_secrets::at_rest::transform_owned(
+        crate::session::storage::to_jsonl_bytes(&checkpoint.compacted_history)?,
+    );
     let rewrite = Fingerprint {
         len: rewrite_bytes.len() as u64,
         sha256: sha256_hex(&rewrite_bytes),
@@ -228,7 +231,11 @@ pub(crate) fn clear_after_chat_rewrite_through(
     written: Option<&[u8]>,
 ) {
     let path = session_writer.dir().join(COMPACTION_WITNESS_FILE);
-    if !witness_outlived_rewrite(&path, written) {
+    // S2 (design §2.6): compared as the rewrite landed on disk, through the at-rest layer.
+    let written = written.map(|bytes| {
+        session_writer.at_rest_bytes(crate::session::storage::CHAT_HISTORY_FILE, bytes)
+    });
+    if !witness_outlived_rewrite(&path, written.as_deref()) {
         return;
     }
     match session_writer.remove_sync(COMPACTION_WITNESS_FILE) {
@@ -774,6 +781,40 @@ mod tests {
         std::fs::write(dir.join("chat_history.jsonl"), raw(&stale)).unwrap();
         let got = unapplied_compaction_projection(dir).expect("recovered");
         assert_eq!(texts(&got), ["SYS", "SUMMARY", "P1"]);
+    }
+
+    /// 1.0.47 S2, design test 9: a landed rewrite whose history holds a recorded value (scrubbed on disk, through the
+    /// writer) is still recognised as landed, so the projection is not taken again and nothing is duplicated.
+    #[test]
+    fn a_landed_rewrite_holding_a_recorded_value_is_recognised() {
+        let value = concat!("cw", "_live_Witness9KxQz").to_owned();
+        fuigo_secrets::at_rest::record(&value);
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let head = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user(format!("deploy with {value}")),
+        ];
+        let projection = vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user(format!("SUMMARY: the key is {value}")),
+        ];
+        chat(dir, &head);
+        let c1 = write_checkpoint(dir, "c1", projection.clone());
+        write_compaction_witness_sync(&test_writer(dir), dir, &c1).unwrap();
+        std::fs::write(dir.join("updates.jsonl"), checkpoint_line("c1", 1)).unwrap();
+        let mut landed = projection.clone();
+        landed.push(ConversationItem::user("P1"));
+        chat(dir, &landed);
+        let on_disk = std::fs::read_to_string(dir.join("chat_history.jsonl")).unwrap();
+        assert!(
+            !on_disk.contains(&value),
+            "fixture: the rewrite landed scrubbed"
+        );
+        assert!(
+            unapplied_compaction_projection(dir).is_none(),
+            "the landed rewrite is authoritative"
+        );
     }
 
     /// P111 (Astra r6 #4): many later compactions write their entries and never activate; the committed one whose

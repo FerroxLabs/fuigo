@@ -201,7 +201,7 @@ SCOPE=(--locked --no-fail-fast)
 #   PTYBUILD  what phase 1 builds (the pager binary, then every listed test executable, JSON for derive.py / list-counts.py)
 #   PTYRUN    what phase 2 runs (one `cargo test ... -- --ignored` per listed target; the exit code is the worst of them)
 #   PTYFILT   the per-binary name filters, so --list counts exactly what the run selects
-# Line format: `<package> <test|lib|tests> <target|-> <threads> [name-filter]` (see the file header).
+# Line format: `<package> <test|lib|release-lib|tests> <target|-> <threads> [name-filter]` (see the file header).
 PTYBUILD=""; PTYRUN=""; PTYFILT=""; PTYPKGS=""
 if [ "$PTY" = 1 ]; then
   PTYFILE="$SRC/scripts/strike/pty-targets.txt"
@@ -210,16 +210,19 @@ if [ "$PTY" = 1 ]; then
   while read -r PPKG PKIND PTGT PTHR PFLT; do
     case "$PPKG" in ''|'#'*) continue;; esac
     [[ "$PPKG$PTGT$PFLT" =~ ^[A-Za-z0-9_:.-]*$ ]] && [[ "$PTHR" =~ ^[1-9][0-9]*$ ]] || { echo "GATE: bad line in $PTYFILE: $PPKG $PKIND $PTGT $PTHR $PFLT"; exit 2; }
+    PENV=""
     case "$PKIND" in
       test) PSEL="--test $PTGT";;
       lib) PSEL="--lib";;
+      # optimized (a timing gate), with debug assertions kept: the crate's other tests are built with them
+      release-lib) PSEL="--release --lib"; PENV="CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true ";;
       tests) PSEL="--tests";;
       *) echo "GATE: bad target kind '$PKIND' in $PTYFILE"; exit 2;;
     esac
-    PTYBUILD+=" && cargo test --locked --no-run --message-format=json -p $PPKG $PSEL"
-    PTYRUN+="cargo test --locked --no-fail-fast @OFFLINE@ -p $PPKG $PSEL -- --ignored --test-threads=$PTHR $PFLT || rc=\$?; "
+    PTYBUILD+=" && ${PENV}cargo test --locked --no-run --message-format=json -p $PPKG $PSEL"
+    PTYRUN+="${PENV}cargo test --locked --no-fail-fast @OFFLINE@ -p $PPKG $PSEL -- --ignored --test-threads=$PTHR $PFLT || rc=\$?; "
     if [ -n "$PFLT" ]; then
-      case "$PKIND" in lib) PTYFILT+="${PPKG//-/_}=$PFLT;";; test) PTYFILT+="$PTGT=$PFLT;";; *) echo "GATE: a name filter needs a lib or test target: $PPKG $PKIND"; exit 2;; esac
+      case "$PKIND" in lib|release-lib) PTYFILT+="${PPKG//-/_}=$PFLT;";; test) PTYFILT+="$PTGT=$PFLT;";; *) echo "GATE: a name filter needs a lib or test target: $PPKG $PKIND"; exit 2;; esac
     fi
     case ",$PTYPKGS," in *",$PPKG,"*) ;; *) PTYPKGS+="${PTYPKGS:+,}$PPKG";; esac
   done < "$PTYFILE"

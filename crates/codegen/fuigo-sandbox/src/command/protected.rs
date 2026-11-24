@@ -1076,7 +1076,7 @@ pub fn floor_with_unread(inputs: &ProtectedInputs<'_>) -> Floor {
     // Every other workspace's session directory, present or future, and all of the own one but
     // its command directory: the grant files, their lock, temp names and `permission*.toml`
     out.push(Protected::TreeExcept {
-        tree: fuigo_home.join("sessions"),
+        tree: fuigo_config::sessions_root_in(&fuigo_home),
         except: command_dir,
     });
     // Named too, so the hard-link check sees the grant files a command could reach another way
@@ -1098,7 +1098,7 @@ pub fn floor_with_unread(inputs: &ProtectedInputs<'_>) -> Floor {
     // naming each folder's would grow every profile with each folder ever served
     #[cfg(unix)]
     out.extend(
-        linked_grant_files(&fuigo_home.join("sessions"), |name| {
+        linked_grant_files(&fuigo_config::sessions_root_in(&fuigo_home), |name| {
             [GLOBAL_GRANTS_FILENAME, GRANTS_LOCK_FILENAME].contains(&name)
                 || is_permission_file(name)
         })

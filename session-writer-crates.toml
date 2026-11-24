@@ -28,6 +28,18 @@ producers = [
 
 # Raw-mutation list and path-taking helpers by defining path (§5.4.1): banned in every listed crate.
 raw-write-ban = [
+    # 1.0.47 S2 (Fable r2 #1): the by-path write helpers of fuigo_config::fs_atomic.
+    "fuigo_config::fs_atomic::write_atomically",
+    "fuigo_config::fs_atomic::write_atomically_verified",
+    "fuigo_config::fs_atomic::stage_atomically",
+    "fuigo_config::fs_atomic::stage_atomically_keeping_mode",
+    "fuigo_config::fs_atomic::stage_atomically_from_existing",
+    "fuigo_config::fs_atomic::edit_state_file",
+    "fuigo_config::fs_atomic::locked_read_modify_write",
+    "fuigo_config::fs_atomic::edit_locked",
+    "fuigo_config::fs_atomic::edit_locked_with_lock",
+    "fuigo_config::fs_atomic::commit_if_unchanged",
+    "fuigo_config::fs_atomic::edit_under_lock",
     "std::fs::write",
     "std::fs::rename",
     "std::fs::remove_file",

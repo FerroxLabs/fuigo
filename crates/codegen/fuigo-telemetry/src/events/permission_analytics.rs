@@ -138,6 +138,7 @@ pub enum PermissionDecisionReason {
     BashRequestFloor,
     OpaqueShell,
     HookAsk,
+    OutsideChange,
     RequesterGone,
 }
 
@@ -167,6 +168,7 @@ impl PermissionDecisionReason {
         Self::BashRequestFloor,
         Self::OpaqueShell,
         Self::HookAsk,
+        Self::OutsideChange,
         Self::RequesterGone,
     ];
 }
@@ -199,6 +201,7 @@ impl TryFrom<&str> for PermissionDecisionReason {
             "bash_request_floor" => Self::BashRequestFloor,
             "opaque_shell" => Self::OpaqueShell,
             "hook_ask" => Self::HookAsk,
+            "outside_change" => Self::OutsideChange,
             "requester_gone" => Self::RequesterGone,
             _ => return Err(()),
         })

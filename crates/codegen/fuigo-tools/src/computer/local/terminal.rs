@@ -453,6 +453,8 @@ impl ProcessState {
     async fn flush_and_truncate_output_file(&mut self) {
         if let Some(ref mut file) = self.file_handle {
             let _ = file.flush().await;
+            // S2 (design §2.5): the output is complete here; release what the at-rest stream holds back.
+            file.finish().await;
             if self.total_bytes as u64 > MAX_RETAINED_OUTPUT_FILE_BYTES {
                 file.truncate_to(MAX_RETAINED_OUTPUT_FILE_BYTES).await;
             }
@@ -3343,6 +3345,15 @@ impl LogSink {
         match self {
             Self::File(file) => file.flush().await,
             Self::Session(_) => Ok(()),
+        }
+    }
+
+    /// Release what a session log's at-rest stream holds back (S2); its context is kept for later writes.
+    async fn finish(&mut self) {
+        if let Self::Session(log) = self
+            && let Err(error) = log.finish_async().await
+        {
+            tracing::warn!(%error, "terminal output log: could not release the held tail");
         }
     }
 

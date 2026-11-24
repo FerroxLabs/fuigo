@@ -231,10 +231,14 @@ impl ScrollLogRecorder {
         let Sink::Open(writer) = &mut self.sink else {
             return;
         };
-        let result = writeln!(writer, "{line}").and_then(|()| {
-            // Finalize marks a gesture boundary: flush so a live `tail -f` sees it
-            if flush_now { writer.flush() } else { Ok(()) }
-        });
+        let result = writer
+            .write_all(&fuigo_secrets::at_rest::transform_whole(
+                format!("{line}\n").as_bytes(),
+            ))
+            .and_then(|()| {
+                // Finalize marks a gesture boundary: flush so a live `tail -f` sees it
+                if flush_now { writer.flush() } else { Ok(()) }
+            });
         if let Err(err) = result {
             tracing::warn!(error = %err, "scroll log disabled: write failed");
             self.sink = Sink::Disabled;
@@ -256,7 +260,5 @@ fn open_writer(path: &Path) -> std::io::Result<BufWriter<File>> {
 /// It is also the target of the `/debug log` runtime toggle ([`super::mouse::MouseScrollState`]).
 pub(crate) fn default_log_path() -> PathBuf {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    fuigo_tools::util::fuigo_home::fuigo_home()
-        .join("logs")
-        .join(format!("scroll-log-{ts}.jsonl"))
+    fuigo_config::logs_dir().join(format!("scroll-log-{ts}.jsonl"))
 }

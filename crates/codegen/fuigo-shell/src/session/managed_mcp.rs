@@ -399,6 +399,11 @@ fn admit_client_mcp_servers_tracked(
     // Block by the raw name first: a vendor entry is matched on what the client sent, not on the projected name.
     let admitted: Vec<(acp::McpServer, Option<String>)> = entries
         .into_iter()
+        // MC-03: a client-supplied object never carries an admission stamp; a copy gets the disk definition's own.
+        .map(|(mut s, copy_of)| {
+            crate::util::config::mcp_approvals::mark_uncovered(&mut s, "client");
+            (s, copy_of)
+        })
         .filter(|(s, _)| unblocked(s))
         .filter_map(|(s, copy_of)| match copy_of {
             // P141: a seed's forwarded copy is the CURRENT disk definition of the name it copied (an edit takes
@@ -608,7 +613,24 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
         if !blocked.is_empty() && blocked.contains(&mcp_vendor_block_key(&server)) {
             continue;
         }
-        servers.insert(mcp_merge_key(&server), server);
+        // MC-03 (coordinator, for ACP hosts such as Murage): a non-copy client server keeps its `client` mark, so it is
+        // never recorded or held, even when it displaces a covered definition of its name (P141: it still wins the
+        // name). The ACP client is the trusted host, and its mounts change ports, tokens and paths on every run. A copy
+        // of a disk definition was replaced above by that definition, which stays gated under its own key.
+        let key = mcp_merge_key(&server);
+        // Review Fable confirm 2: say so when that happens to a covered definition (once per distinct server).
+        if crate::util::config::mcp_approvals::uncovered_source(&server) == Some("client")
+            && servers
+                .get(&key)
+                .is_some_and(|prev| crate::util::config::mcp_approvals::read_stamp(prev).is_some())
+            && first_report_of_differing_server(&server)
+        {
+            tracing::warn!(
+                server = mcp_server_name(&server),
+                "a client-supplied MCP server that is not a copy of the disk definition of that name replaces it; it starts as a client server, without the approval check"
+            );
+        }
+        servers.insert(key, server);
     }
 
     let mut merged: Vec<acp::McpServer> = servers.into_values().collect();
@@ -884,8 +906,8 @@ pub(crate) fn discover_mcp_definitions_ignoring_disable(
     inputs: &McpDiscoveryInputs<'_>,
 ) -> HashMap<String, acp::McpServer> {
     use crate::util::config::{
-        McpEnabledFilter, load_mcp_preferences, load_mcp_server_configs_with_project,
-        materialize_mcp_config,
+        McpEnabledFilter, load_mcp_preferences, load_mcp_server_configs_with_origin,
+        materialize_mcp_config_stamped,
     };
 
     let cwd = inputs.cwd;
@@ -898,10 +920,15 @@ pub(crate) fn discover_mcp_definitions_ignoring_disable(
 
     // TOML wins its name (insert); lower tiers or_insert.
     let mut by_name: HashMap<String, acp::McpServer> = HashMap::new();
-    for (name, (config, _scope)) in load_mcp_server_configs_with_project(cwd) {
-        let Some(transport) =
-            materialize_mcp_config(&name, config, &preferences, sub, McpEnabledFilter::Ignore)
-        else {
+    for (name, (config, origin)) in load_mcp_server_configs_with_origin(cwd) {
+        let Some(transport) = materialize_mcp_config_stamped(
+            &name,
+            config,
+            &preferences,
+            sub,
+            McpEnabledFilter::Ignore,
+            origin.as_ref(),
+        ) else {
             continue;
         };
         by_name.insert(name, transport);
@@ -996,7 +1023,12 @@ fn load_plugin_mcp_servers_from_config(
         crate::config::expand_env_vars_in_string(&s)
     };
     let label = format!("plugin:{}", plugin_name);
-    crate::util::config::parse_mcp_config_with_oauth(config, &label, &sub)
+    let (mut servers, oauth) =
+        crate::util::config::parse_mcp_config_with_oauth(config, &label, &sub);
+    for server in &mut servers {
+        crate::util::config::mcp_approvals::mark_uncovered(server, "plugin");
+    }
+    (servers, oauth)
 }
 
 pub(crate) fn collect_plugin_oauth_configs(
@@ -1073,7 +1105,10 @@ fn canonical_server_json(server: &acp::McpServer) -> Option<serde_json::Value> {
             _ => {}
         }
     }
-    let mut v = serde_json::to_value(server).ok()?;
+    // MC-03: the admission stamp is not part of the definition a client copies.
+    let mut server = server.clone();
+    crate::util::config::mcp_approvals::strip_stamp(&mut server);
+    let mut v = serde_json::to_value(&server).ok()?;
     sort_maps(&mut v);
     Some(v)
 }

@@ -60,6 +60,7 @@ fn install(
     std::fs::create_dir_all(dir)?;
     // Stage in the destination directory and rename atomically, so an
     // interrupted or concurrent first use never publishes a partial binary.
+    // at-rest: outside-roots vendored tool binaries, not under sessions/ or logs/
     let mut staged = tempfile::NamedTempFile::new_in(dir)?;
     staged.write_all(&decoded)?;
     #[cfg(unix)]

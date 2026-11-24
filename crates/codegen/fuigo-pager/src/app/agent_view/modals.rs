@@ -1468,6 +1468,12 @@ impl AgentView {
                             return InputOutcome::Action(Action::ToggleMcpServer {
                                 server_name: server.name.clone(),
                                 enabled: !server.enabled,
+                                // Approve exactly the held definition this row shows (as the held prompt does).
+                                digest: if server.enabled {
+                                    None
+                                } else {
+                                    server.held_digest.clone()
+                                },
                             });
                         }
                     }
@@ -2262,6 +2268,7 @@ mod extensions_action_target_tests {
             wire_source: crate::views::mcps_modal::McpWireSource::Local,
             plugin_name: None,
             is_managed_gateway: false,
+            held_digest: None,
         }
     }
 
@@ -2403,6 +2410,56 @@ mod extensions_action_target_tests {
             AgentView::extensions_action_target(&modal, &ButtonAction::ToggleSelectedSkill);
         assert_eq!(target.as_deref(), Some("my-skill"));
         assert_eq!(enabled, Some(true));
+    }
+
+    /// MC-03: the `/mcps` toggle sends the digest of the held definition the row shows, so a definition that reloads
+    /// to something else afterwards is refused by the shell (ACP test `acp_mcp_toggle_with_a_shown_digest_never_
+    /// approves_a_later_definition`) and stays held; a row that is not held sends none.
+    #[test]
+    fn mcps_toggle_sends_the_digest_of_the_held_definition_the_row_shows() {
+        let toggle = |held: Option<&str>, enabled: bool| {
+            let mut agent = super::test_fixtures::make_agent();
+            let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
+            let mut server = server_info("notes", enabled);
+            server.held_digest = held.map(str::to_owned);
+            modal.mcps_data = TabDataState::Loaded(vec![server]);
+            modal.entry_data_indices = vec![Some(0)];
+            modal.entry_group_keys = vec![None];
+            modal.picker_state.selected = 0;
+            agent.extensions_modal = Some(modal);
+            agent.execute_modal_button_action(
+                crate::views::extensions_modal::ButtonAction::ToggleSelectedMcpServer,
+            )
+        };
+        match toggle(Some("digest-b"), false) {
+            crate::app::app_view::InputOutcome::Action(
+                crate::app::actions::Action::ToggleMcpServer {
+                    server_name,
+                    enabled: true,
+                    digest,
+                },
+            ) => {
+                assert_eq!(server_name, "notes");
+                assert_eq!(digest.as_deref(), Some("digest-b"));
+            }
+            other => panic!("expected an enable toggle with the shown digest, got {other:?}"),
+        }
+        assert!(matches!(
+            toggle(None, false),
+            crate::app::app_view::InputOutcome::Action(
+                crate::app::actions::Action::ToggleMcpServer { digest: None, .. }
+            )
+        ));
+        assert!(matches!(
+            toggle(Some("digest-b"), true),
+            crate::app::app_view::InputOutcome::Action(
+                crate::app::actions::Action::ToggleMcpServer {
+                    enabled: false,
+                    digest: None,
+                    ..
+                }
+            )
+        ));
     }
 
     #[test]
@@ -2877,6 +2934,7 @@ mod managed_section_no_funnel_tests {
             wire_source: McpWireSource::Managed,
             plugin_name: None,
             is_managed_gateway,
+            held_digest: None,
         }
     }
 
@@ -3201,6 +3259,7 @@ mod extensions_modal_confirmation_tests {
             wire_source,
             plugin_name: None,
             is_managed_gateway: false,
+            held_digest: None,
         }
     }
 

@@ -470,3 +470,113 @@ fn enter_on_a_video_card_with_graphics_and_ffmpeg_plays_inline() {
         "inline playback starts loading frames"
     );
 }
+
+/// MC-03: a configured MCP server held at session start gets one question (Enter keeps it stopped); approving it sends
+/// the `/mcp` toggle, which approves exactly the held digest. Nothing held: no question.
+#[test]
+fn a_held_mcp_server_at_session_start_is_asked_about_and_approve_sends_the_mcp_toggle() {
+    use crate::app::actions::TaskResult;
+    use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = fuigo_test_support::FuigoHome::new();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id =
+        Some(acp::SessionId::new("sess-held"));
+
+    // Nothing held: no friction.
+    let none = fuigo_shell::util::config::held_mcp_definitions(cwd.path());
+    assert!(none.is_empty());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::HeldMcpServers {
+            agent_id: AgentId(0),
+            held: none,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty() && app.agents[&AgentId(0)].question_view.is_none());
+
+    crate::mcp_cmd::held_notes_fixture(home.path());
+    let held = fuigo_shell::util::config::held_mcp_definitions(cwd.path());
+    assert_eq!(held.len(), 1);
+    // Review Astra confirm H1: the digest shown travels with the answer to the toggle.
+    let shown = held[0].digest().to_owned();
+    assert!(shown.starts_with("mcpdef.v1:"), "{shown}");
+    dispatch(
+        Action::TaskComplete(TaskResult::HeldMcpServers {
+            agent_id: AgentId(0),
+            held,
+        }),
+        &mut app,
+    );
+    let qv = app.agents[&AgentId(0)]
+        .question_view
+        .as_ref()
+        .expect("question opened");
+    assert!(
+        matches!(&qv.local_kind, Some(LocalQuestionKind::McpHeld { servers }) if servers == &[("notes".to_owned(), shown.clone())])
+    );
+    let q = &qv.questions[0];
+    assert!(
+        q.question.contains("`notes` changed since you approved it"),
+        "{}",
+        q.question
+    );
+    assert!(
+        q.question.contains("runs: notes-srv --v2"),
+        "{}",
+        q.question
+    );
+    assert_eq!(q.options[0].label, "Approve and start");
+    assert_eq!(
+        q.options[qv.cursor()].label,
+        "Keep it stopped",
+        "Enter must not approve"
+    );
+
+    // Answer "Approve and start".
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.question_view.as_mut().unwrap().selections[0] = QuestionSelection::Single(Some(0));
+    let outcome = agent.submit_question_answers_for_test(false);
+    let crate::app::app_view::InputOutcome::Action(action) = outcome else {
+        panic!("expected an action, got {outcome:?}");
+    };
+    assert!(
+        matches!(&action, Action::McpHeldAnswered { approve } if approve == &[("notes".to_owned(), shown.clone())])
+    );
+    let effects = dispatch(action, &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::ToggleMcpServer { server_name, enabled: true, digest: Some(d), .. }] if server_name == "notes" && d == &shown
+        ),
+        "{effects:?}"
+    );
+}
+
+/// MC-03 (L7): a refused enable leaves the `/mcps` row stale, so the panel reloads its list.
+#[test]
+fn a_refused_mcp_toggle_reloads_the_mcps_list() {
+    use crate::app::actions::TaskResult;
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.session_id = Some(acp::SessionId::new("sess-l7"));
+    agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::McpServers));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::McpToggleDone {
+            agent_id: AgentId(0),
+            result: Err("definition changed again".into()),
+        }),
+        &mut app,
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::FetchMcpsList { cache: false, .. }]
+        ),
+        "{effects:?}"
+    );
+}

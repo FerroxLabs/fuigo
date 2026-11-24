@@ -128,6 +128,11 @@ pub enum LocalQuestionKind {
         plan: Box<crate::diagnostics::FixPlan>,
     },
     DeleteCurrentSession,
+    /// MC-03 session-start question: one tab per held MCP server, in this order; option 0 approves and starts it.
+    McpHeld {
+        /// (name, shown `mcpdef.v1` digest): approving names the digest shown (review Astra confirm H1).
+        servers: Vec<(String, String)>,
+    },
     /// Freeform report modal opened by `/feedback`.
     Feedback,
     /// Second stage of the `/feedback` card: trace consent.

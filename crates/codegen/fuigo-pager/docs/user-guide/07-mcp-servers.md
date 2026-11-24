@@ -221,6 +221,44 @@ The model has access to two built-in tools for working with MCP servers:
 
 ---
 
+## Changed Servers Are Held Until You Approve Them
+
+Fuigo records each MCP server definition from your config files the first time it starts it. If the definition later
+changes (the command, its arguments, the environment, the URL, the headers or the OAuth settings) Fuigo does not start
+the changed server until you approve it. This applies in every permission mode, bypass included, and to every config
+file Fuigo reads MCP servers from (`config.toml`, `.mcp.json`, `.cursor/mcp.json`, `~/.claude.json`, agent definitions).
+
+That includes edits made while a session is open. When an MCP config file changes under a running session, the old
+server stops and the changed one is held: it does not start until you approve it. Edits Fuigo makes itself (`fuigo mcp
+add`, the setup prompts) are approved as they are saved, so they are never held.
+
+A held server is reported as a notice ("MCP server `notes` was not started: its definition ... changed since you
+approved it"), never silently skipped. To approve it:
+
+- **When a session starts:** the TUI asks about each held server, shows what it will now run or connect to, and offers
+  **Approve and start** or **Keep it stopped**. Keeping it stopped records nothing, so you are asked again next session.
+  Nothing is asked when nothing is held.
+- **In a running session:** turn the server on in `/mcps`. That approves exactly the definition that was held, and the
+  server starts.
+- **From the command line:** `fuigo mcp enable <name>` prints the definition it approves and approves it. For a server
+  declared inline in an agent definition, run `fuigo mcp enable <name> --agent <agent>`. Restart the session (or turn
+  the server on in `/mcps`) to start it.
+
+Every approval is of the definition you were shown: if the server changes again before you answer, the newer
+definition stays held and the approval is refused ("definition changed again since it was shown; review it"). ACP
+clients get the same guarantee by passing the optional `digest` field (the `heldDigest` from `_fuigo/mcp/list`) to
+`_fuigo/mcp/toggle`; a toggle without it approves what the session holds, as before.
+
+`fuigo mcp list` shows held servers, and `fuigo mcp list --json` adds `held` to every entry. A held entry also carries
+`held_reason`, `held_origin`, `held_definition` (what it will run or connect to) and `held_digest` (the first 12 hex
+digits of the definition's digest).
+
+Approvals are kept in `~/.fuigo/mcp_approved_definitions.json`. If that file cannot be read, every server from your
+config files is held until you fix it or run `fuigo mcp approvals reset`, which keeps the old file aside and starts a
+new one. Only run it if you trust your current MCP config: the next session approves every server configured then.
+
+A process that can rewrite both your MCP config and the approvals file can approve its own change.
+
 ## Compatibility
 
 Fuigo loads MCP server configurations from multiple sources for compatibility:
@@ -305,7 +343,7 @@ Fuigo reads the file again for every request, so a rotated token applies at once
 
   In PowerShell write the last argument as `"${env:USERNAME}:F"`. If you sign in with a domain account use `DOMAIN\you` in place of the user name. Then run `icacls "C:\Users\you\token.txt"` to look at the result: it should list only you (and optionally SYSTEM and Administrators). Remove any other name that is still listed with `icacls "C:\Users\you\token.txt" /remove "Name"`.
 
-To avoid putting secrets in the config file, reference an environment variable with `${VAR}` (or `${VAR:-default}`). Fuigo expands string fields in `[mcp_servers.*]` — `url`, `command`, `args`, and the values in `env` and `headers` — at load time:
+To avoid putting secrets in the config file, reference an environment variable with `${VAR}` (or `${VAR:-default}`). Fuigo expands string fields in `[mcp_servers.*]` — `url`, `command`, `args`, and the values in `env` and `headers` — at load time. A value referenced with `${VAR}` is not part of the approved definition: rotating it does not hold the server, changing the reference does:
 
 ```toml
 [mcp_servers.internal-tools]

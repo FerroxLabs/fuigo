@@ -286,7 +286,7 @@ fn directory_barrier_failure_is_retried_even_after_file_exists() {
             &path,
             b"{\"record\":1}\n".to_vec(),
             AppendDurability::Durable,
-            std::fs::File::sync_all,
+            fuigo_session_writer::AtRestAppend::sync_all,
             &mut flaky_parent,
         )
         .is_err()
@@ -296,7 +296,7 @@ fn directory_barrier_failure_is_retried_even_after_file_exists() {
         &path,
         b"{\"record\":1}\n".to_vec(),
         AppendDurability::Durable,
-        std::fs::File::sync_all,
+        fuigo_session_writer::AtRestAppend::sync_all,
         &mut flaky_parent,
     )
     .unwrap();

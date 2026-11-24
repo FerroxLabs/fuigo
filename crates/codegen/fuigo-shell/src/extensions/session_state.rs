@@ -50,15 +50,33 @@ pub(crate) async fn handle_state(args: &acp::ExtRequest) -> ExtResult {
     let Some(dir) = resolve_session_dir(&request.session_id, &request.cwd) else {
         return Err(crate::acp_error::invalid_params("session not found"));
     };
+    super::to_raw_response(&read_state(&dir))
+}
+
+/// The metadata columns of the session at `dir`, keyed by logical name: what `fuigo/session/state` exports.
+fn read_state(dir: &Path) -> serde_json::Map<String, Value> {
     let mut state = serde_json::Map::new();
     for (column, rel) in COLUMNS {
         if let Ok(text) = std::fs::read_to_string(dir.join(rel))
-            && let Ok(value) = serde_json::from_str::<Value>(&text)
+            && let Ok(mut value) = serde_json::from_str::<Value>(&text)
         {
+            // F4: the per-turn rows past the `usage.json` cap are in the archive; export every turn.
+            if *rel == st::USAGE_FILE
+                && dir
+                    .join(crate::session::usage_file::USAGE_ARCHIVE_FILE)
+                    .is_file()
+                && let Ok(mut usage) = serde_json::from_value::<
+                    crate::session::usage_file::SessionUsageFile,
+                >(value.clone())
+                && usage.merge_archive(dir).is_ok()
+                && let Ok(merged) = serde_json::to_value(&usage)
+            {
+                value = merged;
+            }
             state.insert((*column).to_string(), value);
         }
     }
-    super::to_raw_response(&state)
+    state
 }
 
 #[derive(serde::Deserialize)]
@@ -213,6 +231,8 @@ fn write_import(
     for (_, rel) in COLUMNS {
         let _ = writer.remove_sync(rel);
     }
+    // The imported `usage` column carries every turn; a leftover archive must not add rows to it.
+    let _ = writer.remove_sync(crate::session::usage_file::USAGE_ARCHIVE_FILE);
 
     if !updates.is_empty() {
         writer.replace_atomic_sync(st::UPDATES_FILE, &st::to_jsonl_bytes(updates)?)?;
@@ -438,5 +458,86 @@ mod tests {
             serde_json::from_slice(&std::fs::read(dir.join("usage.json")).unwrap()).unwrap();
         assert_eq!(usage.session_id, "imported-id");
         assert_eq!(usage.session.input_tokens, 10);
+    }
+
+    fn usage_rows(turns: std::ops::RangeInclusive<u32>, input: u64) -> Vec<Value> {
+        turns
+            .map(|n| json!({ "turnNumber": n, "inputTokens": input }))
+            .collect()
+    }
+
+    fn imported_usage(dir: &Path) -> crate::session::usage_file::SessionUsageFile {
+        serde_json::from_slice(&std::fs::read(dir.join(st::USAGE_FILE)).unwrap()).unwrap()
+    }
+
+    /// F4 export/import: an export carries the archived rows in its `usage` column (the pre-1.0.47 shape), an import
+    /// drops a leftover archive so it adds nothing, and an older build's export (capped rows, no archive) imports as is.
+    #[test]
+    fn state_export_and_import_round_trip_every_usage_row() {
+        let summary = json!({ "info": { "id": "src", "cwd": "/work" } });
+        let src = tempfile::TempDir::new().unwrap();
+        std::fs::write(src.path().join(st::SUMMARY_FILE), summary.to_string()).unwrap();
+        let capped = json!({
+            "sessionId": "src",
+            "session": { "inputTokens": 50, "turnCount": 5 },
+            "turns": usage_rows(3..=5, 10),
+        });
+        std::fs::write(src.path().join(st::USAGE_FILE), capped.to_string()).unwrap();
+        let mut archive = Vec::new();
+        for row in usage_rows(1..=2, 10) {
+            archive.extend_from_slice(format!("{row}\n").as_bytes());
+        }
+        std::fs::write(
+            src.path()
+                .join(crate::session::usage_file::USAGE_ARCHIVE_FILE),
+            archive,
+        )
+        .unwrap();
+
+        let exported = read_state(src.path());
+        let rows = exported["usage"]["turns"].as_array().unwrap();
+        assert_eq!(rows.len(), 5, "the export carries the archived rows");
+        assert_eq!(exported["summary"], summary);
+
+        let dst = tempfile::TempDir::new().unwrap();
+        // A failed earlier import left an archive with other numbers: it must not add rows to the imported column.
+        let stale = usage_rows(1..=2, 999)
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        std::fs::write(
+            dst.path()
+                .join(crate::session::usage_file::USAGE_ARCHIVE_FILE),
+            stale,
+        )
+        .unwrap();
+        let state: std::collections::HashMap<_, _> = exported.into_iter().collect();
+        write_import(&test_writer(dst.path()), &state, &[], "dst").unwrap();
+        assert!(
+            !dst.path()
+                .join(crate::session::usage_file::USAGE_ARCHIVE_FILE)
+                .exists(),
+            "the leftover archive is removed"
+        );
+        let mut usage = imported_usage(dst.path());
+        usage.merge_archive(dst.path()).unwrap();
+        assert_eq!(usage.session_id, "dst");
+        assert!(usage.turns.iter().map(|t| t.turn_number).eq(1..=5));
+        assert!(usage.turns.iter().all(|t| t.usage.input_tokens == 10));
+        assert_eq!(usage.session.turn_count, 5);
+
+        // An older build's export: the capped rows only, no archive anywhere. It imports and re-exports with the same rows.
+        let old = tempfile::TempDir::new().unwrap();
+        let mut state = std::collections::HashMap::new();
+        state.insert("summary".to_string(), summary.clone());
+        state.insert("usage".to_string(), capped.clone());
+        write_import(&test_writer(old.path()), &state, &[], "old").unwrap();
+        let usage = imported_usage(old.path());
+        assert!(usage.turns.iter().map(|t| t.turn_number).eq(3..=5));
+        assert_eq!(usage.session.turn_count, 5);
+        assert_eq!(usage.session.input_tokens, 50);
+        let again = read_state(old.path());
+        assert_eq!(again["usage"]["turns"].as_array().unwrap().len(), 3);
+        assert_eq!(again["usage"]["sessionId"], json!("old"));
     }
 }

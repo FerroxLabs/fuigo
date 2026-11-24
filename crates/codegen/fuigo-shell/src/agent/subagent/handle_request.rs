@@ -1235,9 +1235,11 @@ pub(crate) async fn run_shell_child(
         }
     }
     // Resolved against the parent's merge; the kill switch and managed policy are judged at the parent's cwd.
-    let agent_mcp_servers = crate::session::agent_mcp::materialize_agent_mcp_servers(
+    // MC-03: an inline server replacing one of the parent's takes its approval key, so it is held until approved.
+    let agent_mcp_servers = crate::session::agent_mcp::materialize_subagent_mcp_servers(
         &definition,
         &ctx.parent_mcp_configs,
+        &ctx.parent_session_id,
         &ctx.parent_cwd,
         notice_scope,
     );

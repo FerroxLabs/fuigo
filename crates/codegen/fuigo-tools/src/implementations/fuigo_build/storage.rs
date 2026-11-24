@@ -259,6 +259,26 @@ mod tests {
         assert_eq!(tokio::fs::read(&p2).await.unwrap(), b"img2");
     }
 
+    /// Astra N3 (1.0.47 S2): media saved through the session writer is byte-exact, even when its bytes happen to hold a
+    /// value recorded at rest.
+    #[tokio::test]
+    async fn saved_media_is_byte_exact_even_holding_a_recorded_value() {
+        let value = concat!("img", "_live_N3MediaKx9Q").to_owned();
+        fuigo_secrets::at_rest::record(&value);
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0".to_vec();
+        bytes.extend_from_slice(value.as_bytes());
+        bytes.extend_from_slice(b"\"\\u0041\xff\xfe");
+        let tmp = tempfile::tempdir().unwrap();
+        let files = SessionFiles::at(tmp.path());
+        for (dir, ext) in [("images", "png"), ("videos", "mp4"), ("downloads", "pdf")] {
+            let path = SessionFileWriter::new(dir, ext)
+                .save(&files, &bytes, None)
+                .await
+                .unwrap();
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes, "{dir}");
+        }
+    }
+
     #[tokio::test]
     async fn save_resumes_counter_from_existing_files() {
         let tmp = tempfile::tempdir().unwrap();

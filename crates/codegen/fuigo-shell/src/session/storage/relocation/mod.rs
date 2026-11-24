@@ -61,7 +61,7 @@ pub(crate) struct RelocationView {
 
 impl RelocationView {
     pub(crate) fn load(fuigo_home: &Path) -> Result<Self> {
-        Self::load_for_sessions_root(&fuigo_home.join("sessions"))
+        Self::load_for_sessions_root(&fuigo_config::sessions_root_in(fuigo_home))
     }
 
     pub(crate) fn load_for_sessions_root(sessions_root: &Path) -> Result<Self> {

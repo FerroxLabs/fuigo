@@ -116,6 +116,9 @@ async fn permission_prompt_hook_chimes_only_on_real_wait() {
     }
 
     // Enter takes the preselected allow-once row (P152: a digit no longer picks the always-approve row 1).
+    // The card opened within the typing window of the prompt's Enter, so an Enter now is held as typing (audit S9-F4).
+    // A user reads the card first: let the window pass, then answer.
+    harness.update(Duration::from_millis(1000));
     harness.inject_keys(b"\r").expect("allow once");
     harness
         .wait_for_text(EDIT_DONE, Duration::from_secs(90))

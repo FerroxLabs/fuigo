@@ -211,7 +211,8 @@ impl MvpAgent {
             .unwrap_or(0);
 
         // Inline blocking I/O: spawn_blocking has multi-second latency on LocalSet.
-        let raw_contents = match std::fs::read_to_string(updates_path) {
+        let bytes = crate::session::storage::updates_cache::read(updates_path).unwrap_or_default();
+        let raw_contents = match crate::session::storage::updates_cache::utf8(&bytes) {
             Ok(s) if !s.is_empty() => s,
             _ => return Ok((0, 0, Vec::new())),
         };
@@ -219,7 +220,7 @@ impl MvpAgent {
 
         let mut prepared = {
             let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
-            crate::session::storage::prepare_replay_lines(&raw_contents, cursor)
+            crate::session::storage::prepare_replay_lines(raw_contents, cursor)
         };
         let unfinished_subagents = std::mem::take(&mut prepared.unfinished_subagents);
 

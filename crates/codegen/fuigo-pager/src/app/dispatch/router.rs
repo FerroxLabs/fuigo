@@ -108,8 +108,8 @@ use super::status::{
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
     dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
-    dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
-    dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
+    dispatch_dump_input_log, dispatch_export_conversation, dispatch_mcp_held_answered,
+    dispatch_open_block_viewer, dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
     dispatch_open_transcript_pager,
 };
 use super::turn::{
@@ -267,6 +267,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DeleteCurrentSessionAnswered { confirmed } => {
             dispatch_delete_current_session_answered(app, confirmed)
         }
+        Action::McpHeldAnswered { approve } => dispatch_mcp_held_answered(app, approve),
         Action::NewWorktreeSession {
             load_session_id,
             label,
@@ -901,6 +902,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ToggleMcpServer {
             server_name,
             enabled,
+            digest,
         } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
@@ -916,6 +918,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 session_id,
                 server_name,
                 enabled,
+                digest,
             }]
         }
         Action::ToggleMcpTool {

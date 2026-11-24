@@ -112,13 +112,13 @@ mod tests {
     }
 
     #[test]
-    fn builtin_includes_when_to_use_and_path() {
+    fn builtin_has_when_to_use_and_no_path() {
         let text = format_workflow_listing(&[listing(
             "deep-research",
             "Research a query with citations.",
             Some("Compare or research a question that needs sourced claims"),
             "builtin",
-            Some("/src/session/workflows/deep_research.rhai"),
+            None,
         )])
         .unwrap();
         assert!(text.contains("- deep-research: Research a query with citations."));
@@ -126,7 +126,8 @@ mod tests {
             text.contains("  Use when: Compare or research a question that needs sourced claims")
         );
         assert!(!text.contains("Source:"));
-        assert!(text.contains("  Absolute path: /src/session/workflows/deep_research.rhai"));
+        assert!(!text.contains("Absolute path"));
+        assert!(!text.contains("CARGO_MANIFEST_DIR"));
     }
 
     #[test]

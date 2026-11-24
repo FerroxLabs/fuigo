@@ -92,6 +92,13 @@ pub struct McpServerEntry {
     pub config: McpServerConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<McpServerSessionState>,
+    /// MC-03: held by the definition gate (changed since approved, or the approvals file is unreadable) and not
+    /// started; `heldReason`/`heldDigest` say why and which definition `_fuigo/mcp/toggle` would approve.
+    pub held: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_digest: Option<String>,
 }
 
 /// MCP server config for the `mcp/list` catalog response.
@@ -528,6 +535,9 @@ pub(crate) fn build_mcp_catalog_with_gateway_tools(
             let name = managed_gateway_entry_name(connector_id);
             seen.insert(name.clone());
             servers.push(McpServerEntry {
+                held: false,
+                held_reason: None,
+                held_digest: None,
                 name,
                 display_name: Some(connector_name.to_owned()),
                 icons: Vec::new(),
@@ -592,6 +602,9 @@ pub(crate) fn build_mcp_catalog_with_gateway_tools(
                 _ => continue,
             };
             servers.push(McpServerEntry {
+                held: false,
+                held_reason: None,
+                held_digest: None,
                 name,
                 display_name: None,
                 icons: Vec::new(),
@@ -635,6 +648,9 @@ fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
         }
     };
     McpServerEntry {
+        held: false,
+        held_reason: None,
+        held_digest: None,
         name: name.to_owned(),
         display_name: name
             .strip_prefix(MANAGED_GATEWAY_ENTRY_PREFIX)
@@ -954,7 +970,14 @@ pub(crate) async fn init_agent_mcp_pool(
         .with_oauth_discovery(crate::session::mcp_servers::McpOauthDiscovery::Network);
     let meta = Default::default();
     let oauth = Default::default();
-    let results = start_mcp_servers(configs, Some(cwd), &meta, &oauth, &ctx).await;
+    let results = start_mcp_servers(
+        crate::session::mcp_admission::admit_installed(&configs),
+        Some(cwd),
+        &meta,
+        &oauth,
+        &ctx,
+    )
+    .await;
     let clients: fuigo_mcp::owned_clients::OwnedClients = results
         .into_iter()
         .filter_map(|r| match r {
@@ -1055,6 +1078,26 @@ pub async fn call_mcp_tool(
 
 // ── mcp/list handler ────────────────────────────────────────────────
 
+/// MC-03: mark the entries the definition gate holds (for `session`, else in any session), so an ACP host can see a hold
+/// without parsing notice text.
+fn mark_held_entries(servers: &mut [McpServerEntry], session: Option<&str>) {
+    let held = crate::session::mcp_admission::held_mcp_servers_in(session);
+    for entry in servers.iter_mut() {
+        if let Some(h) = held.iter().find(|h| h.name == entry.name) {
+            entry.held = true;
+            entry.held_reason = Some(if h.store_unavailable {
+                format!(
+                    "the MCP approvals file {} could not be read",
+                    crate::util::config::mcp_approvals::store_path().display()
+                )
+            } else {
+                format!("definition changed since you approved it ({})", h.origin)
+            });
+            entry.held_digest = Some(h.digest.clone());
+        }
+    }
+}
+
 async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // The gateway catalog fetch and the session-state branch run concurrently via tokio::join!
     // The session-state branch is a conditional `retry_auth_required_servers` followed by `build_mcp_status`
@@ -1134,6 +1177,9 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             .get(&name)
             .map(|prefs| prefs.values.clone());
         servers.push(McpServerEntry {
+            held: false,
+            held_reason: None,
+            held_digest: None,
             name: name.clone(),
             icons: Vec::new(),
             display_name: None,
@@ -1295,6 +1341,9 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         for client_status in &snapshot.clients {
             if !catalog_names.contains(&client_status.name) {
                 servers.push(McpServerEntry {
+                    held: false,
+                    held_reason: None,
+                    held_digest: None,
                     name: client_status.name.clone(),
                     icons: client_status.icons.clone(),
                     display_name: None,
@@ -1332,6 +1381,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             }
         }
     }
+    mark_held_entries(&mut servers, req.session_id.as_deref());
     to_ext_response(Ok(McpListResponse {
         servers,
         session_mcp_resolved,
@@ -1783,15 +1833,18 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         source: Some(entry.source.clone()),
         updated_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
     };
-    match entry.config.resolve_setup(Some(&pending_preferences)) {
-        crate::util::config::McpSetupResolution::Resolved(_) => {}
+    // MC-03: this setup choice approves its own resolved definition (computed here, in memory).
+    let setup_digest = match entry.config.resolve_setup(Some(&pending_preferences)) {
+        crate::util::config::McpSetupResolution::Resolved(resolved) => {
+            crate::util::config::mcp_approvals::mcpdef_v1_config(&resolved)
+        }
         crate::util::config::McpSetupResolution::Required(_) => {
             return Err(crate::acp_error::invalid_params("setup values incomplete"));
         }
         crate::util::config::McpSetupResolution::Invalid(reason) => {
             return Err(crate::acp_error::invalid_params(reason));
         }
-    }
+    };
 
     let load = crate::util::config::load_mcp_preferences();
     if !load.is_writable() {
@@ -1845,9 +1898,18 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let was_disabled =
         crate::util::config::disabled_mcp_server_names(&cwd).contains(&req.server_name);
     // Review C7-02: enabling here approves a campaign stdio server's command; name the program (a notice, no prompt).
-    let approval_notice = crate::util::config::campaign_approval_notice(&req.server_name, &cwd);
+    // The approval recorded is the fingerprint of exactly the command the notice names (one read).
+    let (campaign_approval, approval_notice) =
+        crate::util::config::campaign_approval_shown(&req.server_name, &cwd);
     let enable_paths = if was_disabled {
-        match crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd).await {
+        match crate::util::config::save_mcp_server_enabled_in(
+            &req.server_name,
+            true,
+            &cwd,
+            campaign_approval,
+        )
+        .await
+        {
             Ok(paths) => paths,
             Err(e) => {
                 rollback_prefs().await;
@@ -1911,6 +1973,26 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
     };
 
+    // MC-03 (setup edits approve their own resolved definition): only when the definition merged now is the one this
+    // setup resolved; anything else is held by the gate as usual.
+    if let Some(stamp) = crate::util::config::mcp_approvals::read_stamp(&server)
+        && stamp.digest == setup_digest
+    {
+        let (key, digest) = (stamp.key, stamp.digest);
+        match tokio::task::spawn_blocking(move || {
+            crate::util::config::mcp_approvals::approve_mcp_definition(&key, &digest)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(server = req.server_name.as_str(), error = %e, "could not record the set-up MCP definition")
+            }
+            Err(e) => {
+                tracing::warn!(server = req.server_name.as_str(), error = %e, "could not record the set-up MCP definition")
+            }
+        }
+    }
     if let Err(e) = handle
         .toggle_mcp_server(req.server_name.clone(), true, Some(server))
         .await
@@ -1937,6 +2019,22 @@ struct McpToggleRequest {
     session_id: String,
     server_name: String,
     enabled: bool,
+    /// The `mcpdef.v1` digest of the held definition the client showed (`heldDigest` in `mcp/list`). When set, turning
+    /// on approves only that definition; a held definition that differs is refused and stays held. Optional: without
+    /// it the toggle approves what this session holds, as before.
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+/// The toggle's refusal when the held definition is not the one the client showed (review Astra confirm H1).
+const DEFINITION_CHANGED_AGAIN: &str = "definition changed again since it was shown; review it";
+
+/// An empty digest is a malformed one, never "none": it must not fall through to approving what the session holds.
+fn check_shown_digest(digest: Option<&str>) -> Result<(), &'static str> {
+    match digest {
+        Some(d) if d.trim().is_empty() => Err("empty definition digest"),
+        _ => Ok(()),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -2156,14 +2254,31 @@ async fn spawn_discovery<T: Send + 'static>(
 
 /// The ONE gated enable sequence for `mcp/toggle`: policy verdict BEFORE any
 /// config write; every failure past the write rolls the enable back ([`run_gated_enable`]).
+fn store_unavailable_message() -> String {
+    format!(
+        "MCP server not enabled: the MCP approvals file {} could not be read, so its definition cannot be approved. Repair it or run `fuigo mcp approvals reset`.",
+        crate::util::config::mcp_approvals::store_path().display()
+    )
+}
+
 async fn enable_mcp_server_gated(
     agent: &MvpAgent,
     handle: &crate::session::SessionHandle,
+    session_id: &str,
     cwd: &std::path::Path,
     server_name: &str,
+    shown_digest: Option<&str>,
 ) -> Result<(), GatedEnableError> {
     let plugin_reg = agent.plugin_registry_snapshot();
     let compat = agent.cfg.borrow().compat_resolved;
+    // Review C7-02 / Grok r2 A3: the campaign approval is the fingerprint of this read, never a later disk read.
+    let (campaign_approval, _) = crate::util::config::campaign_approval_shown(server_name, cwd);
+    // MC-03: turning a held server on approves exactly the definition THIS session's gate held (what its `/mcp` shows;
+    // review Astra H1: never another session's), found by the approval key (scope and name) of this session's own
+    // definition of the server; the toggled object then passes the gate, so it starts only if it is still that
+    // definition.
+    let probe_key = std::sync::OnceLock::<String>::new();
+    let probe_key = &probe_key;
 
     let probe_reg = plugin_reg.clone();
     let probe = || async move {
@@ -2178,6 +2293,9 @@ async fn enable_mcp_server_gated(
         let Some(probe) = discovered.get(server_name) else {
             return Err(GatedEnableError::NotFound);
         };
+        if let Some(stamp) = crate::util::config::mcp_approvals::read_stamp(probe) {
+            let _ = probe_key.set(stamp.key);
+        }
         if let Some(message) = policy_enable_error_in(cwd, probe) {
             return Err(GatedEnableError::PolicyRefused(message));
         }
@@ -2185,7 +2303,30 @@ async fn enable_mcp_server_gated(
     };
 
     let persist_enable = || async move {
-        crate::util::config::save_mcp_server_enabled_in(server_name, true, cwd)
+        let held = probe_key
+            .get()
+            .and_then(|key| crate::session::mcp_admission::held_mcp_server(session_id, key));
+        if let Some(held) = held {
+            // Coordinator: never report ok over an approval that could not be recorded.
+            if held.store_unavailable {
+                return Err(store_unavailable_message());
+            }
+            // Approve exactly what was shown: a later definition stays held (review Astra confirm H1).
+            if shown_digest.is_some_and(|shown| shown != held.digest) {
+                return Err(format!(
+                    "MCP server `{}`: {DEFINITION_CHANGED_AGAIN}",
+                    fuigo_config::config_override::tidy_note_text(&held.name, 64)
+                ));
+            }
+            let (key, digest) = (held.key, held.digest);
+            tokio::task::spawn_blocking(move || {
+                crate::util::config::mcp_approvals::approve_mcp_definition(&key, &digest)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        }
+        crate::util::config::save_mcp_server_enabled_in(server_name, true, cwd, campaign_approval)
             .await
             .map_err(|e| e.to_string())
     };
@@ -2241,6 +2382,7 @@ async fn enable_mcp_server_gated(
 
 async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req = parse_params::<McpToggleRequest>(args)?;
+    check_shown_digest(req.digest.as_deref()).map_err(crate::acp_error::invalid_params)?;
     let acp_id = acp::SessionId::new(req.session_id.clone());
 
     let handle = agent
@@ -2257,13 +2399,18 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             // Propagate like the local-server sibling (PersistFailed): `mcp/list` derives gateway
             // enablement from `disabled_mcp_servers`, so an unpersisted enable misreports ok.
             Some(
-                crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd)
-                    .await
-                    .map_err(|e| {
-                        crate::acp_error::internal_error(format!(
-                            "failed to clear disabled MCP server entry: {e}"
-                        ))
-                    })?,
+                crate::util::config::save_mcp_server_enabled_in(
+                    &req.server_name,
+                    true,
+                    &cwd,
+                    crate::util::config::CampaignApproval::Clear,
+                )
+                .await
+                .map_err(|e| {
+                    crate::acp_error::internal_error(format!(
+                        "failed to clear disabled MCP server entry: {e}"
+                    ))
+                })?,
             )
         } else {
             None
@@ -2298,23 +2445,33 @@ async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         let cwd = agent
             .get_session_cwd(&acp_id)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        enable_mcp_server_gated(agent, &handle, &cwd, &req.server_name)
-            .await
-            .map_err(|e| match e {
-                GatedEnableError::NotFound => crate::acp_error::invalid_params(format!(
-                    "server '{}' not found in config",
-                    req.server_name
-                )),
-                GatedEnableError::PolicyRefused(message) => {
-                    crate::acp_error::invalid_params(message)
-                }
-                GatedEnableError::PersistFailed(detail) => crate::acp_error::internal_error(
-                    format!("failed to clear disabled MCP server entry: {detail}"),
-                ),
-                GatedEnableError::ToggleFailed(detail) | GatedEnableError::TaskFailed(detail) => {
-                    crate::acp_error::internal_error(detail)
-                }
-            })?;
+        enable_mcp_server_gated(
+            agent,
+            &handle,
+            &req.session_id,
+            &cwd,
+            &req.server_name,
+            req.digest.as_deref(),
+        )
+        .await
+        .map_err(|e| match e {
+            GatedEnableError::NotFound => crate::acp_error::invalid_params(format!(
+                "server '{}' not found in config",
+                req.server_name
+            )),
+            GatedEnableError::PolicyRefused(message) => crate::acp_error::invalid_params(message),
+            GatedEnableError::PersistFailed(detail)
+                if detail.ends_with(DEFINITION_CHANGED_AGAIN) =>
+            {
+                crate::acp_error::invalid_params(detail)
+            }
+            GatedEnableError::PersistFailed(detail) => crate::acp_error::internal_error(format!(
+                "failed to clear disabled MCP server entry: {detail}"
+            )),
+            GatedEnableError::ToggleFailed(detail) | GatedEnableError::TaskFailed(detail) => {
+                crate::acp_error::internal_error(detail)
+            }
+        })?;
         return to_ext_response(Ok(McpToggleResponse { ok: true }));
     }
 
@@ -2418,7 +2575,7 @@ async fn handle_upsert(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     // Build the ACP server config before persisting so a refused upsert
     // leaves no state behind.
-    let server_config = req
+    let mut server_config = req
         .config
         .to_acp_mcp_server(&req.server_name)
         .ok_or_else(|| {
@@ -2448,6 +2605,14 @@ async fn handle_upsert(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     .map_err(crate::acp_error::invalid_params)?
     .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
 
+    // MC-03 (review Astra M1): the live object carries the stamp of the definition just saved, so the gate judges it
+    // like the next session's read: admitted when its approval was recorded, held when that failed or the store is
+    // unreadable (the saved edit stays; the gate's notice reports the hold).
+    crate::util::config::stamp_saved_user_definition(
+        &mut server_config,
+        &req.server_name,
+        &req.config,
+    );
     // Reuse the toggle path: enable=true with the built config.
     handle
         .toggle_mcp_server(req.server_name, true, Some(server_config))
@@ -2509,6 +2674,15 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MC-03 (L8): an empty or blank `digest` is invalid, not "none".
+    #[test]
+    fn an_empty_toggle_digest_is_refused() {
+        assert!(check_shown_digest(None).is_ok());
+        assert!(check_shown_digest(Some("mcpdef.v1:abc")).is_ok());
+        assert!(check_shown_digest(Some("")).is_err());
+        assert!(check_shown_digest(Some("  ")).is_err());
+    }
 
     /// `sessionMcpResolved` lets a client tell "no client yet" (still starting) from "no client" (handshake failed).
     /// It follows `McpState::is_initialized`, which stays false until every handshake has reported.
@@ -2699,6 +2873,9 @@ mod tests {
         let resp = McpListResponse {
             servers: vec![
                 McpServerEntry {
+                    held: false,
+                    held_reason: None,
+                    held_digest: None,
                     name: "linear".to_string(),
                     icons: Vec::new(),
                     display_name: None,
@@ -2715,6 +2892,9 @@ mod tests {
                     session: None,
                 },
                 McpServerEntry {
+                    held: false,
+                    held_reason: None,
+                    held_digest: None,
                     name: "filesystem".to_string(),
                     icons: Vec::new(),
                     display_name: None,
@@ -2758,6 +2938,9 @@ mod tests {
         assert!(json["servers"][0].get("session").is_none());
         // Managed gateway connectors are not serialized as local transports.
         let gateway = serde_json::to_value(McpServerEntry {
+            held: false,
+            held_reason: None,
+            held_digest: None,
             name: managed_gateway_entry_name("linear"),
             icons: Vec::new(),
             display_name: Some("linear".to_string()),
@@ -2802,6 +2985,9 @@ mod tests {
     #[test]
     fn test_mcp_list_icons_serialization() {
         let entry = McpServerEntry {
+            held: false,
+            held_reason: None,
+            held_digest: None,
             name: "custom".to_string(),
             display_name: Some("Custom".to_string()),
             icons: vec![fuigo_mcp::servers::McpIcon {
@@ -3044,6 +3230,9 @@ mod tests {
     #[test]
     fn test_mcp_list_setup_required_serialization() {
         let entry = McpServerEntry {
+            held: false,
+            held_reason: None,
+            held_digest: None,
             name: "acme".to_string(),
             icons: Vec::new(),
             display_name: None,
@@ -3132,6 +3321,9 @@ mod tests {
     #[test]
     fn test_disabled_session_state_serialization() {
         let entry = McpServerEntry {
+            held: false,
+            held_reason: None,
+            held_digest: None,
             name: "slack".to_string(),
             icons: Vec::new(),
             display_name: None,

@@ -171,6 +171,8 @@ pub(crate) struct ChatState {
     /// persist last_turn_usage). Always overwritten by the most recent turn —
     /// historical turns are not retained here.
     pub last_turn_usage: Option<TokenUsage>,
+    /// The last attempt's own usage within that response (`last_turn_usage` sums every resend for billing).
+    pub last_attempt_usage: Option<TokenUsage>,
     /// Billing for the open prompt (cleared on next prompt; not persisted).
     pub prompt_usage: Option<UsageLedger>,
     /// Lifetime session billing (not persisted).
@@ -258,6 +260,7 @@ impl ChatState {
             estimated_tokens_since_model: 0,
             estimate_at_last_response: initial_tokens,
             last_turn_usage: None,
+            last_attempt_usage: None,
             prompt_usage: None,
             session_usage: UsageLedger::default(),
             turn_capture: None,

@@ -649,13 +649,15 @@ pub(super) fn dispatch_dump_input_log(app: &mut AppView) -> Vec<Effect> {
         }
     };
 
-    let fuigo_home = fuigo_tools::util::fuigo_home::fuigo_home();
-    let logs_dir = fuigo_home.join("logs");
+    let logs_dir = fuigo_config::logs_dir();
     let _ = std::fs::create_dir_all(&logs_dir);
     let ts = now.format("%Y%m%d-%H%M%S");
     let path = logs_dir.join(format!("input-debug-{ts}.json"));
 
-    match std::fs::write(&path, json) {
+    match std::fs::write(
+        &path,
+        fuigo_secrets::at_rest::transform_whole(json.as_bytes()),
+    ) {
         Ok(()) => {
             let display_path = path.display();
             agent.show_toast(&format!(
@@ -735,6 +737,22 @@ pub(super) fn handle_mcp_toggle_done(
         modal.pending_action = None;
         modal.pending_entry_index = None;
         modal.modal_message = Some(crate::views::extensions_modal::ModalMessage::Error(e));
+        // A refusal (e.g. the definition changed again) leaves the row stale: reload so it shows the current one.
+        return agent
+            .session
+            .session_id
+            .clone()
+            .map(|session_id| Effect::FetchMcpsList {
+                agent_id,
+                session_id,
+                cache: false,
+            })
+            .into_iter()
+            .collect();
+    }
+    // A toggle sent without the modal (the MC-03 startup question) still reports its failure.
+    if let Err(e) = result {
+        agent.scrollback.push_block(RenderBlock::system(e));
         return vec![];
     }
     let Some(session_id) = agent.session.session_id.clone() else {
@@ -745,6 +763,97 @@ pub(super) fn handle_mcp_toggle_done(
         session_id,
         cache: false,
     }]
+}
+
+/// MC-03: configured MCP servers the launch gate holds at session start get one question each: approve and start, or
+/// keep stopped (nothing recorded; asked again next session). Nothing held, or another question open: nothing shown
+/// (the held notice and `/mcp` still offer the approval).
+pub(super) fn open_held_mcp_question(
+    app: &mut AppView,
+    agent_id: AgentId,
+    held: Vec<fuigo_shell::util::config::HeldMcpDefinition>,
+) -> Vec<Effect> {
+    use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
+    use fuigo_tools::implementations::fuigo_build::ask_user_question::{Question, QuestionOption};
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    if held.is_empty() || agent.question_view.is_some() || agent.session.session_id.is_none() {
+        return vec![];
+    }
+    let questions = held
+        .iter()
+        .map(|h| Question {
+            question: format!(
+                "MCP server `{}` changed since you approved it ({}). It now {}",
+                h.name, h.origin, h.display
+            ),
+            id: None,
+            options: vec![
+                QuestionOption {
+                    label: "Approve and start".into(),
+                    description: "Approve this definition and start the server now".into(),
+                    preview: None,
+                    id: None,
+                },
+                QuestionOption {
+                    label: "Keep it stopped".into(),
+                    description: "Nothing is approved; you are asked again next session".into(),
+                    preview: None,
+                    id: None,
+                },
+            ],
+            multi_select: Some(false),
+        })
+        .collect();
+    let servers = held
+        .into_iter()
+        .map(|h| {
+            let digest = h.digest().to_owned();
+            (h.name, digest)
+        })
+        .collect();
+    let stashed = agent.prompt.stash();
+    let mut view = QuestionViewState::new(
+        format!("mcp-held-{}", uuid::Uuid::new_v4()),
+        questions,
+        stashed,
+    )
+    .with_local_kind(LocalQuestionKind::McpHeld { servers })
+    .with_no_freeform();
+    // Approving is never the default: a reflex Enter keeps every server stopped; `1` approves.
+    view.per_question_cursor.iter_mut().for_each(|c| *c = 1);
+    agent.question_view = Some(view);
+    agent.prompt.set_text("");
+    vec![]
+}
+
+/// MC-03: turn on each approved held server through `fuigo/mcp/toggle` with the digest the question showed, so the shell
+/// approves exactly that definition (a later one stays held; review Astra confirm H1).
+pub(super) fn dispatch_mcp_held_answered(
+    app: &mut AppView,
+    approve: Vec<(String, String)>,
+) -> Vec<Effect> {
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        return vec![];
+    };
+    let Some(session_id) = app
+        .agents
+        .get(&agent_id)
+        .and_then(|a| a.session.session_id.clone())
+    else {
+        return vec![];
+    };
+    approve
+        .into_iter()
+        .map(|(server_name, digest)| Effect::ToggleMcpServer {
+            agent_id,
+            session_id: session_id.clone(),
+            server_name,
+            enabled: true,
+            digest: Some(digest),
+        })
+        .collect()
 }
 
 pub(super) fn handle_marketplace_updates_available(

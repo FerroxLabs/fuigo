@@ -201,7 +201,15 @@ pub enum SamplingError {
     /// NOT retryable: the model (or network path) is stuck, and replaying the same request would likely stall again.
     #[error("inference idle timeout after {elapsed_secs}s with no chunks")]
     IdleTimeout { elapsed_secs: u64 },
-    #[error("empty response from model ({})", context.reason)]
+    #[error(
+        "empty response from model ({}){}",
+        context.reason,
+        if context.reason == EmptyReason::ReasoningOnly {
+            " - think-only, the model reasoned but sent no reply or tool call"
+        } else {
+            ""
+        }
+    )]
     EmptyResponse { context: EmptyResponseContext },
     #[error("{text}", text = MAX_TOKENS_TRUNCATION_MESSAGE)]
     MaxTokensTruncation,

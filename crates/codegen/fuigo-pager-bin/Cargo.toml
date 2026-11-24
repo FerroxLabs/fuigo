@@ -56,6 +56,8 @@ fuigo-tty-utils = { workspace = true }
 fuigo-active-sessions = { workspace = true }
 fuigo-config = { workspace = true }
 fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false }
+# S2: the at-rest secret set is captured at process start.
+fuigo-secrets = { workspace = true }
 fuigo-extra-ca = { workspace = true }
 
 # Binary hardening: compile-time string + control-flow obfuscation.

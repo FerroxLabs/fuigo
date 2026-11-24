@@ -44,6 +44,8 @@ tracing = { workspace = true }
 url = { workspace = true }
 webbrowser = { workspace = true }
 fuigo-config = { workspace = true }
+# S2: MCP stderr logs go through the at-rest layer.
+fuigo-secrets = { workspace = true }
 
 # For mcp_http_client.rs (rmcp trait signatures). Must match rmcp 3.x's own
 # versions or the trait types won't unify.

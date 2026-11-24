@@ -122,8 +122,18 @@ fn a_client_supplied_server_without_a_key_reference_is_unchanged() {
         acp::McpServerStdio::new("p133-plain", "x")
             .env(vec![acp::EnvVariable::new("TOKEN", "${OTHER_TOKEN}")]),
     )];
+    // MC-03: the only addition is the uncovered (client) mark, which is not part of the definition.
+    let mut admitted = admit_client_mcp_servers(plain.clone(), cwd.path(), &compat);
+    assert!(
+        admitted
+            .iter()
+            .all(|s| crate::util::config::mcp_approvals::uncovered_source(s) == Some("client"))
+    );
+    admitted
+        .iter_mut()
+        .for_each(crate::util::config::mcp_approvals::strip_stamp);
     assert_eq!(
-        serde_json::to_value(admit_client_mcp_servers(plain.clone(), cwd.path(), &compat)).unwrap(),
+        serde_json::to_value(admitted).unwrap(),
         serde_json::to_value(plain).unwrap()
     );
 }

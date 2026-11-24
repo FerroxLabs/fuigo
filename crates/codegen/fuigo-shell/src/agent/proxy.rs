@@ -726,7 +726,7 @@ mod tests {
         let _guard = capture.install();
         for proxy in [
             format!("http://p113user:{P113_PASSWORD}@proxy.example:3128"),
-            format!("http://p113user:1234/{P113_PASSWORD}@proxy.example:3128"),
+            format!("http://p113user:p113slashpw/{P113_PASSWORD}@proxy.example:3128"),
             format!("http://p113user:{P113_PASSWORD}@proxy.example"),
             format!("http://p113user:{P113_PASSWORD}@proxy.example:3128?token=q{P113_PASSWORD}"),
         ] {
@@ -744,7 +744,7 @@ mod tests {
             logged.contains("Using HTTP CONNECT proxy"),
             "control: {logged}"
         );
-        for fragment in [P113_PASSWORD, "p113user", "1234"] {
+        for fragment in [P113_PASSWORD, "p113user", "p113slashpw"] {
             assert!(
                 !logged.contains(fragment),
                 "the relay log holds {fragment:?}: {logged}"

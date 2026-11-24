@@ -41,30 +41,31 @@ mod copy;
 /// the descriptor and, if we only closed ours, keeps the lock alive until it execs: a rewind that has finished (or a
 /// reconcile that has) would still look "running" to the next check (R-flake-rewind).
 #[derive(Debug)]
-pub(crate) struct HeldLock(std::fs::File);
+pub(crate) struct HeldLock(fuigo_session_writer::SessionLock);
 
 impl HeldLock {
-    /// Wrap `file`, on which the caller has just taken a lock.
-    pub(crate) fn new(file: std::fs::File) -> Self {
-        Self(file)
+    /// Wrap `lock` (a writer's sidecar, or a file opened by path), on which the caller has just taken a lock.
+    pub(crate) fn new(lock: impl Into<fuigo_session_writer::SessionLock>) -> Self {
+        Self(lock.into())
     }
 }
 
 impl std::ops::Deref for HeldLock {
-    type Target = std::fs::File;
-    fn deref(&self) -> &std::fs::File {
+    type Target = fuigo_session_writer::SessionLock;
+    fn deref(&self) -> &fuigo_session_writer::SessionLock {
         &self.0
     }
 }
 
 impl Drop for HeldLock {
     fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.0);
+        let _ = self.0.unlock();
     }
 }
 pub(crate) mod compaction_witness;
 pub(crate) mod load_repair;
 pub(crate) mod rewind_reconcile;
+mod summary_defer;
 #[derive(Clone)]
 enum SessionDirMode {
     FromRoot(PathBuf),
@@ -289,6 +290,17 @@ impl JsonlStorageAdapter {
     /// closed. Later writes are refused.
     pub(crate) fn release_writer_slot(&self) {
         let released = std::mem::replace(&mut *self.writer.lock(), WriterSlot::Released);
+        if let WriterSlot::Held(writer) = &released {
+            // Backstop (F2): the persistence task flushes held summary counts before it releases.
+            if summary_defer::has_pending(writer.dir()) {
+                let mut patch = super::summary_write::SummaryPatch::default();
+                summary_defer::take_into(writer.dir(), &mut patch);
+                if let Err(error) = super::summary_write::apply_patch_locked(writer, &patch) {
+                    tracing::warn!(%error, "could not write held summary counts at release");
+                }
+            }
+            summary_defer::forget(writer.dir());
+        }
         drop(released);
     }
     /// The writer of `info`'s session folder, for a write (F5-C4: never by path). No writer, or a writer of another
@@ -598,7 +610,7 @@ impl JsonlStorageAdapter {
         path: &Path,
         line: Vec<u8>,
         durability: AppendDurability,
-        sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
+        sync_file: impl FnMut(&fuigo_session_writer::AtRestAppend) -> io::Result<()>,
         sync_parent: impl FnMut() -> io::Result<()>,
     ) -> Result<(), AppendLineError> {
         let lock = Self::lock_append(w, path).map_err(AppendLineError::NotCommitted)?;
@@ -614,7 +626,7 @@ impl JsonlStorageAdapter {
         path: &Path,
         mut line: Vec<u8>,
         durability: AppendDurability,
-        mut sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
+        mut sync_file: impl FnMut(&fuigo_session_writer::AtRestAppend) -> io::Result<()>,
         mut sync_parent: impl FnMut() -> io::Result<()>,
     ) -> Result<(), AppendLineError> {
         debug_assert!(line.ends_with(b"\n"), "JSONL record must end with \\n");
@@ -730,7 +742,7 @@ impl JsonlStorageAdapter {
         path: &Path,
         mut line: Vec<u8>,
         generation: u64,
-        mut sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
+        mut sync_file: impl FnMut(&fuigo_session_writer::AtRestAppend) -> io::Result<()>,
         mut sync_parent: impl FnMut() -> io::Result<()>,
     ) -> Result<StrictAppendAck, super::AppendCwdSwitchError> {
         let lock = Self::lock_append(w, path).map_err(super::AppendCwdSwitchError::NotCommitted)?;
@@ -804,8 +816,10 @@ impl JsonlStorageAdapter {
         lock.lock_exclusive()?;
         Ok(HeldLock::new(lock))
     }
-    fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
-        super::sync_file_durable(file)
+    /// The durable sync of a JSONL append (S2: the append hatch hands out an `AtRestAppend`, never the `File`); one full
+    /// flush, as `sync_file_durable` (`File::sync_all` is `F_FULLFSYNC` on Apple targets).
+    fn sync_file_durable(file: &fuigo_session_writer::AtRestAppend) -> io::Result<()> {
+        file.sync_all()
     }
     fn sync_parent_directory(path: &Path) -> io::Result<()> {
         super::sync_parent_dir_durable(path)
@@ -974,7 +988,7 @@ impl JsonlStorageAdapter {
                 fs2::FileExt::try_lock_exclusive(&lock)
             };
             match taken {
-                Ok(()) => return Ok(Some(HeldLock(lock))),
+                Ok(()) => return Ok(Some(HeldLock::new(lock))),
                 Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
                     #[cfg(test)]
                     if !shared {
@@ -1088,6 +1102,12 @@ impl JsonlStorageAdapter {
                 tracing::warn!(%error, "could not flush chat_history.jsonl at a turn boundary");
             }
         }
+        // F2: a buffered update's counters wait for the turn boundary; the durable one writes them all.
+        if matches!(durability, AppendDurability::Buffered)
+            && summary_defer::defer(&self.session_dir(info), 1, 0)
+        {
+            return Ok(());
+        }
         self.apply_summary_patch(
             info,
             super::summary_write::SummaryPatch {
@@ -1193,8 +1213,13 @@ impl JsonlStorageAdapter {
                 format!("summary.json is empty (0 bytes): {}", path.display()),
             ));
         }
-        serde_json::from_slice::<Summary>(&bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let mut summary = match crate::session::persistence::rebuilt_if_withheld(&bytes, info) {
+            Some(summary) => summary,
+            None => serde_json::from_slice::<Summary>(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        };
+        summary_defer::overlay(&self.session_dir(info), &mut summary);
+        Ok(summary)
     }
     fn read_optional_json_sync<T: serde::de::DeserializeOwned>(
         &self,
@@ -1205,6 +1230,8 @@ impl JsonlStorageAdapter {
         }
         match std::fs::read_to_string(path) {
             Ok(s) if s.trim().is_empty() => Ok(None),
+            // S2: a store the at-rest layer withheld is absent, not corrupt.
+            Ok(s) if fuigo_secrets::at_rest::is_withheld(s.as_bytes()) => Ok(None),
             Ok(s) => match serde_json::from_str::<T>(&s) {
                 Ok(v) => Ok(Some(v)),
                 Err(e) => {
@@ -1472,6 +1499,15 @@ impl JsonlStorageAdapter {
             if line.is_empty() {
                 continue;
             }
+            // S2 (Fable r2 #6): a record the at-rest layer withheld is a known placeholder, not corruption: it is
+            // dropped without a skipped-line report or a quarantine copy.
+            if line == fuigo_secrets::at_rest::WITHHELD_MARKER.as_bytes() || line == b"{}" {
+                tracing::debug!(
+                    line = line_idx + 1,
+                    "chat history record withheld at rest; skipped"
+                );
+                continue;
+            }
             let raw: serde_json::Value = match serde_json::from_slice(line) {
                 Ok(raw) => raw,
                 Err(e) => {
@@ -1579,11 +1615,19 @@ impl JsonlStorageAdapter {
         // Review r1 H4: the RMW is the session writer's work. A resident session's goes through its live writer; a
         // dormant one's through a writer claimed here and held (moved into the blocking task) until the RMW is done.
         let writer = self.summary_writer(info).await?;
-        tokio::task::spawn_blocking(move || {
+        let mut patch = patch;
+        let dir = self.session_dir(info);
+        let taken = summary_defer::take_into(&dir, &mut patch);
+        let result = tokio::task::spawn_blocking(move || {
             super::summary_write::apply_patch_locked(&writer, &patch)
         })
         .await
-        .map_err(io::Error::other)?
+        .map_err(io::Error::other)
+        .and_then(|result| result);
+        if result.is_err() {
+            summary_defer::restore(&dir, taken);
+        }
+        result
     }
     /// The writer a listing's best-effort worktree heal runs as: this adapter's own, else the live writer of the session
     /// open in this process, else one claimed without waiting (`try_claim_reader`: a contended OS lock is not retried).
@@ -1752,6 +1796,13 @@ impl StorageAdapter for JsonlStorageAdapter {
     fn release_writer(&self) {
         self.release_writer_slot();
     }
+    async fn flush_summary(&self, info: &Info) -> io::Result<()> {
+        if !summary_defer::has_pending(&self.session_dir(info)) {
+            return Ok(());
+        }
+        self.apply_summary_patch(info, super::summary_write::SummaryPatch::default())
+            .await
+    }
     fn session_writer(&self, info: &Info) -> io::Result<fuigo_session_writer::SessionWriter> {
         self.owner(info)
     }
@@ -1904,6 +1955,10 @@ impl StorageAdapter for JsonlStorageAdapter {
         self.append_jsonl(w, self.chat_file(info), message)
             .await
             .map_err(super::AppendChatError::NotCommitted)?;
+        // F2: held until the turn boundary (see `summary_defer`).
+        if summary_defer::defer(&self.session_dir(info), 0, 1) {
+            return Ok(());
+        }
         self.apply_summary_patch(
             info,
             super::summary_write::SummaryPatch {
@@ -2032,7 +2087,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        if data.iter().all(u8::is_ascii_whitespace) {
+        if data.iter().all(u8::is_ascii_whitespace) || fuigo_secrets::at_rest::is_withheld(&data) {
             return Ok(None);
         }
         serde_json::from_slice(&data)
@@ -2058,7 +2113,12 @@ impl StorageAdapter for JsonlStorageAdapter {
             lock.lock_exclusive()?;
             let result = (|| {
                 let current = match std::fs::read(&path) {
-                    Ok(data) if data.iter().all(u8::is_ascii_whitespace) => None,
+                    Ok(data)
+                        if data.iter().all(u8::is_ascii_whitespace)
+                            || fuigo_secrets::at_rest::is_withheld(&data) =>
+                    {
+                        None
+                    }
                     Ok(data) => Some(
                         serde_json::from_slice(&data)
                             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
@@ -2066,7 +2126,15 @@ impl StorageAdapter for JsonlStorageAdapter {
                     Err(e) if e.kind() == io::ErrorKind::NotFound => None,
                     Err(e) => return Err(e),
                 };
-                let updated = update(current);
+                let mut updated = update(current);
+                // F4: rows past the cap (a legacy file's too, on its first turn here) go to the archive first.
+                let archived = updated.drain_overflow()?;
+                if !archived.is_empty() {
+                    w.append_line_checked_sync(
+                        crate::session::usage_file::USAGE_ARCHIVE_FILE,
+                        &archived,
+                    )?;
+                }
                 let json = serde_json::to_vec_pretty(&updated)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 super::write_bytes_atomic_as(&w, &path, &json)?;

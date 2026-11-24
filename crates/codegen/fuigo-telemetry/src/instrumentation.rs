@@ -13,11 +13,8 @@ use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
-use fuigo_config::fuigo_home;
-
 const ENV_ENABLED: &str = "FUIGO_INSTRUMENTATION";
 const ENV_LOG_PATH: &str = "FUIGO_INSTRUMENTATION_LOG";
-const DEFAULT_LOG_DIR: &str = "logs";
 const DEFAULT_LOG_FILE: &str = "instrumentation.log";
 const DEFAULT_TRACE_FILE: &str = "instrumentation.trace.json";
 
@@ -67,7 +64,7 @@ pub fn current_mode() -> InstrumentationMode {
 }
 
 fn default_log_path() -> PathBuf {
-    fuigo_home().join(DEFAULT_LOG_DIR).join(DEFAULT_LOG_FILE)
+    fuigo_config::logs_dir().join(DEFAULT_LOG_FILE)
 }
 
 fn log_path_from_env() -> Option<PathBuf> {
@@ -79,7 +76,7 @@ fn log_path_from_env() -> Option<PathBuf> {
 }
 
 fn default_output_path(mode: InstrumentationMode) -> PathBuf {
-    let root = fuigo_home().join(DEFAULT_LOG_DIR);
+    let root = fuigo_config::logs_dir();
     match mode {
         InstrumentationMode::Chrome => root.join(DEFAULT_TRACE_FILE),
         // Server uses OTLP export, not file output
@@ -325,7 +322,9 @@ where
     };
 
     let (layer, guard) = ChromeLayerBuilder::<S>::new()
-        .writer(BestEffortFile(file))
+        .writer(BestEffortFile(fuigo_secrets::at_rest::AtRestFile::stream(
+            file,
+        )))
         .include_args(true)
         .trace_style(TraceStyle::Async)
         .build();
@@ -547,8 +546,13 @@ pub fn generate_chrome_trace(options: ChromeTraceOptions) -> Result<PathBuf> {
 
     let mut output_file = std::fs::File::create(&output)
         .map_err(|err| anyhow!("failed to create chrome trace {:?}: {}", output, err))?;
-    serde_json::to_writer_pretty(&mut output_file, &trace)
+    let rendered = serde_json::to_vec_pretty(&trace)
         .map_err(|err| anyhow!("failed to write chrome trace: {}", err))?;
+    std::io::Write::write_all(
+        &mut output_file,
+        &fuigo_secrets::at_rest::transform_whole(&rendered),
+    )
+    .map_err(|err| anyhow!("failed to write chrome trace: {}", err))?;
 
     Ok(output)
 }

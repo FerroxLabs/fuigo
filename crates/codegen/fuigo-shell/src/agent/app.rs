@@ -641,11 +641,11 @@ pub async fn run_headless(
             tokio::task::spawn_local(async move {
                 while let Some(msg) = ws_to_agent_rx.recv().await {
                     let mut tx = ws_tx.lock().await;
-                    if tx.write_all(msg.as_bytes()).await.is_err() {
+                    if crate::agent::credential_scrub::write_client_line(&mut *tx, &msg)
+                        .await
+                        .is_err()
+                    {
                         warn!("Failed to write to agent incoming stream");
-                        break;
-                    }
-                    if tx.write_all(b"\n").await.is_err() {
                         break;
                     }
                 }
@@ -1215,8 +1215,9 @@ pub async fn run_leader(
             tokio::task::spawn_local(async move {
                 while let Some(msg) = ipc_to_agent_rx.recv().await {
                     let mut tx = acp_incoming_tx_ipc.lock().await;
-                    if tx.write_all(msg.as_bytes()).await.is_err()
-                        || tx.write_all(b"\n").await.is_err()
+                    if crate::agent::credential_scrub::write_client_line(&mut *tx, &msg)
+                        .await
+                        .is_err()
                     {
                         warn!("Failed to write IPC message to agent");
                         break;
@@ -1236,8 +1237,9 @@ pub async fn run_leader(
                     // and track the relay as a driver beside the local clients (foreign flag for a contested session).
                     let msg = crate::leader::server::stamp_relay_connection_identity_with(&msg, &relay_driver_board);
                     let mut tx = acp_incoming_tx_ws.lock().await;
-                    if tx.write_all(msg.as_bytes()).await.is_err()
-                        || tx.write_all(b"\n").await.is_err()
+                    if crate::agent::credential_scrub::write_client_line(&mut *tx, &msg)
+                        .await
+                        .is_err()
                     {
                         warn!("Failed to write WS message to agent");
                         break;

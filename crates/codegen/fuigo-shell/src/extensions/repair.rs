@@ -108,7 +108,7 @@ async fn repair_on_disk(
 ) -> ExtResult {
     let summary = crate::session::persistence::find_summary_by_session_id_in_root(
         session_id,
-        &fuigo_root.join("sessions"),
+        &fuigo_config::sessions_root_in(fuigo_root),
     )
     .ok_or_else(|| {
         crate::acp_error::resource_not_found(format!("session not found: {session_id}"))

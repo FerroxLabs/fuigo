@@ -16,6 +16,8 @@ use agent_client_protocol as acp;
 use fuigo_mcp::oauth_config::{McpOAuthConfig, McpOAuthConfigMap};
 use fuigo_mcp::servers as inner;
 
+pub(crate) use crate::session::mcp_admission::AdmittedMcpLaunch;
+
 fn resolve_overrides(
     server_name: &str,
     cwd: Option<&Path>,
@@ -65,15 +67,25 @@ pub(crate) fn build_config_resolved_event(
     fuigo_session_events::Event::McpConfigResolved { servers, disabled }
 }
 
+/// Start one admitted server (MC-03: only the gate makes an [`AdmittedMcpLaunch`]). A covered server connects with
+/// the OAuth settings admitted with it; `byo_config` applies only to an uncovered one (plugin OAuth).
 pub(crate) async fn start_mcp_server(
-    mcp_server: acp::McpServer,
+    admitted: AdmittedMcpLaunch,
     cwd: Option<&Path>,
     meta_config: Option<&inner::McpServerMetaConfig>,
     byo_config: Option<&McpOAuthConfig>,
     ctx: &inner::McpSpawnCtx<'_>,
 ) -> Result<inner::McpClient, inner::McpError> {
-    let overrides = resolve_overrides(inner::mcp_server_name(&mcp_server), cwd);
-    inner::start_mcp_server(mcp_server, overrides.as_ref(), meta_config, byo_config, ctx).await
+    let overrides = resolve_overrides(admitted.name(), cwd);
+    let oauth = admitted.oauth(byo_config).cloned();
+    inner::start_mcp_server(
+        admitted.into_server(),
+        overrides.as_ref(),
+        meta_config,
+        oauth.as_ref(),
+        ctx,
+    )
+    .await
 }
 
 /// Build all pending MCP clients for one init pass as a single merged list.
@@ -82,7 +94,7 @@ pub(crate) async fn start_mcp_server(
 /// SDK clients never fail to build, so they enter as `Ok`.
 pub(crate) async fn build_pending_clients(
     mcp_state: &tokio::sync::Mutex<inner::McpState>,
-    configs_to_start: Vec<acp::McpServer>,
+    configs_to_start: Vec<AdmittedMcpLaunch>,
     cwd: Option<&Path>,
     meta_config_map: &inner::McpMetaConfigMap,
     oauth_config_map: &McpOAuthConfigMap,
@@ -114,8 +126,10 @@ pub(crate) async fn build_pending_clients(
     results
 }
 
+/// Start admitted servers (MC-03). Covered servers connect with the OAuth settings admitted with them, never the
+/// caller's map, which applies only to uncovered servers (plugin OAuth).
 pub(crate) async fn start_mcp_servers(
-    mcp_servers: Vec<acp::McpServer>,
+    mcp_servers: Vec<AdmittedMcpLaunch>,
     cwd: Option<&Path>,
     meta_config_map: &inner::McpMetaConfigMap,
     oauth_config_map: &McpOAuthConfigMap,
@@ -124,15 +138,30 @@ pub(crate) async fn start_mcp_servers(
     let overrides_map: HashMap<String, inner::McpClientTimeoutOverrides> = mcp_servers
         .iter()
         .filter_map(|s| {
-            let name = inner::mcp_server_name(s);
+            let name = s.name();
             resolve_overrides(name, cwd).map(|o| (name.to_string(), o))
         })
         .collect();
+    let mut oauth_map = oauth_config_map.clone();
+    for s in &mcp_servers {
+        let name = s.name().to_owned();
+        match s.oauth(oauth_config_map.get(&name)).cloned() {
+            Some(oauth) => {
+                oauth_map.insert(name, oauth);
+            }
+            None => {
+                oauth_map.remove(&name);
+            }
+        }
+    }
     inner::start_mcp_servers(
-        mcp_servers,
+        mcp_servers
+            .into_iter()
+            .map(AdmittedMcpLaunch::into_server)
+            .collect(),
         &overrides_map,
         meta_config_map,
-        oauth_config_map,
+        &oauth_map,
         ctx,
     )
     .await

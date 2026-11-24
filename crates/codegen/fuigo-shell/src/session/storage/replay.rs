@@ -206,7 +206,9 @@ fn try_fast_replay_updates_path(
     }
     for cwd in [hint.child_cwd, hint.parent_cwd].into_iter().flatten() {
         let encoded = fuigo_config::encode_cwd_dirname(&cwd.to_string_lossy());
-        let candidate = fuigo_home.join("sessions").join(encoded).join(session_id);
+        let candidate = fuigo_config::sessions_root_in(fuigo_home)
+            .join(encoded)
+            .join(session_id);
         if let Some(path) = replay_updates_path_in_dir(&candidate) {
             return Some(path);
         }
@@ -229,7 +231,7 @@ pub(crate) fn resolve_replay_updates_path(
         }
         None => {}
     }
-    let sessions_root = fuigo_home.join("sessions");
+    let sessions_root = fuigo_config::sessions_root_in(fuigo_home);
     let view = RelocationView::load_for_sessions_root(&sessions_root).map_err(io::Error::other)?;
     let Some(session_dir) = view
         .find_persisted_session_dir(session_id)

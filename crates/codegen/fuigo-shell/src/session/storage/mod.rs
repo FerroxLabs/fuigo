@@ -27,6 +27,7 @@ pub mod search;
 mod search_content;
 pub(crate) mod snapshot_lock;
 pub(crate) mod summary_write;
+pub mod updates_cache;
 
 /// The session search index moved to its own crate; re-exported here so `session::storage::search_fts::…` keeps resolving for its consumers.
 pub use fuigo_session_search::fts as search_fts;
@@ -123,7 +124,11 @@ pub(crate) fn write_bytes_atomic_as(
 ) -> io::Result<()> {
     #[cfg(test)]
     jsonl::load_repair::seams::wait_if_held(path);
-    writer.replace_atomic_sync(writer.rel_of(path)?, bytes)
+    let rel = writer.rel_of(path)?;
+    if let Some(synced) = chat_history_skip(writer, rel, path, bytes) {
+        return synced;
+    }
+    writer.replace_atomic_sync(rel, bytes)
 }
 
 /// [`write_bytes_atomic_reporting`] of a session file, as the session's writer (F5-C4).
@@ -135,16 +140,16 @@ pub(crate) fn write_bytes_atomic_reporting_as(
     #[cfg(test)]
     jsonl::load_repair::seams::wait_if_held(path);
     let rel = writer.rel_of(path).map_err(AtomicWriteError::NotReplaced)?;
-    let result = writer
-        .replace_atomic_reporting_sync(rel, bytes)
-        .map_err(|error| match error {
-            fuigo_session_writer::ReplaceError::NotReplaced(error) => {
-                AtomicWriteError::NotReplaced(error)
-            }
-            fuigo_session_writer::ReplaceError::Replaced(error) => {
-                AtomicWriteError::Replaced(error)
-            }
-        });
+    let result = match chat_history_skip(writer, rel, path, bytes) {
+        Some(synced) => synced.map_err(fuigo_session_writer::ReplaceError::NotReplaced),
+        None => writer.replace_atomic_reporting_sync(rel, bytes),
+    };
+    let result = result.map_err(|error| match error {
+        fuigo_session_writer::ReplaceError::NotReplaced(error) => {
+            AtomicWriteError::NotReplaced(error)
+        }
+        fuigo_session_writer::ReplaceError::Replaced(error) => AtomicWriteError::Replaced(error),
+    });
     if matches!(&result, Ok(()) | Err(AtomicWriteError::Replaced(_)))
         && rel == Path::new(CHAT_HISTORY_FILE)
     {
@@ -275,7 +280,10 @@ fn write_bytes_atomic_outcome_with(
     sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
     sync_parent: impl Fn() -> io::Result<()>,
 ) -> Result<(), AtomicWriteError> {
-    writer.rel_of(path).map_err(AtomicWriteError::NotReplaced)?;
+    let rel = writer.rel_of(path).map_err(AtomicWriteError::NotReplaced)?;
+    // S2 (Grok r2 #5): the summary carries conversation text; it lands through the at-rest layer like every other
+    // session file.
+    let bytes: &[u8] = &writer.at_rest_bytes(rel, bytes);
     let tmp = temp_sibling(path);
     let write_synced = || -> io::Result<()> {
         let mut file = owner_only::create(&tmp)?; // F5-A: summary RMW (§5.5) only: its one non-test caller is summary_write::write_summary_atomic
@@ -485,7 +493,12 @@ pub(crate) fn replace_chat_history_through(
 ) -> io::Result<()> {
     #[cfg(test)]
     jsonl::load_repair::seams::wait_if_held(&session_writer.dir().join(CHAT_HISTORY_FILE));
-    let result = session_writer.replace_atomic_reporting_sync(CHAT_HISTORY_FILE, bytes);
+    let rel = Path::new(CHAT_HISTORY_FILE);
+    let result =
+        match chat_history_skip(session_writer, rel, &session_writer.dir().join(rel), bytes) {
+            Some(synced) => synced.map_err(fuigo_session_writer::ReplaceError::NotReplaced),
+            None => session_writer.replace_atomic_reporting_sync(rel, bytes),
+        };
     if matches!(
         &result,
         Ok(()) | Err(fuigo_session_writer::ReplaceError::Replaced(_))
@@ -493,6 +506,28 @@ pub(crate) fn replace_chat_history_through(
         jsonl::compaction_witness::clear_after_chat_rewrite_through(session_writer, Some(bytes));
     }
     result.map_err(fuigo_session_writer::ReplaceError::into_io)
+}
+
+/// The one skip for a chat-history rewrite that would change nothing (F5, 1.0.47 F7): `Some` when `path` already holds
+/// the at-rest form of `bytes`. The file is still flushed, so bytes that reached it by buffered appends are as durable
+/// as a replace would have left them; only the temp write, rename and directory sync are saved.
+fn chat_history_skip(
+    writer: &fuigo_session_writer::SessionWriter,
+    rel: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> Option<io::Result<()>> {
+    (rel == Path::new(CHAT_HISTORY_FILE) && file_holds(path, &writer.at_rest_bytes(rel, bytes)))
+        .then(|| writer.sync_existing_sync(rel))
+}
+
+/// True when the regular file at `path` already holds exactly `bytes`. F5: a resume rewrote an unchanged
+/// `chat_history.jsonl` twice; a rewrite that would change nothing is skipped (the length check keeps the usual,
+/// changed case to one stat). Callers pass the at-rest form of the bytes (S2), so a legacy file that still holds a
+/// recorded secret differs and is rewritten scrubbed instead of skipped.
+fn file_holds(path: &Path, bytes: &[u8]) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == bytes.len() as u64)
+        && std::fs::read(path).is_ok_and(|disk| disk == bytes)
 }
 
 pub(crate) fn to_jsonl_bytes<T: serde::Serialize>(items: &[T]) -> io::Result<Vec<u8>> {
@@ -2172,9 +2207,12 @@ impl ContentFingerprint {
         }
     }
 
-    /// The fingerprint of `items` written as a JSONL file, exactly as a whole rewrite of the file writes them.
+    /// The fingerprint of `items` written as a JSONL file, exactly as a whole rewrite of the file writes them: through
+    /// the at-rest layer (S2, design §2.6), so it matches the bytes on disk.
     pub(crate) fn of_jsonl<T: serde::Serialize>(items: &[T]) -> io::Result<Self> {
-        Ok(Self::of(&to_jsonl_bytes(items)?))
+        Ok(Self::of(&fuigo_secrets::at_rest::transform_owned(
+            to_jsonl_bytes(items)?,
+        )))
     }
 
     /// Whether `bytes` are exactly the fingerprinted bytes.
@@ -2446,6 +2484,11 @@ pub trait StorageAdapter: Send + Sync {
     async fn append_rewind_point(&self, info: &Info, point: &RewindPoint) -> io::Result<()>;
 
     async fn load_rewind_points(&self, info: &Info) -> io::Result<Vec<RewindPoint>>;
+
+    /// Write summary counters the adapter holds between turn boundaries (audit 1.0.47 F2). Default: none held.
+    async fn flush_summary(&self, _info: &Info) -> io::Result<()> {
+        Ok(())
+    }
 
     /// Sync the selected session files, plus the session directory entry once, to stable media.
     /// Backs the `FlushAndAck` barrier (dirty files only) and the pre-`CopyFile` flush ([`SessionFileSet::ALL`]).
@@ -2847,7 +2890,7 @@ pub(crate) fn replay_updates_path_in_dir(
 // ============================================================================
 
 /// Each event represents the minimal information extracted from one `updates.jsonl` line without deserializing the full typed notification.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PromptExtractEvent {
     /// A text chunk from a `UserMessageChunk` ACP update.
     ///
@@ -2934,6 +2977,18 @@ impl Iterator for PromptExtractIterator {
             return Some(parse_prompt_extract_event(line));
         }
     }
+}
+
+/// [`PromptExtractIterator`] over bytes already in memory: the same events, line for line (a line that is not UTF-8
+/// is `NotUserMessage`, as the reader's error is).
+pub fn prompt_extract_events(bytes: &[u8]) -> impl Iterator<Item = PromptExtractEvent> + '_ {
+    bytes
+        .split(|b| *b == b'\n')
+        .filter_map(|line| match std::str::from_utf8(line) {
+            Err(_) => Some(PromptExtractEvent::NotUserMessage),
+            Ok(line) if line.trim().is_empty() => None,
+            Ok(line) => Some(parse_prompt_extract_event(line.trim())),
+        })
 }
 
 /// Assemble accumulated user-prompt strings from a stream of [`PromptExtractEvent`]s.
@@ -4703,10 +4758,29 @@ mod tests {
     }
 
     fn collect_events(path: &std::path::Path) -> Vec<PromptExtractEvent> {
-        PromptExtractIterator::open(path)
+        let events: Vec<PromptExtractEvent> = PromptExtractIterator::open(path)
             .unwrap()
             .unwrap()
-            .collect()
+            .collect();
+        // F5: the in-memory reader a resume uses yields the same events.
+        let in_memory: Vec<PromptExtractEvent> =
+            prompt_extract_events(&std::fs::read(path).unwrap()).collect();
+        assert_eq!(in_memory, events);
+        events
+    }
+
+    #[test]
+    fn in_memory_events_match_the_reader_around_a_line_that_is_not_utf8() {
+        let chunk = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello"}}"#,
+        );
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, "{chunk}").unwrap();
+        f.write_all(b"\xff\xfe\n\n").unwrap();
+        write!(f, "{chunk}").unwrap();
+        let events = collect_events(f.path());
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert_eq!(events[1], PromptExtractEvent::NotUserMessage);
     }
 
     #[test]

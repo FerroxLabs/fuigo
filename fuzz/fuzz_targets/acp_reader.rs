@@ -1,6 +1,7 @@
 #![no_main]
-//! The ACP stdin path: the escaped-slash line normaliser, the capped line reader, the envelope parse (batch arrays
-//! are rejected, never mis-read as a message) and `LineBufferedRead` (lossless over any chunking).
+//! The ACP stdin path: the escaped-slash line normaliser, the capped line reader, the envelope parse and
+//! `LineBufferedRead` (lossless over any chunking, except that JSON array lines are dropped: the acp crate's derived
+//! envelope accepts a positional array as a message, so the reader is what keeps arrays out).
 
 use futures::executor::LocalPool;
 use futures::io::AsyncRead;
@@ -54,11 +55,8 @@ fuzz_target!(|data: &[u8]| {
         assert!(serde_json::from_slice::<serde_json::Value>(&out).is_ok());
     }
 
-    // 2. Envelope parse: never panics; a batch array is never accepted as a message.
-    let parsed = serde_json::from_slice::<agent_client_protocol::RawIncomingMessage>(body);
-    if body.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'[') {
-        assert!(parsed.is_err(), "a JSON-RPC batch array must be rejected");
-    }
+    // 2. Envelope parse: never panics (arrays are kept from it by `LineBufferedRead`, checked in 4).
+    let _ = serde_json::from_slice::<agent_client_protocol::RawIncomingMessage>(body);
 
     // 3. Capped reader equals read_until under the cap, and never holds more than cap+one fill beyond it.
     let max = (head as usize % 64) + 1;
@@ -82,7 +80,8 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(rest, rest_b);
     }
 
-    // 4. LineBufferedRead: concatenated output equals the input for any chunking (lines are far below the cap).
+    // 4. LineBufferedRead: concatenated output equals the input minus its JSON array lines, for any chunking (lines are
+    // far below the cap), so no array ever reaches the envelope parse.
     let sizes: Vec<usize> = body.iter().take(4).map(|b| (*b as usize % 9) + 1).collect();
     let sizes = if sizes.is_empty() { vec![3] } else { sizes };
     let mut pool = LocalPool::new();
@@ -96,5 +95,11 @@ fuzz_target!(|data: &[u8]| {
         reader.read_to_end(&mut v).await.unwrap();
         v
     });
-    assert_eq!(got, body);
+    let want: Vec<u8> = body
+        .split_inclusive(|&b| b == b'\n')
+        .filter(|l| !fuigo_acp_lib::fuzz_support::is_json_array_line(l))
+        .flatten()
+        .copied()
+        .collect();
+    assert_eq!(got, want);
 });

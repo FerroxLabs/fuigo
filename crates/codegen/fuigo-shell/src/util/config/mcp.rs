@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use toml::Value as TomlValue;
 use toml::map::Map as TomlMap;
 
+use super::mcp_approvals::DefinitionOrigin;
+
 pub use fuigo_mcp::oauth_config::{McpOAuthConfig, McpOAuthConfigMap};
 // MCP server config value types moved to `fuigo-config-types`; the re-export keeps `crate::util::config::*` paths working
 pub use fuigo_config_types::{
@@ -249,9 +251,171 @@ pub(crate) fn load_mcp_servers_with_oauth(
 /// 3. Each level's entries replace entries with the same name entirely (no deep merge; omitted fields fall back to defaults)
 /// 4. Closer directories (cwd) take priority over further ones (repo root)
 pub fn load_mcp_servers(cwd: &std::path::Path, compat: &CompatConfig) -> Vec<acp::McpServer> {
-    let global_config = crate::config::load_effective_config()
-        .unwrap_or_else(|_| TomlValue::Table(toml::map::Map::new()));
-    reload_mcp_servers_merged(&global_config, cwd, compat)
+    let (global_config, user_layer) = effective_and_user_layer();
+    reload_mcp_servers_merged(&global_config, &user_layer, cwd, compat)
+}
+
+/// The effective config and the user's own layer from one read (empty tables when it cannot be read).
+fn effective_and_user_layer() -> (TomlValue, TomlValue) {
+    super::load_effective_config_and_user_layer().unwrap_or_else(|_| {
+        (
+            TomlValue::Table(toml::map::Map::new()),
+            TomlValue::Table(toml::map::Map::new()),
+        )
+    })
+}
+
+/// MC-03: where a global (effective) `[mcp_servers.<name>]` comes from. The user's key when the user's own layer has
+/// a table for that name (a managed or campaign layer patching it does not make it uncovered, Fable r2 M3); else the
+/// campaign key when a campaign added it; else none (managed, system or requirements: admin-owned, uncovered).
+fn global_toml_origin(
+    name: &str,
+    config: &McpServerConfig,
+    user_names: &std::collections::HashSet<String>,
+) -> Option<DefinitionOrigin> {
+    if user_names.contains(name) {
+        Some(DefinitionOrigin::user(
+            user_config_path().display().to_string(),
+        ))
+    } else if config.campaign_source {
+        Some(DefinitionOrigin::campaign())
+    } else {
+        None
+    }
+}
+
+fn user_layer_mcp_names(user_layer: &TomlValue) -> std::collections::HashSet<String> {
+    user_layer
+        .get("mcp_servers")
+        .and_then(TomlValue::as_table)
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// A project `.fuigo/config.toml` (`<dir>/.fuigo/config.toml`) as an origin: the directory that holds `.fuigo`.
+fn project_toml_origin(config_path: &std::path::Path) -> DefinitionOrigin {
+    let dir = config_path
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap_or(config_path);
+    DefinitionOrigin::project_dir(dir, config_path)
+}
+
+/// Every config.toml definition (user/effective, then project files nearest last) with its MC-03 origin.
+fn toml_configs_with_origin(
+    global_config: &TomlValue,
+    user_layer: &TomlValue,
+    cwd: &std::path::Path,
+) -> IndexMap<String, (McpServerConfig, Option<DefinitionOrigin>)> {
+    let user_names = user_layer_mcp_names(user_layer);
+    let user_raw = raw_toml_mcp_tables(&user_config_path());
+    let mut servers: IndexMap<String, (McpServerConfig, Option<DefinitionOrigin>)> =
+        parse_mcp_servers_from_toml(global_config)
+            .into_iter()
+            .map(|(name, config)| {
+                let origin = global_toml_origin(&name, &config, &user_names).map(|mut origin| {
+                    if origin.scope == "user" {
+                        let raw = user_raw
+                            .get(&name)
+                            .and_then(|raw| raw_at_merged_layer(global_config, &name, raw));
+                        origin.raw = raw_reproducing(&name, &config, raw.as_ref());
+                    }
+                    origin
+                });
+                (name, (config, origin))
+            })
+            .collect();
+    // find_project_configs is repo-root-first, so nearer files overwrite.
+    for config_path in crate::config::find_project_configs(cwd) {
+        if let Ok(root) = fuigo_config::load_project_config_file(&config_path) {
+            let raw = raw_toml_mcp_definitions(&config_path);
+            for (name, config) in parse_mcp_servers_from_toml(&root) {
+                let mut origin = project_toml_origin(&config_path);
+                origin.raw = raw_reproducing(&name, &config, raw.get(&name));
+                servers.insert(name, (config, Some(origin)));
+            }
+        }
+    }
+    servers
+}
+
+/// The `[mcp_servers]` tables of the config file `path` as written (no `${VAR}` expansion), possibly partial: a user
+/// table may set only the fields it overrides over a managed or system layer.
+fn raw_toml_mcp_tables(path: &std::path::Path) -> toml::map::Map<String, TomlValue> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<TomlValue>(&text).ok())
+        .and_then(|root| match root {
+            TomlValue::Table(mut root) => match root.remove("mcp_servers")? {
+                TomlValue::Table(t) => Some(t),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// `name`'s effective (merged, expanded) definition with the user's own fields put back as written (review Astra
+/// confirm M3): a partial user table over a managed `command` does not parse on its own, but this does, so rotating a
+/// `${VAR}` the user wrote is not a change. [`raw_reproducing`] still checks it expands to what launches.
+fn raw_at_merged_layer(
+    global_config: &TomlValue,
+    name: &str,
+    raw_user: &TomlValue,
+) -> Option<McpServerConfig> {
+    fn overlay(base: &mut TomlValue, top: &TomlValue) {
+        match (base, top) {
+            (TomlValue::Table(base), TomlValue::Table(top)) => {
+                for (k, v) in top {
+                    match base.get_mut(k) {
+                        Some(slot) => overlay(slot, v),
+                        None => {
+                            base.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+            (base, top) => *base = top.clone(),
+        }
+    }
+    let mut merged = global_config.get("mcp_servers")?.get(name)?.clone();
+    overlay(&mut merged, raw_user);
+    let mut servers = toml::map::Map::new();
+    servers.insert(name.to_owned(), merged);
+    let mut root = toml::map::Map::new();
+    root.insert("mcp_servers".to_owned(), TomlValue::Table(servers));
+    parse_mcp_servers_from_toml(&TomlValue::Table(root)).shift_remove(name)
+}
+
+/// The `[mcp_servers]` of the config file `path` as written: no `${VAR}` expansion (coordinator: token rotation).
+fn raw_toml_mcp_definitions(path: &std::path::Path) -> IndexMap<String, McpServerConfig> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<TomlValue>(&text).ok())
+        .map(|root| parse_mcp_servers_from_toml(&root))
+        .unwrap_or_default()
+}
+
+/// `raw` (`name` as written in its file) when expanding it with the loader's own expander gives exactly `loaded`;
+/// `None` otherwise (a managed patch, a version override, a refused key reference, or the file changed between the
+/// reads), so a raw definition is only ever digested for the very definition that is launched.
+fn raw_reproducing(
+    name: &str,
+    loaded: &McpServerConfig,
+    raw: Option<&McpServerConfig>,
+) -> Option<Box<McpServerConfig>> {
+    let raw = raw?;
+    let mut servers = toml::map::Map::new();
+    servers.insert(name.to_owned(), TomlValue::try_from(raw).ok()?);
+    let mut root = toml::map::Map::new();
+    root.insert("mcp_servers".to_owned(), TomlValue::Table(servers));
+    let mut root = TomlValue::Table(root);
+    fuigo_config::expand_env_vars_in_toml(&mut root);
+    let mut expanded = parse_mcp_servers_from_toml(&root).shift_remove(name)?;
+    expanded.untrusted_source = loaded.untrusted_source;
+    expanded.campaign_source = loaded.campaign_source;
+    let same = serde_json::to_value(&expanded).ok()? == serde_json::to_value(loaded).ok()?;
+    same.then(|| Box::new(raw.clone()))
 }
 
 /// Load MCP servers from config.toml only (global and project-scoped).
@@ -262,12 +426,30 @@ pub fn load_mcp_servers(cwd: &std::path::Path, compat: &CompatConfig) -> Vec<acp
 pub(crate) fn load_mcp_servers_toml_only(cwd: &std::path::Path) -> Vec<acp::McpServer> {
     let preferences = load_mcp_preferences().file();
     let sub = &crate::config::expand_env_vars_in_string;
-    load_all_mcp_configs(cwd)
+    let (global_config, user_layer) = effective_and_user_layer();
+    let configs = toml_configs_with_origin(&global_config, &user_layer, cwd);
+    record_held_campaign_definitions(&configs, &preferences);
+    configs
         .into_iter()
-        .filter_map(|(name, config)| {
-            materialize_mcp_config(&name, config, &preferences, sub, McpEnabledFilter::Respect)
+        .filter_map(|(name, (config, origin))| {
+            materialize_mcp_config_stamped(
+                &name,
+                config,
+                &preferences,
+                sub,
+                McpEnabledFilter::Respect,
+                origin.as_ref(),
+            )
         })
         .collect()
+}
+
+/// [`load_mcp_server_configs_with_project`] with each definition's MC-03 origin (for discovery that must stamp).
+pub(crate) fn load_mcp_server_configs_with_origin(
+    cwd: &std::path::Path,
+) -> IndexMap<String, (McpServerConfig, Option<DefinitionOrigin>)> {
+    let (global_config, user_layer) = effective_and_user_layer();
+    toml_configs_with_origin(&global_config, &user_layer, cwd)
 }
 
 /// Whether materialization respects the config `enabled` field.
@@ -279,13 +461,28 @@ pub(crate) enum McpEnabledFilter {
     Ignore,
 }
 
-/// Resolve setup, expand strings, and convert to ACP.
+/// Resolve setup, expand strings, and convert to ACP. Test-only: with no origin the result is marked `managed`
+/// (uncovered), so a product caller on a covered source must use [`materialize_mcp_config_stamped`].
+#[cfg(test)]
 pub(crate) fn materialize_mcp_config(
+    name: &str,
+    config: McpServerConfig,
+    preferences: &McpPreferencesFile,
+    sub: &dyn Fn(&str) -> String,
+    enabled_filter: McpEnabledFilter,
+) -> Option<acp::McpServer> {
+    materialize_mcp_config_stamped(name, config, preferences, sub, enabled_filter, None)
+}
+
+/// [`materialize_mcp_config`], stamping the launch object with the MC-03 digest of the same definition (setup
+/// resolved, before expansion) when `origin` is set.
+pub(crate) fn materialize_mcp_config_stamped(
     name: &str,
     mut config: McpServerConfig,
     preferences: &McpPreferencesFile,
     sub: &dyn Fn(&str) -> String,
     enabled_filter: McpEnabledFilter,
+    origin: Option<&DefinitionOrigin>,
 ) -> Option<acp::McpServer> {
     if matches!(enabled_filter, McpEnabledFilter::Ignore) {
         config.enabled = true;
@@ -298,8 +495,32 @@ pub(crate) fn materialize_mcp_config(
             return None;
         }
     };
+    // The digest source: the definition as written when the loader's expansion reproduces it (token rotation), else
+    // this one; resolved by the same setup choice.
+    let resolved = origin.map(|origin| {
+        origin
+            .raw
+            .as_ref()
+            .and_then(|raw| {
+                let mut raw = (**raw).clone();
+                raw.enabled = config.enabled;
+                match raw.resolve_setup(preferences.servers.get(name)) {
+                    McpSetupResolution::Resolved(raw) => Some(raw),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| config.clone())
+    });
     config.expand_strings(sub);
-    config.to_acp_mcp_server(name)
+    let mut server = config.to_acp_mcp_server(name)?;
+    match (origin, resolved) {
+        (Some(origin), Some(resolved)) => {
+            super::mcp_approvals::stamp_from_config(&mut server, name, &resolved, &config, origin)
+        }
+        // No origin: a managed, system or requirements definition (admin-owned, uncovered).
+        _ => super::mcp_approvals::mark_uncovered(&mut server, "managed"),
+    }
+    Some(server)
 }
 
 /// Merge MCP servers from a pre-parsed global config with project-scoped overrides.
@@ -308,13 +529,19 @@ pub(crate) fn materialize_mcp_config(
 /// Project configs are still read from disk because the watcher signals paths, not content.
 pub(crate) fn reload_mcp_servers_merged(
     global_config: &TomlValue,
+    user_layer: &TomlValue,
     cwd: &std::path::Path,
     compat: &CompatConfig,
 ) -> Vec<acp::McpServer> {
-    materialize_merged_mcp_configs(merged_mcp_server_configs(global_config, cwd, compat))
-        .into_iter()
-        .map(|(server, _trusted)| server)
-        .collect()
+    materialize_merged_mcp_configs(merged_mcp_server_configs(
+        global_config,
+        user_layer,
+        cwd,
+        compat,
+    ))
+    .into_iter()
+    .map(|(server, _trusted)| server)
+    .collect()
 }
 
 /// [`load_mcp_servers`], with each server's provenance (P136): `true` when its definition came from a source that may
@@ -324,94 +551,75 @@ pub(crate) fn load_mcp_servers_with_provenance(
     cwd: &std::path::Path,
     compat: &CompatConfig,
 ) -> Vec<(acp::McpServer, bool)> {
-    let global_config = crate::config::load_effective_config()
-        .unwrap_or_else(|_| TomlValue::Table(toml::map::Map::new()));
-    materialize_merged_mcp_configs(merged_mcp_server_configs(&global_config, cwd, compat))
+    let (global_config, user_layer) = effective_and_user_layer();
+    materialize_merged_mcp_configs(merged_mcp_server_configs(
+        &global_config,
+        &user_layer,
+        cwd,
+        compat,
+    ))
 }
 
 /// Resolve setup, expand strings and convert each merged definition, with whether it is trusted (not marked
 /// `untrusted_source`).
 fn materialize_merged_mcp_configs(
-    servers: IndexMap<String, McpServerConfig>,
+    servers: IndexMap<String, (McpServerConfig, Option<DefinitionOrigin>)>,
 ) -> Vec<(acp::McpServer, bool)> {
     let preferences = load_mcp_preferences().file();
     let sub = &crate::config::expand_env_vars_in_string;
     servers
         .into_iter()
-        .filter_map(|(name, config)| {
-            let mut config = match config.resolve_setup(preferences.servers.get(&name)) {
-                McpSetupResolution::Resolved(config) => config,
-                McpSetupResolution::Required(_) => return None,
-                McpSetupResolution::Invalid(reason) => {
-                    tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
-                    return None;
-                }
-            };
-            config.expand_strings(sub);
+        .filter_map(|(name, (config, origin))| {
             let trusted = !config.untrusted_source;
-            config
-                .to_acp_mcp_server(name)
-                .map(|server| (server, trusted))
+            materialize_mcp_config_stamped(
+                &name,
+                config,
+                &preferences,
+                sub,
+                McpEnabledFilter::Respect,
+                origin.as_ref(),
+            )
+            .map(|server| (server, trusted))
         })
         .collect()
 }
 
-/// The definitions [`reload_mcp_servers_merged`] starts from, by name, in merge priority.
+/// The definitions [`reload_mcp_servers_merged`] starts from, by name, in merge priority, each with its MC-03 origin.
 fn merged_mcp_server_configs(
     global_config: &TomlValue,
+    user_layer: &TomlValue,
     cwd: &std::path::Path,
     compat: &CompatConfig,
-) -> IndexMap<String, McpServerConfig> {
-    let mut servers: IndexMap<String, McpServerConfig> = IndexMap::new();
-
-    for (name, config) in parse_mcp_servers_from_toml(global_config) {
-        servers.insert(name, config);
-    }
-
-    let project_configs = crate::config::find_project_configs(cwd);
-    for config_path in &project_configs {
-        if let Ok(root) = fuigo_config::load_project_config_file(config_path) {
-            let project_servers = parse_mcp_servers_from_toml(&root);
-            if !project_servers.is_empty() {
-                tracing::info!(
-                    count = project_servers.len(),
-                    path = %config_path.display(),
-                    "Loaded project-scoped MCP servers from .fuigo/config.toml"
-                );
-                for (name, config) in project_servers {
-                    servers.insert(name, config);
-                }
-            }
-        }
-    }
+) -> IndexMap<String, (McpServerConfig, Option<DefinitionOrigin>)> {
+    let mut servers = toml_configs_with_origin(global_config, user_layer, cwd);
     // Also load from ~/.claude.json (lower priority than TOML)
-    let claude_servers = load_claude_json_mcp_servers_as_configs(cwd, compat);
+    let claude_servers = load_claude_json_mcp_servers_as_configs_with_origin(cwd, compat);
     tracing::info!(
         count = claude_servers.len(),
         "Loaded MCP servers from ~/.claude.json"
     );
-    for (name, config) in claude_servers {
-        servers.entry(name).or_insert(config);
+    for (name, (config, origin)) in claude_servers {
+        servers.entry(name).or_insert((config, Some(origin)));
     }
 
     // Also load from ~/.cursor/mcp.json (lower priority than TOML and ~/.claude.json)
-    let cursor_servers = load_cursor_mcp_servers_as_configs(cwd, compat);
+    let cursor_servers = load_cursor_mcp_servers_as_configs_with_origin(cwd, compat);
     tracing::info!(
         count = cursor_servers.len(),
         "Loaded Cursor MCP servers from ~/.cursor/mcp.json"
     );
-    for (name, config) in cursor_servers {
-        servers.entry(name).or_insert(config);
+    for (name, (config, origin)) in cursor_servers {
+        servers.entry(name).or_insert((config, Some(origin)));
     }
 
     // Also load from .mcp.json files (lower priority than TOML)
-    let mcp_json_servers = load_mcp_json_servers_as_configs(cwd);
+    let mcp_json_servers = load_mcp_json_servers_as_configs_with_origin(cwd);
     tracing::info!(
         count = mcp_json_servers.len(),
         "Loaded .mcp.json MCP servers"
     );
-    for (name, config) in mcp_json_servers {
-        servers.entry(name).or_insert(config);
+    for (name, (config, origin)) in mcp_json_servers {
+        servers.entry(name).or_insert((config, Some(origin)));
     }
     servers
 }
@@ -437,7 +645,11 @@ pub(crate) fn load_mcp_json_servers(cwd: &std::path::Path) -> Vec<acp::McpServer
 
     // Reverse so cwd entries win on name conflict.
     for mcp_path in mcp_json_files.iter().rev() {
-        let json_servers = load_mcp_json_file(mcp_path, Some(&project_root));
+        let json_servers = load_mcp_json_file_stamped(
+            mcp_path,
+            Some(&project_root),
+            Some(&mcp_json_origin(mcp_path)),
+        );
         for server in json_servers {
             let name = match &server {
                 acp::McpServer::Http(acp::McpServerHttp { name, .. })
@@ -588,6 +800,10 @@ pub(crate) async fn save_mcp_preferences_to(
 /// The file is written `0600` (it may hold setup values), through the shared
 /// helper: process-local and cross-process locks, temp synced outside the
 /// file lock, rename only over the version `f` saw, temp removed on failure.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: an MCP config file, outside the at-rest roots (sessions/, logs/)"
+)]
 pub(crate) async fn update_mcp_preferences_at<T: Send + 'static>(
     path: &std::path::Path,
     mut f: impl FnMut(&mut McpPreferencesFile) -> T + Send + 'static,
@@ -845,30 +1061,32 @@ pub async fn save_mcp_server_enabled_in(
     server_name: &str,
     enabled: bool,
     cwd: &std::path::Path,
+    approval: CampaignApproval,
 ) -> Result<Vec<PathBuf>> {
     let mut modified = Vec::new();
 
-    // Review C7-02: turning a campaign-added stdio server on is the user's approval of its current command; turning
-    // any server off (or on, when it needs no approval) clears a stored approval.
-    let approval = if enabled {
-        let preferences = load_mcp_preferences().file();
-        load_all_mcp_configs(cwd)
-            .get(server_name)
-            .and_then(|config| {
-                campaign_stdio_fingerprint(&setup_resolved_for_approval(
-                    server_name,
-                    config,
-                    &preferences,
-                ))
-            })
-    } else {
-        None
-    };
+    // Review C7-02: turning a campaign-added stdio server on is the user's approval of the command they were SHOWN
+    // (`Set`); this function never derives it from what is on disk now (Grok r2 A3: a later read may see an edit made
+    // meanwhile). Turning a server off withdraws it (`Clear`); a delayed re-save keeps it (`Keep`).
+    // MC-03 (Grok High): the `mcpdef.v1` digest of the definition the user was shown (from the same read as the v3
+    // fingerprint, which omits env) is approved BEFORE the enable is written: a campaign server dropped before the gate
+    // has no held entry, and without its digest a later env-only edit would be a silent first sight. A failed approval
+    // writes nothing.
+    if let CampaignApproval::Set(_, digest) = &approval {
+        let key = super::mcp_approvals::DefinitionOrigin::campaign().key(server_name);
+        super::mcp_approvals::approve_mcp_definition(&key, digest)?;
+    }
     let user_path = config_path();
     let name = server_name.to_owned();
     if write_toml_table_if_changed(&user_path, move |table| {
         apply_mcp_server_enabled(table, &name, enabled);
-        set_campaign_mcp_approval(table, &name, approval.clone());
+        match &approval {
+            CampaignApproval::Keep => {}
+            CampaignApproval::Set(fingerprint, _) => {
+                set_campaign_mcp_approval(table, &name, Some(fingerprint.clone()))
+            }
+            CampaignApproval::Clear => set_campaign_mcp_approval(table, &name, None),
+        }
     })
     .await?
     {
@@ -897,6 +1115,84 @@ pub async fn save_mcp_server_enabled_in(
     }
 
     Ok(modified)
+}
+
+/// What turning a server on or off does to its campaign approval (review C7-02, Grok r2 A3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CampaignApproval {
+    /// Leave a stored approval as it is.
+    Keep,
+    /// Record this [`campaign_stdio_fingerprint`]: the one of the command the user was shown. The second field is the
+    /// `mcpdef.v1` digest of that same definition, approved for the MC-03 gate too (review Fable M3).
+    Set(String, String),
+    /// Withdraw a stored approval.
+    Clear,
+}
+
+/// What enabling `server_name` approves, from ONE read of its definition: the campaign approval to record (`Set` of
+/// the fingerprint of the command named in the notice, or `Clear` for a server that needs none) and the notice that
+/// names that command (`None` when nothing new is approved).
+pub fn campaign_approval_shown(
+    server_name: &str,
+    cwd: &std::path::Path,
+) -> (CampaignApproval, Option<String>) {
+    let preferences = load_mcp_preferences().file();
+    let Some(config) = load_all_mcp_configs(cwd).shift_remove(server_name) else {
+        return (CampaignApproval::Clear, None);
+    };
+    let resolved = setup_resolved_for_approval(server_name, &config, &preferences);
+    let Some(fingerprint) = campaign_stdio_fingerprint(&resolved) else {
+        return (CampaignApproval::Clear, None);
+    };
+    let already = user_campaign_mcp_approvals()
+        .get(server_name)
+        .and_then(TomlValue::as_str)
+        == Some(fingerprint.as_str());
+    let notice = (!already)
+        .then(|| campaign_approval_text(server_name, &resolved))
+        .flatten();
+    let digest = super::mcp_approvals::mcpdef_v1_config(&resolved);
+    (CampaignApproval::Set(fingerprint, digest), notice)
+}
+
+/// MC-03 (Grok r2 A3): a campaign-added stdio server the user has not approved is dropped before the launch gate (the
+/// C7-02 hold), so the gate never sees it. Record its definition as first seen (only where its key is missing), so an
+/// approval later recorded for a DIFFERENT command cannot make that command a silent first sight.
+fn record_held_campaign_definitions(
+    configs: &IndexMap<String, (McpServerConfig, Option<DefinitionOrigin>)>,
+    preferences: &McpPreferencesFile,
+) {
+    if !configs.values().any(|(c, _)| c.campaign_source) {
+        return;
+    }
+    let approvals = user_campaign_mcp_approvals();
+    let store = super::mcp_approvals::store_path();
+    for (name, (config, origin)) in configs {
+        let Some(origin) = origin else { continue };
+        if !config.campaign_source
+            || !config.enabled
+            || campaign_server_approved(name, config, &approvals, preferences)
+        {
+            continue;
+        }
+        let McpSetupResolution::Resolved(resolved) =
+            config.resolve_setup(preferences.servers.get(name))
+        else {
+            continue;
+        };
+        let digest = super::mcp_approvals::mcpdef_v1_config(&resolved);
+        // Grok M2: a failure is visible. Enabling approves the shown digest itself (`save_mcp_server_enabled_in`), so a
+        // missed record cannot make a later command a silent first sight through the enable path.
+        match super::mcp_approvals::record_first_seen_at(&store, &origin.key(name), &digest) {
+            Ok(super::mcp_approvals::FirstSeen::Unavailable(e)) => {
+                tracing::warn!(server = %name, error = %e, "could not record a held campaign MCP definition")
+            }
+            Err(e) => {
+                tracing::warn!(server = %name, error = %e, "could not record a held campaign MCP definition")
+            }
+            Ok(_) => {}
+        }
+    }
 }
 
 /// User config only, no project unstick.
@@ -1127,6 +1423,78 @@ pub(crate) async fn save_mcp_server_config(
 ///
 /// Same behavior as [`save_mcp_server_config`] but targets an explicit config file, e.g. a project-scoped `.fuigo/config.toml`.
 pub async fn save_mcp_server_config_at(
+    path: &std::path::Path,
+    server_name: &str,
+    config: &McpServerConfig,
+) -> Result<()> {
+    // MC-03: Fuigo's own edit records the digest of the in-memory definition it saves (computed before the write,
+    // never by re-reading the file), so the edit is not held; a later rewrite by anything else does not match.
+    let approval = mcp_definition_saved_at(path, server_name, config);
+    save_mcp_server_config_at_unrecorded(path, server_name, config).await?;
+    if let Some((key, digest)) = approval {
+        let recorded = tokio::task::spawn_blocking(move || {
+            super::mcp_approvals::approve_mcp_definition(&key, &digest)
+        })
+        .await;
+        if let Ok(Err(e)) | Err(e) = recorded.map_err(anyhow::Error::from) {
+            tracing::warn!(server = server_name, error = %e, "could not record the saved MCP definition as approved");
+            // The config stays saved (no rollback); the caller must not report this as an approved save.
+            let shown = fuigo_config::config_override::tidy_note_text(server_name, 64);
+            return Err(e.context(format!(
+                "saved MCP server `{shown}` to {}, but could not record it as approved, so it will be held on the next start; approve it with `fuigo mcp enable {shown}`",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// MC-03 (review Astra M1): stamp the live object of a definition just saved to the user's config.toml (`mcp/upsert`)
+/// with the key and digest that save recorded, and that definition's OAuth, so the gate judges it like the next
+/// session's read of the file.
+pub(crate) fn stamp_saved_user_definition(
+    server: &mut acp::McpServer,
+    server_name: &str,
+    config: &McpServerConfig,
+) {
+    let path = config_path();
+    let Some((key, digest)) = mcp_definition_saved_at(&path, server_name, config) else {
+        return;
+    };
+    let stamp = super::mcp_approvals::AdmissionStamp {
+        key,
+        digest,
+        origin: path.display().to_string(),
+        oauth: super::mcp_approvals::oauth_source(config),
+    };
+    super::mcp_approvals::set_stamp(server, &stamp);
+}
+
+/// The approval key and digest of `config` saved as `server_name` in the config file `path` (the user's own
+/// config.toml or a project `.fuigo/config.toml`), as setup resolves it now; `None` when it does not resolve.
+fn mcp_definition_saved_at(
+    path: &std::path::Path,
+    server_name: &str,
+    config: &McpServerConfig,
+) -> Option<(String, String)> {
+    let preferences = load_mcp_preferences().file();
+    let McpSetupResolution::Resolved(resolved) =
+        config.resolve_setup(preferences.servers.get(server_name))
+    else {
+        return None;
+    };
+    let origin = if path == user_config_path() {
+        DefinitionOrigin::user(path.display().to_string())
+    } else {
+        project_toml_origin(path)
+    };
+    Some((
+        origin.key(server_name),
+        super::mcp_approvals::mcpdef_v1_config(&resolved),
+    ))
+}
+
+async fn save_mcp_server_config_at_unrecorded(
     path: &std::path::Path,
     server_name: &str,
     config: &McpServerConfig,
@@ -1491,6 +1859,25 @@ pub(crate) fn load_mcp_json_file(
     path: &std::path::Path,
     root: Option<&fuigo_dirs::contained::PinnedRoot>,
 ) -> Vec<acp::McpServer> {
+    load_mcp_json_file_stamped(path, root, None)
+}
+
+/// A project `.mcp.json` as an MC-03 origin: the directory that holds it.
+fn mcp_json_origin(path: &std::path::Path) -> DefinitionOrigin {
+    DefinitionOrigin::project_dir(path.parent().unwrap_or(path), path)
+}
+
+/// A project `<cwd>/.cursor/mcp.json` as an MC-03 origin: `cwd`, the same scope as the project's other files there.
+fn cursor_project_origin(cwd: &std::path::Path, path: &std::path::Path) -> DefinitionOrigin {
+    DefinitionOrigin::project_dir(cwd, path)
+}
+
+/// [`load_mcp_json_file`], stamping each launch object for MC-03 when `origin` is set.
+pub(crate) fn load_mcp_json_file_stamped(
+    path: &std::path::Path,
+    root: Option<&fuigo_dirs::contained::PinnedRoot>,
+    origin: Option<&DefinitionOrigin>,
+) -> Vec<acp::McpServer> {
     if !path.is_file() {
         return vec![];
     }
@@ -1502,7 +1889,13 @@ pub(crate) fn load_mcp_json_file(
         return vec![];
     };
     let label = path.display().to_string();
-    parse_mcp_config(&value, &label, &crate::config::expand_env_vars_in_string)
+    parse_mcp_config_with_origin(
+        &value,
+        &label,
+        &crate::config::expand_env_vars_in_string,
+        origin,
+    )
+    .0
 }
 /// Load .mcp.json servers as McpServerConfig map (for merging into load_mcp_servers).
 pub(crate) fn load_mcp_json_servers_as_configs(
@@ -1517,6 +1910,32 @@ pub(crate) fn load_mcp_json_servers_as_configs(
 
 /// Like [`load_mcp_json_servers_as_configs`] but bypasses the import-marker gate.
 /// Used by the `/import-claude` scanner so users can re-import items they previously skipped, even after the runtime cutoff is active.
+/// [`load_mcp_json_servers_as_configs`] with each definition's MC-03 origin (the directory of its `.mcp.json`).
+fn load_mcp_json_servers_as_configs_with_origin(
+    cwd: &std::path::Path,
+) -> IndexMap<String, (McpServerConfig, DefinitionOrigin)> {
+    if crate::claude_import::is_claude_import_marked_with_log("load_mcp_json_servers_as_configs") {
+        return IndexMap::new();
+    }
+    let mut result = IndexMap::new();
+    let mcp_json_files = find_mcp_json_files(cwd);
+    if mcp_json_files.is_empty() {
+        return result;
+    }
+    let Some(project_root) = project_mcp_root(cwd) else {
+        return result;
+    };
+    for mcp_path in mcp_json_files.iter().rev() {
+        if let Some(config) = read_mcp_json_contained(mcp_path, &project_root) {
+            let origin = mcp_json_origin(mcp_path);
+            for (name, cfg) in config.mcp_servers {
+                result.entry(name).or_insert((cfg, origin.clone()));
+            }
+        }
+    }
+    result
+}
+
 pub(crate) fn load_mcp_json_servers_as_configs_unfiltered(
     cwd: &std::path::Path,
 ) -> IndexMap<String, McpServerConfig> {
@@ -1557,6 +1976,16 @@ pub(crate) fn parse_mcp_config_with_oauth(
     source_label: &str,
     sub: &dyn Fn(&str) -> String,
 ) -> (Vec<acp::McpServer>, McpOAuthConfigMap) {
+    parse_mcp_config_with_origin(config, source_label, sub, None)
+}
+
+/// [`parse_mcp_config_with_oauth`], stamping each launch object for MC-03 when `origin` is set.
+pub(crate) fn parse_mcp_config_with_origin(
+    config: &McpConfig,
+    source_label: &str,
+    sub: &dyn Fn(&str) -> String,
+    origin: Option<&DefinitionOrigin>,
+) -> (Vec<acp::McpServer>, McpOAuthConfigMap) {
     let preferences = load_mcp_preferences().file();
     let mut servers = Vec::new();
     let mut oauth_configs = McpOAuthConfigMap::new();
@@ -1576,8 +2005,18 @@ pub(crate) fn parse_mcp_config_with_oauth(
                 continue;
             }
         };
+        let resolved = origin.map(|_| server_config.clone());
         server_config.expand_strings(sub);
-        if let Some(server) = server_config.to_acp_mcp_server(name.clone()) {
+        if let Some(mut server) = server_config.to_acp_mcp_server(name.clone()) {
+            if let (Some(origin), Some(resolved)) = (origin, &resolved) {
+                super::mcp_approvals::stamp_from_config(
+                    &mut server,
+                    name,
+                    resolved,
+                    &server_config,
+                    origin,
+                );
+            }
             // P136: OAuth settings only for a definition that is itself started (see `load_mcp_servers_with_oauth`).
             if let Some(oauth) = server_config.oauth_config() {
                 oauth_configs.insert(name.clone(), oauth);
@@ -1716,6 +2155,36 @@ fn split_claude_json_mcp_servers_from(
     (user, project)
 }
 
+/// [`load_claude_json_mcp_servers_as_configs`] with each definition's MC-03 origin (user, or `projects.<cwd>`).
+fn load_claude_json_mcp_servers_as_configs_with_origin(
+    cwd: &std::path::Path,
+    compat: &CompatConfig,
+) -> IndexMap<String, (McpServerConfig, DefinitionOrigin)> {
+    if !compat.claude.mcps
+        || crate::claude_import::is_claude_import_marked_with_log(
+            "load_claude_json_mcp_servers_as_configs",
+        )
+    {
+        return IndexMap::new();
+    }
+    let Some(home) = fuigo_dirs::home_dir() else {
+        return IndexMap::new();
+    };
+    let path = home.join(".claude.json");
+    let (user, project) = split_claude_json_mcp_servers_from(&path, cwd);
+    let cwd_key = cwd.to_string_lossy();
+    let project_origin = DefinitionOrigin::claude_project(&path, &cwd_key);
+    let user_origin = DefinitionOrigin::user(path.display().to_string());
+    let mut result: IndexMap<String, (McpServerConfig, DefinitionOrigin)> = project
+        .into_iter()
+        .map(|(name, cfg)| (name, (cfg, project_origin.clone())))
+        .collect();
+    for (name, cfg) in user {
+        result.entry(name).or_insert((cfg, user_origin.clone()));
+    }
+    result
+}
+
 fn load_claude_json_mcp_servers_from_as_configs(
     claude_json_path: &std::path::Path,
     cwd: &std::path::Path,
@@ -1791,7 +2260,11 @@ pub(crate) fn load_cursor_mcp_servers(
     let project_path = cwd.join(".cursor").join("mcp.json");
     let project_root = project_mcp_root(cwd);
     let project_servers = match &project_root {
-        Some(root) => load_mcp_json_file(&project_path, Some(root)),
+        Some(root) => load_mcp_json_file_stamped(
+            &project_path,
+            Some(root),
+            Some(&cursor_project_origin(cwd, &project_path)),
+        ),
         None => Vec::new(),
     };
     for server in project_servers {
@@ -1811,7 +2284,8 @@ pub(crate) fn load_cursor_mcp_servers(
     if let Some(home) = fuigo_dirs::home_dir() {
         // The user's own file: follows links.
         let global_path = home.join(".cursor").join("mcp.json");
-        for server in load_mcp_json_file(&global_path, None) {
+        let origin = DefinitionOrigin::user(global_path.display().to_string());
+        for server in load_mcp_json_file_stamped(&global_path, None, Some(&origin)) {
             let name = match &server {
                 acp::McpServer::Http(acp::McpServerHttp { name, .. })
                 | acp::McpServer::Sse(acp::McpServerSse { name, .. })
@@ -1831,6 +2305,39 @@ pub(crate) fn load_cursor_mcp_servers(
 /// Load Cursor MCP servers as McpServerConfig map (for merging into load_mcp_servers).
 ///
 /// Scans project-level `<cwd>/.cursor/mcp.json` first, then global.
+/// [`load_cursor_mcp_servers_as_configs`] with each definition's MC-03 origin.
+fn load_cursor_mcp_servers_as_configs_with_origin(
+    cwd: &std::path::Path,
+    compat: &CompatConfig,
+) -> IndexMap<String, (McpServerConfig, DefinitionOrigin)> {
+    let mut result = IndexMap::new();
+    if !compat.cursor.mcps {
+        return result;
+    }
+    let project_path = cwd.join(".cursor").join("mcp.json");
+    if project_path.is_file()
+        && let Some(root) = project_mcp_root(cwd)
+        && let Some(config) = read_mcp_json_contained(&project_path, &root)
+    {
+        let origin = cursor_project_origin(cwd, &project_path);
+        for (name, cfg) in config.mcp_servers {
+            result.insert(name, (cfg, origin.clone()));
+        }
+    }
+    if let Some(home) = fuigo_dirs::home_dir() {
+        let global_path = home.join(".cursor").join("mcp.json");
+        if global_path.is_file()
+            && let Some(config) = read_mcp_json(&global_path)
+        {
+            let origin = DefinitionOrigin::user(global_path.display().to_string());
+            for (name, cfg) in config.mcp_servers {
+                result.entry(name).or_insert((cfg, origin.clone()));
+            }
+        }
+    }
+    result
+}
+
 pub(crate) fn load_cursor_mcp_servers_as_configs(
     cwd: &std::path::Path,
     compat: &CompatConfig,
@@ -1895,12 +2402,16 @@ fn load_claude_json_mcp_servers_from(
     let cwd_key = cwd.to_string_lossy();
     if let Some(project) = config.projects.get(cwd_key.as_ref()) {
         let label = format!("~/.claude.json projects[{}]", cwd_key);
-        servers.extend(parse_mcp_config(project, &label, sub));
+        let origin = DefinitionOrigin::claude_project(claude_json_path, &cwd_key);
+        servers.extend(parse_mcp_config_with_origin(project, &label, sub, Some(&origin)).0);
     }
 
     // User-level MCP servers (lower priority)
     if !config.user_mcp.mcp_servers.is_empty() {
-        servers.extend(parse_mcp_config(&config.user_mcp, "~/.claude.json", sub));
+        let origin = DefinitionOrigin::user(claude_json_path.display().to_string());
+        servers.extend(
+            parse_mcp_config_with_origin(&config.user_mcp, "~/.claude.json", sub, Some(&origin)).0,
+        );
     }
 
     servers
@@ -2148,17 +2659,11 @@ fn setup_resolved_for_approval(
 /// What to tell the user when turning `server_name` on approves a campaign stdio server's command (review C7-02):
 /// the program, its arguments and folder. `None` when it needs no approval or the user already approved this command.
 pub(crate) fn campaign_approval_notice(server_name: &str, cwd: &std::path::Path) -> Option<String> {
-    let preferences = load_mcp_preferences().file();
-    let config = load_all_mcp_configs(cwd).shift_remove(server_name)?;
-    if campaign_server_approved(
-        server_name,
-        &config,
-        &user_campaign_mcp_approvals(),
-        &preferences,
-    ) {
-        return None;
-    }
-    let config = setup_resolved_for_approval(server_name, &config, &preferences);
+    campaign_approval_shown(server_name, cwd).1
+}
+
+/// The approval notice text for a campaign stdio server's resolved definition `config`.
+fn campaign_approval_text(server_name: &str, config: &McpServerConfig) -> Option<String> {
     let McpServerTransportConfig::Stdio {
         command,
         args,
@@ -2306,6 +2811,122 @@ pub fn cli_mcp_enable_refusal(cwd: &std::path::Path, name: &str) -> Option<Strin
 /// Resolves the same cwd-effective `[plugins]` table as session startup (`resolve_effective_plugins_config`).
 /// Trusted project `[plugins].paths` plugins are therefore included, not just the global config.
 /// Also used by the pager's `/agents` modal to list plugin-provided agents without a live session registry snapshot.
+/// MC-03: a configured server whose definition the launch gate would hold, as the CLI shows and approves it.
+#[derive(Debug, Clone)]
+pub struct HeldMcpDefinition {
+    pub name: String,
+    /// Where the definition lives.
+    pub origin: String,
+    /// What it will run or connect to.
+    pub display: String,
+    /// The approvals file cannot be read: approving is refused until `fuigo mcp approvals reset` (or a fix).
+    pub store_unavailable: bool,
+    key: String,
+    digest: String,
+}
+
+impl HeldMcpDefinition {
+    /// The first 12 hex digits of the held definition's `mcpdef.v1` digest, for listings.
+    pub fn digest_summary(&self) -> &str {
+        let hex = self.digest.rsplit(':').next().unwrap_or(&self.digest);
+        hex.get(..12).unwrap_or(hex)
+    }
+
+    /// The held definition's full `mcpdef.v1` digest: what an approval of this shown definition names (`_fuigo/mcp/toggle`
+    /// `digest`), so a definition that changed again after it was shown is not approved (review Astra confirm H1).
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    fn from_held(h: crate::session::mcp_admission::HeldMcpServer) -> Self {
+        Self {
+            name: h.name,
+            origin: h.origin,
+            display: h.display,
+            store_unavailable: h.store_unavailable,
+            key: h.key,
+            digest: h.digest,
+        }
+    }
+}
+
+/// Every configured server (switched-off ones included) the gate would hold now, by the CLI's discovery (user and
+/// project config, compatible JSON sources and plugins). Reads only; it decides nothing.
+pub fn held_mcp_definitions(cwd: &std::path::Path) -> Vec<HeldMcpDefinition> {
+    let registry = load_cli_plugin_registry(cwd);
+    let compat = CompatConfig::default();
+    let discovered = crate::session::managed_mcp::discover_mcp_definitions_ignoring_disable(
+        &crate::session::managed_mcp::McpDiscoveryInputs {
+            cwd,
+            plugin_registry: Some(&registry),
+            compat: &compat,
+        },
+    );
+    let servers: Vec<acp::McpServer> = discovered.into_values().collect();
+    let mut held: Vec<HeldMcpDefinition> = crate::session::mcp_admission::preview_held(&servers)
+        .into_iter()
+        .map(HeldMcpDefinition::from_held)
+        .collect();
+    held.sort_by(|a, b| a.name.cmp(&b.name));
+    held
+}
+
+/// The held definition of `name`, if the gate would hold it now.
+pub fn held_mcp_definition(cwd: &std::path::Path, name: &str) -> Option<HeldMcpDefinition> {
+    held_mcp_definitions(cwd)
+        .into_iter()
+        .find(|h| h.name == name)
+}
+
+/// The held inline server `name` of agent definition `agent` (`fuigo mcp enable --agent`), as a session running that
+/// agent would gate it: overlaid on this directory's configured servers, so an inline server that replaces a
+/// configured one carries that server's key. `Ok(None)` when it is not held; an error when the agent is unknown or
+/// declares no inline server `name`.
+pub fn held_agent_mcp_definition(
+    cwd: &std::path::Path,
+    agent: &str,
+    name: &str,
+) -> Result<Option<HeldMcpDefinition>> {
+    let registry = load_cli_plugin_registry(cwd);
+    let Some(definition) = fuigo_agent::discovery::by_name_in_cwd(agent, cwd) else {
+        anyhow::bail!("no agent named `{agent}`");
+    };
+    if !definition.mcp_servers.iter().any(
+        |e| matches!(e, fuigo_agent::config::McpServerRef::Inline { name: n, .. } if n == name),
+    ) {
+        anyhow::bail!("agent `{agent}` declares no inline MCP server `{name}`");
+    }
+    let compat = CompatConfig::default();
+    let mut merged: Vec<acp::McpServer> =
+        crate::session::managed_mcp::discover_mcp_definitions_ignoring_disable(
+            &crate::session::managed_mcp::McpDiscoveryInputs {
+                cwd,
+                plugin_registry: Some(&registry),
+                compat: &compat,
+            },
+        )
+        .into_values()
+        .collect();
+    crate::session::agent_mcp::apply_agent_mcp_overlay(&mut merged, &definition, cwd);
+    merged.retain(|s| crate::session::mcp_servers::mcp_server_name(s) == name);
+    Ok(crate::session::mcp_admission::preview_held(&merged)
+        .into_iter()
+        .next()
+        .map(HeldMcpDefinition::from_held))
+}
+
+/// Approve exactly the definition `held` shows (its digest; config is not read again). Refused while the approvals
+/// file cannot be read.
+pub fn approve_held_mcp_definition(held: &HeldMcpDefinition) -> Result<()> {
+    if held.store_unavailable {
+        anyhow::bail!(
+            "the MCP approvals file {} could not be read; fix it or run `fuigo mcp approvals reset`",
+            super::mcp_approvals::store_path().display()
+        );
+    }
+    super::mcp_approvals::approve_mcp_definition(&held.key, &held.digest)
+}
+
 pub fn load_cli_plugin_registry(cwd: &std::path::Path) -> fuigo_agent::plugins::PluginRegistry {
     let trust_store = fuigo_agent::plugins::TrustStore::load();
     // Resolve/record the folder-trust verdict first: the effective-plugins resolve below gates project [plugins].paths on the cached verdict

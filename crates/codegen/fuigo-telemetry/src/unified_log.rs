@@ -11,8 +11,6 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use fuigo_config::fuigo_home;
-
 /// Binary version stamped into every log entry.
 /// Set once at startup via [`set_version()`]; entries emitted before that get `None`.
 static VERSION: OnceLock<String> = OnceLock::new();
@@ -163,7 +161,7 @@ fn log_path() -> PathBuf {
     if TEST_REDIRECT.load(std::sync::atomic::Ordering::Relaxed) {
         return test_log_dir().join(LOG_FILE);
     }
-    fuigo_home().join(LOG_DIR).join(LOG_FILE)
+    fuigo_config::logs_dir().join(LOG_FILE)
 }
 
 /// Owner-only (0o700), freshly-created directory for the test redirect.
@@ -310,6 +308,7 @@ fn write_lines(lines: &[u8]) {
     // P70b: a log sink. Credentials this process sent upstream are replaced (exact match) before the bytes land.
     let scrubbed = fuigo_secrets::sent_credentials::scrub_record(lines);
     let lines = scrubbed.as_deref().unwrap_or(lines);
+    let lines = &*fuigo_secrets::at_rest::transform_whole(lines);
     if let Err(e) = writer.file.write_all(lines) {
         tracing::warn!("[unified_log] write failed: {e}");
     }
@@ -368,7 +367,7 @@ pub fn trim_file(path: &std::path::Path) {
         Some(pos) => half + pos + 1,
         None => return,
     };
-    let tail = &data[start..];
+    let tail = &*fuigo_secrets::at_rest::transform_whole(&data[start..]);
 
     // Rewind rather than truncate-on-open: the tail is laid down over the head first, and only then is the file shortened
     // The retained bytes are therefore never absent from disk

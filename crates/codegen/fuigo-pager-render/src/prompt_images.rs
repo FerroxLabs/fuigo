@@ -1258,6 +1258,7 @@ pub fn persist_to_session(
     let write_result: anyhow::Result<()> = (|| {
         use std::io::Write as _;
         let mut f = fuigo_config::create_file_owner_only(&tmp_path)?;
+        // at-rest: media asset, byte-exact (S2 N3): not transformed
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);

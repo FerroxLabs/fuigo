@@ -143,7 +143,12 @@ async fn render_text_resource(
     let (tag, attrs_str) = ("file_contents", attrs);
     let _ = is_cursor;
     if estimate_tokens(&file_content) > MAX_FILE_TOKENS {
-        let dest = write_to_session_subdir("pasted", path, text_resource.text.as_bytes()).await;
+        let dest = write_to_session_subdir(
+            "pasted",
+            path,
+            &fuigo_secrets::at_rest::transform_whole(text_resource.text.as_bytes()),
+        )
+        .await;
         let display_path = dest
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned())
@@ -183,7 +188,12 @@ async fn render_diff_resource(
         format!(" {}", attrs.join(" "))
     };
     if estimate_tokens(&text_resource.text) > MAX_FILE_TOKENS {
-        let dest = write_to_session_subdir("pasted", path, text_resource.text.as_bytes()).await;
+        let dest = write_to_session_subdir(
+            "pasted",
+            path,
+            &fuigo_secrets::at_rest::transform_whole(text_resource.text.as_bytes()),
+        )
+        .await;
         let display_path = dest
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned())

@@ -1318,12 +1318,23 @@ impl SessionActor {
                 message: notice,
             });
         }
+        // MC-03: gate before the state lock, off the reactor (review Astra M4).
+        let admission = crate::session::mcp_admission::admit_off_reactor(
+            self.session_info.id.0.to_string(),
+            new_mcp_servers,
+        )
+        .await;
         let (mcp_diff, dispatch_event_tx) = {
             let mut mcp_state = self.mcp_state.lock().await;
-            let diff = mcp_state.update_configs_diff(new_mcp_servers);
+            let diff = mcp_state.update_configs_diff(admission.servers());
             let tx = mcp_state.client_event_tx();
             (diff, tx)
         };
+        for notice in admission.notices {
+            self.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice {
+                message: notice,
+            });
+        }
         let mcp_changed = if let Some(diff) = mcp_diff {
             if (!diff.added.is_empty() || !diff.removed.is_empty())
                 && let Some(tx) = &dispatch_event_tx

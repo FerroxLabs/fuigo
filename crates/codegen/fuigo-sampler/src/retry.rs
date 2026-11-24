@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use fuigo_sampling_types::{SamplingError, is_retryable_api_status};
+use fuigo_sampling_types::{ApiBackend, EmptyReason, SamplingError, is_retryable_api_status};
 
 pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
 
@@ -22,6 +22,26 @@ pub const EMPTY_RESPONSE_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 /// stable across a request; splitting it announced "(1/2)" and then "(2/3)".
 pub const EMPTY_RESPONSE_MAX_ATTEMPTS: u32 = 3;
 
+/// Attempt cap for a reply that stopped after reasoning alone (think-only): five resends of the unchanged request.
+/// Measured on qwen3 under ollama, each think-only attempt is an independent ~50% draw, so plain resends recover the turn.
+/// This is its own budget, not capped by the configured one (`FUIGO_MAX_RETRIES`, `max_retries`), with one exception:
+/// a configured budget of 0 (resends disabled) still turns think-only resends off.
+pub const THINK_ONLY_MAX_ATTEMPTS: u32 = 6;
+
+/// Wall-clock cap, from the first think-only reply, on the think-only resends past [`EMPTY_RESPONSE_MAX_ATTEMPTS`].
+/// Once it is spent the turn ends with the think-only error instead of using the remaining attempts.
+pub const THINK_ONLY_EXTRA_RESEND_WINDOW: Duration = Duration::from_secs(180);
+
+/// The attempt cap for an empty reply of `reason` on `backend`: [`THINK_ONLY_MAX_ATTEMPTS`] for a think-only reply on
+/// Chat Completions (where local reasoning models such as qwen3 on ollama stop after thinking), else
+/// [`EMPTY_RESPONSE_MAX_ATTEMPTS`], the cap [`classify_error`] applies to every empty reply.
+pub fn empty_response_max_attempts(reason: EmptyReason, backend: &ApiBackend) -> u32 {
+    match (reason, backend) {
+        (EmptyReason::ReasoningOnly, ApiBackend::ChatCompletions) => THINK_ONLY_MAX_ATTEMPTS,
+        _ => EMPTY_RESPONSE_MAX_ATTEMPTS,
+    }
+}
+
 /// Attempt cap (the original plus the resend) for a model call that stalled: it is resent once.
 /// Each stall costs the whole idle window, so a longer ladder would only stretch the wait.
 pub const IDLE_TIMEOUT_MAX_ATTEMPTS: u32 = 2;
@@ -30,6 +50,7 @@ pub const IDLE_TIMEOUT_MAX_ATTEMPTS: u32 = 2;
 /// It is the configured `max_retries`, lowered to [`EMPTY_RESPONSE_MAX_ATTEMPTS`] for `SamplingError::EmptyResponse`.
 /// Like `max_retries` it counts attempts including the original, so `Retrying` events report `attempt/effective`.
 /// A lower configured budget (`FUIGO_MAX_RETRIES`, `max_retries`) always wins; the cap never raises it.
+/// The one budget it does not bound is a think-only reply's on Chat Completions ([`THINK_ONLY_MAX_ATTEMPTS`]).
 pub fn effective_max_retries(err: &SamplingError, max_retries: u32) -> u32 {
     match err {
         SamplingError::EmptyResponse { .. } => max_retries.min(EMPTY_RESPONSE_MAX_ATTEMPTS),
@@ -41,12 +62,13 @@ pub fn effective_max_retries(err: &SamplingError, max_retries: u32) -> u32 {
 /// The denominator an empty-response `Retrying` event announces, given the resends
 /// already recorded (this one included).
 ///
-/// It is [`EMPTY_RESPONSE_MAX_ATTEMPTS`], lowered to what the configured budget can still
+/// It is the reply's `cap` ([`empty_response_max_attempts`]), lowered to what the configured budget can still
 /// fund: every resend of the request, of any kind, spends that shared budget, and an empty
 /// reply is only resent while `total_resends + 1 < configured_max_retries`. Announcing the
 /// bare cap after an earlier 503 retry, or under a lowered `FUIGO_MAX_RETRIES`, promises
 /// attempts that cannot happen.
 pub fn empty_response_announced_attempts(
+    cap: u32,
     empty_resends_used: u32,
     total_resends_used: u32,
     configured_max_retries: u32,
@@ -54,7 +76,7 @@ pub fn empty_response_announced_attempts(
     let fundable = configured_max_retries
         .saturating_sub(1)
         .saturating_sub(total_resends_used);
-    EMPTY_RESPONSE_MAX_ATTEMPTS.min(
+    cap.min(
         empty_resends_used
             .saturating_add(1)
             .saturating_add(fundable),
@@ -1314,26 +1336,41 @@ mod tests {
     fn the_announced_empty_response_cap_never_promises_unfundable_resends() {
         // The default budget funds every resend the cap allows.
         assert_eq!(
-            empty_response_announced_attempts(1, 1, DEFAULT_MAX_RETRIES),
+            empty_response_announced_attempts(
+                EMPTY_RESPONSE_MAX_ATTEMPTS,
+                1,
+                1,
+                DEFAULT_MAX_RETRIES
+            ),
             3
         );
         assert_eq!(
-            empty_response_announced_attempts(2, 2, DEFAULT_MAX_RETRIES),
+            empty_response_announced_attempts(
+                EMPTY_RESPONSE_MAX_ATTEMPTS,
+                2,
+                2,
+                DEFAULT_MAX_RETRIES
+            ),
             3
         );
         // An earlier retry of another kind spends the same budget: after a 503 resend the
         // cap is still fundable on the default budget, but not on a lowered one.
         assert_eq!(
-            empty_response_announced_attempts(1, 2, DEFAULT_MAX_RETRIES),
+            empty_response_announced_attempts(
+                EMPTY_RESPONSE_MAX_ATTEMPTS,
+                1,
+                2,
+                DEFAULT_MAX_RETRIES
+            ),
             3
         );
         assert_eq!(
-            empty_response_announced_attempts(1, 2, 3),
+            empty_response_announced_attempts(EMPTY_RESPONSE_MAX_ATTEMPTS, 1, 2, 3),
             2,
             "one 503 resend then one empty resend spends a budget of 3: no second empty resend"
         );
         assert_eq!(
-            empty_response_announced_attempts(1, 1, 2),
+            empty_response_announced_attempts(EMPTY_RESPONSE_MAX_ATTEMPTS, 1, 1, 2),
             2,
             "FUIGO_MAX_RETRIES=2 funds exactly this resend"
         );
@@ -1354,5 +1391,36 @@ mod tests {
                 backoffs[5]
             );
         }
+    }
+
+    /// Only a think-only reply on Chat Completions gets the larger budget; every other backend and reason keeps the shared cap.
+    #[test]
+    fn the_think_only_budget_is_chat_completions_only() {
+        use fuigo_sampling_types::EmptyReason::{NoVisibleContent, ReasoningOnly};
+        assert_eq!(
+            empty_response_max_attempts(ReasoningOnly, &ApiBackend::ChatCompletions),
+            THINK_ONLY_MAX_ATTEMPTS
+        );
+        for backend in [ApiBackend::Responses, ApiBackend::Messages] {
+            assert_eq!(
+                empty_response_max_attempts(ReasoningOnly, &backend),
+                EMPTY_RESPONSE_MAX_ATTEMPTS
+            );
+        }
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            assert_eq!(
+                empty_response_max_attempts(NoVisibleContent, &backend),
+                EMPTY_RESPONSE_MAX_ATTEMPTS
+            );
+        }
+        // `classify_error` itself is unchanged: it still holds every empty reply to the shared cap.
+        assert_eq!(
+            effective_max_retries(&empty_response(ReasoningOnly), DEFAULT_MAX_RETRIES),
+            EMPTY_RESPONSE_MAX_ATTEMPTS
+        );
     }
 }

@@ -4548,6 +4548,7 @@ mod tests {
             wire_source: McpWireSource::Local,
             plugin_name: Some("acme".into()),
             is_managed_gateway: false,
+            held_digest: None,
         };
         let form = McpSetupFormState::new(&server).unwrap();
         assert_eq!(form.selected_value().as_deref(), Some("us1"));
@@ -4643,6 +4644,7 @@ mod tests {
             wire_source: McpWireSource::Managed,
             plugin_name: None,
             is_managed_gateway: false,
+            held_digest: None,
         }]);
         state.entry_data_indices = vec![None, Some(0)];
         state.entry_group_keys = vec![
@@ -4696,6 +4698,7 @@ mod tests {
             wire_source: wire,
             plugin_name: None,
             is_managed_gateway: false,
+            held_digest: None,
         }
     }
 
@@ -4790,6 +4793,7 @@ mod tests {
                 wire_source: McpWireSource::Local,
                 plugin_name: Some("alpha".into()),
                 is_managed_gateway: false,
+                held_digest: None,
             },
             McpServerInfo {
                 name: "p2-srv".into(),
@@ -4808,6 +4812,7 @@ mod tests {
                 wire_source: McpWireSource::Local,
                 plugin_name: Some("beta".into()),
                 is_managed_gateway: false,
+                held_digest: None,
             },
         ];
         let mut state = ExtensionsModalState::new(ExtensionsTab::McpServers);
@@ -4861,6 +4866,7 @@ mod tests {
             wire_source: McpWireSource::Local,
             plugin_name: plugin.map(str::to_string),
             is_managed_gateway: false,
+            held_digest: None,
         };
         let servers = vec![
             server("fuigo_com_x", None),

@@ -140,7 +140,7 @@ async fn refresh_cross_cwd_cache(
 }
 
 fn scan_cross_cwd_prompts() -> Vec<String> {
-    let sessions_dir = crate::util::fuigo_home::fuigo_home().join("sessions");
+    let sessions_dir = fuigo_config::sessions_root();
     let entries = match std::fs::read_dir(&sessions_dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),

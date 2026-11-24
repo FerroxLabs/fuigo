@@ -2545,3 +2545,47 @@ fn correct_custom_tool_call_still_works_with_custom_set() {
         Some([OutputSlot::CustomToolCall { .. }])
     ));
 }
+
+/// T2: a main turn sets only `x_fuigo_conv_id` (the session id); the Responses body must still carry it as
+/// `prompt_cache_key`, identical to the key a side call sets explicitly under its own `btw-` conv id.
+#[test]
+fn main_turn_and_side_call_share_one_prompt_cache_key() {
+    let main = ConversationRequest {
+        items: vec![ConversationItem::user("hi")],
+        model: Some("m".to_string()),
+        x_fuigo_conv_id: Some("session-1".to_string()),
+        ..Default::default()
+    };
+    let side = ConversationRequest {
+        x_fuigo_conv_id: Some("btw-label".to_string()),
+        prompt_cache_key: Some("session-1".to_string()),
+        ..main.clone()
+    };
+    assert_eq!(
+        rs::CreateResponse::from(&main).prompt_cache_key.as_deref(),
+        Some("session-1")
+    );
+    assert_eq!(
+        rs::CreateResponse::from(&side).prompt_cache_key,
+        rs::CreateResponse::from(&main).prompt_cache_key
+    );
+}
+
+/// T3: the system prompt travels as the first `system` input item, never as `instructions`, so the
+/// instructions-vs-input cache split some clients hit does not apply.
+#[test]
+fn system_prompt_is_an_input_item_not_instructions() {
+    let req = ConversationRequest {
+        items: vec![
+            ConversationItem::system("SYS"),
+            ConversationItem::user("hi"),
+        ],
+        model: Some("m".to_string()),
+        ..Default::default()
+    };
+    let body = serde_json::to_value(rs::CreateResponse::from(&req)).unwrap();
+    assert!(body.get("instructions").is_none_or(|v| v.is_null()));
+    let first = &body["input"][0];
+    assert_eq!(first["role"], "system");
+    assert!(first.to_string().contains("SYS"));
+}

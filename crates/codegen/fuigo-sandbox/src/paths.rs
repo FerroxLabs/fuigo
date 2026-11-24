@@ -12,7 +12,7 @@ pub(crate) fn fuigo_home() -> PathBuf {
 /// The sessions root used by sandbox grants, diagnostics, and the root audit log.
 /// This names the root; writes within individual session folders use SessionWriter.
 pub(crate) fn sessions_root() -> PathBuf {
-    fuigo_home().join("sessions")
+    fuigo_config::sessions_root()
 }
 
 /// On-disk JSONL audit log under the sessions directory.
@@ -121,7 +121,7 @@ mod r2_tests {
     #[test]
     fn r2f12_strict_profile_grants_the_session_tree_only_with_persistence_on() {
         let workspace = Path::new("/work/space");
-        let sessions = fuigo_home().join("sessions");
+        let sessions = fuigo_config::sessions_root();
         assert!(strict_writable_paths(workspace, false).contains(&sessions));
         let off = strict_writable_paths(workspace, true);
         assert!(!off.iter().any(|p| p.starts_with(&sessions)), "{off:?}");

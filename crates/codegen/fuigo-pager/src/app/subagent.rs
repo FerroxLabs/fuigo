@@ -257,8 +257,7 @@ fn enrich_from_meta_with_home(
     parent_cwd: &std::path::Path,
     parent_session_id: &str,
 ) {
-    let meta_path = fuigo_home
-        .join("sessions")
+    let meta_path = fuigo_config::sessions_root_in(fuigo_home)
         .join(urlencoding::encode(&parent_cwd.to_string_lossy()).as_ref())
         .join(parent_session_id)
         .join("subagents")

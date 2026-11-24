@@ -15,8 +15,9 @@
 //! error text; nothing in the agent classifies on the scrubbed text.
 
 use crate::client::{
-    H_AGENT_ID, H_CLIENT_IDENTIFIER, H_CLIENT_VERSION, H_CONV_ID, H_DEPLOYMENT_ID,
-    H_MODEL_OVERRIDE, H_REQ_ID, H_SESSION_ID, H_TRANSIENT_RETRY, H_TURN_IDX, H_USER_ID,
+    H_AGENT_ID, H_CLIENT_IDENTIFIER, H_CLIENT_VERSION, H_CONV_ID, H_DEPLOYMENT_ID, H_GROK_CONV_ID,
+    H_MODEL_OVERRIDE, H_OPENROUTER_SESSION_ID, H_REQ_ID, H_SESSION_ID, H_TRANSIENT_RETRY,
+    H_TURN_IDX, H_USER_ID,
 };
 
 /// Fixed protocol constants the sampler writes, with the header each travels under. Only that pair is skipped: the
@@ -46,6 +47,10 @@ const CLIENT_WRITTEN_HEADERS: &[&str] = &[
     H_CONV_ID,
     H_REQ_ID,
     H_SESSION_ID,
+    // The provider cache headers carry the same session id: recorded, it was redacted from every session file at rest
+    // (summary.json `id`), so the session could no longer be found or loaded (1.0.47 S2 round-trip audit).
+    H_GROK_CONV_ID,
+    H_OPENROUTER_SESSION_ID,
     H_TURN_IDX,
     H_TRANSIENT_RETRY,
     H_MODEL_OVERRIDE,
@@ -313,6 +318,28 @@ mod tests {
         );
         record_request(&key_req, &[]);
         assert_eq!(scrub("text/event-stream"), "<redacted>");
+        clear_for_tests();
+    }
+
+    /// 1.0.47 S2 round-trip audit: the session id the client writes under a provider cache header is not a sent
+    /// credential, so it is never pinned at rest (where it rewrote summary.json `id` and broke session/load).
+    #[test]
+    fn the_session_id_under_a_provider_cache_header_is_not_recorded() {
+        let _g = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        clear_for_tests();
+        let sid = "019a9f3e-7c41-7b2a-9d1e-5f0c2b8a4e17";
+        let req = request(
+            "https://api.x.ai/v1/responses",
+            &[(H_GROK_CONV_ID, sid), (H_OPENROUTER_SESSION_ID, sid)],
+        );
+        record_request(&req, &[]);
+        assert_eq!(scrub(sid), sid);
+        assert!(!fuigo_secrets::at_rest::contains_any(sid.as_bytes()));
+        let summary = format!(r#"{{"id":"{sid}"}}"#);
+        assert_eq!(
+            &*fuigo_secrets::at_rest::transform_whole(summary.as_bytes()),
+            summary.as_bytes()
+        );
         clear_for_tests();
     }
 

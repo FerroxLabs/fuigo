@@ -295,6 +295,8 @@ pub struct BashToolInput {
     pub timeout: Option<u64>,
 
     /// One sentence explanation as to why this command needs to be run and how it contributes to the goal.
+    // Optional: models often omit it and a rejected first call costs a turn. Readers treat empty as absent.
+    #[serde(default)]
     #[schemars(
         description = "One sentence explanation as to why this command needs to be run and how it contributes to the goal."
     )]
@@ -2586,6 +2588,15 @@ mod tests {
             Some(&serde_json::json!(120_000)),
             "timeout schema should advertise default 120000, got {timeout}"
         );
+        // Description is optional on parse and in the generated schema (empty = absent).
+        let bare: BashToolInput = serde_json::from_str(r#"{"command":"ls"}"#).unwrap();
+        assert_eq!(bare.description, "");
+        let schema = crate::registry::types::generate_schema::<BashToolInput>();
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["command"]),
+            "{schema}"
+        );
         // Serde omit stays None so background without timeout remains unbounded.
         let missing: BashToolInput =
             serde_json::from_str(r#"{"command":"ls","description":"list"}"#).unwrap();
@@ -2678,7 +2689,8 @@ mod tests {
             )
             .is_err()
         );
-        assert!(serde_json::from_str::<BashToolInput>(r#"{"command":"x"}"#).is_err());
+        // description is optional now (T1).
+        assert!(serde_json::from_str::<BashToolInput>(r#"{"command":"x"}"#).is_ok());
     }
 
     // A foreground command must not block longer than the cap, whatever its
@@ -4490,7 +4502,7 @@ mod tests {
                     "block_until_ms": { "type": "integer", "description": "placeholder" },
                     "description": { "type": "string" }
                 },
-                "required": ["command", "description"]
+                "required": ["command"]
             })
         }
 

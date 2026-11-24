@@ -572,6 +572,7 @@ mod tests {
             is_managed_gateway: false,
             status_reason: None,
             blocked_reason: None,
+            held_digest: None,
         }
     }
 
@@ -769,6 +770,7 @@ mod tests {
                 config_type: Some("http".into()),
                 setup: None,
                 setup_values: None,
+                held_digest: None,
                 session: Some(McpsServerSession {
                     enabled: true,
                     status: None,

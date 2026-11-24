@@ -34,12 +34,13 @@ pub fn find_latest_compaction_checkpoint(
 ) -> io::Result<Option<CompactionCheckpointInfo>> {
     use crate::session::storage::RawLinePeek;
 
-    let raw_contents = match std::fs::read_to_string(updates_path) {
-        Ok(s) if !s.is_empty() => s,
+    let bytes = match crate::session::storage::updates_cache::read(updates_path) {
+        Ok(b) if !b.is_empty() => b,
         Ok(_) => return Ok(None),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
+    let raw_contents = crate::session::storage::updates_cache::utf8(&bytes)?;
 
     if !raw_contents.contains("compaction_checkpoint") {
         return Ok(None);

@@ -1,0 +1,57 @@
+# Fuigo 1.0.47 release notes
+
+## Security
+
+- **Destructive changes outside the workspace now ask first, in every mode.** On macOS and Linux, a command or edit that deletes, moves, truncates or overwrites data that already exists outside your workspace now asks before it runs. This includes bypass mode. Temp folders and Fuigo's own home are not "outside". In headless runs, that one command is refused with a message naming the path, unless the path is pre-allowed with `--allow` or a user-level allow rule. ACP hosts that can show prompts declare `_meta: {"fuigo/permissionPrompts": true}` in `initialize`.
+  - **Not affected:** paths you typed in your own prompt (the resolved target must stay inside the path you typed, so a link that points elsewhere still asks), files Fuigo created for you this session, creating new files, appends, and anything inside the workspace. An approval is remembered per resolved path for the rest of the session (in memory only).
+  - **Also asks:** any write to your user-level rule and config files.
+  - **Third-party ACP clients:** in Default and Auto they still get the prompt, as in 1.0.46. In bypass they are refused unless they declare `fuigo/permissionPrompts`.
+  - **This is a safety net, not a boundary.** Approvals cover the exact path only, not the rest of its folder. For a real boundary run inside the sandbox (for example `fuigo --sandbox workspace`).
+  - **Known limits:** a target reached only by a tree walk (`find -L`, `find -fprint`); a variable set outside the command (`rm -rf "$DATA_DIR"`); a program run from a script file; interpreters and `eval`; `cp -ln SRC DIR` link not recorded; a quoted relative path with spaces that you type also counts its first word as typed; `find -execdir` with both `{}` and a fixed relative operand judges that operand from where `find` started; a same-line link whose own path has `..` after another link is placed where the `..` points on paper; an unrecognised ACP client that answers prompts by itself in Default or Auto lets the change run (the prompt it always had); a file that appears after an allowed command counts as the agent's even if the command failed; the sandbox does not switch the ask off; a variable given only to a nested shell, set twice on a line, or set in both `if` branches is read with one value; `mkdir -p ~/.claude` on an existing folder asks; `touch -m FILE` is not recorded as the agent's file; after you resume a session, paths you typed earlier and files Fuigo created earlier ask again; calls routed through the hub are unchanged; Windows has no guard in this release.
+- **Secrets are scrubbed from saved sessions, logs and the search database.** Secret values from your environment and config (names containing TOKEN, SECRET, PASSWORD, API_KEY and similar; short dictionary-like values excepted) and credentials Fuigo sends are stored as `<redacted>` under `~/.fuigo/sessions` and `~/.fuigo/logs`, and in the search database. That covers transcripts, terminal and MCP output files, compaction archives, prompt history and MCP stderr logs. The model still sees raw values during the live session.
+  - **Saved JSON stays readable and resumable.** It is scrubbed record by record: only string values are edited, and Fuigo's own record labels are kept.
+  - **What you will notice:** a resumed session, up-arrow prompt recall, and output the agent reads back from those files show `<redacted>`. `/rewind` file copies and permission grants are kept exact.
+  - **Known limits:** only values Fuigo knows about are matched (environment and config secrets, credentials it sent, and the shapes its redactor already catches). A secret that matches a label word survives only in a label position. Copies and imports catch secrets that span records. A secret the agent prints from a file it read, or writes into a file in your workspace, is not scrubbed. Sessions from before 1.0.47 are not rewritten in place. Further limits: user JSON written whole (such as an MCP output file) keeps a secret equal to a label word in its top-level key or tag value; nested tags outside the five listed paths are scrubbed, so that update line stops loading; a torn non-JSON line in a copied JSON-lines file loses masking of a cut-off value start (pre-1.0.47 imports only); two secrets used as keys of one nested object both become `<redacted>`.
+- **A changed MCP server definition is held until you approve it again.** If the command, arguments, environment, URL or headers of a configured MCP server change outside Fuigo (an edit, a `git pull`, another tool), the server is not started or connected until you approve it. This applies in every permission mode, bypass included.
+  - **What is held:** a changed definition. A first sighting of a server is silent, and unchanged servers start as before. Config edits made while a session is open are held too. Rotating a token that config.toml references as `${VAR}` is not held.
+  - **How to approve:** the prompt in the TUI, `fuigo mcp enable <name> [--agent]`, or `fuigo mcp approvals reset`. ACP clients use `_fuigo/mcp/toggle`, which has a new optional `digest` field: it approves exactly the definition shown (by digest, as do `fuigo mcp enable` and the TUI), and returns an error if the definition has changed again since.
+  - **ACP:** `mcp/list` now shows `held`, `heldReason` and `heldDigest` for each server. Servers supplied by an ACP client are never held. A server with the same name in your own config still wins over a client's, as since 1.0.21.
+  - **If the approvals file is damaged,** Fuigo holds the servers read from disk, keeps the session running, and tells you; the toggle returns an error naming the file. `fuigo mcp approvals reset` starts a new file and keeps the old one aside.
+  - **Existing "Always allow" grants are unaffected.**
+  - **Known limits:** anything that can run commands as you (including the agent's own shell in bypass mode) can approve a definition, just as it can edit your config; someone who rewrites both the config and the approvals file is out of scope; a port-only change is held once.
+
+- **ACP input is checked more strictly.** ACP input now drops JSON array lines (batches or positional messages) and client payloads that contain embedded line breaks or exceed 64 MiB. Before this, such input could slip a request past the leader's checks (id namespacing, identity, ownership) and the stdio launch policy. Present since 1.0.46.
+- **`url` updated to 2.5.9.** This fixes RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs.
+
+## Fixes
+
+- **Built-in workflows no longer advertise a build-machine path.** The workflow list used to show an "Absolute path" line pointing at a folder on the machine that built Fuigo. Built-ins now carry no path; the script is embedded in the binary.
+
+- **Sessions always reload after a restart.** The secret scrubber no longer rewrites the launch policy path or hash, or the session id sent in provider cache headers, so a session with a launch policy set resumes as expected.
+- **Table copy no longer adds backticks** except under "Copy as Markdown".
+- **Local reasoning models no longer end a turn with nothing to show.** When a model such as qwen3 on Ollama stops after thinking, with no answer and no tool call, Fuigo now sends the same request again, up to five times, because a fresh try usually gets the answer. In that case the turn can take up to about 3 extra minutes. If every try still only thinks, the error says "think-only" instead of a generic empty response. These tries do not count against your retry setting (`FUIGO_MAX_RETRIES` or `max_retries`), so a lower setting does not cut them short. The one exception: a retry setting of 0, which turns resends off, turns these off too. Connection errors and server errors still stop at your retry setting. Stop ends the resends at once. Ollama's reasoning text is now shown like other providers' reasoning.
+- **A retried turn no longer counts each retry against the context window,** so it no longer compacts early or repeats tool calls. Your usage and cost still count every try. Present since 1.0.43. In the prompt response's `_meta`, `totalTokens`, `inputTokens`, `outputTokens` and `cachedReadTokens` now all describe that last try; the billed sum of every try is in `billedTotalTokens`, `billedInputTokens`, `billedOutputTokens` and `billedCachedReadTokens`.
+
+## Improvements
+
+### Memory and performance
+
+- **Memory search is fast and can be cancelled.** On a 156 KB MEMORY.md a search drops from about 7 s to about 0.13 s, and Cancel now works during it.
+- **`usage.json` is capped at 200 rows.** Older rows are archived in `usage_turns.jsonl` and are still readable, and fork totals stay exact. `fuigo usage` still shows every turn.
+- **Less disk work per turn.** The session summary is written once per turn, not once per record. Chat history is rewritten only after 1 MiB of aged results, and old results are also cleared on resume. Identical rewrites are skipped but still flushed to disk.
+- **Session search reads only new content,** not whole transcripts each prompt and launch.
+- **Resume reads the update log once, not six times.**
+- **Memtrace files are pruned after 7 days.**
+
+### Lower token cost
+
+- **About 6% lower cost per solved task than 1.0.46, at the same solve rate.** In our A/B (36 tasks, 2 runs each, same model and limits) both versions solved 69 of 72; cost per solved task fell 6.4% (paired ratio 0.936, 95% CI 0.895 to 0.984), with about one fewer turn per task on average (10.69 vs 11.57).
+- **Cache keys go only to the provider that documents them.** Fuigo sends the session's cache-routing identifier as `x-grok-conv-id` to api.x.ai and as `x-session-id` to openrouter.ai, and to no other host. Repeat turns in one session are more likely to reach the same cache, so the long unchanged start of each request is billed at the cached rate more often. The value is a random per-session identifier, not linked to you. OpenAI requests already carried a cache key; a test now pins that, so cost there is unchanged.
+- **Shell `description` is optional.** The shell tool no longer requires a `description` field. Before, a first call without one was rejected and had to be repeated, which cost an extra round trip on most first calls in our benchmark (about 2.5% of spend). Empty or missing descriptions show the command itself in the activity line and approval card; no permission decision changes.
+- **`rules = false` is documented.** The docs now state that the `rules` option under the compatibility section turns off only the rules folder, and that root-level project instruction files load regardless. If you are trimming the start of every request, this tells you what actually stays in it.
+
+## Developer and CI
+
+- **A flaky web-search test is fixed.** `t04_denied_live_search_credential_cannot_use_configured_snapshot` no longer shares a pooled client with other mock-server tests; the assertion is unchanged.
+- **Release pipeline:** the npm signature audit upgrades npm first and retries, up to a bound, only when the registry has not caught up (`EMISSINGSIGNATUREKEY`); any other failure fails at once. The PowerShell Gallery signing module is installed before Windows signing, with a bounded retry.
+- **Redactor regression pins:** four URL and query-key redaction cases from an outside review, already fixed in 1.0.46, are now a test and fuzz seeds. No behaviour change.

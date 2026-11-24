@@ -674,7 +674,7 @@ fn read_rows_text(path: &Path, fuigo_home: &Path) -> std::io::Result<String> {
 /// The sessions tree cannot be listed, or a grants file is there but cannot be read or is not
 /// TOML: what it granted is unknown.
 pub fn recorded_write_roots(fuigo_home: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let sessions = fuigo_home.join("sessions");
+    let sessions = fuigo_config::sessions_root_in(fuigo_home);
     let mut roots = vec![canonical_path(&sessions)];
     let mut files = vec![fuigo_home.join(GLOBAL_GRANTS_FILENAME)];
     match std::fs::read_dir(&sessions) {

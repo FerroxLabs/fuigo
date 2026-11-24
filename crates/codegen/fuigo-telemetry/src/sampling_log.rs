@@ -8,8 +8,6 @@ use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::Layer;
 use tracing_subscriber::registry::LookupSpan;
 
-use fuigo_config::fuigo_home;
-
 use crate::instrumentation::{NoOpLayer, TargetFilterLayer};
 
 const ENV_VAR: &str = "FUIGO_LOG_SAMPLING";
@@ -27,9 +25,7 @@ where
         return Box::new(NoOpLayer::new());
     }
 
-    let path = fuigo_home()
-        .join(crate::unified_log::LOG_DIR)
-        .join(LOG_FILE);
+    let path = fuigo_config::logs_dir().join(LOG_FILE);
 
     if let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
@@ -44,6 +40,7 @@ where
 
     let file = match std::fs::OpenOptions::new()
         .create(true)
+        // at-rest: handed to appender::scrubbed_non_blocking (AtRestFile::records)
         .append(true)
         .open(&path)
     {

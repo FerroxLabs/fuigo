@@ -108,3 +108,50 @@ async fn concurrent_server_saves_neither_tear_nor_lose_updates() {
         .collect();
     assert!(strays.is_empty(), "temp files left behind: {strays:?}");
 }
+
+/// MC-03: when the approval cannot be recorded the save must not read as approved. The config stays saved, and the
+/// error says so and names `fuigo mcp enable`.
+#[test]
+fn a_save_whose_approval_cannot_be_recorded_returns_an_error_but_keeps_the_config() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = fuigo_test_support::FuigoHome::new();
+    // An unreadable approvals store is refused, never overwritten.
+    std::fs::write(super::super::mcp_approvals::store_path(), "not json").unwrap();
+    let path = home.path().join("config.toml");
+    let err = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(save_mcp_server_config_at(&path, "srv", &server()))
+        .expect_err("a failed approval record must be reported");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("saved MCP server `srv`") && text.contains("fuigo mcp enable srv"),
+        "{text}"
+    );
+    assert!(std::fs::read_to_string(&path).unwrap().contains("srv"));
+}
+
+/// MC-03 (L9): the server name in the unrecorded-approval error is scrubbed like the other S3 messages.
+#[test]
+fn the_unrecorded_approval_error_scrubs_the_server_name() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = fuigo_test_support::FuigoHome::new();
+    std::fs::write(super::super::mcp_approvals::store_path(), "not json").unwrap();
+    let path = home.path().join("config.toml");
+    let err = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(save_mcp_server_config_at(&path, "s\u{1b}[31mrv", &server()))
+        .expect_err("a failed approval record must be reported");
+    let text = format!("{err:#}");
+    assert!(
+        !text.contains('\u{1b}') && text.contains("fuigo mcp enable s[31mrv"),
+        "{text}"
+    );
+}

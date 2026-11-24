@@ -101,16 +101,19 @@ impl SessionActor {
     /// Each `UserMessageChunk` sequence is merged into a single prompt string.
     /// `RewindMarker` entries truncate the list back to the marker's target so only prompts from the current timeline are returned.
     ///
-    /// Uses [`PromptExtractIterator`] which peeks at the `update.sessionUpdate` discriminant field without fully deserialising every notification.
+    /// Uses [`prompt_extract_events`](crate::session::storage::prompt_extract_events), which peeks at the `update.sessionUpdate` discriminant field without fully deserialising every notification.
     /// This skips large `acp::SessionNotification` allocations for the many update types (tool calls, assistant chunks) prompt extraction ignores.
     pub(super) fn load_user_prompts_from_updates(
         updates_path: &std::path::Path,
     ) -> std::io::Result<Vec<String>> {
-        use crate::session::storage::{PromptExtractIterator, collect_prompts_from_events};
+        use crate::session::storage::{collect_prompts_from_events, prompt_extract_events};
 
-        let Some(iter) = PromptExtractIterator::open(updates_path)? else {
-            return Ok(vec![]);
+        let bytes = match crate::session::storage::updates_cache::read(updates_path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e),
         };
+        let iter = prompt_extract_events(&bytes);
 
         tracing::debug!(
             path = %updates_path.display(),

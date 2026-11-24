@@ -276,6 +276,9 @@ pub struct PermissionRequest {
     /// mismatch with `mcp_definition` that matches this one is an upgrade, not a changed definition: it is re-recorded
     /// silently. `None` when `mcp_definition` is.
     pub mcp_definition_legacy: Option<String>,
+    /// S1 (1.0.47): what the outside-change guard found. Always computed by the permission handle, never by the caller
+    /// (any value given is overwritten).
+    pub outside_change: Option<crate::permission::shell_access::OutsideChange>,
 }
 /// u35 g11 (Astra r10 High): the working directory a bash tool input names (OpenCode bash `workdir`), resolved as the
 /// tool resolves it (absolute, or under `session_cwd`); `None` when the tool runs in the session directory.
@@ -310,6 +313,7 @@ impl PermissionRequest {
             shell_run_dir: None,
             mcp_definition: None,
             mcp_definition_legacy: None,
+            outside_change: None,
         }
     }
 }
@@ -451,6 +455,9 @@ pub enum PermissionCommand {
     /// u35 t1 (design d2 §3.4): what the session policy was built from, so the manager can build it without the
     /// project tier and rebuild it when folder trust changes.
     SetSessionPolicyInputs(std::sync::Arc<super::resolution::SessionPolicyInputs>),
+    /// S1 (1.0.47): hand the outside-change guard the allow rules loaded at session start (after every earlier
+    /// command, so the session's policy inputs are applied), then answer.
+    SealOutsideRules(oneshot::Sender<Vec<PermissionRule>>),
     ResetState,
     Shutdown,
 }

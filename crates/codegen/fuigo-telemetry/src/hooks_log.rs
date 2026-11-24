@@ -27,8 +27,6 @@ use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::Layer;
 use tracing_subscriber::registry::LookupSpan;
 
-use fuigo_config::fuigo_home;
-
 const ENV_HOOKS_LOG: &str = "FUIGO_HOOKS_LOG";
 
 static LOG_GUARD: std::sync::OnceLock<Mutex<Option<tracing_appender::non_blocking::WorkerGuard>>> =
@@ -103,7 +101,7 @@ where
 }
 
 fn resolve_log_path() -> Option<PathBuf> {
-    let default_path = || fuigo_home().join("logs").join("hooks.log");
+    let default_path = || fuigo_config::logs_dir().join("hooks.log");
     let raw = match std::env::var(ENV_HOOKS_LOG) {
         Ok(val) => val,
         Err(_) => return None, // opt-in only

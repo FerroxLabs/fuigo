@@ -139,13 +139,17 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    let mut configured: Vec<String> = Vec::new();
     let fresh: Vec<String> = names
         .into_iter()
         .filter_map(|name| {
             let name = name.as_ref();
             let usable =
                 !name.is_empty() && !name.contains(['=', '\0']) && !is_never_credential_name(name);
-            usable.then(|| name.to_ascii_uppercase())
+            usable.then(|| {
+                configured.push(name.to_owned());
+                name.to_ascii_uppercase()
+            })
         })
         // P113 r3 (Astra r3 #1): a built-in provider name a config names (an MCP `bearer_token_env_var =
         // "OPENAI_API_KEY"`) is kept too: children are denied it either way, but `!` commands and client terminals,
@@ -155,7 +159,7 @@ where
         return;
     }
     // Waits out a persistent-shell spawn that checked the generation and has not spawned yet.
-    let _fence = DENYLIST_FENCE
+    let fence = DENYLIST_FENCE
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut set = CONFIGURED_CREDENTIAL_NAMES
@@ -170,6 +174,10 @@ where
     if denies_more {
         CREDENTIAL_DENYLIST_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+    drop(set);
+    drop(fence);
+    // S2 (design §4 source 2): a configured credential name's current value is never written at rest either.
+    crate::at_rest::record_env_names(&configured);
 }
 
 /// Bumped (under the registry's write lock) every time [`register_credential_env_names`] adds a

@@ -297,6 +297,48 @@ What is deliberately **not** floored:
 
 ---
 
+### Changes outside the workspace
+
+This is a safety net, not a boundary: it asks before the outside deletes and overwrites it can recognise on the command line. For a hard boundary use the sandbox (for example `fuigo --sandbox workspace`, see [Sandbox](18-sandbox.md)).
+
+Since 1.0.47 a command (or an edit tool) that would delete, move away, truncate or overwrite an existing file outside the
+workspace asks first, in every mode, always-approve and Auto included (Auto does not consult the classifier for it).
+The workspace is the session folder, its git worktree, `$FUIGO_HOME` and the temp folders. Creating a new file never
+asks, and neither does an append. Writes to the files that hold your own authority (`~/.claude/settings.json`,
+Fuigo's config, hooks, sandbox and MCP config, the per-session permission stores and the folder-trust inputs) ask on
+any write.
+
+It stays quiet for a path you typed in your prompt this session, a path you approved once this session (that exact
+path), a file the agent itself created this session, and a CLI or user-tier allow rule loaded at session start that
+spells the path. Nothing is remembered across a resume. Where nobody can answer (headless runs in always-approve,
+`dontAsk`, `alwaysAllow`, unrecognised ACP clients in always-approve) the command is refused with a message that says
+how to allow it. A command Fuigo cannot parse asks too, since its effects cannot be known.
+
+Limits: the check judges the command line. A target reached only by a tree walk (`find -L`, `find -fprint`), a variable
+set outside the command, or a program run from a script file is not seen. Under `--sandbox` the ask still appears even
+when the sandbox would block that write. Approvals and typed paths are forgotten on resume, so the same change asks
+again. There is no Windows guard. Also not seen:
+
+- A quoted relative path with spaces that you type (`"data/report final.txt"`) also counts its first word
+  (`data/report`) as typed, so a change below that folder through a workspace link stays quiet.
+- `find -execdir` with both `{}` and a fixed relative operand judges the fixed operand from the folder `find` started
+  in, not from the folder of each match.
+- A link made earlier on the same line whose own path goes through `..` after another link (`ln -s X jump/../alias`)
+  is placed where the `..` points on paper, not where the system puts it.
+- An unrecognised ACP client in Default or Auto still gets the prompt, as it always did; if that client answers prompts
+  automatically, the change runs. Only always-approve, `dontAsk` and `alwaysAllow` refuse for such clients.
+- A file counts as created by the agent when it appears after an allowed command, even if that command failed and
+  something else made the file before the next request.
+- A variable given only to a nested shell (`D=/srv/data sh -c 'rm -f "$D/app.db"'`) is not followed into it, and a
+  variable set twice on one line (`D=a; D=b rm "$D/x"`) or in both branches of an `if` is read with one value only.
+- `mkdir -p ~/.claude` (or a session folder under `$FUIGO_HOME`) on a folder that already exists asks, and
+  `touch -m FILE` is not recorded as the agent's file, so removing it later asks.
+- `cp -ln SRC DIR` does not record the link it makes inside `DIR`, so a later write through that link stays quiet.
+
+A command Fuigo cannot parse asks. On a corpus of 155 real commands (CI steps, repository scripts, everyday idioms)
+this caused no false asks: the only commands that did not parse were GitHub Actions templates (`${{ … }}`), which are
+not shell.
+
 ## Configuring Permissions
 
 Fuigo reads permission rules from three compatible sources. Rules from all sources are merged into one set; a rule's effect depends on its action (`deny` > `ask` > `allow`), not on which file it came from.

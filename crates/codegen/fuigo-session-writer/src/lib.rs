@@ -26,8 +26,9 @@ mod writer;
 pub mod seams;
 
 pub use writer::{
-    Busy, ClaimError, DELETING_PREFIX, LOCK_SIDECARS, Refusal, ReplaceError, SessionAppend,
-    SessionWriter, delete_observer, disable_persistence, persistence_disabled, refusal,
+    AtRestAppend, Busy, ClaimError, DELETING_PREFIX, LOCK_SIDECARS, Refusal, ReplaceError,
+    SessionAppend, SessionLock, SessionWriter, delete_observer, disable_persistence,
+    persistence_disabled, refusal,
 };
 
 #[cfg(debug_assertions)]
@@ -40,3 +41,18 @@ pub use writer::debug_live_writers;
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 mod writer_tests;
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: timing fixtures in test-owned temp dirs; no product session writer runs there"
+)]
+#[cfg(test)]
+#[path = "at_rest_perf_tests.rs"]
+mod at_rest_perf_tests;
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: fixtures stage files in test-owned temp dirs; no product session writer runs there"
+)]
+#[cfg(test)]
+#[path = "at_rest_tests.rs"]
+mod at_rest_tests;

@@ -26,11 +26,6 @@ mod builtin_tests {
                 "builtin '{}' needs meta.when_to_use",
                 builtin.name
             );
-            assert!(
-                !builtin.path.is_empty(),
-                "builtin '{}' needs a listing path",
-                builtin.name
-            );
         }
     }
 

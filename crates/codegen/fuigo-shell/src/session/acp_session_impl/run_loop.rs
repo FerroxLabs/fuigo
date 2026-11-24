@@ -1628,12 +1628,26 @@ pub(super) async fn run_session(
                             // Capture the dispatcher's event sender alongside the diff
                             // `McpClientEvent::ConfigDiff` can then fan out right after the in-memory swap
                             // The emit happens without holding the `mcp_state` lock
+                            // MC-03: only admitted servers are installed; a changed one is held (its old process stops).
+                            // The gate's file I/O runs before the state lock, off the reactor (review Astra M4).
+                            let admission = crate::session::mcp_admission::admit_off_reactor(
+                                session.session_info.id.0.to_string(),
+                                mcp_servers,
+                            )
+                            .await;
                             let (diff, dispatch_event_tx) = {
                                 let mut mcp_state = session.mcp_state.lock().await;
-                                let diff = mcp_state.update_configs_diff(mcp_servers);
+                                let diff = mcp_state.update_configs_diff(admission.servers());
                                 let tx = mcp_state.client_event_tx();
                                 (diff, tx)
                             };
+                            for notice in admission.notices {
+                                if told_config_notices.insert(notice.clone()) {
+                                    session.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice {
+                                        message: notice,
+                                    });
+                                }
+                            }
 
                             let Some(diff) = diff else {
                                 tracing::debug!(
@@ -1688,8 +1702,7 @@ pub(super) async fn run_session(
                                 server_name: server_name.clone(),
                                 enabled,
                             });
-                            let mut mcp_state = session.mcp_state.lock().await;
-                            let mut configs = mcp_state.configs.clone();
+                            let mut configs = session.mcp_state.lock().await.configs.clone();
 
                             if enabled {
                                 if let Some(config) = server_config {
@@ -1705,11 +1718,9 @@ pub(super) async fn run_session(
                                             == server_name
                                     });
                                     if already_present {
-                                        drop(mcp_state);
                                         let _ = respond_to.send(Ok(()));
                                         continue;
                                     }
-                                    drop(mcp_state);
                                     let _ = respond_to.send(Err(crate::acp_error::invalid_params(format!("server '{}' not found in config", server_name))));
                                     continue;
                                 }
@@ -1717,13 +1728,32 @@ pub(super) async fn run_session(
                                 configs.retain(|c| crate::session::mcp_servers::mcp_server_name(c) != server_name);
                             }
 
-                            let diff = mcp_state.update_configs_diff(configs);
-                            // Snapshot the dispatcher sender BEFORE dropping the lock so the emit below survives any later mutation
-                            let dispatch_event_tx = mcp_state.client_event_tx();
-                            drop(mcp_state);
+                            // MC-03: the toggled-on object passes the gate like any other install, on the blocking pool
+                            // before the state lock (review Astra M4). The run loop handles one command at a time, so
+                            // nothing else rewrites `configs` between the copy above and the install below.
+                            let admission = crate::session::mcp_admission::admit_off_reactor(
+                                session.session_info.id.0.to_string(),
+                                configs,
+                            )
+                            .await;
+                            let (diff, dispatch_event_tx) = {
+                                let mut mcp_state = session.mcp_state.lock().await;
+                                let diff = mcp_state.update_configs_diff(admission.servers());
+                                // Snapshot the dispatcher sender under the lock so the emit below survives any later mutation
+                                (diff, mcp_state.client_event_tx())
+                            };
+                            // Review Fable confirm 2: turned on but still held is not success.
+                            let outcome: Result<(), acp::Error> =
+                                crate::session::mcp_admission::toggle_outcome(&admission, &server_name, enabled)
+                                    .map_err(crate::acp_error::invalid_params);
+                            for notice in admission.notices {
+                                session.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice {
+                                    message: notice,
+                                });
+                            }
 
                             let Some(diff) = diff else {
-                                let _ = respond_to.send(Ok(()));
+                                let _ = respond_to.send(outcome);
                                 continue;
                             };
 
@@ -1763,10 +1793,18 @@ pub(super) async fn run_session(
                             let session_cwd = session.session_info.cwd.clone();
                             tokio::task::spawn_local(async move {
                                 session_for_mcp.ensure_mcp_tools_initialized().await;
+                                // Grok r2 A3: this delayed save never records an approval of what is on disk NOW
+                                // (it may have changed during init); turning off still withdraws one.
+                                let approval = if enabled {
+                                    crate::util::config::CampaignApproval::Keep
+                                } else {
+                                    crate::util::config::CampaignApproval::Clear
+                                };
                                 if let Err(e) = crate::util::config::save_mcp_server_enabled_in(
                                     &sname,
                                     enabled,
                                     std::path::Path::new(&session_cwd),
+                                    approval,
                                 )
                                 .await
                                 {
@@ -1776,7 +1814,7 @@ pub(super) async fn run_session(
                                         "Failed to persist server enabled state to config"
                                     );
                                 }
-                                let _ = respond_to.send(Ok(()));
+                                let _ = respond_to.send(outcome);
                             });
                         }
                         SessionCommand::ToggleMcpTool { server_name, tool_name, enabled, is_managed_gateway, respond_to } => {

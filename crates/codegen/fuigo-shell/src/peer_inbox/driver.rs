@@ -312,27 +312,32 @@ mod tests {
             .rsplit_once("\n#[cfg(test)]\nmod tests")
             .map_or(text, |(a, _)| a);
         for marker in ["ipc_to_agent_rx.recv()", "ws_to_agent_rx.recv()"] {
-            let at = body
-                .find(marker)
-                .unwrap_or_else(|| panic!("pump {marker} not found"));
-            let pump: String = body[at..].lines().take(6).collect::<Vec<_>>().join("\n");
-            assert!(
-                pump.contains("write_all(msg.as_bytes())"),
-                "{marker}: forwards the line as is"
-            );
-            for banned in [
-                "peer_inbox",
-                "from_str",
-                "from_slice",
-                "serde_json",
-                "Value",
-            ] {
+            assert!(body.contains(marker), "pump {marker} not found");
+            for (at, _) in body.match_indices(marker) {
+                let wide: String = body[at..].lines().take(12).collect::<Vec<_>>().join("\n");
                 assert!(
-                    !pump.contains(banned),
-                    "{marker}: pump touches `{banned}`:\n{pump}"
+                    wide.contains("credential_scrub::write_client_line("),
+                    "{marker}@{at}: forwards the line as is (through the one multi-line guard)"
                 );
+                let pump: String = body[at..].lines().take(6).collect::<Vec<_>>().join("\n");
+                for banned in [
+                    "peer_inbox",
+                    "from_str",
+                    "from_slice",
+                    "serde_json",
+                    "Value",
+                ] {
+                    assert!(
+                        !pump.contains(banned),
+                        "{marker}: pump touches `{banned}`:\n{pump}"
+                    );
+                }
             }
         }
+        assert!(
+            include_str!("../agent/server.rs").contains("credential_scrub::write_client_line("),
+            "server.rs relay pump bypasses the multi-line guard"
+        );
         // The only peer_inbox calls in the leader app are the arm calls and the attach hook.
         for (i, l) in body.lines().enumerate() {
             if l.contains("peer_inbox::") && !l.trim_start().starts_with("//") {

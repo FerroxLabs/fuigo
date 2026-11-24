@@ -6,6 +6,8 @@ edition.workspace = true
 description = "OS-level sandboxing for Fuigo using kernel primitives (Landlock/Seatbelt) via nono"
 
 [dependencies]
+# S2: writes under the session/log roots go through the at-rest layer.
+fuigo-secrets = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 fuigo-dirs = { workspace = true }

@@ -10,16 +10,11 @@ const MAX_WORKFLOW_NAME_BYTES: usize = 64;
 pub(crate) struct BuiltinWorkflow {
     pub name: &'static str,
     pub script: &'static str,
-    pub path: &'static str,
 }
 
 pub(crate) const BUILTIN_WORKFLOWS: &[BuiltinWorkflow] = &[BuiltinWorkflow {
     name: "deep-research",
     script: include_str!("../workflows/deep_research.rhai"),
-    path: concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/session/workflows/deep_research.rhai"
-    ),
 }];
 
 pub(crate) struct ResolvedWorkflow {
@@ -115,7 +110,7 @@ fn cached_builtin_entries() -> Vec<RegistryEntry> {
             script: builtin.script.to_string(),
             source: WorkflowSource::Builtin,
             source_label: "builtin",
-            path: Some(PathBuf::from(builtin.path)),
+            path: None,
         })
         .collect()
 }
@@ -775,6 +770,13 @@ mod tests {
 
     fn script(name: &str) -> String {
         format!("let meta = #{{ name: \"{name}\", description: \"d\" }};\ncomplete(\"ok\");")
+    }
+
+    #[test]
+    fn builtin_listing_carries_no_filesystem_path() {
+        let builtins: Vec<_> = cached_builtin_entries();
+        assert!(!builtins.is_empty());
+        assert!(builtins.iter().all(|entry| entry.path.is_none()));
     }
 
     #[test]

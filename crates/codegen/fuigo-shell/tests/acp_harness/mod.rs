@@ -111,6 +111,19 @@ pub async fn connect_client<C>(
 where
     C: acp::Client + 'static,
 {
+    connect_client_with_meta(client, client_type, pipes, serde_json::Map::new()).await
+}
+
+/// [`connect_client`] with extra top-level `initialize` `_meta` keys (a capability a test declares).
+pub async fn connect_client_with_meta<C>(
+    client: C,
+    client_type: &str,
+    pipes: AgentPipes,
+    extra_meta: serde_json::Map<String, serde_json::Value>,
+) -> (acp::ClientSideConnection, acp::InitializeResponse)
+where
+    C: acp::Client + 'static,
+{
     let AgentPipes {
         to_agent,
         from_agent,
@@ -142,7 +155,11 @@ where
                         "clientVersion": "0.0-test",
                     })
                     .as_object()
-                    .cloned(),
+                    .cloned()
+                    .map(|mut meta| {
+                        meta.extend(extra_meta);
+                        meta
+                    }),
                 ),
         ),
     )

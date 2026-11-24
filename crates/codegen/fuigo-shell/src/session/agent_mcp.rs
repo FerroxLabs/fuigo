@@ -69,9 +69,9 @@ pub(crate) fn materialize_agent_mcp_servers(
                         tracing::warn!(agent = %definition.name, server = name, "mcpServers: named ref not found in parent");
                         None
                     }),
-                McpServerRef::Inline { name, config } => {
-                    notices.run(|| inline_agent_mcp_server(&definition.name, name, config))
-                }
+                McpServerRef::Inline { name, config } => notices
+                    .run(|| inline_agent_mcp_server(&definition.name, name, config))
+                    .map(|server| stamp_inline(server, definition, name)),
             })
             .collect()
     };
@@ -109,6 +109,33 @@ pub(crate) fn inline_agent_mcp_server(
         }
     };
     crate::session::managed_mcp::refuse_saved_key_in_server(server, &origin)
+}
+
+/// MC-03: an inline server is covered under its agent definition file, with the digest of the parsed object exactly
+/// as it will run (list form: env/header order and duplicates kept). Any stamp the file itself carried is dropped.
+/// [`overlay_agent_mcp_servers`] re-keys it to the server it replaces.
+fn stamp_inline(
+    mut server: acp::McpServer,
+    definition: &AgentDefinition,
+    name: &str,
+) -> acp::McpServer {
+    use crate::util::config::mcp_approvals as ap;
+    ap::strip_stamp(&mut server);
+    let Some(digest) = ap::mcpdef_v1_acp(&server) else {
+        return server;
+    };
+    let origin = match &definition.source_path {
+        Some(path) => ap::DefinitionOrigin::agent(path),
+        None => ap::DefinitionOrigin::agent(Path::new(&format!("agent {}", definition.name))),
+    };
+    let stamp = ap::AdmissionStamp {
+        key: origin.key(&format!("agent:{name}")),
+        digest,
+        origin: origin.display,
+        oauth: None,
+    };
+    ap::set_stamp(&mut server, &stamp);
+    server
 }
 
 fn parse_acp_mcp_object(
@@ -159,16 +186,66 @@ pub(crate) fn overlay_agent_mcp_servers(
     merged: &mut Vec<acp::McpServer>,
     overlay: Vec<acp::McpServer>,
 ) {
-    for server in overlay {
-        let name = mcp_server_name(&server);
+    for mut server in overlay {
+        let name = mcp_server_name(&server).to_owned();
         if let Some(slot) = merged
             .iter_mut()
             .find(|existing| mcp_server_name(existing) == name)
         {
+            rekey_onto_replaced(&mut server, slot);
             *slot = server;
         } else {
             merged.push(server);
         }
+    }
+}
+
+/// A subagent's servers: materialized against the parent's merge `parent`, then each one that replaces a parent server
+/// takes that server's approval key with its own digest. They go to the child session as they are (no overlay), so a
+/// changed replacement is held before the child spawns (design 3.4, review Fable M1, Astra H2).
+///
+/// `parent` is the parent's admitted (execution) list. A parent server held right now is not in it, so its covered
+/// identity comes from the parent session's held record (review Astra/Fable confirm H2). A parent server switched off
+/// needs nothing here: the kill switch drops the child's same-named server.
+pub(crate) fn materialize_subagent_mcp_servers(
+    definition: &AgentDefinition,
+    parent: &[acp::McpServer],
+    parent_session: &str,
+    cwd: &Path,
+    notices: NoticeScope,
+) -> Vec<acp::McpServer> {
+    let mut servers = materialize_agent_mcp_servers(definition, parent, cwd, notices);
+    for server in &mut servers {
+        let name = mcp_server_name(server).to_owned();
+        let replaced_key = match parent.iter().find(|p| mcp_server_name(p) == name) {
+            Some(replaced) => {
+                crate::util::config::mcp_approvals::read_stamp(replaced).map(|s| s.key)
+            }
+            None => crate::session::mcp_admission::held_key_by_name(parent_session, &name),
+        };
+        if let Some(key) = replaced_key {
+            rekey_onto_key(server, key);
+        }
+    }
+    servers
+}
+
+/// MC-03 (A6/G2): an inline agent server that replaces a covered one takes THAT server's key with its own digest, so
+/// an approval of the replaced definition never carries to it, and a first sight of the replacement is held.
+fn rekey_onto_replaced(server: &mut acp::McpServer, replaced: &acp::McpServer) {
+    if let Some(replaced) = crate::util::config::mcp_approvals::read_stamp(replaced) {
+        rekey_onto_key(server, replaced.key);
+    }
+}
+
+fn rekey_onto_key(server: &mut acp::McpServer, key: String) {
+    use crate::util::config::mcp_approvals as ap;
+    if let Some(mut own) = ap::read_stamp(server)
+        && own.key != key
+        && own.key.contains("\0agent:")
+    {
+        own.key = key;
+        ap::set_stamp(server, &own);
     }
 }
 

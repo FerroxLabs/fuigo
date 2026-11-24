@@ -189,7 +189,7 @@ impl OutputLog {
             tracing::warn!("no session writer: terminal output log not written");
             return Self::Unavailable;
         };
-        let opened = tokio::task::spawn_blocking(move || writer.open_append(&rel))
+        let opened = tokio::task::spawn_blocking(move || writer.open_append_stream(&rel))
             .await
             .unwrap_or_else(|error| Err(std::io::Error::other(error)));
         match opened {

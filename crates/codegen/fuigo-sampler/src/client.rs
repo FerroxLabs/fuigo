@@ -110,6 +110,27 @@ pub(crate) const H_CLIENT_VERSION: &str = "x-fuigo-client-version";
 /// Client-level IDENTITY header: which Ferrox client is calling.
 pub(crate) const H_CLIENT_IDENTIFIER: &str = "x-fuigo-client-identifier";
 
+/// Provider-documented prompt-cache routing headers (not `x-fuigo-*`). Each goes ONLY to the host that documents it
+/// ([`provider_cache_header`]) and carries the session id: a per-session UUID (v7 minted at session setup, or a
+/// client-supplied UUID) with no account, machine or tenant linkage. A cache key, not identity, so the documenting
+/// host receives it even when identity is withheld; every other destination receives neither header.
+/// xAI sticky-cache header (docs.x.ai prompt-caching).
+pub(crate) const H_GROK_CONV_ID: &str = "x-grok-conv-id";
+/// OpenRouter sticky-routing header (openrouter.ai prompt-caching guide).
+pub(crate) const H_OPENROUTER_SESSION_ID: &str = "x-session-id";
+
+/// The provider cache header `base_url`'s host documents, if any. Decided like
+/// `fuigo_extra_ca::fluxrouter::is_fluxrouter_url`: an exact host after `Url::parse` (userinfo separated,
+/// host lowercased), DNS root dot removed, so lookalikes such as `api.x.ai.evil.example` get nothing.
+fn provider_cache_header(base_url: &str) -> Option<&'static str> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    match url.host_str()?.trim_end_matches('.') {
+        "api.x.ai" => Some(H_GROK_CONV_ID),
+        "openrouter.ai" => Some(H_OPENROUTER_SESSION_ID),
+        _ => None,
+    }
+}
+
 /// The per-request `x-fuigo-*` names that go to **every** destination.
 ///
 /// `cfg(test)` because the product reads the individual `H_*` consts directly; this array is
@@ -182,6 +203,8 @@ struct FuigoRequestHeaders<'a> {
     /// a user-configured-origin answer (`fuigo_shell_base::util::is_fuigo_api_bearer_url`,
     /// which decides credential delivery) cannot be passed here by mistake.
     identity: IdentityDisclosure,
+    /// The destination's provider cache header ([`provider_cache_header`]), decided once from the base URL.
+    cache_header: Option<&'static str>,
 }
 
 impl FuigoRequestHeaders<'_> {
@@ -215,6 +238,10 @@ impl FuigoRequestHeaders<'_> {
         }
         if let Some(attempt) = self.transient_retry {
             b = b.header(H_TRANSIENT_RETRY, attempt);
+        }
+        // Destination-gated, not identity-gated: only the documenting host, and the session id is no identity.
+        if let Some(name) = self.cache_header.filter(|_| !self.session_id.is_empty()) {
+            b = b.header(name, self.session_id);
         }
         // Gated: identity. `agent_id` is a persisted machine id that survives logout,
         // `deployment_id` the tenant UUID, `user_id` the Ferrox account id — all three are
@@ -759,6 +786,8 @@ pub struct SamplingClient {
     fluxrouter_cache_bypass: bool,
     /// Whether this client's destination may receive `x-fuigo-*` identity headers. P15, P30.
     identity_disclosure: IdentityDisclosure,
+    /// The provider cache header this destination documents ([`provider_cache_header`]).
+    provider_cache_header: Option<&'static str>,
     first_use_noted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// P70b: the values of configured headers (`extra_headers`, `env_http_headers`) that are really in
     /// `default_headers`, i.e. that no client-composed header replaced. Recorded as sent credentials on every
@@ -1242,6 +1271,7 @@ impl SamplingClient {
         let endpoint = EndpointTemplate::new(&config.base_url, &config.query_params);
         let fluxrouter_cache_bypass = config.subscription.is_none()
             && fuigo_extra_ca::fluxrouter::is_fluxrouter_url(&config.base_url);
+        let cache_header = provider_cache_header(&config.base_url);
 
         let configured_header_values =
             crate::sent_credentials::surviving_configured_values(configured, &headers);
@@ -1261,6 +1291,7 @@ impl SamplingClient {
             endpoint,
             fluxrouter_cache_bypass,
             identity_disclosure: identity,
+            provider_cache_header: cache_header,
             first_use_noted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             configured_header_values,
         })
@@ -1660,6 +1691,7 @@ impl SamplingClient {
             deployment_id: payload.x_fuigo_deployment_id.as_deref(),
             user_id: payload.x_fuigo_user_id.as_deref(),
             identity: self.identity_disclosure,
+            cache_header: self.provider_cache_header,
         };
         let SentRequest {
             builder,
@@ -1718,6 +1750,7 @@ impl SamplingClient {
             deployment_id: payload.x_fuigo_deployment_id.as_deref(),
             user_id: payload.x_fuigo_user_id.as_deref(),
             identity: self.identity_disclosure,
+            cache_header: self.provider_cache_header,
         };
         let SentRequest {
             builder,
@@ -1980,6 +2013,7 @@ impl SamplingClient {
             deployment_id: request.x_fuigo_deployment_id.as_deref(),
             user_id: request.x_fuigo_user_id.as_deref(),
             identity: self.identity_disclosure,
+            cache_header: self.provider_cache_header,
         };
         let extra_tool_entries = std::mem::take(&mut request.extra_tool_entries);
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
@@ -2115,6 +2149,7 @@ impl SamplingClient {
             deployment_id: request.x_fuigo_deployment_id.as_deref(),
             user_id: request.x_fuigo_user_id.as_deref(),
             identity: self.identity_disclosure,
+            cache_header: self.provider_cache_header,
         };
         let extra_tool_entries = std::mem::take(&mut request.extra_tool_entries);
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
@@ -2376,6 +2411,7 @@ impl SamplingClient {
             deployment_id: request.x_fuigo_deployment_id.as_deref(),
             user_id: request.x_fuigo_user_id.as_deref(),
             identity: self.identity_disclosure,
+            cache_header: self.provider_cache_header,
         };
         let SentRequest {
             builder,
@@ -2494,6 +2530,7 @@ impl SamplingClient {
             deployment_id: request.x_fuigo_deployment_id.as_deref(),
             user_id: request.x_fuigo_user_id.as_deref(),
             identity: self.identity_disclosure,
+            cache_header: self.provider_cache_header,
         };
         let SentRequest {
             builder,
@@ -3295,6 +3332,7 @@ mod tests {
                 deployment_id: Some("dep-uuid-v5"),
                 user_id: Some("ferrox-account-id"),
                 identity,
+                cache_header: None,
             };
             let request = h
                 .apply(probe_builder("https://example.test/v1"))
@@ -3370,6 +3408,7 @@ mod tests {
             deployment_id: Some("dep-uuid-v5"),
             user_id: Some("ferrox-account-id"),
             identity: IdentityDisclosure::WITHHELD,
+            cache_header: None,
         };
         let request = h
             .apply(probe_builder("https://api.openai.com/v1"))
@@ -3391,6 +3430,71 @@ mod tests {
         }
     }
 
+    /// Each provider cache header reaches only the host that documents it, with the session id (never the per-call
+    /// conv id: a side call labels its conv id `btw-` but shares the parent cache), whatever the identity decision.
+    /// Every other destination, including FluxRouter and lookalike hosts, receives neither.
+    #[test]
+    fn provider_cache_headers_go_only_to_the_documenting_host() {
+        for (base_url, expected) in [
+            ("https://api.x.ai/v1", Some(H_GROK_CONV_ID)),
+            ("https://API.X.AI./v1", Some(H_GROK_CONV_ID)),
+            (
+                "https://openrouter.ai/api/v1",
+                Some(H_OPENROUTER_SESSION_ID),
+            ),
+            ("https://api.openai.com/v1", None),
+            ("https://api.anthropic.com/v1", None),
+            ("https://api.fluxrouter.ai/v1", None),
+            ("https://chatgpt.com/backend-api/codex", None),
+            ("http://127.0.0.1:8080/v1", None),
+            ("https://x.ai/v1", None),
+            ("https://api.x.ai.evil.example/v1", None),
+            ("https://openrouter.ai@evil.example/v1", None),
+            ("not a url", None),
+        ] {
+            assert_eq!(provider_cache_header(base_url), expected, "{base_url}");
+            for identity in [
+                IdentityDisclosure::WITHHELD,
+                IdentityDisclosure::for_destination(base_url),
+            ] {
+                let h = FuigoRequestHeaders {
+                    conv_id: "btw-label",
+                    req_id: "req",
+                    model_id: "model",
+                    session_id: "sess-4d0e",
+                    turn_idx: None,
+                    transient_retry: None,
+                    agent_id: "agent",
+                    deployment_id: None,
+                    user_id: None,
+                    identity,
+                    cache_header: provider_cache_header(base_url),
+                };
+                let request = h
+                    .apply(probe_builder("https://example.test/v1"))
+                    .build()
+                    .expect("request builds");
+                for name in [H_GROK_CONV_ID, H_OPENROUTER_SESSION_ID] {
+                    assert_eq!(
+                        request.headers().get(name).and_then(|v| v.to_str().ok()),
+                        (Some(name) == expected).then_some("sess-4d0e"),
+                        "{base_url}: {name}"
+                    );
+                }
+                // A request with no session id sends no empty cache key.
+                let request = FuigoRequestHeaders {
+                    session_id: "",
+                    ..h
+                }
+                .apply(probe_builder("https://example.test/v1"))
+                .build()
+                .expect("request builds");
+                assert!(request.headers().get(H_GROK_CONV_ID).is_none());
+                assert!(request.headers().get(H_OPENROUTER_SESSION_ID).is_none());
+            }
+        }
+    }
+
     /// `turn_idx` and `transient_retry` are `Option`, and a first turn with no resubmit has
     /// neither. Pinned so the "absent" case stays absent rather than becoming an empty header,
     /// which `inference_override::classify` treats as not-present anyway (`nonempty_header`).
@@ -3407,6 +3511,7 @@ mod tests {
             deployment_id: None,
             user_id: None,
             identity: IdentityDisclosure::WITHHELD,
+            cache_header: None,
         };
         let request = h
             .apply(probe_builder("https://api.openai.com/v1"))

@@ -43,7 +43,7 @@ Fuigo also scans home-level rules, regardless of where it starts. These roots ar
 | `~/.claude/rules/` | Controlled by `compat.claude.rules` |
 | `~/.cursor/rules/` | Controlled by `compat.cursor.rules` |
 
-Home rules load first, in the table order, followed by project files from repo root to the current directory. Files are alphabetical within each rules directory. The vendor `rules` cells control both home and project rules independently of the corresponding `agents` cells. Claude's `agents` cell controls named files under `~/.claude/` and project `<dir>/.claude/CLAUDE*.md`; generic top-level names such as `Claude.md`, `CLAUDE.md`, and `CLAUDE.local.md` remain recognized. See [Configuration](05-configuration.md#harness-compatibility).
+Home rules load first, in the table order, followed by project files from repo root to the current directory. Files are alphabetical within each rules directory. The vendor `rules` cells control both home and project rules independently of the corresponding `agents` cells. Claude's `agents` cell controls named files under `~/.claude/` and project `<dir>/.claude/CLAUDE*.md`; generic top-level names such as `Claude.md`, `CLAUDE.md`, and `CLAUDE.local.md` are project instruction files and load regardless of any `[compat.claude]` setting. See [Configuration](05-configuration.md#harness-compatibility).
 
 ---
 

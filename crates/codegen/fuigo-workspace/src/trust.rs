@@ -566,6 +566,7 @@ impl TrustStore {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Unique temp in the same directory (atomic rename requires same FS).
+        // at-rest: outside-roots the folder-trust store, not under sessions/ or logs/
         let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
         tmp.write_all(body.as_bytes())?;
         // Durably flush to disk before publishing so a crash can't leave a zero-length or stale store behind

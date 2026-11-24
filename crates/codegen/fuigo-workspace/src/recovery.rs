@@ -366,6 +366,7 @@ pub const DEFAULT_SESSION_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 
 /// All errors are swallowed: a startup janitor must never fail boot.
 /// Only directories with a resolvable, expired mtime are removed; stray files and future-mtime entries are left untouched.
 pub async fn cleanup_stale_sessions(workspace_home: &Path, max_age: Duration) {
+    // at-rest: outside-roots the workspace server's own <workspace_home>/sessions tree (not <fuigo_home>; never retargeted); this janitor only removes expired dirs
     let sessions_dir = workspace_home.join("sessions");
     let Ok(mut entries) = tokio::fs::read_dir(&sessions_dir).await else {
         return; // No sessions dir yet (first boot).

@@ -2936,6 +2936,21 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::CheckHeldMcpServers { agent_id, cwd } => {
+            tasks.spawn(async move {
+                let held = tokio::task::spawn_blocking(move || {
+                    let disabled = fuigo_shell::util::config::disabled_mcp_server_names(&cwd);
+                    let mut held = fuigo_shell::util::config::held_mcp_definitions(&cwd);
+                    // A switched-off server is not offered; approving cannot help an unreadable approvals file (its
+                    // notice names the fix).
+                    held.retain(|h| !h.store_unavailable && !disabled.contains(&h.name));
+                    held
+                })
+                .await
+                .unwrap_or_default();
+                TaskResult::HeldMcpServers { agent_id, held }
+            });
+        }
         Effect::CheckMarketplaceUpdates { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks
@@ -3298,16 +3313,19 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::ToggleMcpServer { agent_id, session_id, server_name, enabled } => {
+        Effect::ToggleMcpServer { agent_id, session_id, server_name, enabled, digest } => {
             let tx = acp_tx.clone();
             let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({
+                    let mut params = serde_json::json!({
                     "session_id": session_id.0.to_string(),
                     "server_name": server_name,
                     "enabled": enabled,
                 });
+                    if let Some(digest) = digest {
+                        params["digest"] = serde_json::Value::String(digest);
+                    }
                     let req = acp::ExtRequest::new(
                         "fuigo/mcp/toggle",
                         serde_json::value::to_raw_value(&params)

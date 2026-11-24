@@ -221,8 +221,12 @@ impl<'a> UpdateLineWriter<'a> {
         }
         let update = transform_session_id_in_update(update, self.target_session_id);
         let envelope = SessionUpdateEnvelope::from_update(&update).map_err(invalid_data)?;
-        serde_json::to_writer(&mut self.writer, &envelope).map_err(invalid_data)?;
-        self.writer.write_all(b"\n")?;
+        let mut line = serde_json::to_vec(&envelope).map_err(invalid_data)?;
+        line.push(b'\n');
+        // S2 (Grok r2 A#4/Ga#3): the staged transcript sits under sessions/<cwd>/ and survives a killed fork for a
+        // day, so each line goes through the at-rest layer before it is staged.
+        self.writer
+            .write_all(&fuigo_secrets::at_rest::transform_whole(&line))?;
         self.copied.count += 1;
         Ok(())
     }
@@ -495,7 +499,8 @@ impl JsonlStorageAdapter {
             target.replace_atomic_sync(rel_in(target, &self.updates_file(target_info))?, b"")?;
             CopiedUpdates::default()
         } else if let Some((staging, staged_updates, copied)) = staged_cut {
-            target.move_in_sync(
+            // Every staged line went through the at-rest layer (`copy_line`), so it is renamed in, not read again.
+            target.move_in_scrubbed_sync(
                 &staged_updates,
                 rel_in(target, &self.updates_file(target_info))?,
             )?;
@@ -593,6 +598,13 @@ impl JsonlStorageAdapter {
             options.copy_usage,
             &self.usage_file(source_info),
             &self.usage_file(target_info),
+        )?;
+        let archive = crate::session::usage_file::USAGE_ARCHIVE_FILE;
+        copy_sidecar_file(
+            target,
+            usage_copied,
+            &self.usage_file(source_info).with_file_name(archive),
+            &self.usage_file(target_info).with_file_name(archive),
         )?;
         if let Some(max_turn) = options.target_prompt_index.map(|i| (i + 1) as u32) {
             if usage_copied {
@@ -847,7 +859,7 @@ fn lock_append_for_snapshot(
     };
     let deadline = std::time::Instant::now() + SNAPSHOT_LOCK_WAIT;
     loop {
-        match fs2::FileExt::try_lock_exclusive(&lock) {
+        match lock.try_lock_exclusive() {
             Ok(()) => return Ok(Some(super::HeldLock::new(lock))),
             Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
                 #[cfg(test)]
@@ -1327,6 +1339,7 @@ fn private_staging_dir(parent: &Path) -> io::Result<ForkStaging> {
     }
     // F5-A: fork staging in `sessions/<cwd>/`, beside (never inside) any session folder: no session's writer owns
     // it, and the target folder must not exist before the coherence check (P111). Moved in by `move_in` (§5.3).
+    // at-rest: writer fork staging (Grok r2 A4): every line written into it goes through at_rest::transform_whole (UpdateLineWriter::copy_line)
     let dir = builder.tempdir_in(parent)?;
     // The lock is taken under another name and only then renamed to `.lock` (the lock stays with the open file), so a
     // `.lock` a sweep can open is always one its copy has locked at some point: a copy suspended before it holds its
@@ -1564,7 +1577,20 @@ fn restamp_copied_usage(
     };
     file.session_id = session_id.to_string();
     if let Some(max_turn) = max_turn {
+        // F4: exact totals at an old turn need the archived rows; the child's archive keeps only its own overflow.
+        let dir = path.parent().unwrap_or(Path::new(""));
+        file.merge_archive(dir)?;
         file.retain_turns_through(max_turn);
+        let archive = dir.join(crate::session::usage_file::USAGE_ARCHIVE_FILE);
+        let lines = file.drain_overflow()?;
+        if lines.is_empty() {
+            match target.remove_sync(rel_in(target, &archive)?) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        } else {
+            target.replace_atomic_sync(rel_in(target, &archive)?, &lines)?;
+        }
     }
     target.replace_atomic_sync(
         rel_in(target, path)?,

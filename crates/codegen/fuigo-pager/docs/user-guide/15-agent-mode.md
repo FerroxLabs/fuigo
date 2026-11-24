@@ -401,6 +401,29 @@ Optional fields on `session/new`:
 }
 ```
 
+## Initialize `_meta`: `fuigo/permissionPrompts`
+
+Fuigo sends `session/request_permission` to clients it recognises (its own TUI, web, desktop and IDE extensions). Any
+other client is treated as unattended. Since 1.0.47 one ask reaches every mode, always-approve included: a command that
+would delete or overwrite an existing file outside the workspace, when the user did not name that path (see
+[Changes outside the workspace](22-permissions-and-safety.md#changes-outside-the-workspace)). In always-approve an
+unrecognised client gets a refusal for it, because Fuigo cannot tell whether anyone is there to answer. In Default and
+Auto it gets the prompt as it gets every other prompt.
+
+A client that does answer permission requests can say so at `initialize`, and then gets these asks in always-approve
+too:
+
+```json
+{
+  "protocolVersion": 1,
+  "clientCapabilities": { "_meta": { "fuigo/permissionPrompts": true } }
+}
+```
+
+The flag is also accepted as a top-level `_meta` field of `initialize`. It is read from `initialize` only (never from
+session `_meta` or repository content), and it changes nothing else: the client type and every other prompt stay as
+they were.
+
 ---
 
 ## ACP SDKs

@@ -38,6 +38,8 @@ struct Rig {
     journal: PathBuf,
     chat: PathBuf,
     updates: PathBuf,
+    /// The conversation before the rewind; a rewind to prompt #1 saves its first three items.
+    before: Vec<ConversationItem>,
 }
 
 fn conversation_before() -> Vec<ConversationItem> {
@@ -96,6 +98,11 @@ fn user_prompt(session: &Info, text: &str) -> SessionUpdate {
 
 /// A session with a three-prompt conversation, a rewind point for prompts 0..=3, and some transcript.
 async fn rig(name: &str) -> Rig {
+    rig_with(name, conversation_before()).await
+}
+
+/// [`rig`] with its own conversation.
+async fn rig_with(name: &str, before: Vec<ConversationItem>) -> Rig {
     let temp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp.path().to_path_buf());
     let info = Info {
@@ -106,10 +113,7 @@ async fn rig(name: &str) -> Rig {
         .init_session(&info, default_model_id())
         .await
         .unwrap();
-    adapter
-        .replace_chat_history(&info, &conversation_before())
-        .await
-        .unwrap();
+    adapter.replace_chat_history(&info, &before).await.unwrap();
     for i in 0..4 {
         adapter
             .append_rewind_point(&info, &RewindPoint::new(i))
@@ -129,6 +133,7 @@ async fn rig(name: &str) -> Rig {
         points,
         adapter,
         info,
+        before,
         _temp: temp,
     }
 }
@@ -145,7 +150,7 @@ async fn rewind_killed_at(
         .lock_rewind_points_rewrite(&rig.info)
         .await
         .expect("the rewind takes its lock");
-    let saved = conversation_after();
+    let saved: Vec<ConversationItem> = rig.before.iter().take(3).cloned().collect();
     let conversation = rewinds_conversation.then(|| RewindConversation {
         after: ContentFingerprint::of_jsonl(&saved).unwrap(),
         marker_created_at: MARKER_AT.into(),
@@ -438,6 +443,38 @@ async fn killed_after_the_conversation_was_saved_the_rewind_is_finished() {
         None
     );
     assert_eq!(markers_to(&rig.updates, 1), 1);
+}
+
+/// 1.0.47 S2, design test 9: a rewind cut short after it saved a conversation holding a recorded value (scrubbed on
+/// disk) is still recognised as gone through: its fingerprint is of the bytes that landed.
+#[tokio::test]
+async fn a_rewind_cut_short_with_a_value_in_the_conversation_reconciles() {
+    let value = concat!("rr", "_live_Rewind9KxQzP").to_owned();
+    fuigo_secrets::at_rest::record(&value);
+    let mut before = conversation_before();
+    before[2] = ConversationItem::assistant(format!("R0 uses {value}"));
+    let rig = rig_with("s2-rewind-value", before).await;
+    rewind_killed_at(
+        &rig,
+        RewindPointsRewrite::TruncateFrom(1),
+        true,
+        KilledAt::AfterConversationSaved,
+    )
+    .await;
+    let chat_after = std::fs::read(&rig.chat).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&chat_after).contains(&value),
+        "fixture: the saved conversation landed scrubbed"
+    );
+    let notice = rig
+        .adapter
+        .reconcile_interrupted_rewind(&rig.info)
+        .await
+        .expect("the user is told");
+    assert!(notice.contains("went through"), "{notice}");
+    assert_eq!(std::fs::read(&rig.chat).unwrap(), chat_after);
+    assert_eq!(markers_to(&rig.updates, 1), 1);
+    assert_eq!(leftovers(&rig), (false, false));
 }
 
 /// Killed after the `RewindMarker`, before the cleanup: finished, and the marker is not written twice.
