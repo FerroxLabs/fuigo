@@ -376,7 +376,7 @@ pub(super) fn collect() -> ReportInputs {
         .sum();
 
     let home = fuigo_dirs::fuigo_home();
-    let log = home.join("logs").join("unified.jsonl");
+    let log = fuigo_config::logs_dir_in(&home).join("unified.jsonl");
     let errors = read_log_tail(&log)
         .map(|t| error_lines_from_jsonl(&t, MAX_ERROR_LINES))
         .unwrap_or_default();

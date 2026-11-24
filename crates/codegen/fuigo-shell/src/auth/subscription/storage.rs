@@ -224,6 +224,7 @@ impl SubscriptionStore {
         }
         reject_symlink(&self.path())?;
         let mut temp =
+            // at-rest: outside-roots the auth store, not under sessions/ or logs/
             tempfile::NamedTempFile::new_in(&self.root).map_err(|_| SubscriptionError::Storage)?;
         // Windows ACL is tightened before any secret bytes are written.
         ensure_owner_only_permissions(temp.path()).map_err(|_| SubscriptionError::Storage)?;

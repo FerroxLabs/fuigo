@@ -253,7 +253,28 @@ pub fn sessions_cwd_dir(cwd: &str) -> PathBuf {
 
 /// [`sessions_cwd_dir`] with an injectable fuigo home, the single source of truth for the `sessions/<encoded-cwd>` path shape.
 pub fn sessions_cwd_dir_in(fuigo_home: &std::path::Path, cwd: &str) -> PathBuf {
-    fuigo_home.join("sessions").join(encode_cwd_dirname(cwd))
+    sessions_root_in(fuigo_home).join(encode_cwd_dirname(cwd))
+}
+
+/// `<fuigo_home>/sessions`, the at-rest roots R1 and R2 (1.0.47 S2): the single producer. Every file under it is written
+/// through `fuigo_secrets::at_rest`; `scripts/ci/at-rest-roots.py` rejects a hand-built join and lists every call.
+pub fn sessions_root() -> PathBuf {
+    sessions_root_in(&fuigo_home())
+}
+
+/// [`sessions_root`] with an injectable fuigo home.
+pub fn sessions_root_in(fuigo_home: &std::path::Path) -> PathBuf {
+    fuigo_home.join("sessions")
+}
+
+/// `<fuigo_home>/logs`, the at-rest root R3 (1.0.47 S2): the single producer (see [`sessions_root`]).
+pub fn logs_dir() -> PathBuf {
+    logs_dir_in(&fuigo_home())
+}
+
+/// [`logs_dir`] with an injectable fuigo home.
+pub fn logs_dir_in(fuigo_home: &std::path::Path) -> PathBuf {
+    fuigo_home.join("logs")
 }
 
 /// Create the CWD-level session directory and write a `.cwd` metadata file when hash-based encoding is used (long paths).
@@ -302,7 +323,7 @@ pub fn ensure_sessions_cwd_dir_in(
     let dir = sessions_cwd_dir_in(fuigo_home, cwd);
     // The 0700 dir and root shield everything beneath (children with looser modes, cwd-path dirnames, the session search index)
     create_dir_all_owner_only(&dir)?;
-    set_dir_owner_only(&fuigo_home.join("sessions"));
+    set_dir_owner_only(&sessions_root_in(fuigo_home));
     // Hash-based encoding is in use when the dirname differs from the plain URL-encoded form
     // Write a `.cwd` file so decode can recover the original path
     // O_CREAT|O_EXCL via create_new avoids TOCTOU races with parallel session starts

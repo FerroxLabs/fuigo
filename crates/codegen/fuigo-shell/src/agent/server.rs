@@ -597,10 +597,10 @@ fn setup_acp_connection(
                     "incoming WS message has neither id nor method"
                 );
             }
-            if agent_read_tx.write_all(msg.as_bytes()).await.is_err() {
-                break;
-            }
-            if agent_read_tx.write_all(b"\n").await.is_err() {
+            if crate::agent::credential_scrub::write_client_line(&mut agent_read_tx, &msg)
+                .await
+                .is_err()
+            {
                 break;
             }
         }

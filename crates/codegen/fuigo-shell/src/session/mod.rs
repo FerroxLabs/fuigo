@@ -191,6 +191,28 @@ impl PromptOrigin {
         }
     }
 
+    /// S1 (1.0.47): whether this prompt's text adds typed paths to the outside-change exemption. Only what the human
+    /// typed; never a wake, a peer or parent message, a scheduled fire or a goal nudge (design r3 N1). Exhaustive on
+    /// purpose: a new origin cannot be added without choosing.
+    pub fn adds_typed_paths(&self) -> bool {
+        match self {
+            Self::User => true,
+            Self::UnverifiedScheduled
+            | Self::TaskCompleted { .. }
+            | Self::SubagentCompleted { .. }
+            | Self::ParentAgentMessage { .. }
+            | Self::PeerMessage { .. }
+            | Self::WorkflowCompleted { .. }
+            | Self::PeerNotice { .. }
+            | Self::NotificationDrain
+            | Self::GoalSummary
+            | Self::GoalClassifierNudge
+            | Self::SchedulerFired
+            | Self::PlanResume
+            | Self::SubagentTask => false,
+        }
+    }
+
     /// The `origin` tag a `UserPromptSubmit` hook payload carries. `None` ONLY for a prompt the human typed
     /// ([`Self::User`]), whose payload bytes stay unchanged; every other origin has a stable snake_case tag.
     /// Exhaustive on purpose: a new origin cannot be added without choosing its tag.
@@ -416,6 +438,8 @@ mod tests {
         ];
         let mut seen = std::collections::HashSet::new();
         for origin in &all {
+            // S1 (design r3 §8.4, N1): a non-user origin carrying a path never exempts it.
+            assert_eq!(origin.adds_typed_paths(), origin == &PromptOrigin::User);
             match origin.hook_origin_tag() {
                 None => assert_eq!(origin, &PromptOrigin::User),
                 Some(tag) => {
@@ -767,6 +791,7 @@ mod compact_tool_catalog_tests;
 pub mod execution_state;
 pub mod interrupted_turn;
 pub mod managed_mcp;
+pub(crate) mod mcp_admission;
 pub(crate) mod mcp_descriptors;
 pub(crate) mod mcp_dispatcher;
 #[cfg(test)]

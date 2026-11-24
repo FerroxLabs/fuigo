@@ -62,6 +62,8 @@ pub fn stream_chat_completions<'a>(
 
         let mut content_acc = String::new();
         let mut reasoning_acc = String::new();
+        // Only reasoning that arrived as `reasoning_content` is echoed back; `reasoning` alone stays display-only
+        let mut saw_reasoning_content = false;
         // Tool call deltas keyed by positional index; each entry is (id, name, arguments_buffer)
         // The first chunk for an index carries the id and name and starts the arguments buffer; later chunks append to arguments only
         let mut tool_call_acc: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
@@ -167,7 +169,9 @@ pub fn stream_chat_completions<'a>(
                     };
                 }
 
-                if let Some(thought) = delta.reasoning_content
+                let reasoning_content = delta.reasoning_content.filter(|s| !s.is_empty());
+                saw_reasoning_content |= reasoning_content.is_some();
+                if let Some(thought) = reasoning_content.or(delta.reasoning)
                     && !thought.is_empty()
                 {
                     if !first_token_emitted {
@@ -265,9 +269,11 @@ pub fn stream_chat_completions<'a>(
         let mut items: Vec<ConversationItem> = Vec::new();
         if first_choice_seen {
             if !reasoning_acc.is_empty() {
-                items.push(ConversationItem::Reasoning(
-                    fuigo_sampling_types::synthesized_reasoning_item(reasoning_acc),
-                ));
+                items.push(ConversationItem::Reasoning(if saw_reasoning_content {
+                    fuigo_sampling_types::synthesized_reasoning_item(reasoning_acc)
+                } else {
+                    fuigo_sampling_types::display_only_reasoning_item(reasoning_acc)
+                }));
             }
             items.push(ConversationItem::Assistant(AssistantItem {
                 content: std::sync::Arc::<str>::from(content_acc),
@@ -346,6 +352,7 @@ mod tests {
             role: Some(Role::Assistant),
             content: Some(text.to_string()),
             reasoning_content: None,
+            reasoning: None,
             tool_calls: vec![],
             tool_call_id: None,
         }])
@@ -437,6 +444,7 @@ mod tests {
             role: Some(Role::Assistant),
             content: None,
             reasoning_content: Some("thinking...".into()),
+            reasoning: None,
             tool_calls: vec![],
             tool_call_id: None,
         }]);
@@ -527,6 +535,7 @@ mod tests {
             role: None,
             content: None,
             reasoning_content: None,
+            reasoning: None,
             tool_calls: vec![ChunkToolCallDelta {
                 index: 0,
                 id: Some("call_cut".into()),
@@ -567,6 +576,7 @@ mod tests {
             role: None,
             content: None,
             reasoning_content: None,
+            reasoning: None,
             tool_calls: vec![ChunkToolCallDelta {
                 index: 0,
                 id: Some("call_abc".into()),
@@ -583,6 +593,7 @@ mod tests {
             role: None,
             content: None,
             reasoning_content: None,
+            reasoning: None,
             tool_calls: vec![ChunkToolCallDelta {
                 index: 0,
                 id: None,

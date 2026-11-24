@@ -421,6 +421,43 @@ async fn workspace_grant_is_persisted_owner_only_and_reloaded_by_a_fresh_store()
     );
 }
 
+/// 1.0.47 S2, design test 8: the grant store is verbatim at rest, so a grant whose subject holds a recorded value is
+/// reloaded byte for byte by a fresh store (still honoured after a restart: no new prompt).
+#[tokio::test]
+async fn a_grant_holding_a_recorded_value_is_reloaded_exactly() {
+    let value = concat!("gr", "_live_Grant8KxQzPm").to_owned();
+    fuigo_secrets::at_rest::record(&value);
+    let home = Home::new("s2-value");
+    let clock = Arc::new(FixedClock::at(T0));
+    let mut store = home.open(clock.clone()).await;
+    let root = home.ws.join(&value);
+    std::fs::create_dir_all(&root).unwrap();
+    store
+        .add(grant(
+            "0192c1a0-0000-7000-8000-000000000081",
+            GrantSubject::FsWriteRoot { root: root.clone() },
+            GrantScope::Workspace {
+                root: home.ws.clone(),
+            },
+            Expiry::Ttl { seconds: 3600 },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        std::fs::read_to_string(home.workspace_file())
+            .unwrap()
+            .contains(&value),
+        "the grant store keeps its exact bytes"
+    );
+    let reopened = home.open(clock).await;
+    assert_eq!(
+        reopened.live().first().map(|g| g.subject.clone()),
+        Some(GrantSubject::FsWriteRoot {
+            root: canonical_path(&root)
+        })
+    );
+}
+
 /// A session row belongs to the hub session that gave it and goes with it;
 /// call rows never enter the store and a session row never goes through `add`.
 #[tokio::test]

@@ -67,3 +67,22 @@ fn test_should_skip_session_nonexistent_file() {
         100
     ));
 }
+
+/// S2 (Astra r2 N1): text assembled from separately scrubbed chunks (or a legacy transcript) is scrubbed before it is
+/// hashed and bound, and so is the title.
+#[test]
+fn s2_assembled_text_and_title_are_scrubbed_before_hashing() {
+    let _set = crate::at_rest_set_lock();
+    let value = concat!("Alpha", "Beta GammaDelta9");
+    fuigo_secrets::at_rest::record(value);
+    let session = test_session("s2", "/workspace", &format!("title {value}"));
+    // Extraction joins two chunks that each held half of the value.
+    let doc = build_session_doc(&session, ["AlphaBeta", "GammaDelta9"].join(" "));
+    assert!(!doc.content.contains(value) && !doc.title.contains(value));
+    assert!(doc.content.contains("<redacted>"));
+    let clean = build_session_doc(&session, "<redacted>".to_string());
+    assert_eq!(
+        doc.content_hash, clean.content_hash,
+        "hashed after the transform"
+    );
+}

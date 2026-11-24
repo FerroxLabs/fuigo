@@ -256,7 +256,12 @@ pub fn extract_user_guide_docs(fuigo_home: &std::path::Path) {
         return;
     }
     for doc in USER_GUIDE {
-        if let Err(e) = std::fs::write(docs_dir.join(doc.filename), doc.content) {
+        let path = docs_dir.join(doc.filename);
+        // F7: every launch used to rewrite all of them; skip a file that already matches.
+        if std::fs::read(&path).is_ok_and(|on_disk| on_disk == doc.content.as_bytes()) {
+            continue;
+        }
+        if let Err(e) = std::fs::write(&path, doc.content) {
             tracing::debug!(error = %e, filename = doc.filename, "Failed to extract user-guide doc");
         }
     }
@@ -459,6 +464,31 @@ mod tests {
         assert!(
             docs_dir.join("notes.md").exists(),
             "User file should not be deleted"
+        );
+    }
+
+    /// F7: a second launch rewrites no doc whose content already matches, and repairs one that differs.
+    #[cfg(unix)]
+    #[test]
+    fn extract_user_guide_docs_skips_unchanged_files() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        extract_user_guide_docs(tmp.path());
+        let docs_dir = tmp.path().join("docs").join("user-guide");
+        let first = USER_GUIDE[0].filename;
+        let second = USER_GUIDE[1].filename;
+        std::fs::write(docs_dir.join(first), "edited").unwrap();
+        let mtime = |name: &str| {
+            let meta = std::fs::metadata(docs_dir.join(name)).unwrap();
+            (meta.mtime(), meta.mtime_nsec())
+        };
+        let before = mtime(second);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        extract_user_guide_docs(tmp.path());
+        assert_eq!(mtime(second), before, "an unchanged doc was rewritten");
+        assert_eq!(
+            std::fs::read_to_string(docs_dir.join(first)).unwrap(),
+            USER_GUIDE[0].content
         );
     }
 

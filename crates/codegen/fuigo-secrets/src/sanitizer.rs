@@ -4407,4 +4407,37 @@ mod tests {
         // A backtick still ends a URL before a value opens.
         assert_eq!(clean("`https://h/p`?token=abc"), "`https://h/p`?token=abc");
     }
+
+    /// u47 AS: the four Astra triggers from the 1.0.46 review rounds r8-r10, verbatim (closed before the 1.0.46
+    /// release by the spans work; pinned here in one place). Each is redacted, is a fixed point, and keeps nothing
+    /// frozen 1.0.45 removed. The same inputs are fuzz regression seeds (`fuzz/regressions/sanitizer/astra-r*`).
+    #[test]
+    fn as_astra_r8_to_r10_triggers_are_redacted() {
+        let _registry = crate::sent_credentials::REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::sent_credentials::clear_for_tests();
+        for (input, secret) in [
+            ("https://%70assword=swordfish987/", "swordfish987"),
+            ("api_key=https://h/Swordfish987#view...", "Swordfish987"),
+            ("https://h/?db_pass%77ord=Swordfish987", "Swordfish987"),
+            ("prefixhttps:///alice:Swordfish987@host/", "Swordfish987"),
+        ] {
+            let out = super::redact_secrets(input).into_owned();
+            assert!(
+                !out.contains(secret) && !percent_decode(&out).contains(secret),
+                "{input:?} -> {out:?}"
+            );
+            assert_eq!(
+                super::redact_secrets(&out),
+                out,
+                "not a fixed point: {input:?}"
+            );
+            assert!(
+                regressions_vs_1045(input).is_empty(),
+                "{input:?}: {:?}",
+                regressions_vs_1045(input)
+            );
+        }
+    }
 }

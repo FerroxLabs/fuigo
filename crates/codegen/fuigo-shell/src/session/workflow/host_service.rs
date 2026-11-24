@@ -903,6 +903,8 @@ impl HostService {
                     .replace_atomic_sync(rel, &body)
                     .map_err(|e| HostError::Failed(format!("scratch atomic persist: {e}")));
             }
+            let body = fuigo_secrets::at_rest::transform_owned(body);
+            // at-rest: at-rest the writer-less scratch fallback writes the transformed bytes
             let mut tmp = tempfile::NamedTempFile::new_in(&scratch_dir)
                 .map_err(|e| HostError::Failed(format!("scratch temp file: {e}")))?;
             Self::reject_symlink(&scratch_dir, "scratch directory")?;

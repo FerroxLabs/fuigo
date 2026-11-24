@@ -96,6 +96,7 @@ pub fn build_memory_archive(storage: &MemoryStorage) -> Result<Vec<u8>> {
     let mut ar = tar::Builder::new(enc);
 
     // Session logs
+    // at-rest: outside-roots the memory store's own workspace folder (<memory root>/<workspace>/sessions), not <fuigo_home>/sessions
     let sessions_dir = storage.workspace_dir().join("sessions");
     if sessions_dir.is_dir() {
         for entry in std::fs::read_dir(&sessions_dir)

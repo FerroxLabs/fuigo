@@ -1,3 +1,5 @@
+pub mod at_rest;
+mod at_rest_schema;
 pub mod child_env;
 pub mod owner_only;
 mod sanitizer;

@@ -258,6 +258,18 @@ pub fn load_effective_config_with_campaign_free() -> std::io::Result<(toml::Valu
     Ok((effective, campaign_free))
 }
 
+/// [`load_effective_config`] plus the user's OWN layer (`~/.fuigo/config.toml` alone) from the SAME read, so MC-03 can
+/// tell which effective `[mcp_servers.*]` the user defined (Fable r2 M3: one `ConfigLayers::load`).
+pub fn load_effective_config_and_user_layer() -> std::io::Result<(toml::Value, toml::Value)> {
+    let layers = ConfigLayers::load()?;
+    let effective = effective_config_from_layers(&layers)?;
+    let user = layers.user.clone();
+    if let Ok(mut last_good) = LAST_GOOD_CONFIG_LAYERS.write() {
+        *last_good = Some(std::sync::Arc::new(layers));
+    }
+    Ok((effective, user))
+}
+
 /// The disk layers of the last successful [`load_effective_config`], if any.
 pub fn last_good_config_layers() -> Option<std::sync::Arc<ConfigLayers>> {
     LAST_GOOD_CONFIG_LAYERS.read().ok().and_then(|g| g.clone())

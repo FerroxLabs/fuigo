@@ -166,7 +166,7 @@ const EXPECTED: &[(&str, usize)] = &[
         "crates/codegen/fuigo-pager/src/app/acp_handler/workflow_ingest.rs",
         1,
     ),
-    ("crates/codegen/fuigo-pager/src/app/actions.rs", 141), // 1.0.46 rustfmt: +1, the one-line `Effect::FolderTrustClose { agent_id: AgentId, .. }` field now sits on its own line (a reflow of the existing field, no new site). 26-6d: +2 `agent_id` fields of `Effect::SetContextWindow` / `TaskResult::ContextWindowSet` (in-process agent-view key; the request is `session/set_model` with `_meta.contextWindow`, no new identity). R-xs-p12: +2 `agent_id: AgentId` fields of `Effect::PeerRpc` / `Action::PeerRpcDone`: the pager's in-process agent-view key that routes the answer back; the request body is `PeerCall::params` (sessionId, heldId, token, action) and carries no identity. Keep. F5 1.0.41: +3 `agent_id: AgentId` fields of `TaskResult::FolderTrustLoaded` / `FolderTrustClosed` / `Effect::FolderTrustLoad` (in-process AgentId field of a task result or effect; pager tab key, never a request body).
+    ("crates/codegen/fuigo-pager/src/app/actions.rs", 143), // u47 MC-03: +2 `agent_id: AgentId` fields of `Effect::CheckHeldMcpServers` / `TaskResult::HeldMcpServers` (in-process pager tab key; the held-server preview is a local config read, no request body). Keep. 1.0.46 rustfmt: +1, the one-line `Effect::FolderTrustClose { agent_id: AgentId, .. }` field now sits on its own line (a reflow of the existing field, no new site). 26-6d: +2 `agent_id` fields of `Effect::SetContextWindow` / `TaskResult::ContextWindowSet` (in-process agent-view key; the request is `session/set_model` with `_meta.contextWindow`, no new identity). R-xs-p12: +2 `agent_id: AgentId` fields of `Effect::PeerRpc` / `Action::PeerRpcDone`: the pager's in-process agent-view key that routes the answer back; the request body is `PeerCall::params` (sessionId, heldId, token, action) and carries no identity. Keep. F5 1.0.41: +3 `agent_id: AgentId` fields of `TaskResult::FolderTrustLoaded` / `FolderTrustClosed` / `Effect::FolderTrustLoad` (in-process AgentId field of a task result or effect; pager tab key, never a request body).
     ("crates/codegen/fuigo-pager/src/app/agent_view/cta.rs", 3),
     (
         "crates/codegen/fuigo-pager/src/app/agent_view/dock_input_tests.rs",
@@ -300,16 +300,16 @@ const EXPECTED: &[(&str, usize)] = &[
     ), // pager-local tab id / in-process `agent_id` field of a TaskResult or action literal (re-pinned by GATE-HYG after U32 pager work); never a request body. Keep. // 26-6d: pager-local fixtures for `ContextWindowSet`; no body site F5 1.0.41: +1 `agent_id: AgentId(0)` field of a `TaskResult::RenameSessionFailed` test fixture (in-process AgentId field; pager tab key, never a request body).
     (
         "crates/codegen/fuigo-pager/src/app/dispatch/tests/transcript.rs",
-        1,
-    ),
+        4,
+    ), // u47 MC-03: +3 `agent_id: AgentId(0)` fields of `TaskResult::HeldMcpServers` / `McpToggleDone` test fixtures (in-process pager tab key, never a request body). Keep.
     (
         "crates/codegen/fuigo-pager/src/app/dispatch/tests/turn.rs",
         7,
     ),
     (
         "crates/codegen/fuigo-pager/src/app/dispatch/transcript.rs",
-        9,
-    ),
+        10,
+    ), // u47 MC-03: +1 `agent_id: AgentId` parameter of `open_held_mcp_question` (in-process pager tab key; opens a local question view, no request body). Keep.
     ("crates/codegen/fuigo-pager/src/app/effects/helpers.rs", 4), // P77: +1 reads `hostname` from a session-list entry (inbound); local UI
     ("crates/codegen/fuigo-pager/src/app/effects/tests.rs", 3),   // P77: +1 fixture
     ("crates/codegen/fuigo-pager/src/app/event_loop.rs", 8), // P66 (97efd30a) deleted the dead local-workspace feature; pager-local, no body site (re-pinned by P54-K, R080 §11)
@@ -349,7 +349,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-plugin-marketplace/src/index.rs", 1),
     ("crates/codegen/fuigo-ratatui-inline/benches/bench.rs", 2),
     ("crates/codegen/fuigo-sampler/src/actor/state.rs", 2),
-    ("crates/codegen/fuigo-sampler/src/client.rs", 34),
+    ("crates/codegen/fuigo-sampler/src/client.rs", 37), // u47-tcfix: +3 are the `agent_id`/`deployment_id`/`user_id` fields of the `provider_cache_headers_go_only_to_the_documenting_host` test literal; no body site. Its cache headers: `x-grok-conv-id` to api.x.ai only, `x-session-id` to openrouter.ai only, both the per-session UUID (no account/machine link), so sent there even when identity is withheld. Keep.
     ("crates/codegen/fuigo-sampler/src/config.rs", 6), // P70a (R087): +2 are the quoted field names `"deployment_id"`, `"user_id"` in `SamplerConfig`'s hand-written redacting `Debug`. No body site
     ("crates/codegen/fuigo-sampler/tests/test_actor.rs", 2),
     ("crates/codegen/fuigo-sampling-types/src/messages.rs", 1),
@@ -708,6 +708,10 @@ const EXPECTED: &[(&str, usize)] = &[
         "crates/codegen/fuigo-workspace/src/permission/safe_forms.rs",
         1,
     ), // u35: the `hostname` shell command, matched to judge its options; not a body
+    (
+        "crates/codegen/fuigo-workspace/src/permission/shell_access/outside_change_tests.rs",
+        1,
+    ), // u47 S1 (DS-04): `"email"` is a plain prompt word (a symlink name) in a typed-path regression test; not a body
     ("crates/codegen/fuigo-workspace/src/publish.rs", 1),
     ("crates/codegen/fuigo-workspace/src/sandbox/grants.rs", 3), // U32-P3: `self.engage()` is `WorkspaceSandbox::engage`, which builds the folder's sandbox grant store; it is not a Mixpanel profile write. No body site
     ("crates/codegen/fuigo-workspace/src/sandbox/mod.rs", 1), // U32-P3: the `engage()` call in `engage_unless_off`; same method, no body site

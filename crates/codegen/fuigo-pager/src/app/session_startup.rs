@@ -91,7 +91,7 @@ pub fn fork_session_params(
 /// Mirrors in-session `/fork` reading `agent.session.is_worktree`.
 pub fn parent_session_is_worktree(session_id: &str, cwd: &Path) -> bool {
     let cwd_str = cwd.to_string_lossy();
-    let sessions_root = fuigo_shell::util::fuigo_home::fuigo_home().join("sessions");
+    let sessions_root = fuigo_config::sessions_root();
     let encoded = fuigo_shell::util::fuigo_home::encode_cwd_dirname(&cwd_str);
     let summary_path = sessions_root
         .join(encoded)
@@ -1902,9 +1902,7 @@ mod tests {
         let cwd_str = cwd.path().to_string_lossy().to_string();
         let id = "aaaaaaaa-1111-2222-3333-444444444444";
         let encoded = fuigo_shell::util::fuigo_home::encode_cwd_dirname(&cwd_str);
-        let sessions_cwd_dir = fuigo_shell::util::fuigo_home::fuigo_home()
-            .join("sessions")
-            .join(&encoded);
+        let sessions_cwd_dir = fuigo_config::sessions_root().join(&encoded);
         struct RmDirOnDrop(std::path::PathBuf);
         impl Drop for RmDirOnDrop {
             fn drop(&mut self) {

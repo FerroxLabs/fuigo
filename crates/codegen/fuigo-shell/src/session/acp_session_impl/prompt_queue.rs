@@ -681,6 +681,14 @@ impl SessionActor {
             input_origin,
             ..
         } = item;
+        // S1 (1.0.47): a human interjection's typed paths count like a prompt's.
+        if input_origin.as_prompt_origin().adds_typed_paths() {
+            self.permissions.note_user_text(
+                &super::turn::user_prompt_text(&prompt_blocks),
+                std::path::Path::new(self.session_info.cwd.as_str()),
+                None,
+            );
+        }
         let mut text_parts = Vec::new();
         let mut attachments = Vec::new();
         for block in prompt_blocks {

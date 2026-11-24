@@ -5900,3 +5900,125 @@ async fn restore_snapshot_restores_all_fields() {
     let tokens = h.handle.get_total_tokens().await;
     assert_eq!(tokens, 500);
 }
+
+/// F6: aging tool results out no longer rewrites the whole history every turn; the rewrite waits for
+/// `PRUNE_PERSIST_BYTES` of freed content, and the history it writes is the pruned one.
+#[tokio::test]
+async fn prune_retained_rewrites_history_only_in_batches() {
+    use super::mutations::PRUNE_PERSIST_BYTES;
+    use crate::actor::ChatStateActor;
+    use crate::persistence::MockChatPersistence;
+    use crate::types::PruningConfig;
+
+    let (mock, mut rx) = MockChatPersistence::new();
+    let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let token = tokio_util::sync::CancellationToken::new();
+    let config = PruningConfig {
+        hard_clear_age_turns: 3,
+        keep_last_n_turns: 1,
+        ..Default::default()
+    };
+    let handle = ChatStateActor::spawn_with_pruning(
+        vec![],
+        test_config(),
+        config,
+        Box::new(mock),
+        event_tx,
+        token,
+    );
+    let rewrites = |records: Vec<PersistenceRecord>| {
+        records
+            .into_iter()
+            .filter(|r| matches!(r, PersistenceRecord::ReplaceHistory(_)))
+            .count()
+    };
+
+    // 40 turns of 10 KB results: 36 results age out (one per turn from turn 4), 360 KB freed, under the batch size.
+    // Before F6 this was 36 whole-history rewrites.
+    push_turns(&handle, 40, 10_000).await;
+    assert_eq!(rewrites(rx.drain()), 0, "small prunes stay in memory");
+
+    // Enough freed content triggers exactly one rewrite per batch, carrying the pruned history.
+    let turns = PRUNE_PERSIST_BYTES / 10_000 + 1;
+    push_turns(&handle, turns, 10_000).await;
+    let records = rx.drain();
+    let replaced: Vec<_> = records
+        .iter()
+        .filter_map(|r| match r {
+            PersistenceRecord::ReplaceHistory(items) => Some(items),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replaced.len(),
+        1,
+        "one batched rewrite after {turns} more turns"
+    );
+    assert!(
+        matches!(&replaced[0][2], ConversationItem::ToolResult(tr) if tr.content.as_ref() == super::request_builder::HARD_CLEAR_PLACEHOLDER)
+    );
+}
+
+/// F6 (review M1): a resumed session loads the history from disk, which may still hold results the live session had
+/// cleared. After the resume restore, before any prompt, its conversation equals the live one.
+#[tokio::test]
+async fn resumed_conversation_matches_live_before_first_prompt() {
+    use crate::actor::ChatStateActor;
+    use crate::persistence::MockChatPersistence;
+    use crate::types::PruningConfig;
+
+    let spawn = |enabled: bool, conversation: Vec<ConversationItem>| {
+        let (mock, rx) = MockChatPersistence::new();
+        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let config = PruningConfig {
+            enabled,
+            hard_clear_age_turns: 3,
+            keep_last_n_turns: 1,
+            ..Default::default()
+        };
+        let handle = ChatStateActor::spawn_with_pruning(
+            conversation,
+            test_config(),
+            config,
+            Box::new(mock),
+            event_tx,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        (handle, rx)
+    };
+    // The turn order of `turn.rs`: the prompt index moves before the user message lands.
+    let drive = async |handle: &crate::handle::ChatStateHandle| {
+        for i in 0..12 {
+            handle.increment_prompt_index();
+            handle.push_user_message(ConversationItem::user(format!("q{i}")));
+            handle.push_assistant_response(ConversationItem::assistant(format!("a{i}")));
+            handle.push_tool_result(ConversationItem::tool_result(
+                format!("call_{i}"),
+                "x".repeat(1_000),
+            ));
+        }
+        handle.snapshot().await.unwrap()
+    };
+    let (live, _live_rx) = spawn(true, vec![]);
+    let live_snap = drive(&live).await;
+    // What `chat_history.jsonl` holds under F6: the results the live prune cleared, uncleared.
+    let (unpruned, _) = spawn(false, vec![]);
+    let on_disk = drive(&unpruned).await.conversation;
+    let json = |items: &Vec<ConversationItem>| serde_json::to_value(items).unwrap();
+    assert_ne!(
+        json(&on_disk),
+        json(&live_snap.conversation),
+        "the live session cleared old results"
+    );
+
+    // Resume as `spawn.rs` does: the loaded history, then a restore carrying the replayed prompt index.
+    let (resumed, _resumed_rx) = spawn(true, on_disk);
+    let mut snap = resumed.snapshot().await.unwrap();
+    snap.prompt_index = live_snap.prompt_index;
+    snap.prompt_texts = live_snap.prompt_texts.clone();
+    resumed.restore_snapshot(snap);
+    assert_eq!(
+        json(&resumed.get_conversation().await),
+        json(&live_snap.conversation)
+    );
+}

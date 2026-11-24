@@ -5,6 +5,8 @@ edition.workspace = true
 license = "Apache-2.0"
 
 [dependencies]
+# S2: writes under the session/log roots go through the at-rest layer.
+fuigo-secrets = { workspace = true }
 # TTY safety
 dunce = { workspace = true }
 fuigo-tty-utils = { workspace = true }

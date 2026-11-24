@@ -6,6 +6,8 @@ edition.workspace = true
 description = "Track file hunks (diffs) with agent/external attribution"
 
 [dependencies]
+# S2: writes under the session/log roots go through the at-rest layer.
+fuigo-secrets = { workspace = true }
 # External
 chrono = { workspace = true, features = ["serde"] }
 dunce = { workspace = true }

@@ -262,7 +262,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                 }
                 // An `rs_...` id marks an OpenAI Responses reasoning item: its `encrypted_content` is not an
                 // Anthropic signature and the Messages API would reject it
-                if r.id.starts_with("rs_") {
+                if r.id.starts_with("rs_") || is_display_only_reasoning_item(r) {
                     continue;
                 }
                 let thinking = reasoning_item_text(r);

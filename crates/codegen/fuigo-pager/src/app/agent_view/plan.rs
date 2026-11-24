@@ -30,8 +30,7 @@ impl AgentView {
         let cwd_str = self.session.cwd.to_string_lossy().into_owned();
         let encoded_cwd = urlencoding::encode(&cwd_str);
         Some(
-            fuigo_shell::util::fuigo_home::fuigo_home()
-                .join("sessions")
+            fuigo_config::sessions_root()
                 .join(encoded_cwd.as_ref())
                 .join(session_id.0.as_ref())
                 .join("plan.md"),

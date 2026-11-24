@@ -188,9 +188,71 @@ where
     })
 }
 
+/// Writes one client ACP message onto the agent's `\n`-framed input (leader IPC and relay forwards, the in-process
+/// leader, the agent-mode relay). A message whose body still holds a CR or LF is dropped with a warning: the agent's
+/// [`LineBufferedRead`] would split it, and an inner line would reach the agent past the leader's id namespacing,
+/// identity stamp and ownership checks, which only ever saw the whole payload. Clients send one compact line.
+pub async fn write_client_line<W>(w: &mut W, msg: &str) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    use tokio::io::AsyncWriteExt as _;
+    let body = msg.trim_end_matches(['\r', '\n']);
+    if body.contains(['\n', '\r']) {
+        tracing::warn!(len = msg.len(), "dropped multi-line ACP payload");
+        return Ok(());
+    }
+    // The agent's line reader errors on a line (with its `\n`) over the cap, which ends its input for every client.
+    if body.len() >= fuigo_acp_lib::MAX_LINE_SIZE {
+        tracing::warn!(len = msg.len(), "dropped over-long ACP payload");
+        return Ok(());
+    }
+    w.write_all(body.as_bytes()).await?;
+    w.write_all(b"\n").await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn write_client_line_drops_embedded_line_breaks_and_keeps_single_lines() {
+        let req = r#"{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{}}"#;
+        for bad in [
+            format!("junk\n{req}"),
+            format!("junk\r{req}"),
+            format!("junk\r\n{req}\n"),
+            format!("{{\"a\":\n{req}\n}}"),
+        ] {
+            let mut out = Vec::new();
+            write_client_line(&mut out, &bad).await.unwrap();
+            assert!(out.is_empty(), "{bad:?} reached the agent as {out:?}");
+        }
+        for (good, framed) in [
+            (req.to_string(), format!("{req}\n")),
+            (format!("{req}\n"), format!("{req}\n")),
+            (format!("{req}\r\n"), format!("{req}\n")),
+        ] {
+            let mut out = Vec::new();
+            write_client_line(&mut out, &good).await.unwrap();
+            assert_eq!(String::from_utf8(out).unwrap(), framed);
+        }
+    }
+
+    #[tokio::test]
+    async fn write_client_line_drops_a_line_over_the_agent_line_cap() {
+        let cap = fuigo_acp_lib::MAX_LINE_SIZE;
+        let mut out = Vec::new();
+        write_client_line(&mut out, &"a".repeat(cap)).await.unwrap();
+        assert!(
+            out.is_empty(),
+            "cap+1 bytes with the newline reached the agent"
+        );
+        write_client_line(&mut out, &"a".repeat(cap - 1))
+            .await
+            .unwrap();
+        assert_eq!(out.len(), cap);
+    }
 
     /// No lock: these tests record unique values and assert only on them.
     #[test]

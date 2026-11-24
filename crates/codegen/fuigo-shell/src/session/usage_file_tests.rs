@@ -235,3 +235,142 @@ fn covers_detects_same_process_vs_reset_ledger() {
     assert!(!smaller.covers(&bigger));
     assert!(smaller.covers(&UsageSummary::default()));
 }
+
+#[test]
+fn turn_rows_are_capped_and_session_totals_keep_every_turn() {
+    let mut file = SessionUsageFile::new("sess-1");
+    let turns = MAX_TURN_ROWS as u32 + 50;
+    for n in 1..=turns {
+        file.apply_turn(
+            n,
+            format!("t{n}"),
+            &live(&[("grok-4", 10, 2, Some(1))]),
+            None,
+        );
+        file.drain_overflow().unwrap();
+    }
+    let before = serde_json::to_vec_pretty(&file).unwrap().len();
+    assert_eq!(file.turns.len(), MAX_TURN_ROWS);
+    assert_eq!(file.turns[0].turn_number, 51);
+    assert_eq!(file.session.turn_count, u64::from(turns));
+    assert_eq!(file.session.input_tokens, 10 * u64::from(turns));
+    assert_eq!(file.session.cost_usd_ticks, Some(i64::from(turns)));
+    // Size stays flat: another 1,000 turns do not grow the rewrite.
+    for n in turns + 1..=turns + 1_000 {
+        file.apply_turn(
+            n,
+            format!("t{n}"),
+            &live(&[("grok-4", 10, 2, Some(1))]),
+            None,
+        );
+        file.drain_overflow().unwrap();
+    }
+    let after = serde_json::to_vec_pretty(&file).unwrap().len();
+    assert!(
+        after < before + before / 100, // only wider numbers, never another row
+        "usage.json grew from {before} to {after} bytes"
+    );
+    assert_eq!(file.session.turn_count, u64::from(turns) + 1_000);
+
+    // A fork at a turn still inside the kept rows keeps the totals of every turn up to it.
+    file.retain_turns_through(turns + 900);
+    assert_eq!(file.turns.len(), MAX_TURN_ROWS - 100);
+    assert_eq!(file.session.turn_count, u64::from(turns) + 900);
+    assert_eq!(file.session.input_tokens, 10 * (u64::from(turns) + 900));
+    assert_eq!(file.session.cost_usd_ticks, Some(i64::from(turns) + 900));
+}
+
+/// F4: rows past the cap move to `usage_turns.jsonl` instead of being dropped. A legacy 500-row `usage.json` keeps every
+/// row on its first turn here, and `fuigo usage <id> N` still finds a turn older than the last 200.
+#[tokio::test]
+async fn capped_rows_are_archived_and_still_readable() {
+    use crate::session::info::Info;
+    use crate::session::storage::StorageAdapter;
+    use crate::session::storage::jsonl::JsonlStorageAdapter;
+    use agent_client_protocol as acp;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let info = Info {
+        id: acp::SessionId::new("usage-archive"),
+        cwd: "/usage".to_string(),
+    };
+    adapter
+        .init_session(&info, crate::session::persistence::default_model_id())
+        .await
+        .unwrap();
+    let one = || live(&[("grok-4", 10, 2, Some(1))]);
+    let mut legacy = SessionUsageFile::new("usage-archive");
+    for n in 1..=500 {
+        legacy.apply_turn(n, format!("t{n}"), &one(), None);
+    }
+    assert_eq!(legacy.turns.len(), 500);
+    adapter.write_usage(&info, &legacy).await.unwrap();
+
+    adapter
+        .update_usage(
+            &info,
+            Box::new(move |file| {
+                let mut file = file.unwrap();
+                file.apply_turn(501, "t501", &one(), None);
+                file
+            }),
+        )
+        .await
+        .unwrap();
+    let on_disk = adapter.read_usage(&info).await.unwrap().unwrap();
+    assert_eq!(
+        on_disk.turns.len(),
+        MAX_TURN_ROWS,
+        "usage.json stays capped"
+    );
+    assert_eq!(on_disk.turns[0].turn_number, 302);
+
+    let UsageLoad::Ready(file) =
+        load_for_session_in_root("usage-archive", &fuigo_config::sessions_root_in(tmp.path()))
+            .unwrap()
+    else {
+        panic!("usage not found");
+    };
+    assert_eq!(file.turns.len(), 501, "every row survives the migration");
+    assert!(file.turns.iter().map(|t| t.turn_number).eq(1..=501));
+    let old = file
+        .turn(1)
+        .expect("turn 1, older than the last 200, is still readable");
+    assert_eq!(old.usage.input_tokens, 10);
+    assert_eq!(file.session.turn_count, 501);
+    assert_eq!(file.session.input_tokens, 10 * 501);
+}
+
+/// F4: a crash between the archive append and the `usage.json` rewrite repeats archive lines on the next turn. Each turn
+/// is read once: the `usage.json` row wins, else the last archive line; a torn last line is skipped.
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test fixture: writes a crash-shaped usage_turns.jsonl into a test-owned temp dir; no session writer runs there"
+)]
+fn crash_duplicated_archive_lines_are_read_once() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let one = || live(&[("grok-4", 10, 2, Some(1))]);
+    let mut file = SessionUsageFile::new("dup");
+    for n in 1..=210 {
+        file.apply_turn(n, format!("t{n}"), &one(), None);
+    }
+    let first = file.drain_overflow().unwrap();
+    // The crash: rows 1..=10 were appended, `usage.json` was not rewritten, so the next turn drains them again.
+    let mut archive = first.clone();
+    archive.extend_from_slice(&first);
+    // A stale archive line for a row `usage.json` still holds, with different numbers: the `usage.json` row wins.
+    let mut stale = file.turns[0].clone();
+    stale.usage.input_tokens = 999;
+    serde_json::to_writer(&mut archive, &stale).unwrap();
+    archive.push(b'\n');
+    archive.extend_from_slice(br#"{"turnNumber":5,"inputTo"#);
+    std::fs::write(tmp.path().join(USAGE_ARCHIVE_FILE), &archive).unwrap();
+
+    file.merge_archive(tmp.path()).unwrap();
+    assert_eq!(file.turns.len(), 210, "every turn once");
+    assert!(file.turns.iter().map(|t| t.turn_number).eq(1..=210));
+    assert_eq!(file.turn(11).unwrap().usage.input_tokens, 10);
+    assert!(file.turns.iter().all(|t| t.usage.input_tokens == 10));
+}

@@ -496,17 +496,6 @@ impl MemoryBackend for MemoryBackendImpl {
             search_config.semantic_min_score = None;
         }
 
-        let candidate_limit = search_config.max_results * 3;
-        let primary = index.search_fts(query, candidate_limit);
-        let fts_error_class = primary.as_ref().err().map(|error| {
-            tracing::warn!(target: crate::MEMORY_LOG_TARGET, %error, "FTS search failed");
-            MemorySearchErrorClass::Fts
-        });
-        let fts_results = merge_fts_results(
-            primary,
-            index.search_fts_by_sources(query, candidate_limit, &["global", "workspace"]),
-        );
-
         // ── Async phase: embed query for vector search (no &index borrow) ──
         let query_embedding = super::search::resolve_query_embedding(
             provider
@@ -517,16 +506,43 @@ impl MemoryBackend for MemoryBackendImpl {
         )
         .await;
 
-        // ── Sync phase 3: vector search + scoring + merge (borrows &index) ──
-        let merged = super::search::hybrid_search_merge(
-            &index,
-            fts_results,
-            query_embedding.embedding(),
-            &search_config,
-        )
-        .map_err(|error| {
-            Box::new(std::io::Error::other(error.to_string()))
-                as Box<dyn std::error::Error + Send + Sync>
+        // ── Sync phases 2-3: FTS, vector search, scoring and merge ──
+        // On the blocking pool so an aborted turn (`session/cancel`) is not held until it ends.
+        let blocking_query = query.to_owned();
+        let span = tracing::Span::current();
+        let (mut index, fts_error_class, merged, query_embedding) =
+            tokio::task::spawn_blocking(move || {
+                let _span = span.enter();
+                let candidate_limit = search_config.max_results * 3;
+                let primary = index.search_fts(&blocking_query, candidate_limit);
+                let fts_error_class = primary.as_ref().err().map(|error| {
+                    tracing::warn!(target: crate::MEMORY_LOG_TARGET, %error, "FTS search failed");
+                    MemorySearchErrorClass::Fts
+                });
+                let fts_results = merge_fts_results(
+                    primary,
+                    index.search_fts_by_sources(
+                        &blocking_query,
+                        candidate_limit,
+                        &["global", "workspace"],
+                    ),
+                );
+                let merged = super::search::hybrid_search_merge(
+                    &index,
+                    fts_results,
+                    query_embedding.embedding(),
+                    &search_config,
+                )
+                .map_err(|error| error.to_string());
+                (index, fts_error_class, merged, query_embedding)
+            })
+            .await
+            .map_err(|error| {
+                Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?;
+        let merged = merged.map_err(|error| {
+            Box::new(std::io::Error::other(error)) as Box<dyn std::error::Error + Send + Sync>
         })?;
         let mode = if merged.is_vector_degraded {
             MemoryRetrievalMode::FtsOnly

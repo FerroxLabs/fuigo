@@ -1,14 +1,13 @@
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use fs2::FileExt;
 use fuigo_session_writer::SessionWriter;
 
 use crate::implementations::fuigo_build::storage::SessionFiles;
 
 const ARTIFACT_DIR: &str = "web_fetch";
 const ALLOCATION_FILE: &str = ".allocation";
+const LOCK_FILE: &str = ".allocation.lock";
 const COUNTER_WIDTH: usize = 10;
 const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -46,15 +45,16 @@ fn save_locked_through(
     extension: &str,
 ) -> anyhow::Result<PathBuf> {
     let rel_dir = Path::new(ARTIFACT_DIR);
-    let mut allocation = writer
-        .open_lock(rel_dir.join(ALLOCATION_FILE))
+    // The counter file is replaced by rename (new inode), so the lock lives on its own sidecar.
+    let allocation = writer
+        .open_lock(rel_dir.join(LOCK_FILE))
         .context("open allocation file")?;
     allocation
         .lock_exclusive()
         .context("lock allocation file")?;
 
     let (max_existing, total_bytes) = scan_artifacts(dir, Some(writer))?;
-    let number = reserve_number(&mut allocation, max_existing)?;
+    let number = reserve_number(writer, &rel_dir.join(ALLOCATION_FILE), dir, max_existing)?;
     let new_total = total_bytes
         .checked_add(u64::try_from(data.len()).context("artifact size exceeds u64")?)
         .context("artifact byte count overflow")?;
@@ -72,38 +72,38 @@ fn save_locked_through(
     Ok(path)
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "lock sidecar (design F5 5.6): the .allocation counter, opened through SessionWriter::open_lock; rewrites only that handle"
-)]
-fn reserve_number(file: &mut std::fs::File, max_existing: u32) -> anyhow::Result<u32> {
-    let stored = read_reserved_number(file)?.unwrap_or(max_existing);
+fn reserve_number(
+    writer: &SessionWriter,
+    counter_rel: &Path,
+    dir: &Path,
+    max_existing: u32,
+) -> anyhow::Result<u32> {
+    let stored = read_reserved_number(&dir.join(ALLOCATION_FILE))?.unwrap_or(max_existing);
     let next = stored
         .max(max_existing)
         .checked_add(1)
         .context("artifact number exhausted")?;
-    file.seek(SeekFrom::Start(0))
-        .context("seek allocation file")?;
-    write!(file, "{next:0width$}", width = COUNTER_WIDTH).context("write allocation file")?;
-    file.set_len(COUNTER_WIDTH as u64)
-        .context("truncate allocation file")?;
-    file.sync_all().context("fsync allocation file")?;
+    writer
+        .replace_atomic_sync(
+            counter_rel,
+            format!("{next:0width$}", width = COUNTER_WIDTH).as_bytes(),
+        )
+        .context("write allocation file")?;
     Ok(next)
 }
 
-fn read_reserved_number(file: &mut std::fs::File) -> anyhow::Result<Option<u32>> {
-    let len = file.metadata().context("stat allocation file")?.len();
-    if len == 0 {
+fn read_reserved_number(counter: &Path) -> anyhow::Result<Option<u32>> {
+    let bytes = match std::fs::read(counter) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(0)),
+        Err(e) => return Err(e).context("read allocation file"),
+    };
+    if bytes.is_empty() {
         return Ok(Some(0));
     }
-    if len != COUNTER_WIDTH as u64 {
+    if bytes.len() != COUNTER_WIDTH {
         return Ok(None);
     }
-    file.seek(SeekFrom::Start(0))
-        .context("seek allocation file")?;
-    let mut bytes = [0; COUNTER_WIDTH];
-    file.read_exact(&mut bytes)
-        .context("read allocation file")?;
     Ok(std::str::from_utf8(&bytes)
         .ok()
         .and_then(|stored| stored.parse().ok()))

@@ -82,7 +82,7 @@ pub const MAX_SPELLINGS: usize = 4096;
 /// flight, or an error still on its way to a sink, must find its credential. Older ones are bounded by [`CAPACITY`].
 pub const RETAIN: Duration = Duration::from_secs(60 * 60);
 
-struct Entry {
+pub(crate) struct Entry {
     value: Box<str>,
     /// Re-encodings of `value`, computed once by [`encodings`] when it was recorded.
     encoded: Box<[Encoded]>,
@@ -103,7 +103,7 @@ struct Encoded {
 /// it carry, as `(bit count, bits)` (a count of 0 checks nothing). A neighbour that is a base64 character must carry
 /// those bits; a missing one (the text ends, or is not base64 there) is accepted, since what is there is still the key.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
-struct Edges {
+pub(crate) struct Edges {
     before: (u8, u8),
     after: (u8, u8),
 }
@@ -174,15 +174,24 @@ fn escaped_before(hay: &[u8], start: usize) -> Option<u8> {
 
 /// One spelling to look for: its text, its truncated-prefix floor in `char`s, and for an in-blob base64 form its edges.
 #[derive(Clone, Copy)]
-struct Spelling<'a> {
-    text: &'a str,
-    floor: usize,
-    edges: Edges,
+pub(crate) struct Spelling<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) floor: usize,
+    pub(crate) edges: Edges,
 }
 
 impl Entry {
+    /// A new entry for `value` with its base64 forms (S2: the at-rest set builds its own entries).
+    pub(crate) fn new(value: &str) -> Self {
+        Self {
+            value: value.into(),
+            encoded: encodings(value).into_boxed_slice(),
+            recorded: Instant::now(),
+        }
+    }
+
     /// Every spelling this entry matches: the value, then its base64 forms.
-    fn spellings(&self) -> impl Iterator<Item = Spelling<'_>> {
+    pub(crate) fn spellings(&self) -> impl Iterator<Item = Spelling<'_>> {
         std::iter::once(Spelling {
             text: &self.value,
             floor: MIN_TRUNCATED_PREFIX_CHARS,
@@ -221,6 +230,9 @@ pub fn record(value: &str) {
         insert(&mut sent, &twice, now);
     }
     evict(&mut sent, now);
+    drop(sent);
+    // S2: a credential this process sent is never written to a session file or a log at rest either (design §4).
+    crate::at_rest::record(value);
 }
 
 /// `value` as it reads inside a JSON string (without the surrounding quotes).
@@ -307,7 +319,7 @@ fn base64_value(c: u8) -> Option<u8> {
 }
 
 /// `%XX` (either hex case) at `src[i..]`: pushes the byte it stands for and returns 3.
-fn percent_escape(src: &[u8], i: usize, out: &mut Vec<u8>) -> Option<usize> {
+pub(crate) fn percent_escape(src: &[u8], i: usize, out: &mut Vec<u8>) -> Option<usize> {
     if src.get(i) != Some(&b'%') {
         return None;
     }
@@ -319,7 +331,7 @@ fn percent_escape(src: &[u8], i: usize, out: &mut Vec<u8>) -> Option<usize> {
 
 /// A JSON string escape at `src[i..]` (two bytes, a `\u` escape of six, or a surrogate pair of twelve): pushes the
 /// UTF-8 bytes it stands for and returns its length. A lone surrogate is not an escape here.
-fn json_escape(src: &[u8], i: usize, out: &mut Vec<u8>) -> Option<usize> {
+pub(crate) fn json_escape(src: &[u8], i: usize, out: &mut Vec<u8>) -> Option<usize> {
     if src.get(i) != Some(&b'\\') {
         return None;
     }
@@ -847,21 +859,34 @@ pub fn scrub_record(record: &[u8]) -> Option<Vec<u8>> {
 
 /// Length in bytes of the longest proper prefix of `cred`, at least `floor_chars` chars long (for a recorded value,
 /// [`MIN_TRUNCATED_PREFIX_CHARS`]), that `before` (the text up to a truncation mark) ends with.
-fn truncated_prefix_len(before: &[u8], cred: &str, floor_chars: usize) -> Option<usize> {
+pub(crate) fn truncated_prefix_len(before: &[u8], cred: &str, floor_chars: usize) -> Option<usize> {
     let floor = cred.char_indices().nth(floor_chars).map(|(i, _)| i)?;
     let last = *before.last()?;
-    cred.char_indices()
-        .map(|(i, _)| i)
-        .rev()
-        .take_while(|&len| len >= floor)
-        // Cheap first: the prefix's last byte must be the one just before the mark.
-        .filter(|&len| cred.as_bytes()[len - 1] == last)
-        .find(|&len| before.ends_with(&cred.as_bytes()[..len]))
+    if prefilter_off() {
+        return cred
+            .char_indices()
+            .map(|(i, _)| i)
+            .rev()
+            .take_while(|&len| len >= floor)
+            .filter(|&len| cred.as_bytes()[len - 1] == last)
+            .find(|&len| before.ends_with(&cred.as_bytes()[..len]));
+    }
+    // Only a prefix no longer than `before` can end it, and only one whose last byte is the one just before the mark:
+    // those are found by a SIMD scan, not by walking every char of a long value (S2 test 11, Fable r2 #4's long values).
+    let bytes = cred.as_bytes();
+    let top = before.len().min(bytes.len() - 1);
+    let low = floor.max(1);
+    if top < low {
+        return None;
+    }
+    memchr::memrchr_iter(last, &bytes[low - 1..top])
+        .map(|p| low + p)
+        .find(|&len| cred.is_char_boundary(len) && before.ends_with(&bytes[..len]))
 }
 
 /// How many bytes at the end of `before` are the beginning of an escape that a cut left incomplete: `%`, `%X`, `\`,
 /// `\u`, `\uX`, `\uXX` or `\uXXX` (X a hex digit). 0 when there is none.
-fn incomplete_escape_len(before: &[u8]) -> usize {
+pub(crate) fn incomplete_escape_len(before: &[u8]) -> usize {
     let hex_tail = before
         .iter()
         .rev()
@@ -947,6 +972,10 @@ fn occurrences<'a>(hay: &'a [u8], needle: &'a [u8]) -> impl Iterator<Item = usiz
 struct Prefixes {
     sorted: Vec<(u16, usize)>,
     seen: Vec<u64>,
+    /// The needles' heads (see [`Prefixes::with_starts`]) in automatons of at most 64 heads, each with the packed SIMD
+    /// searcher as its prefilter (or one DFA past [`MAX_HEAD_GROUPS`] of them): only a position where a head begins can
+    /// begin a needle, so [`find_all`] looks at no other. Empty: every position is looked at.
+    starts: Vec<aho_corasick::AhoCorasick>,
 }
 
 impl Prefixes {
@@ -962,9 +991,59 @@ impl Prefixes {
         for &(prefix, _) in &sorted {
             seen[usize::from(prefix >> 6)] |= 1 << (prefix & 63);
         }
-        Self { sorted, seen }
+        Self {
+            sorted,
+            seen,
+            starts: Vec::new(),
+        }
+    }
+
+    /// [`Prefixes::new`] with the heads automaton (S2 test 11: the byte-at-a-time bitmap ran at ~250 MB/s, a quarter of
+    /// a page-cache write). A head is a needle's first `k` bytes (all of a shorter needle), `k` the largest up to 16
+    /// that keeps 64 distinct heads or fewer, the most the packed SIMD searcher takes: a long head is rarely a false
+    /// lead (a recorded JSON value's `{"type":"` begins every transcript line). Built for an index that is kept (the
+    /// at-rest set's, once per generation), not for the display scrub's index of one call.
+    fn with_starts(needles: &[&[u8]]) -> Self {
+        let mut prefixes = Self::new(needles);
+        let usable: Vec<&[u8]> = prefixes.sorted.iter().map(|&(_, i)| needles[i]).collect();
+        let heads_of = |k: usize| {
+            let mut heads: Vec<&[u8]> = usable.iter().map(|n| &n[..k.min(n.len())]).collect();
+            heads.sort_unstable();
+            heads.dedup();
+            heads
+        };
+        // The fewest groups of 64 heads, then the longest heads. Leftmost-first: the kind whose prefilter is the packed SIMD
+        // searcher (64 patterns at most); the match it finds begins first. More than ~16 distinct values give more than
+        // 64 heads (Fable S2 confirm review #1), so they are split into groups, each scanned with that searcher; past
+        // MAX_HEAD_GROUPS one DFA over 4-byte heads (one table step per byte) is cheaper than that many scans.
+        let leftmost = |heads: &[&[u8]], dfa: bool| {
+            let mut builder = aho_corasick::AhoCorasick::builder();
+            builder.match_kind(aho_corasick::MatchKind::LeftmostFirst);
+            if dfa {
+                builder.kind(Some(aho_corasick::AhoCorasickKind::DFA));
+            }
+            builder.build(heads).ok()
+        };
+        let grouped = (1..=MAX_HEAD_GROUPS).find_map(|groups| {
+            (5..=16)
+                .rev()
+                .map(heads_of)
+                .find(|heads| heads.len() <= 64 * groups)
+        });
+        let starts: Option<Vec<_>> = match grouped {
+            Some(heads) => heads
+                .chunks(64)
+                .map(|group| leftmost(group, false))
+                .collect(),
+            None => leftmost(&heads_of(4), true).map(|dfa| vec![dfa]),
+        };
+        prefixes.starts = starts.unwrap_or_default();
+        prefixes
     }
 }
+
+/// The most groups of 64 heads [`Prefixes::with_starts`] scans separately (50 distinct values give about four).
+const MAX_HEAD_GROUPS: usize = 8;
 
 /// Every occurrence of every needle in `hay`, overlapping ones included, in ascending order of start, as
 /// `found(needle index, start)`; `found` returns `false` to stop early, and then so does this.
@@ -980,22 +1059,58 @@ fn find_all(
     if prefixes.sorted.is_empty() {
         return true;
     }
-    for (i, pair) in hay.windows(2).enumerate() {
-        let prefix = u16::from_be_bytes([pair[0], pair[1]]);
+    // Every needle beginning at `i` (`hay[i + 1]` exists), in the order of `sorted`.
+    let mut at = |i: usize| {
+        let prefix = u16::from_be_bytes([hay[i], hay[i + 1]]);
         if prefixes.seen[usize::from(prefix >> 6)] & (1 << (prefix & 63)) == 0 {
-            continue;
+            return true;
         }
         let first = prefixes.sorted.partition_point(|&(p, _)| p < prefix);
-        for &(_, idx) in prefixes.sorted[first..]
+        prefixes.sorted[first..]
             .iter()
             .take_while(|&&(p, _)| p == prefix)
-        {
-            if hay[i..].starts_with(needles[idx]) && !found(idx, i) {
-                return false;
+            .all(|&(_, idx)| !hay[i..].starts_with(needles[idx]) || found(idx, i))
+    };
+    match Some(&prefixes.starts).filter(|starts| !starts.is_empty() && !prefilter_off()) {
+        // The same positions in the same order, minus those where no needle's head begins: the smallest next head
+        // start over the groups, each group's next start kept until the scan passes it (each group scans `hay` once).
+        Some(starts) => {
+            let mut next: Vec<Option<Option<usize>>> = vec![None; starts.len()];
+            let mut from = 0;
+            loop {
+                let mut best: Option<usize> = None;
+                for (group, slot) in starts.iter().zip(next.iter_mut()) {
+                    if slot.is_none_or(|start| start.is_some_and(|start| start < from)) {
+                        *slot = Some(
+                            group
+                                .find(aho_corasick::Input::new(hay).range(from..))
+                                .map(|m| m.start()),
+                        );
+                    }
+                    if let Some(Some(start)) = *slot {
+                        best = Some(best.map_or(start, |b| b.min(start)));
+                    }
+                }
+                let Some(start) = best else { return true };
+                if !at(start) {
+                    return false;
+                }
+                from = start + 1;
             }
         }
+        None => (0..hay.len().saturating_sub(1)).all(at),
     }
-    true
+}
+
+/// Test-only switch back to the byte-at-a-time matcher (the differential tests compare the two).
+#[cfg(test)]
+fn prefilter_off() -> bool {
+    PREFILTER_OFF.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn prefilter_off() -> bool {
+    false
 }
 
 /// The most `(last two bytes, spelling)` pairs [`CutOffTails`] stores (32 MB); past it the table is dropped and a
@@ -1008,7 +1123,7 @@ const MAX_TAIL_PAIRS: usize = 1 << 22;
 /// floor), and the `(last two bytes, spelling index)` pairs sorted, so that a truncation mark is checked only against
 /// the spellings that can end the way the text before it does. A beginning shorter than two bytes has no such pair:
 /// its spelling is in `always` and is checked at every mark.
-struct CutOffTails {
+pub(crate) struct CutOffTails {
     sorted: Vec<(u16, u32)>,
     seen: Vec<u64>,
     always: Vec<u32>,
@@ -1017,7 +1132,7 @@ struct CutOffTails {
 }
 
 impl CutOffTails {
-    fn new(spellings: &[Spelling<'_>]) -> Self {
+    pub(crate) fn new(spellings: &[Spelling<'_>]) -> Self {
         Self::with_limit(spellings, MAX_TAIL_PAIRS)
     }
 
@@ -1068,7 +1183,7 @@ impl CutOffTails {
     }
 
     /// Adds to `out` the spellings that a cut-off beginning ending `before` can belong to.
-    fn candidates(&self, before: &[u8], out: &mut Vec<u32>) {
+    pub(crate) fn candidates(&self, before: &[u8], out: &mut Vec<u32>) {
         out.extend_from_slice(&self.always);
         let [.., a, b] = *before else { return };
         let pair = u16::from_be_bytes([a, b]);
@@ -1097,12 +1212,19 @@ thread_local! {
 
 #[cfg(test)]
 thread_local! {
+    /// Test-only: no prefilter ([`find_all`] steps one byte at a time, marks and view triggers are found by scalar
+    /// scans), the matcher as it was before the S2 perf fix; the differential tests compare the two.
+    pub(crate) static PREFILTER_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// Test-only: make [`Index::cut_off`] check every spelling at every mark, the way it did before P179.
     static CUT_OFF_UNFILTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Every recorded spelling, indexed once per scrub for one pass over the text and over each decoded view of it.
-struct Index<'a> {
+pub(crate) struct Index<'a> {
     spellings: Vec<Spelling<'a>>,
     needles: Vec<&'a [u8]>,
     prefixes: Prefixes,
@@ -1110,14 +1232,37 @@ struct Index<'a> {
     /// The longest spelling, in bytes.
     longest: usize,
     /// Built when the first truncation mark is met: most text has none.
-    tails: std::cell::OnceCell<CutOffTails>,
+    tails: std::sync::OnceLock<CutOffTails>,
 }
 
 impl<'a> Index<'a> {
+    /// Test-only: whether the heads are past one packed searcher (more than 64 heads: groups, or the DFA).
+    #[cfg(test)]
+    pub(crate) fn heads_dfa(&self) -> bool {
+        let starts = &self.prefixes.starts;
+        starts.len() > 1
+            || starts
+                .first()
+                .is_some_and(|one| one.kind() == aho_corasick::AhoCorasickKind::DFA)
+    }
+
     fn new(sent: &'a VecDeque<Entry>) -> Self {
-        let spellings: Vec<Spelling<'a>> = sent.iter().flat_map(Entry::spellings).collect();
+        Self::build(sent.iter().flat_map(Entry::spellings).collect(), false)
+    }
+
+    /// The index over `spellings` (S2: the at-rest set's spellings, indexed once per generation, with the heads
+    /// automaton).
+    pub(crate) fn from_spellings(spellings: Vec<Spelling<'a>>) -> Self {
+        Self::build(spellings, true)
+    }
+
+    fn build(spellings: Vec<Spelling<'a>>, starts: bool) -> Self {
         let needles: Vec<&'a [u8]> = spellings.iter().map(|s| s.text.as_bytes()).collect();
-        let prefixes = Prefixes::new(&needles);
+        let prefixes = if starts {
+            Prefixes::with_starts(&needles)
+        } else {
+            Prefixes::new(&needles)
+        };
         let mut views = vec![View::Percent { plus: false }];
         if spellings.iter().any(|s| s.text.contains(' ')) {
             views.push(View::Percent { plus: true });
@@ -1130,7 +1275,7 @@ impl<'a> Index<'a> {
             prefixes,
             views,
             longest,
-            tails: std::cell::OnceCell::new(),
+            tails: std::sync::OnceLock::new(),
         }
     }
 
@@ -1154,7 +1299,15 @@ impl<'a> Index<'a> {
         #[cfg(not(test))]
         let unfiltered = false;
         let mut candidates: Vec<u32> = Vec::new();
-        for mark in occurrences(hay, TRUNCATION_MARK.as_bytes()) {
+        // memmem skips overlapping occurrences; the mark (E2 80 A6) cannot overlap itself, so it finds them all. Not
+        // memchr on E2: box-drawing output (U+2500..) begins every char with it.
+        static MARK: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+            std::sync::LazyLock::new(|| memchr::memmem::Finder::new(TRUNCATION_MARK.as_bytes()));
+        let (fast, slow) = match prefilter_off() {
+            false => (Some(MARK.find_iter(hay)), None),
+            true => (None, Some(occurrences(hay, TRUNCATION_MARK.as_bytes()))),
+        };
+        for mark in fast.into_iter().flatten().chain(slow.into_iter().flatten()) {
             // A cap can also fall inside an escape (`%7…`, `\u00…`): what is left of it is covered with the prefix.
             let trim = incomplete_escape_len(&hay[..mark]);
             // Only the spellings with a cut-off beginning that ends the way the text before the mark ends (either
@@ -1192,7 +1345,7 @@ impl<'a> Index<'a> {
     /// the text as it is (in ascending order of start), then in each decoded view of it (see the module docs); with
     /// `marks`, also every cut-off beginning before a truncation mark. `found` returns false to stop; returns false
     /// when stopped.
-    fn for_each_match(
+    pub(crate) fn for_each_match(
         &self,
         bytes: &[u8],
         marks: bool,
@@ -1206,8 +1359,11 @@ impl<'a> Index<'a> {
         if marks && !self.cut_off(bytes, &mut *found) {
             return false;
         }
+        // No view triggers on a text without `%`, `\` or `+` (most text): one SIMD scan rules all of them out.
+        let triggered = prefilter_off() || memchr::memchr3(b'%', b'\\', b'+', bytes).is_some();
         self.views.iter().all(|&view| {
-            !bytes.iter().any(|&b| view.trigger(b))
+            !triggered
+                || !bytes.iter().any(|&b| view.trigger(b))
                 || self.scan_view(bytes, view, marks, &mut *found)
         })
     }
@@ -1314,7 +1470,7 @@ impl<'a> Index<'a> {
     }
 
     /// Whether `bytes` holds any recorded spelling, as it is or in a decoded view (cut-off beginnings aside).
-    fn contains_any(&self, bytes: &[u8]) -> bool {
+    pub(crate) fn contains_any(&self, bytes: &[u8]) -> bool {
         !self.for_each_match(bytes, false, &mut |_, _| false)
     }
 }
@@ -2256,32 +2412,33 @@ mod tests {
             ])
             .collect();
         let needles: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
-        let prefixes = Prefixes::new(&needles);
-        let mut fast: Vec<(usize, usize)> = Vec::new();
-        find_all(&hay, &needles, &prefixes, |idx, start| {
-            fast.push((idx, start));
-            true
-        });
-        let mut slow: Vec<(usize, usize)> = needles
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| n.len() >= 2)
-            .flat_map(|(idx, n)| occurrences(&hay, n).map(move |start| (idx, start)))
-            .collect();
-        assert!(fast.windows(2).all(|w| w[0].1 <= w[1].1), "ascending start");
-        fast.sort_unstable();
-        slow.sort_unstable();
-        assert!(!slow.is_empty());
-        assert_eq!(fast, slow);
-        let mut calls = 0;
-        assert!(!find_all(&hay, &needles, &prefixes, |_, _| {
-            calls += 1;
-            false
-        }));
-        assert_eq!(calls, 1);
-        assert!(find_all(b"a", &needles, &prefixes, |_, _| panic!(
-            "shorter than every needle"
-        )));
+        for prefixes in [Prefixes::new(&needles), Prefixes::with_starts(&needles)] {
+            let mut fast: Vec<(usize, usize)> = Vec::new();
+            find_all(&hay, &needles, &prefixes, |idx, start| {
+                fast.push((idx, start));
+                true
+            });
+            let mut slow: Vec<(usize, usize)> = needles
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.len() >= 2)
+                .flat_map(|(idx, n)| occurrences(&hay, n).map(move |start| (idx, start)))
+                .collect();
+            assert!(fast.windows(2).all(|w| w[0].1 <= w[1].1), "ascending start");
+            fast.sort_unstable();
+            slow.sort_unstable();
+            assert!(!slow.is_empty());
+            assert_eq!(fast, slow);
+            let mut calls = 0;
+            assert!(!find_all(&hay, &needles, &prefixes, |_, _| {
+                calls += 1;
+                false
+            }));
+            assert_eq!(calls, 1);
+            assert!(find_all(b"a", &needles, &prefixes, |_, _| panic!(
+                "shorter than every needle"
+            )));
+        }
     }
 
     /// Astra r1 #4: the base64 of a different value that shares all of the key but the bits of its last (or first)

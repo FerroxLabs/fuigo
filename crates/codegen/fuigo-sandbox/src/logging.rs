@@ -73,7 +73,8 @@ impl SandboxLogger {
 
         for event in &events {
             if let Ok(json) = serde_json::to_string(event) {
-                writeln!(file, "{}", json)?;
+                let line = format!("{json}\n");
+                file.write_all(&fuigo_secrets::at_rest::transform_whole(line.as_bytes()))?;
             }
         }
 

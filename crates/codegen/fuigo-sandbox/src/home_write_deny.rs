@@ -1033,7 +1033,7 @@ fn owned_by(dir: &Path, open: &[&LinkedFile]) -> bool {
 fn essential_roots() -> Vec<PathBuf> {
     let fuigo = crate::paths::fuigo_home();
     let mut roots = crate::paths::temp_writable_paths();
-    roots.push(fuigo.join("sessions"));
+    roots.push(fuigo_config::sessions_root_in(&fuigo));
     roots.push(fuigo);
     roots
 }

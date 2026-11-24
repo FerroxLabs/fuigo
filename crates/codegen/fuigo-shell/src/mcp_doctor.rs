@@ -293,7 +293,26 @@ async fn check_server_start(
     let noop = fuigo_session_events::EventWriter::noop();
     let ctx = mcp_servers::McpSpawnCtx::standalone(&noop)
         .with_oauth_discovery(mcp_servers::McpOauthDiscovery::Network);
-    match mcp_servers::start_mcp_server(acp_server, Some(cwd), None, None, &ctx).await {
+    // MC-03: doctor launches through the same gate; a held server is reported and not started.
+    let mut admission = crate::session::mcp_admission::admit_mcp_launch(vec![acp_server]);
+    if let Some(held) = admission.held.pop() {
+        return Err(Check::fail(
+            "held: definition changed since you approved it",
+            held.origin,
+            format!(
+                "if you made this change, approve it with `fuigo mcp enable {}`",
+                held.name
+            ),
+        ));
+    }
+    let Some(admitted) = admission.admitted.pop() else {
+        return Err(Check::fail(
+            "server failed to start",
+            "not admitted",
+            "run `fuigo mcp list`",
+        ));
+    };
+    match mcp_servers::start_mcp_server(admitted, Some(cwd), None, None, &ctx).await {
         Ok(client) => {
             let elapsed = start.elapsed();
             Ok((

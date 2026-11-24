@@ -4,7 +4,8 @@
 //! guide promises config hot-reload without naming a mode).
 //!
 //! Real path: the real binary over stdio, a user `config.toml` stdio MCP server that records its version tag when it
-//! starts, an edit of that tag on disk with the session open.
+//! starts, an edit of that tag on disk with the session open. Since 1.0.47 (MC-03) the edit is held until approved;
+//! approving it through `/mcp` restarts the server from the edited definition.
 #![cfg(unix)]
 
 use std::path::Path;
@@ -129,7 +130,31 @@ async fn a_no_leader_stdio_agent_follows_user_mcp_config_edits() {
             assert!(wait_for("v1", 30).await, "premise: the server starts with the session; tags {:?}", tags(&marker));
 
             // Edit the definition on disk with the session open. Keep the agent's stdout drained meanwhile.
+            // MC-03 (1.0.47): the watcher sees the edit, but a changed definition is held until approved.
             write_config(&fuigo_home, &script, &marker, "v2");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                let _ = client
+                    .wait_for_message("drain", Duration::from_millis(500), |_| false, refuse)
+                    .await;
+            }
+            assert!(
+                !tags(&marker).iter().any(|t| t == "v2"),
+                "MC-03: an edited definition is held until approved; tags {:?}",
+                tags(&marker)
+            );
+            // Approving it (the `/mcp` toggle) starts the edited definition in the open session.
+            let sid = new["result"]["sessionId"].as_str().expect("session id").to_owned();
+            let toggled = client
+                .request(
+                    "p148-4",
+                    "_fuigo/mcp/toggle",
+                    json!({ "session_id": sid, "server_name": "p148reload", "enabled": true }),
+                    RPC,
+                    refuse,
+                )
+                .await;
+            assert!(toggled.get("result").is_some(), "mcp/toggle: {toggled}");
             let followed = {
                 let deadline = Instant::now() + Duration::from_secs(30);
                 let mut seen = false;

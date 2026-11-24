@@ -8,6 +8,8 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 const MAX_PROMPT_HISTORY_ENTRIES: usize = 10_000;
+/// A truncation keeps this many, so the next launch does not rewrite the file again (audit 1.0.47 F7).
+const TRUNCATED_PROMPT_HISTORY_ENTRIES: usize = 9_000;
 const PROMPT_HISTORY_FILE: &str = "prompt_history.jsonl";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +55,7 @@ pub(crate) fn append_prompt(cwd: &str, entry: &PromptEntry) -> io::Result<()> {
     // file an older version left looser is tightened (best effort; the truncation's rewrite keeps the mode).
     if !path.exists() {
         let mut options = std::fs::OpenOptions::new();
+        // at-rest: creates the empty file only
         options.create(true).append(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
@@ -71,13 +74,14 @@ pub(crate) fn append_prompt(cwd: &str, entry: &PromptEntry) -> io::Result<()> {
 
     let mut file = std::fs::OpenOptions::new()
         .create(true)
+        // at-rest: written below through at_rest::transform_whole
         .append(true)
         .open(&path)?;
 
     let mut line =
         serde_json::to_vec(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     line.push(b'\n');
-    file.write_all(&line)?;
+    file.write_all(&fuigo_secrets::at_rest::transform_whole(&line))?;
     Ok(())
 }
 
@@ -104,11 +108,19 @@ pub(crate) fn truncate_if_needed(cwd: &str) -> io::Result<()> {
     if fuigo_session_writer::persistence_disabled() {
         return Ok(());
     }
-    truncate_file_if_needed(&prompt_history_path(cwd), MAX_PROMPT_HISTORY_ENTRIES)
+    truncate_file_if_needed(
+        &prompt_history_path(cwd),
+        MAX_PROMPT_HISTORY_ENTRIES,
+        TRUNCATED_PROMPT_HISTORY_ENTRIES,
+    )
 }
 
-/// [`truncate_if_needed`] of the file at `path`, keeping at most `max` entries.
-fn truncate_file_if_needed(path: &std::path::Path, max: usize) -> io::Result<()> {
+/// [`truncate_if_needed`] of the file at `path`: over `max` entries, keep the newest `keep`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: the prompt-history truncation rewrite, whose new contents go through fuigo_secrets::at_rest::transform_whole, under sessions/<cwd>/"
+)]
+fn truncate_file_if_needed(path: &std::path::Path, max: usize, keep: usize) -> io::Result<()> {
     use fuigo_config::fs_atomic::Edit;
     if !path.exists() {
         return Ok(());
@@ -141,13 +153,13 @@ fn truncate_file_if_needed(path: &std::path::Path, max: usize) -> io::Result<()>
             }
             // Keep the most recent entries
             let mut contents = Vec::new();
-            for entry in &entries[entries.len() - max..] {
+            for entry in &entries[entries.len() - keep.min(max)..] {
                 serde_json::to_writer(&mut contents, entry)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 contents.push(b'\n');
             }
             Ok(Edit::Replace {
-                contents,
+                contents: fuigo_secrets::at_rest::transform_whole(&contents).into_owned(),
                 value: (),
             })
         },
@@ -491,6 +503,40 @@ mod tests {
         assert_eq!(load_prompts(&cwd).unwrap().len(), 4);
     }
 
+    /// F7: a truncation keeps fewer than the cap, so the next run (the next launch) finds nothing to rewrite.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial] // the state lock lives under the (env-derived) fuigo home
+    fn truncation_leaves_headroom_so_the_next_run_does_not_rewrite() {
+        use std::os::unix::fs::MetadataExt;
+        let (_tmp, cwd) = test_cwd();
+        let path = prompt_history_path(&cwd);
+        crate::util::fuigo_home::ensure_sessions_cwd_dir(&cwd).unwrap();
+        let entry = |i: usize| PromptEntry {
+            timestamp: Utc::now(),
+            session_id: "s".into(),
+            prompt: format!("p-{i}"),
+            is_bash: false,
+        };
+        let mut seed = Vec::new();
+        for i in 0..11 {
+            serde_json::to_writer(&mut seed, &entry(i)).unwrap();
+            seed.push(b'\n');
+        }
+        std::fs::write(&path, seed).unwrap();
+        truncate_file_if_needed(&path, 10, 9).unwrap();
+        assert_eq!(load_prompts(&cwd).unwrap().len(), 9);
+        append_prompt(&cwd, &entry(11)).unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        truncate_file_if_needed(&path, 10, 9).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().ino(),
+            inode,
+            "rewritten again"
+        );
+        assert_eq!(load_prompts(&cwd).unwrap().len(), 10);
+    }
+
     /// P72: a truncation running while prompts are appended (other sessions,
     /// other processes) drops only the oldest entries, never an append that
     /// landed between its read and its rename; and leaves no temp.
@@ -519,7 +565,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut runs = 0;
                 while !done.load(std::sync::atomic::Ordering::SeqCst) || runs == 0 {
-                    truncate_file_if_needed(&path, MAX).unwrap();
+                    truncate_file_if_needed(&path, MAX, MAX).unwrap();
                     runs += 1;
                 }
                 runs
@@ -530,7 +576,7 @@ mod tests {
         }
         done.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(truncator.join().unwrap() > 0);
-        truncate_file_if_needed(&path, MAX).unwrap();
+        truncate_file_if_needed(&path, MAX, MAX).unwrap();
         let mut got = load_prompts(&cwd).unwrap();
         got.reverse();
         let want: Vec<String> = (160..210)
@@ -630,7 +676,7 @@ mod tests {
                 })),
             );
         }
-        let truncated = truncate_file_if_needed(&through, 200);
+        let truncated = truncate_file_if_needed(&through, 200, 200);
         under_lock_seam::set(under_lock_seam::Site::Truncate, None);
         truncated.unwrap();
         assert!(

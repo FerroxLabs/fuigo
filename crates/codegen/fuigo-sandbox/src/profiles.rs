@@ -452,6 +452,7 @@ impl ProfileName {
                     return Some(real);
                 }
                 let default_sessions = fuigo_dirs::home_dir()
+                    // at-rest: outside-roots read-only comparison with the default sessions path
                     .map(|user_home| user_home.join(".fuigo").join("sessions"));
                 if path.file_name() == Some(std::ffi::OsStr::new("sessions"))
                     && default_sessions.as_ref() == Some(&real)

@@ -15,6 +15,7 @@ fn args<'a>(
         total_tokens,
         model_id,
         last_turn_usage: None,
+        last_attempt_usage: None,
         prompt_usage: None,
         cancellation_category: None,
         cancellation_context: None,

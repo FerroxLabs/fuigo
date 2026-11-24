@@ -10,6 +10,8 @@ description = "The one write choke point for Fuigo session folders: the writer t
 dunce = { workspace = true }
 # Owner-only session directories (`create_dir_all_owner_only`).
 fuigo-config = { workspace = true }
+# Advisory locks on lock sidecars (`SessionLock`), the same calls the callers used on the raw `File`.
+fs2 = { workspace = true }
 # The owner-only file ACL on Windows (P145), used by the owner-only helpers.
 fuigo-secrets = { workspace = true }
 # The slot's wake-up channel, `spawn_blocking` for the async write methods, the claim deadline.
@@ -28,6 +30,7 @@ test-support = []
 
 [dev-dependencies]
 libc = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
 

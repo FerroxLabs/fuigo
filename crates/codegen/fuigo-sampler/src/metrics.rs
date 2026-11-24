@@ -28,6 +28,9 @@ pub struct InferenceLatencyStats {
     /// Final successful attempt only; cumulative billing usage is not context size.
     #[serde(default)]
     pub last_attempt_total_tokens: Option<u64>,
+    /// The final successful attempt's own usage, so a usage report can keep every field on one basis.
+    #[serde(default)]
+    pub last_attempt_usage: Option<fuigo_sampling_types::TokenUsage>,
     /// Time to first content token (ms)
     pub time_to_first_token_ms: Option<u64>,
     /// Measured at stream exhaustion, not at the last content chunk, so it includes trailing metadata chunks.
@@ -95,6 +98,7 @@ impl InferenceLatencyStats {
 
         Self {
             last_attempt_total_tokens: None,
+            last_attempt_usage: None,
             time_to_first_token_ms: Some(ttfb.as_millis() as u64),
             time_to_last_byte_ms: ttlb,
             chunk_count: u32::try_from(chunk_timestamps.len()).unwrap_or(u32::MAX),

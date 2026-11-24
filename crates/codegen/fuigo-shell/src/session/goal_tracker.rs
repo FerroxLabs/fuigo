@@ -337,7 +337,7 @@ fn open_report_no_follow(path: &std::path::Path) -> Option<std::fs::File> {
     file.metadata().ok()?.is_file().then_some(file)
 }
 
-fn append_reports(out: &mut std::fs::File, reports: Vec<((u32, u32), PathBuf)>) {
+fn append_reports(out: &mut impl std::io::Write, reports: Vec<((u32, u32), PathBuf)>) {
     use std::io::Write;
     let mut budget = crate::session::goal_classifier::GOAL_VERIFIER_PANEL_MAX_BYTES as u64;
     for (_, report) in reports {

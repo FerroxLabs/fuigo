@@ -629,7 +629,7 @@ pub async fn cleanup_stale_permission_state(max_age: std::time::Duration) {
     if fuigo_config::session_persistence_disabled() {
         return;
     }
-    let sessions_dir = fuigo_home().join("sessions");
+    let sessions_dir = fuigo_config::sessions_root();
     let Ok(mut entries) = tokio::fs::read_dir(&sessions_dir).await else {
         return;
     };

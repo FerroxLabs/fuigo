@@ -16,7 +16,10 @@ static FILE_LOG_GUARDS: OnceLock<Mutex<Vec<WorkerGuard>>> = OnceLock::new();
 pub(crate) fn scrubbed_non_blocking<W: std::io::Write + Send + 'static>(
     writer: W,
 ) -> (NonBlocking, WorkerGuard) {
-    tracing_appender::non_blocking(fuigo_secrets::sent_credentials::ScrubWriter::new(writer))
+    // The at-rest layer sits under the sent-credential scrub: both see each whole record.
+    tracing_appender::non_blocking(fuigo_secrets::sent_credentials::ScrubWriter::new(
+        fuigo_secrets::at_rest::AtRestFile::records(writer),
+    ))
 }
 
 /// Create `dir` and any missing parents, each with mode 0700 on Unix (audit S11-F3). A directory that already exists

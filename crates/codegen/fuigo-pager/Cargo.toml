@@ -195,6 +195,8 @@ fuigo-status-line = { workspace = true, features = ["test-support"] }
 fuigo-pager-render = { path = "../fuigo-pager-render", features = ["test-support"] }
 fuigo-gboom = { path = "../fuigo-gboom", features = ["test-support"] }
 fuigo-shell = { workspace = true, features = ["test-support"] }
+# `SessionWriter::wait_free`: the leader-cluster harness waits out a killed generation's writers.
+fuigo-session-writer = { workspace = true }
 pretty_assertions = { workspace = true }
 insta = { workspace = true }
 criterion = { workspace = true }

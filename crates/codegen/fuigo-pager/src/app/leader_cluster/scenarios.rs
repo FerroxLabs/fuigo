@@ -387,7 +387,7 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
         let inference_before_crash = cluster.inference_request_count();
 
         // Kill the leader generation, respawn at the same path; both bridges' reconnectors adopt the one new in-process server
-        cluster.kill_leader().await;
+        cluster.kill_leader(&[&sid]).await;
         cluster.respawn_leader().await;
 
         reconnect_and_reload(&mut cluster, &mut a, &sid).await;
@@ -446,6 +446,7 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
 /// Locate `<fuigo_home>/sessions/<enc-cwd>/<sid>/updates.jsonl` without the (internal) cwd encoder.
 /// Scan one level of cwd dirs, the same approach as session_load_perf's `locate_session_dir`.
 fn find_session_updates_file(sid: &str) -> Option<PathBuf> {
+    // at-rest: outside-roots read-only test scenario listing (the effective home of a harness run)
     let sessions = effective_fuigo_home().join("sessions");
     for entry in std::fs::read_dir(&sessions).ok()?.flatten() {
         let candidate = entry.path().join(sid).join("updates.jsonl");

@@ -117,7 +117,17 @@ pub struct MemoryIndex {
     vec_available: bool,
     embedding_dimensions: usize,
     embedding_identity: Option<String>,
+    /// Per-open memo of source checks, keyed by path and raw-content hash: one search
+    /// validates ~54 chunks that mostly share one file, so screen each file once.
+    source_checks: std::cell::RefCell<HashMap<String, SourceCheck>>,
 }
+
+/// One screened source file: raw-content hash, then the filtered-text revision and its
+/// valid (start_line, chunk hash) pairs (`None` when the screen rejects the file).
+type SourceCheck = (
+    String,
+    Option<(String, std::collections::HashSet<(usize, String)>)>,
+);
 
 impl MemoryIndex {
     /// Open or create the index database at `db_path`.
@@ -244,6 +254,7 @@ impl MemoryIndex {
             vec_available,
             embedding_dimensions: dimensions,
             embedding_identity: None,
+            source_checks: Default::default(),
         })
     }
 
@@ -291,19 +302,26 @@ impl MemoryIndex {
 
     /// Bind the indexed excerpt to the same immutable source bytes used to validate it.
     pub fn chunk_source_revision(&self, chunk: &ChunkRecord) -> Option<String> {
-        self.storage
-            .read_file(Path::new(&chunk.path), None, None)
-            .ok()
-            .and_then(|text| {
-                (super::safety::is_safe_memory(&text)
-                    && chunk_markdown(&text, &self.chunk_config)
-                        .iter()
-                        .any(|candidate| {
-                            candidate.start_line == chunk.start_line
-                                && chunk_hash(&candidate.text) == chunk.hash
-                        }))
-                .then(|| blake3::hash(text.as_bytes()).to_hex().to_string())
-            })
+        let raw = self.storage.read_unfiltered(Path::new(&chunk.path)).ok()?;
+        let raw_hash = blake3::hash(raw.as_bytes()).to_hex().to_string();
+        let mut checks = self.source_checks.borrow_mut();
+        let (cached_hash, check) = checks.entry(chunk.path.clone()).or_default();
+        if *cached_hash != raw_hash {
+            let text = super::safety::filter_memory_lines(&raw);
+            *check = super::safety::is_safe_memory(&text).then(|| {
+                let revision = blake3::hash(text.as_bytes()).to_hex().to_string();
+                let valid = chunk_markdown(&text, &self.chunk_config)
+                    .iter()
+                    .map(|candidate| (candidate.start_line, chunk_hash(&candidate.text)))
+                    .collect();
+                (revision, valid)
+            });
+            *cached_hash = raw_hash;
+        }
+        check
+            .as_ref()
+            .filter(|(_, valid)| valid.contains(&(chunk.start_line, chunk.hash.clone())))
+            .map(|(revision, _)| revision.clone())
     }
 
     /// Latest explicit version of each fact. Same-file later entries supersede
@@ -1494,3 +1512,7 @@ mod tests {
 #[cfg(test)]
 #[path = "index_p91_tests.rs"]
 mod p91_tests;
+
+#[cfg(test)]
+#[path = "index_m1_tests.rs"]
+mod m1_tests;

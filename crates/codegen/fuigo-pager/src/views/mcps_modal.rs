@@ -132,6 +132,9 @@ pub struct McpsServerEntry {
     pub setup_values: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     pub session: Option<McpsServerSession>,
+    /// MC-03: the `mcpdef.v1` digest of the held definition the shell lists for this server.
+    #[serde(default)]
+    pub held_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -214,6 +217,8 @@ pub struct McpServerInfo {
     /// Plugin name parsed from `source_label` (`"plugin: …"`).
     pub plugin_name: Option<String>,
     pub is_managed_gateway: bool,
+    /// `heldDigest` from `mcp/list`: the held definition this row shows; the toggle sends it so only that one is approved.
+    pub held_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -256,7 +261,8 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
         .map(|entry| {
             let (status, tool_count, tools, auth_required, enabled) =
                 if let Some(session) = &entry.session {
-                    let enabled = session.enabled;
+                    // A held row is stopped until approved, whatever the session says: one toggle approves it.
+                    let enabled = session.enabled && entry.held_digest.is_none();
                     // Prefer setupRequired bool; status is a fallback for older shells.
                     if session.setup_required {
                         (
@@ -335,6 +341,7 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
             }
             // The reason is text from a server or its auth flow: scrub it before it can reach a terminal cell
             .map(|reason| fuigo_tty_utils::untrusted(&reason).to_string());
+            let held_digest = entry.held_digest;
             McpServerInfo {
                 name: entry.name,
                 display_name: entry.display_name,
@@ -356,6 +363,7 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                 wire_source,
                 plugin_name,
                 is_managed_gateway,
+                held_digest,
             }
         })
         .collect::<Vec<_>>();
@@ -431,6 +439,7 @@ mod tests {
             wire_source: McpWireSource::Local,
             plugin_name: None,
             is_managed_gateway: false,
+            held_digest: None,
         }
     }
 
@@ -466,6 +475,7 @@ mod tests {
                     blocked_reason: None,
                     unavailable_reason: None,
                 }),
+                held_digest: None,
             }],
             session_mcp_resolved: None,
         })
@@ -518,6 +528,25 @@ mod tests {
         assert!(!blocked.enabled);
         let off = servers.iter().find(|s| s.name == "off").unwrap();
         assert_eq!(off.blocked_reason, None);
+    }
+
+    /// MC-03: a held row lists as stopped (even if the session says enabled) and keeps its digest, so one toggle
+    /// approves it; an empty digest stays `Some` (invalid), never "none".
+    #[test]
+    fn a_held_row_lists_as_disabled_with_its_digest() {
+        let resp: McpsListResponse = serde_json::from_value(serde_json::json!({
+            "servers": [
+                { "name": "held", "source": "local", "heldDigest": "mcpdef.v1:abc", "session": { "enabled": true, "status": "ready" } },
+                { "name": "blank", "source": "local", "heldDigest": "", "session": { "enabled": true } }
+            ]
+        }))
+        .unwrap();
+        let servers = convert_list_response(resp);
+        let held = servers.iter().find(|s| s.name == "held").unwrap();
+        assert!(!held.enabled);
+        assert_eq!(held.held_digest.as_deref(), Some("mcpdef.v1:abc"));
+        let blank = servers.iter().find(|s| s.name == "blank").unwrap();
+        assert_eq!(blank.held_digest.as_deref(), Some(""));
     }
 
     #[test]
@@ -623,6 +652,7 @@ mod tests {
                     blocked_reason: None,
                     unavailable_reason: None,
                 }),
+                held_digest: None,
             }
         }
         let servers = convert_list_response(McpsListResponse {
@@ -669,6 +699,7 @@ mod tests {
                     blocked_reason: None,
                     unavailable_reason: None,
                 }),
+                held_digest: None,
             }],
             session_mcp_resolved: None,
         });
@@ -699,6 +730,7 @@ mod tests {
                 blocked_reason: None,
                 unavailable_reason: reason.map(str::to_string),
             }),
+            held_digest: None,
         };
         let servers = convert_list_response(McpsListResponse {
             servers: vec![
@@ -742,6 +774,7 @@ mod tests {
                 blocked_reason: None,
                 unavailable_reason: Some(reason.to_string()),
             }),
+            held_digest: None,
         };
         let servers = convert_list_response(McpsListResponse {
             servers: vec![entry("refused\x1b]0;pwned\x07\x1b[2J\u{9b}31m\u{202e}tail")],
@@ -829,6 +862,7 @@ mod tests {
             wire_source: McpWireSource::Local,
             plugin_name: None,
             is_managed_gateway: false,
+            held_digest: None,
         }];
         let mutated = patch_server_row(
             &mut servers,

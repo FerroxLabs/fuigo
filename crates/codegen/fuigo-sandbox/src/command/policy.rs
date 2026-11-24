@@ -547,7 +547,7 @@ fn read_denies_for(
     );
     // Other workspaces' transcripts and indexes are not this command's to read
     deny.push(DenyEntry::TreeExcept {
-        tree: fuigo_home.join("sessions"),
+        tree: fuigo_config::sessions_root_in(fuigo_home),
         except: own_session_dir,
     });
     for entry in &inputs.profile.deny {

@@ -349,6 +349,10 @@ pub(super) fn bump_managed_rollback_floor() {
 }
 
 /// Converge disk to the served set — a leftover would keep enforcing a withdrawn policy.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: the managed-config store, outside the at-rest roots (sessions/, logs/)"
+)]
 pub(super) fn apply_managed_config(
     home: &std::path::Path,
     body: &ManagedConfigResponse,

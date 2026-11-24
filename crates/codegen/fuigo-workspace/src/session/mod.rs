@@ -1070,6 +1070,7 @@ pub(crate) fn get_or_open_session_writer(
     if let Some(existing) = writers.get(session_id) {
         return existing.value().clone();
     }
+    // at-rest: outside-roots the workspace server's own <workspace_home>/sessions tree (not <fuigo_home>; never retargeted); written through EventWriter/SessionWriter
     let sessions_root = workspace_home.join("sessions");
     let dir = sessions_root.join(session_id);
     let create = fuigo_config::create_dir_all_owner_only(&dir);

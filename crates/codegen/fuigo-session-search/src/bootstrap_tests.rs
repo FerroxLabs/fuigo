@@ -451,3 +451,167 @@ async fn test_concurrent_gates_single_flight() {
         progress_b.total.load(Ordering::Relaxed),
     );
 }
+
+static STAMP_TEST_READS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts every transcript it reads; the file text is the searchable content.
+fn counting_extract(path: &Path) -> io::Result<(String, u64)> {
+    STAMP_TEST_READS.fetch_add(1, Ordering::SeqCst);
+    let text = std::fs::read_to_string(path)?;
+    let len = text.len() as u64;
+    Ok((text, len))
+}
+
+fn transcript_source(dir: &Path, titles: &[(&str, &str)]) -> FakeSource {
+    let mut source = FakeSource::empty();
+    source.sessions = titles
+        .iter()
+        .map(|(id, title)| IndexableSession {
+            session_id: (*id).to_string(),
+            cwd: "/ws".to_string(),
+            updated_at_unix: 1_700_000_000,
+            title: (*title).to_string(),
+            updates_path: Some(dir.join(format!("{id}.jsonl"))),
+        })
+        .collect();
+    source
+}
+
+fn search_ids(db_path: &Path, query: &str) -> Vec<(String, String)> {
+    with_search_index(db_path, |index| index.query(query, None, 50, 0, true))
+        .unwrap()
+        .results
+        .into_iter()
+        .map(|r| (r.session_id, r.snippet.unwrap_or_default()))
+        .collect()
+}
+
+/// F3: a launch reindex skips transcripts whose length and mtime match the stamp on their row, and search results stay the same.
+#[tokio::test]
+async fn test_launch_reindex_skips_unchanged_transcripts() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("t");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("s1.jsonl"), "alpha bravo").unwrap();
+    std::fs::write(dir.join("s2.jsonl"), "charlie delta").unwrap();
+    let db_path = search_db_path(tmp.path());
+    let run = |source: FakeSource| {
+        let root = tmp.path().to_path_buf();
+        async move {
+            let before = STAMP_TEST_READS.load(Ordering::SeqCst);
+            bootstrap_with_lease_inner(
+                &root,
+                &source,
+                counting_extract,
+                &Arc::new(BootstrapProgress::default()),
+                &TEST_TIMING,
+                BootstrapRole::Launch,
+            )
+            .await
+            .unwrap();
+            STAMP_TEST_READS.load(Ordering::SeqCst) - before
+        }
+    };
+    let titles = [("s1", "first"), ("s2", "second")];
+
+    assert_eq!(
+        run(transcript_source(&dir, &titles)).await,
+        2,
+        "first launch reads both"
+    );
+    let queries = ["alpha", "delta", "first", "second"];
+    let before: Vec<_> = queries.iter().map(|q| search_ids(&db_path, q)).collect();
+
+    assert_eq!(
+        run(transcript_source(&dir, &titles)).await,
+        0,
+        "an unchanged launch must not re-read any transcript"
+    );
+    let after: Vec<_> = queries.iter().map(|q| search_ids(&db_path, q)).collect();
+    assert_eq!(
+        before, after,
+        "search results must be identical after a skipped reindex"
+    );
+
+    // An appended transcript and a renamed session are each re-read once
+    std::fs::write(dir.join("s1.jsonl"), "alpha bravo echo").unwrap();
+    let renamed = [("s1", "first"), ("s2", "renamed")];
+    assert_eq!(run(transcript_source(&dir, &renamed)).await, 2);
+    assert_eq!(search_ids(&db_path, "echo").len(), 1);
+    assert_eq!(search_ids(&db_path, "renamed").len(), 1);
+    assert!(search_ids(&db_path, "second").is_empty());
+
+    // A row rewritten by another writer no longer matches its stamp, so it is re-extracted
+    with_search_index(&db_path, |index| {
+        index.upsert_doc(&crate::doc::build_session_doc(
+            &transcript_source(&dir, &renamed).sessions[1],
+            "stale".to_string(),
+        ))
+    })
+    .unwrap();
+    assert_eq!(run(transcript_source(&dir, &renamed)).await, 1);
+    assert_eq!(search_ids(&db_path, "delta").len(), 1);
+}
+
+/// mem3 review M2: a value recorded after a session was indexed is scrubbed from that untouched session's row at the
+/// next launch. Fails without the `contains_any` check in `unchanged_since_stamp`: the stamp matched, the transcript was
+/// skipped, and the row kept the raw value.
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the recorded-set lock must stay held through the launch; a current-thread test runtime cannot deadlock on it"
+)]
+#[tokio::test]
+async fn test_launch_rescrubs_untouched_row_holding_value_recorded_after_indexing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("t");
+    std::fs::create_dir_all(&dir).unwrap();
+    let value = concat!("Late", "Rec0rdedKq7Zt");
+    std::fs::write(dir.join("s1.jsonl"), format!("alpha {value}")).unwrap();
+    let db_path = search_db_path(tmp.path());
+    let titles = [("s1", "first")];
+    let source = transcript_source(&dir, &titles);
+    let progress = Arc::new(BootstrapProgress::default());
+    let run = || {
+        bootstrap_with_lease_inner(
+            tmp.path(),
+            &source,
+            plain_extract,
+            &progress,
+            &TEST_TIMING,
+            BootstrapRole::Launch,
+        )
+    };
+    let stored = || -> String {
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT content FROM session_docs WHERE session_id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    run().await.unwrap();
+    assert!(
+        stored().contains(value),
+        "indexed before the value was recorded"
+    );
+
+    let _set = crate::at_rest_set_lock();
+    fuigo_secrets::at_rest::record(value);
+    run().await.unwrap();
+    let content = stored();
+    fuigo_secrets::at_rest::clear_for_tests();
+    assert!(
+        !content.contains(value) && content.contains("alpha"),
+        "the untouched row must be re-extracted and scrubbed: {content}"
+    );
+}
+
+/// [`counting_extract`] without the shared count, so a test using it never disturbs the skip test's read deltas.
+fn plain_extract(path: &Path) -> io::Result<(String, u64)> {
+    let text = std::fs::read_to_string(path)?;
+    let len = text.len() as u64;
+    Ok((text, len))
+}

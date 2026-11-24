@@ -316,7 +316,7 @@ pub(super) fn protected_fuigo_config_file_with_home(
             fuigo_home_matches(user_fuigo_home, |home| {
                 path.parent()
                     .and_then(Path::parent)
-                    .is_some_and(|sessions| sessions == home.join("sessions"))
+                    .is_some_and(|sessions| sessions == fuigo_config::sessions_root_in(home))
             })
         };
         return (in_dot_fuigo || in_fuigo_home()).then_some(ProtectedEditReason::FuigoConfig);
@@ -366,7 +366,7 @@ pub(super) fn protected_container_dir(
         || (at(3) == Some(".fuigo") && at(2) == Some("sessions"));
     let fuigo_home_tree = || {
         fuigo_home_matches(user_fuigo_home, |home| {
-            let sessions = home.join("sessions");
+            let sessions = fuigo_config::sessions_root_in(home);
             path == home || path == sessions || path.parent() == Some(sessions.as_path())
         })
     };

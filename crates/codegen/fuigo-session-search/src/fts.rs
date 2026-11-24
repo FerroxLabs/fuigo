@@ -19,11 +19,13 @@ use std::time::Duration;
 use fuigo_sqlite_journal::JournalMode;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::doc::FileStamp;
 use crate::recovery;
 
 /// Bump when making breaking schema changes that require dropping and recreating tables, or to force a rebuild of stale index content.
 /// v3 to v4 forced a rebuild because messages with JSON escapes were silently dropped at indexing.
-const SCHEMA_VERSION: &str = "4";
+/// v4 to v5 adds `cwd_key`: the cwd filter no longer depends on which secrets a process has recorded.
+const SCHEMA_VERSION: &str = "5";
 
 /// Lease stamp for the bootstrap claim, held while a reindex runs, stored as `"{unix_secs}:{owner_token}"`.
 /// `CAST` reads the numeric prefix, and the token fences refresh/release to the owner.
@@ -40,6 +42,26 @@ const CLAIM_TOKEN_SQL: &str = "substr(value, instr(value, ':') + 1)";
 
 fn claim_stamp(now_unix: i64, token: &str) -> String {
     format!("{now_unix}:{token}")
+}
+
+/// `text` as the index stores it: through the at-rest layer (S2, Astra r2 N1). Every bind of a stored string (title,
+/// content, and the `session_id` and `cwd` keys, Astra code review High 4) goes through here, whatever built the
+/// document; a lookup by `session_id` binds the same transform, so it still finds the row. The cwd filter matches
+/// [`cwd_key`] instead, which does not depend on the process's recorded set.
+pub(crate) fn at_rest_text(text: &str) -> String {
+    match fuigo_secrets::at_rest::transform_whole(text.as_bytes()) {
+        std::borrow::Cow::Borrowed(_) => text.to_owned(),
+        std::borrow::Cow::Owned(out) => String::from_utf8_lossy(&out).into_owned(),
+    }
+}
+
+/// The cwd filter's key: a domain-separated BLAKE3 digest of the RAW cwd (Fable S2 confirm review #4). The stored `cwd`
+/// is redacted when it holds a recorded value, and which values are recorded depends on the process, so filtering on
+/// it missed the row in a process without that variable. The digest is the same in every process and is not a
+/// spelling of the value.
+pub(crate) fn cwd_key(cwd: &str) -> String {
+    let digest = blake3::derive_key("fuigo session-search cwd key v1", cwd.as_bytes());
+    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A document to be indexed for session search.
@@ -219,6 +241,7 @@ impl SessionSearchIndex {
                 DROP TRIGGER IF EXISTS session_docs_au;
                 DROP TABLE IF EXISTS session_docs_fts;
                 DROP TABLE IF EXISTS session_docs;
+                DROP TABLE IF EXISTS session_file_stamps;
                 ",
             )?;
             tx.execute(
@@ -244,6 +267,8 @@ impl SessionSearchIndex {
             CREATE TABLE IF NOT EXISTS session_docs (
                 session_id TEXT PRIMARY KEY,
                 cwd TEXT NOT NULL,
+                -- cwd_key(raw cwd); NULL in a row an older binary wrote (then `cwd` itself is matched)
+                cwd_key TEXT,
                 updated_at INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
@@ -277,6 +302,19 @@ impl SessionSearchIndex {
                 INSERT INTO session_docs_fts(rowid, title, content)
                 VALUES (new.rowid, new.title, new.content);
             END;
+
+            -- Transcript length and mtime as of the last extraction, so a launch skips unchanged files.
+            -- content_hash ties the stamp to the row it produced: a row rewritten by another binary is re-extracted.
+            CREATE TABLE IF NOT EXISTS session_file_stamps (
+                session_id TEXT PRIMARY KEY,
+                len INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                content_hash TEXT NOT NULL
+            );
+
+            CREATE TRIGGER IF NOT EXISTS session_docs_ad_stamp AFTER DELETE ON session_docs BEGIN
+                DELETE FROM session_file_stamps WHERE session_id = old.session_id;
+            END;
             ",
         )?;
 
@@ -293,22 +331,26 @@ impl SessionSearchIndex {
 
     /// The content-synced FTS triggers update `session_docs_fts` automatically.
     pub fn upsert_doc(&self, doc: &SessionDoc) -> Result<(), rusqlite::Error> {
+        let (title, content) = (at_rest_text(&doc.title), at_rest_text(&doc.content));
+        let (session_id, cwd) = (at_rest_text(&doc.session_id), at_rest_text(&doc.cwd));
         self.db.execute(
-            "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash, cwd_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(session_id) DO UPDATE SET
                  cwd = excluded.cwd,
+                 cwd_key = excluded.cwd_key,
                  updated_at = excluded.updated_at,
                  title = excluded.title,
                  content = excluded.content,
                  content_hash = excluded.content_hash",
             params![
-                doc.session_id,
-                doc.cwd,
+                session_id,
+                cwd,
                 doc.updated_at_unix,
-                doc.title,
-                doc.content,
-                doc.content_hash
+                title,
+                content,
+                doc.content_hash,
+                cwd_key(&doc.cwd)
             ],
         )?;
         Ok(())
@@ -319,17 +361,20 @@ impl SessionSearchIndex {
     /// Atomic alternative to a check-then-insert: the index DB is shared across processes.
     /// A separate check and insert could clobber a full-content row written between them.
     pub fn insert_doc_if_absent(&self, doc: &SessionDoc) -> Result<(), rusqlite::Error> {
+        let (title, content) = (at_rest_text(&doc.title), at_rest_text(&doc.content));
+        let (session_id, cwd) = (at_rest_text(&doc.session_id), at_rest_text(&doc.cwd));
         self.db.execute(
-            "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash, cwd_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(session_id) DO NOTHING",
             params![
-                doc.session_id,
-                doc.cwd,
+                session_id,
+                cwd,
                 doc.updated_at_unix,
-                doc.title,
-                doc.content,
-                doc.content_hash
+                title,
+                content,
+                doc.content_hash,
+                cwd_key(&doc.cwd)
             ],
         )?;
         Ok(())
@@ -338,7 +383,7 @@ impl SessionSearchIndex {
     pub fn delete_doc(&self, session_id: &str) -> Result<(), rusqlite::Error> {
         self.db.execute(
             "DELETE FROM session_docs WHERE session_id = ?1",
-            params![session_id],
+            params![at_rest_text(session_id)],
         )?;
         Ok(())
     }
@@ -350,10 +395,59 @@ impl SessionSearchIndex {
         self.db
             .query_row(
                 "SELECT content_hash FROM session_docs WHERE session_id = ?1",
-                params![session_id],
+                params![at_rest_text(session_id)],
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    /// True when the transcript still has the stamp recorded for this session's row and the row's title is current.
+    /// A match means re-extracting would produce the same row, so the caller can skip reading the file.
+    pub(crate) fn unchanged_since_stamp(
+        &self,
+        session_id: &str,
+        title: &str,
+        stamp: FileStamp,
+    ) -> Result<bool, rusqlite::Error> {
+        let row: Option<(String, String)> = self
+            .db
+            .query_row(
+                "SELECT d.title, d.content FROM session_file_stamps s JOIN session_docs d USING(session_id)
+                 WHERE s.session_id = ?1 AND s.len = ?2 AND s.mtime_ns = ?3
+                   AND s.content_hash = d.content_hash AND d.title = ?4",
+                params![
+                    at_rest_text(session_id),
+                    stamp.len,
+                    stamp.mtime_ns,
+                    at_rest_text(title)
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        // S2: a row still holding a value recorded after it was indexed is re-extracted (and so scrubbed), not skipped.
+        Ok(row.is_some_and(|(title, content)| {
+            !fuigo_secrets::at_rest::contains_any(title.as_bytes())
+                && !fuigo_secrets::at_rest::contains_any(content.as_bytes())
+        }))
+    }
+
+    pub(crate) fn set_file_stamp(
+        &self,
+        session_id: &str,
+        stamp: FileStamp,
+        content_hash: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO session_file_stamps(session_id, len, mtime_ns, content_hash)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                at_rest_text(session_id),
+                stamp.len,
+                stamp.mtime_ns,
+                content_hash
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn get_meta(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
@@ -505,6 +599,10 @@ impl SessionSearchIndex {
         offset: usize,
         include_content: bool,
     ) -> Result<QueryResult, rusqlite::Error> {
+        let cwd = cwd.map(|raw| (cwd_key(raw), at_rest_text(raw)));
+        let cwd = cwd
+            .as_ref()
+            .map(|(key, text)| (key.as_str(), text.as_str()));
         if is_session_id_like(query) {
             let id_hits = self.query_session_id(query, cwd, limit, offset)?;
             if !id_hits.results.is_empty() || uuid::Uuid::try_parse(query.trim()).is_ok() {
@@ -532,10 +630,11 @@ impl SessionSearchIndex {
     fn query_session_id(
         &self,
         query: &str,
-        cwd: Option<&str>,
+        cwd: Option<(&str, &str)>,
         limit: usize,
         offset: usize,
     ) -> Result<QueryResult, rusqlite::Error> {
+        let (key, text) = cwd.unzip();
         let needle = query.trim();
         if needle.is_empty() {
             return Ok(QueryResult {
@@ -548,8 +647,8 @@ impl SessionSearchIndex {
         let total: i64 = self.db.query_row(
             "SELECT COUNT(*) FROM session_docs d
              WHERE instr(lower(d.session_id), lower(?1)) > 0
-               AND (?2 IS NULL OR d.cwd = ?2)",
-            params![needle, cwd],
+               AND (?2 IS NULL OR d.cwd_key = ?2 OR (d.cwd_key IS NULL AND d.cwd = ?3))",
+            params![needle, key, text],
             |row| row.get(0),
         )?;
 
@@ -557,21 +656,24 @@ impl SessionSearchIndex {
             "SELECT d.session_id, d.cwd, d.title, d.updated_at
              FROM session_docs d
              WHERE instr(lower(d.session_id), lower(?1)) > 0
-               AND (?2 IS NULL OR d.cwd = ?2)
+               AND (?2 IS NULL OR d.cwd_key = ?2 OR (d.cwd_key IS NULL AND d.cwd = ?3))
              ORDER BY d.updated_at DESC, d.session_id ASC
-             LIMIT ?3 OFFSET ?4",
+             LIMIT ?4 OFFSET ?5",
         )?;
-        let rows = stmt.query_map(params![needle, cwd, limit as i64, offset as i64], |row| {
-            Ok(SessionSearchRow {
-                session_id: row.get(0)?,
-                cwd: row.get(1)?,
-                title: row.get(2)?,
-                updated_at_unix: row.get(3)?,
-                score: 1.0,
-                matched_fields: vec!["session_id".to_string()],
-                snippet: None,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![needle, key, text, limit as i64, offset as i64],
+            |row| {
+                Ok(SessionSearchRow {
+                    session_id: row.get(0)?,
+                    cwd: row.get(1)?,
+                    title: row.get(2)?,
+                    updated_at_unix: row.get(3)?,
+                    score: 1.0,
+                    matched_fields: vec!["session_id".to_string()],
+                    snippet: None,
+                })
+            },
+        )?;
         let results: Vec<SessionSearchRow> = rows.collect::<Result<_, _>>()?;
         let total_usize = usize::try_from(total).unwrap_or(0);
         let next_offset = (offset + results.len() < total_usize).then_some(offset + results.len());
@@ -586,18 +688,19 @@ impl SessionSearchIndex {
     fn run_match_query(
         &self,
         match_query: &str,
-        cwd: Option<&str>,
+        cwd: Option<(&str, &str)>,
         limit: usize,
         offset: usize,
         include_content: bool,
     ) -> Result<QueryResult, rusqlite::Error> {
+        let (key, text) = cwd.unzip();
         let total: i64 = self.db.query_row(
             "SELECT COUNT(*)
              FROM session_docs_fts
              JOIN session_docs d ON d.rowid = session_docs_fts.rowid
              WHERE session_docs_fts MATCH ?1
-               AND (?2 IS NULL OR d.cwd = ?2)",
-            params![match_query, cwd],
+               AND (?2 IS NULL OR d.cwd_key = ?2 OR (d.cwd_key IS NULL AND d.cwd = ?3))",
+            params![match_query, key, text],
             |row| row.get(0),
         )?;
 
@@ -621,14 +724,14 @@ impl SessionSearchIndex {
              FROM session_docs_fts
              JOIN session_docs d ON d.rowid = session_docs_fts.rowid
              WHERE session_docs_fts MATCH ?1
-               AND (?2 IS NULL OR d.cwd = ?2)
+               AND (?2 IS NULL OR d.cwd_key = ?2 OR (d.cwd_key IS NULL AND d.cwd = ?3))
              ORDER BY rank ASC, d.updated_at DESC, d.session_id ASC
-             LIMIT ?3 OFFSET ?4"
+             LIMIT ?4 OFFSET ?5"
         );
 
         let mut stmt = self.db.prepare(&sql)?;
         let rows = stmt.query_map(
-            params![match_query, cwd, limit as i64, offset as i64],
+            params![match_query, key, text, limit as i64, offset as i64],
             |row| {
                 let session_id: String = row.get("session_id")?;
                 let row_cwd: String = row.get("cwd")?;
@@ -1293,6 +1396,91 @@ mod tests {
             .unwrap();
         assert_eq!(filtered.results.len(), 1);
         assert_eq!(filtered.results[0].session_id, "s1");
+    }
+
+    /// Astra code review High 4: a `cwd` and a `session_id` holding a recorded value are not in the database bytes,
+    /// through either insert, and a lookup by them still finds the row.
+    #[test]
+    fn s2_secret_bearing_cwd_and_session_id_are_not_stored_raw() {
+        let _set = crate::at_rest_set_lock();
+        let tmp = TempDir::new().unwrap();
+        let (cwd_value, id_value) = (
+            concat!("/srv/Deploy", "Key9xQ7mL2"),
+            concat!("sess", "Tok3nZq8Wv"),
+        );
+        fuigo_secrets::at_rest::record(cwd_value);
+        fuigo_secrets::at_rest::record(id_value);
+        {
+            let index = open(&tmp);
+            let mut doc = test_doc(id_value, "Rust project", "cargo build");
+            doc.cwd = cwd_value.to_string();
+            index.upsert_doc(&doc).unwrap();
+            let mut legacy = test_doc("s-legacy", "Rust title only", "");
+            legacy.cwd = cwd_value.to_string();
+            index.insert_doc_if_absent(&legacy).unwrap();
+            let found = index.query("rust", Some(cwd_value), 10, 0, false).unwrap();
+            assert_eq!(found.results.len(), 2);
+            assert!(index.get_content_hash(id_value).unwrap().is_some());
+            index.delete_doc(id_value).unwrap();
+            assert!(index.get_content_hash(id_value).unwrap().is_none());
+            index.upsert_doc(&doc).unwrap();
+        }
+        for entry in std::fs::read_dir(tmp.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                let bytes = std::fs::read(&path).unwrap();
+                for value in [cwd_value, id_value] {
+                    assert!(
+                        !bytes.windows(value.len()).any(|w| w == value.as_bytes()),
+                        "{} holds {value}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Fable S2 confirm review #4: a cwd holding a recorded value is stored redacted, yet the cwd filter finds its row
+    /// both in a process that has the variable and in a later one that does not (the filter keys on `cwd_key`, a digest
+    /// of the raw cwd). Fails on 41ccbcdf: without the variable the raw cwd was bound against the redacted column.
+    #[test]
+    fn s2_cwd_filter_finds_a_secret_bearing_cwd_with_and_without_the_variable() {
+        let _set = crate::at_rest_set_lock();
+        let tmp = TempDir::new().unwrap();
+        let cwd_value = concat!("/srv/Proj", "Key4hT8nW1");
+        fuigo_secrets::at_rest::record(cwd_value);
+        let index = open(&tmp);
+        let mut doc = test_doc("c0ffee12-ab", "Rust project", "cargo build");
+        doc.cwd = cwd_value.to_string();
+        index.upsert_doc(&doc).unwrap();
+        let mut other = test_doc("s-cwd-other", "Rust elsewhere", "cargo test");
+        other.cwd = "/srv/other".to_string();
+        index.upsert_doc(&other).unwrap();
+
+        let with = index.query("rust", Some(cwd_value), 10, 0, false).unwrap();
+        assert_eq!(with.results.len(), 1, "process with the variable");
+        assert_eq!(with.results[0].session_id, "c0ffee12-ab");
+        assert!(!with.results[0].cwd.contains(cwd_value), "stored redacted");
+
+        // A later process without the variable: nothing is recorded, the raw cwd is bound.
+        fuigo_secrets::at_rest::clear_for_tests();
+        assert_eq!(at_rest_text(cwd_value), cwd_value);
+        let without = index.query("rust", Some(cwd_value), 10, 0, false).unwrap();
+        assert_eq!(without.results.len(), 1, "process without the variable");
+        assert_eq!(without.results[0].session_id, "c0ffee12-ab");
+        let by_id = index
+            .query("c0ffee12-ab", Some(cwd_value), 10, 0, false)
+            .unwrap();
+        assert_eq!(
+            by_id.results.len(),
+            1,
+            "the id lookup filters on the same key"
+        );
+        let others = index
+            .query("rust", Some("/srv/other"), 10, 0, false)
+            .unwrap();
+        assert_eq!(others.results.len(), 1);
+        assert_eq!(others.results[0].session_id, "s-cwd-other");
     }
 
     #[test]

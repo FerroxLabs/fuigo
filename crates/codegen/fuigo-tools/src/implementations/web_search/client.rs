@@ -878,6 +878,15 @@ mod tests {
         assert_eq!(citations.len(), 1);
         assert_eq!(citations[0], "https://valid.com/");
     }
+    /// The process-cached client keeps idle connections across tests, and each test has its own runtime and its own
+    /// mock server. A pooled connection to an earlier test's (dropped, port-reusable) server makes the next POST
+    /// fail with a send error under load, so mock-server tests send on an unpooled client with the same TLS policy
+    /// (all test clients have empty default headers).
+    fn unpooled(mut client: WebSearchClient) -> WebSearchClient {
+        client.http = fuigo_extra_ca::build_reqwest_client(|b| b.pool_max_idle_per_host(0))
+            .expect("unpooled test client");
+        client
+    }
     /// A provider that always returns `None`, simulating an API-key user
     /// whose token has aged past the client-side TTL.
     struct NoneProvider;
@@ -978,7 +987,8 @@ mod tests {
             excluded_domains: None,
         };
         let provider: SharedApiKeyProvider = std::sync::Arc::new(NoneProvider);
-        let client = WebSearchClient::new(&config, Some(provider)).expect("client should build");
+        let client =
+            unpooled(WebSearchClient::new(&config, Some(provider)).expect("client should build"));
         let (content, _citations) = client
             .search("test query", None)
             .await
@@ -1030,7 +1040,8 @@ mod tests {
             excluded_domains: None,
         };
         let provider: SharedApiKeyProvider = std::sync::Arc::new(FreshProvider);
-        let client = WebSearchClient::new(&config, Some(provider)).expect("client should build");
+        let client =
+            unpooled(WebSearchClient::new(&config, Some(provider)).expect("client should build"));
         let (content, _citations) = client
             .search("test query", None)
             .await
@@ -1111,8 +1122,7 @@ mod tests {
             allowed_domains: None,
             excluded_domains: None,
         };
-        WebSearchClient::new(&config, provider)
-            .expect("client should build")
+        unpooled(WebSearchClient::new(&config, provider).expect("client should build"))
             .with_dispatch_gate(gate)
     }
     /// A closed gate means no POST leaves, on both entry points.

@@ -477,14 +477,27 @@ impl SessionActor {
         };
         let cwd = std::path::Path::new(&self.session_info.cwd);
         let session_id = self.session_info.id.0.as_ref();
-        let (disk_servers, mut oauth_config_map) =
-            crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
-        crate::session::managed_mcp::retain_oauth_for_same_destination(
-            &mut oauth_config_map,
-            &disk_servers,
-            std::slice::from_ref(&server_config),
-        );
-        let byo_config = oauth_config_map.get(server_name).cloned();
+        // MC-03: the installed (admitted) object again through the gate; a covered server connects with the OAuth
+        // settings admitted with it, so its settings are not read from disk here.
+        let admitted = crate::session::mcp_admission::admit_installed(std::slice::from_ref(
+            &server_config,
+        ))
+        .pop()
+        .ok_or_else(|| {
+            format!("MCP server '{server_name}' was not started: its definition is held until you approve it")
+        })?;
+        let byo_config = if admitted.is_covered() {
+            None
+        } else {
+            let (disk_servers, mut oauth_config_map) =
+                crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
+            crate::session::managed_mcp::retain_oauth_for_same_destination(
+                &mut oauth_config_map,
+                &disk_servers,
+                std::slice::from_ref(&server_config),
+            );
+            oauth_config_map.get(server_name).cloned()
+        };
         let event_writer = self.events.writer();
         let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
             session_id,
@@ -499,7 +512,7 @@ impl SessionActor {
             _ => None,
         };
         let new_client = crate::session::mcp_servers::start_mcp_server(
-            server_config,
+            admitted,
             Some(cwd),
             meta_config.as_ref(),
             byo_config.as_ref(),
@@ -644,8 +657,16 @@ impl SessionActor {
         cwd: &std::path::Path,
         active: &[acp::McpServer],
     ) -> crate::util::config::McpOAuthConfigMap {
-        let (disk_servers, mut oauth_config_map) =
-            crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
+        // MC-03 (Grok Low): a covered server connects with its admitted OAuth and ignores this map, so the config walk
+        // is needed only when some active server is uncovered.
+        let (disk_servers, mut oauth_config_map) = if active
+            .iter()
+            .all(|s| crate::util::config::mcp_approvals::read_stamp(s).is_some())
+        {
+            Default::default()
+        } else {
+            crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat)
+        };
         // P133: a setting configured for one destination is not handed to a same-named server elsewhere.
         crate::session::managed_mcp::retain_oauth_for_same_destination(
             &mut oauth_config_map,
@@ -712,7 +733,7 @@ impl SessionActor {
             self.tool_context.process_scope.as_ref(),
         );
         let results = crate::session::mcp_servers::start_mcp_servers(
-            configs,
+            crate::session::mcp_admission::admit_installed(&configs),
             Some(cwd),
             &meta_config_map,
             &oauth_config_map,
@@ -1254,9 +1275,16 @@ impl SessionActor {
         };
         let cwd = std::path::Path::new(&self.session_info.cwd);
         let session_id = self.session_info.id.0.as_ref();
-        let (_, oauth_config_map) =
-            crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
-        let byo_config = oauth_config_map.get(server).cloned();
+        // MC-03: the installed object again through the gate (stdio carries no OAuth; nothing is read from disk).
+        let admitted = crate::session::mcp_admission::admit_installed(std::slice::from_ref(
+            &server_config,
+        ))
+        .pop()
+        .ok_or_else(|| {
+            format!(
+                "server '{server}' was not started: its definition is held until you approve it"
+            )
+        })?;
         let event_writer = self.events.writer();
         let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
             session_id,
@@ -1265,10 +1293,10 @@ impl SessionActor {
             self.tool_context.process_scope.as_ref(),
         );
         let new_client = crate::session::mcp_servers::start_mcp_server(
-            server_config.clone(),
+            admitted,
             Some(cwd),
             meta_config.as_ref(),
-            byo_config.as_ref(),
+            None,
             &ctx,
         )
         .await
@@ -1547,12 +1575,23 @@ impl SessionActor {
                 message: notice,
             });
         }
+        // MC-03: gate before the state lock, off the reactor (review Astra M4).
+        let admission = crate::session::mcp_admission::admit_off_reactor(
+            self.session_info.id.0.to_string(),
+            desired,
+        )
+        .await;
         let (diff, dispatch_event_tx) = {
             let mut mcp_state = self.mcp_state.lock().await;
-            let diff = mcp_state.update_configs_diff(desired);
+            let diff = mcp_state.update_configs_diff(admission.servers());
             let tx = mcp_state.client_event_tx();
             (diff, tx)
         };
+        for notice in admission.notices {
+            self.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice {
+                message: notice,
+            });
+        }
         if let Some(diff) = diff {
             self.apply_mcp_config_diff(&diff, dispatch_event_tx);
             self.ensure_mcp_tools_initialized().await;
@@ -1614,6 +1653,8 @@ impl SessionActor {
             .filter(|c| !existing_client_names.contains(mcp_server_name(c)))
             .cloned()
             .collect();
+        // MC-03: the installed (admitted) objects again through the gate right before launch.
+        let configs_to_start = crate::session::mcp_admission::admit_installed(&configs_to_start);
         let acp_pending_names = {
             let mcp_state = self.mcp_state.lock().await;
             mcp_state.pending_acp_server_names()
@@ -1622,7 +1663,7 @@ impl SessionActor {
             let mut mcp_state = self.mcp_state.lock().await;
             let names: Vec<String> = configs_to_start
                 .iter()
-                .map(|c| mcp_server_name(c).to_string())
+                .map(|c| c.name().to_string())
                 .chain(acp_pending_names.iter().cloned())
                 .collect();
             for name in &names {
@@ -1660,7 +1701,11 @@ impl SessionActor {
         let session_id = self.session_info.id.0.as_ref();
         tokio::task::yield_now().await;
         let cwd = std::path::Path::new(&self.session_info.cwd);
-        let oauth_config_map = self.spawn_oauth_config_map(cwd, &configs_to_start);
+        let start_servers: Vec<acp::McpServer> = configs_to_start
+            .iter()
+            .map(|a| a.server().clone())
+            .collect();
+        let oauth_config_map = self.spawn_oauth_config_map(cwd, &start_servers);
         let spawn_writer = self.events.writer();
         let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
             session_id,

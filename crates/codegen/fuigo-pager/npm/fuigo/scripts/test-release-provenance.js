@@ -533,7 +533,7 @@ test('the build job restores no target cache on a tag push or a real dispatch', 
 test('verify-published runs npm audit signatures on the installed packages and only on a real release', () => {
     const job = jobs['verify-published'];
     assert(/^ {4}if: github\.event_name == 'push' \|\| inputs\.dry_run == false$/m.test(job), 'verify-published runs on a dry run');
-    const steps = job.split(/\n(?= {6}- )/).filter(st => /^\s+npm audit signatures\s*$/m.test(st));
+    const steps = job.split(/\n(?= {6}- )/).filter(st => /^\s+(?:if )?npm audit signatures(?:\s|$)/m.test(st));
     assert.equal(steps.length, 1, 'expected exactly one npm audit signatures step in verify-published');
     assert(!/^ {8}if:/m.test(steps[0]) || !/dry_run/.test(steps[0]), 'the step carries its own dry-run condition');
     assert(/npm install[^\n]*--ignore-scripts[^\n]*fuigo@/.test(steps[0]), 'it must install the just-published meta package without running scripts');
@@ -541,7 +541,7 @@ test('verify-published runs npm audit signatures on the installed packages and o
     // audit review L1: one check covers the published packages; the other platforms (unrehearsed on Windows) skip it.
     assert(/^ {8}if: matrix\.platform == 'linux-x64'\s*$/m.test(steps[0]), 'the audit step must run on the linux-x64 entry only');
     for (const [n, body] of Object.entries(jobs)) {
-        if (n !== 'verify-published') assert(!/^\s+npm audit signatures\s*$/m.test(body), `${n} runs npm audit signatures`);
+        if (n !== 'verify-published') assert(!/^\s+(?:if )?npm audit signatures(?:\s|$)/m.test(body), `${n} runs npm audit signatures`);
     }
 });
 

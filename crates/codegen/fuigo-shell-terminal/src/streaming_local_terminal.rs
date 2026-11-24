@@ -538,6 +538,7 @@ impl StreamingLocalTerminalRunner {
             {
                 let state = output_state.lock().await;
                 if state.backgrounded {
+                    finish_log(file_handle).await;
                     return Ok(TerminalRunResult {
                         combined_output: String::from_utf8_lossy(&output_buf).into_owned(),
                         exit_code: None,
@@ -552,6 +553,7 @@ impl StreamingLocalTerminalRunner {
                 && stderr.is_none()
                 && let Some(process_status) = try_get_exit_status(&child_handle).await
             {
+                finish_log(file_handle).await;
                 return self
                     .finish_exit(
                         request,
@@ -638,6 +640,7 @@ impl StreamingLocalTerminalRunner {
                     }
                 }
                 _ = &mut sleep => {
+                    finish_log(file_handle).await;
                     return self
                         .finish_timeout(
                             request,
@@ -1111,6 +1114,15 @@ async fn run_output_collector(
                 }
             }
         }
+    }
+}
+
+/// Release what the log's at-rest stream holds back (S2, design §2.5): the output is complete, or handed off.
+async fn finish_log(log: Option<&fuigo_session_writer::SessionAppend>) {
+    if let Some(log) = log
+        && let Err(error) = log.finish_async().await
+    {
+        tracing::warn!(%error, "output file: could not release the held tail");
     }
 }
 

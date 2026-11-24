@@ -10,14 +10,14 @@ use crate::recovery;
 /// The file the index would open, without creating anything.
 /// The journal-mode classifier inspects the parent directory, so a caller that means to write must go through [`search_db_path`] first.
 fn db_path_in(root_dir: &Path) -> PathBuf {
-    let path = root_dir.join("sessions").join("session_search.sqlite");
+    let path = fuigo_config::sessions_root_in(root_dir).join("session_search.sqlite");
     fuigo_sqlite_journal::JournalMode::for_db_path(&path).effective_db_path(&path)
 }
 
 /// The same path, with the parent directory created owner only, because the index duplicates session text into the database file.
 /// Best effort: the classifier needs the directory to exist.
 pub(crate) fn search_db_path(root_dir: &Path) -> PathBuf {
-    let _ = fuigo_config::create_dir_all_owner_only(&root_dir.join("sessions"));
+    let _ = fuigo_config::create_dir_all_owner_only(&fuigo_config::sessions_root_in(root_dir));
     db_path_in(root_dir)
 }
 

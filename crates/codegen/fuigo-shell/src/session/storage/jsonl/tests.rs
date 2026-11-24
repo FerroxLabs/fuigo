@@ -2020,6 +2020,216 @@ fn user_text(items: &[ConversationItem]) -> Vec<String> {
         })
         .collect()
 }
+/// S2 (Fable r2 #6, Astra r2 A#9): a record the at-rest layer withheld (its marker, or `{}` when the marker itself
+/// matched) is a known placeholder: dropped on load with no skipped-line report and no quarantine copy, and the records
+/// around it load.
+#[test]
+fn read_chat_history_drops_withheld_records_without_quarantine() {
+    let good_1 = r#"{"type":"user","content":[{"type":"text","text":"first"}]}"#;
+    let good_2 = r#"{"type":"user","content":[{"type":"text","text":"second"}]}"#;
+    let marker = fuigo_secrets::at_rest::WITHHELD_MARKER;
+    let raw = format!("{good_1}\n{marker}\n{{}}\n{good_2}\n");
+    let temp_dir = TempDir::new().unwrap();
+    let (adapter, chat_path, items) = load_raw_chat(&temp_dir, raw.as_bytes());
+    assert_eq!(user_text(&items), vec!["first", "second"]);
+    assert!(!chat_path.with_extension("jsonl.corrupt").exists(), "a withheld record is not corruption");
+    let (_, skipped) = adapter
+        .read_chat_history_counting_sync(chat_path.clone(), CHAT_FORMAT_VERSION)
+        .unwrap();
+    assert_eq!(skipped, 0, "a withheld record is not a skipped line");
+}
+/// Astra code review High 2: a tool call whose id is a recorded value, and whose arguments and result mention it, is
+/// written through the adapter and loaded back (a resume): the call and its result keep one shared id that is not the
+/// value, nothing is dropped or quarantined, and the value is nowhere in the file.
+#[tokio::test]
+async fn a_recorded_tool_call_id_keeps_its_pairing_across_a_resume() {
+    let id_value = concat!("call_", "Zq8Wv3Lm9Tx2");
+    fuigo_secrets::at_rest::record(id_value);
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let items = [
+        ConversationItem::user("run it"),
+        ConversationItem::assistant_tool_calls(vec![fuigo_sampling_types::ToolCall {
+            id: id_value.into(),
+            name: "run_terminal_cmd".to_owned(),
+            arguments: format!(r#"{{"command":"echo {id_value}"}}"#).into(),
+        }]),
+        ConversationItem::tool_result(id_value, format!("printed {id_value}")),
+        ConversationItem::user("next"),
+    ];
+    for item in &items {
+        adapter.append_chat_message(&info, item).await.unwrap();
+    }
+    let chat_path = adapter.chat_file(&info);
+    let on_disk = std::fs::read_to_string(&chat_path).unwrap();
+    assert!(!on_disk.contains(id_value), "{on_disk}");
+    let loaded = adapter
+        .read_chat_history_sync(chat_path.clone(), CHAT_FORMAT_VERSION)
+        .unwrap();
+    assert_eq!(loaded.len(), items.len(), "{on_disk}");
+    assert!(!chat_path.with_extension("jsonl.corrupt").exists());
+    let call_ids: Vec<String> = loaded
+        .iter()
+        .flat_map(|i| match i {
+            ConversationItem::Assistant(a) => a.tool_calls.iter().map(|c| c.id.to_string()).collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    let result_ids: Vec<String> = loaded
+        .iter()
+        .filter_map(|i| match i {
+            ConversationItem::ToolResult(r) => Some(r.tool_call_id.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(call_ids.len(), 1);
+    assert_eq!(call_ids, result_ids, "the call and its result still pair");
+    assert_ne!(call_ids[0], id_value);
+}
+/// Sean's S2 decision (schema words): with a recorded value equal to the `backend_tool_call` tag, a conversation written
+/// through the adapter, and a raw pre-S2 copy of it imported the way a fork and a load repair import it, all deserialize
+/// after a resume: the tags stay, every string value equal to the word is redacted, and the two calls keep their ids.
+#[tokio::test]
+async fn a_recorded_schema_word_keeps_conversations_loadable_after_copies_and_resume() {
+    let word = "backend_tool_call";
+    fuigo_secrets::at_rest::record(word);
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let call = |id: &str| -> ConversationItem {
+        serde_json::from_str(&format!(
+            r#"{{"type":"backend_tool_call","kind":{{"tool_type":"web_search","id":"{id}","status":"completed","action":{{"type":"search","query":"{word}","sources":[]}}}}}}"#
+        ))
+        .unwrap()
+    };
+    let items = [
+        ConversationItem::user(word),
+        call("ws_a"),
+        call("ws_b"),
+        ConversationItem::assistant(format!("found {word}")),
+    ];
+    for item in &items {
+        adapter.append_chat_message(&info, item).await.unwrap();
+    }
+    let legacy = temp_dir.path().join("legacy.jsonl");
+    let raw: String = items
+        .iter()
+        .map(|i| serde_json::to_string(i).unwrap() + "\n")
+        .collect();
+    std::fs::write(&legacy, &raw).unwrap();
+    let copies = temp_dir.path().join("copies");
+    let writer = fuigo_session_writer::SessionWriter::try_claim("s2-schema-copies", &copies).unwrap();
+    for rel in ["chat_history.jsonl", "chat_history.jsonl.pre-repair.0191.tmp"] {
+        writer.copy_in_sync(&legacy, rel).unwrap();
+    }
+    /// Every string under `v` that holds the word is a tag (`type`, `tool_type`, `kind`) equal to it.
+    fn only_labels(v: &serde_json::Value, key: &str, word: &str) -> bool {
+        match v {
+            serde_json::Value::String(s) => {
+                !s.contains(word) || (matches!(key, "type" | "tool_type" | "kind") && s == word)
+            }
+            serde_json::Value::Array(a) => a.iter().all(|x| only_labels(x, key, word)),
+            serde_json::Value::Object(o) => o.iter().all(|(k, x)| only_labels(x, k, word)),
+            _ => true,
+        }
+    }
+    for path in [
+        adapter.chat_file(&info),
+        copies.join("chat_history.jsonl"),
+        copies.join("chat_history.jsonl.pre-repair.0191.tmp"),
+    ] {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for line in text.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(only_labels(&v, "", word), "{}: {line}", path.display());
+        }
+        let loaded = adapter
+            .read_chat_history_sync(path.clone(), CHAT_FORMAT_VERSION)
+            .unwrap();
+        let shape: Vec<String> = loaded
+            .iter()
+            .map(|i| match i {
+                ConversationItem::BackendToolCall(b) => format!("call {}", b.id()),
+                ConversationItem::User(_) => "user".to_owned(),
+                ConversationItem::Assistant(_) => "assistant".to_owned(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            ["user", "call ws_a", "call ws_b", "assistant"],
+            "{}: {text}",
+            path.display()
+        );
+    }
+}
+
+/// Fable code review #6 (1.0.47 S2): a whole-file store the at-rest layer replaced by its marker reads as absent, not as
+/// corruption: `summary.json` is rebuilt (the session still loads), `plan.json` and `usage.json` read as none.
+#[tokio::test]
+async fn withheld_whole_file_stores_read_as_absent() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let marker = fuigo_secrets::at_rest::WITHHELD_MARKER;
+    for file in [adapter.summary_file(&info), adapter.plan_file(&info), adapter.usage_file(&info)] {
+        std::fs::write(file, marker).unwrap();
+    }
+    let summary = adapter.read_summary_sync(&info).expect("a withheld summary is rebuilt");
+    assert_eq!(summary.info.id, info.id);
+    assert_eq!(summary.info.cwd, info.cwd);
+    assert!(
+        adapter
+            .read_optional_json_sync::<TodoState>(&adapter.plan_file(&info))
+            .unwrap()
+            .is_none()
+    );
+    assert!(adapter.read_usage(&info).await.unwrap().is_none());
+    let updated = adapter
+        .update_usage(&info, Box::new(|current| {
+            assert!(current.is_none(), "a withheld usage file starts afresh");
+            crate::session::usage_file::SessionUsageFile::default()
+        }))
+        .await;
+    assert!(updated.is_ok(), "{updated:?}");
+}
+/// 1.0.47 S2, design test 8: the rewind store is verbatim at rest, so after a restart (a fresh tracker reading the saved
+/// points from disk) a rewind restores a `.env` holding a recorded value byte for byte.
+#[tokio::test]
+async fn a_rewind_after_restart_restores_a_dot_env_holding_a_value_byte_for_byte() {
+    use fuigo_workspace::file_system::{AsyncFsWrapper, LocalFs};
+    use fuigo_workspace::session::file_state::{
+        FileSnapshot, FileStateTracker, FlexiblePath, RewindPoint, rewind_files,
+    };
+    let value = concat!("rw", "_live_DotEnv8KxQzP").to_owned();
+    fuigo_secrets::at_rest::record(&value);
+    let original = format!("DEPLOY_TOKEN={value}\nREGION=eu\n");
+    let temp = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let env_path = workspace.path().join(".env");
+    let adapter = JsonlStorageAdapter::with_root(temp.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let mut point = RewindPoint::new(0);
+    point.add_snapshot(FileSnapshot::new_flexible(
+        FlexiblePath::Absolute(env_path.clone()),
+        Some(original.clone()),
+    ));
+    adapter.append_rewind_point(&info, &point).await.unwrap();
+    // The agent then rewrote the file; the process restarts.
+    std::fs::write(&env_path, "DEPLOY_TOKEN=changed\n").unwrap();
+    let tracker = FileStateTracker::with_lazy_source(adapter.rewind_points_file(&info));
+    let fs = AsyncFsWrapper::new(std::sync::Arc::new(LocalFs::new(
+        workspace.path().to_path_buf(),
+    )));
+    let response = rewind_files(&tracker, &fs, 0).await;
+    assert!(response.success, "{response:?}");
+    assert_eq!(std::fs::read(&env_path).unwrap(), original.as_bytes());
+}
 /// A record torn mid-object (crash / ENOSPC mid-append) is skipped.
 /// Every other record loads, and the damaged original is quarantined as `chat_history.jsonl.corrupt`.
 #[test]
@@ -3367,4 +3577,103 @@ async fn s12_f5_a_durable_turn_boundary_flushes_the_chat_history() {
     )));
     adapter.append_update_durable_commit_aware(&info, &update).await.unwrap();
     assert_eq!(fuigo_session_writer::seams::sync_count(&chat), 1, "the durable turn boundary flushes the chat file");
+}
+/// Audit 1.0.47 F2: the per-record `summary.json` counters land once per turn boundary, not once per record. Before the
+/// fix each of a turn's 7 records below rewrote the summary (2 fsyncs each); now the durable update writes it once.
+#[cfg(unix)]
+#[tokio::test]
+async fn summary_counters_are_written_once_per_turn_boundary() {
+    use std::os::unix::fs::MetadataExt;
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = Info { id: acp::SessionId::new("f2-summary-batch"), cwd: "/test/f2".to_string() };
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let path = adapter.summary_file(&info);
+    let stamp = || (std::fs::metadata(&path).unwrap().ino(), std::fs::read(&path).unwrap());
+    let on_disk = || serde_json::from_slice::<Summary>(&std::fs::read(&path).unwrap()).unwrap();
+    let update = || SessionUpdate::Acp(Box::new(create_test_notification()));
+    // Records up to the first update still write through: a crash in turn 1 never leaves an unused-looking husk, even
+    // when the turn's chat line comes first (review M2: it used to spend the write-through and leave num_messages 0).
+    adapter.append_chat_message(&info, &ConversationItem::user("q")).await.unwrap();
+    assert_eq!(on_disk().num_chat_messages, 1);
+    adapter.append_update(&info, &update()).await.unwrap();
+    assert_eq!(on_disk().num_messages, 1, "the first update is on disk: the session is not hidden as unused");
+    let mut writes = 0;
+    let mut last = stamp();
+    let mut note = |writes: &mut usize| {
+        let now = stamp();
+        if now != last {
+            *writes += 1;
+            last = now;
+        }
+    };
+    for turn in 0..3usize {
+        for i in 0..2 {
+            adapter.append_chat_message(&info, &ConversationItem::user(format!("t{turn}-{i}"))).await.unwrap();
+            note(&mut writes);
+        }
+        for _ in 0..5 {
+            adapter.append_update(&info, &update()).await.unwrap();
+            note(&mut writes);
+        }
+        // Mid-turn the file is one turn behind; a read in this process sees the held counts.
+        assert_eq!(on_disk().num_messages, 1 + 6 * turn);
+        let live = adapter.read_summary_sync(&info).unwrap();
+        assert_eq!((live.num_messages, live.num_chat_messages), (1 + 6 * turn + 5, 1 + 2 * (turn + 1)));
+        adapter.append_update_durable_commit_aware(&info, &update()).await.map_err(|e| e.into_io_error()).unwrap();
+        note(&mut writes);
+        let summary = on_disk();
+        assert_eq!((summary.num_messages, summary.num_chat_messages), (1 + 6 * (turn + 1), 1 + 2 * (turn + 1)));
+    }
+    assert_eq!(writes, 3, "one summary write per turn (was 21: one per record)");
+
+    // A barrier (FlushAndAck, release) writes held counts without waiting for a boundary.
+    adapter.append_update(&info, &update()).await.unwrap();
+    assert_eq!(on_disk().num_messages, 19);
+    adapter.flush_summary(&info).await.unwrap();
+    assert_eq!(on_disk().num_messages, 20);
+
+    // A crash mid-turn loses only the held counts: the summary is a turn behind and the session loads.
+    adapter.append_chat_message(&info, &ConversationItem::user("lost")).await.unwrap();
+    adapter.append_update(&info, &update()).await.unwrap();
+    super::summary_defer::forget(&adapter.session_dir(&info));
+    let reopened = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let loaded = reopened.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
+    assert_eq!((loaded.summary.num_messages, loaded.summary.num_chat_messages), (20, 7));
+    assert_eq!(loaded.chat_history.len(), 8, "every appended chat line is still there");
+}
+/// Audit 1.0.47 F7: new-session setup wrote the same history twice per step (the sync write, then the chat-state actor's
+/// persist of the same items). A rewrite with the bytes the file already holds is skipped; a changed history is written.
+#[cfg(unix)]
+#[tokio::test]
+async fn rewriting_chat_history_with_the_same_items_is_skipped() {
+    use std::os::unix::fs::MetadataExt;
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = Info { id: acp::SessionId::new("f7-same-history"), cwd: "/test/f7".to_string() };
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let chat = adapter.chat_file(&info);
+    let ino = || std::fs::metadata(&chat).unwrap().ino();
+    let w = adapter.owner(&info).unwrap();
+    let setup = vec![ConversationItem::system("sys"), ConversationItem::user("reminder")];
+    // `persist_chat_history_jsonl_sync`'s write, then the actor's `replace_chat_history` of the same items.
+    super::super::write_bytes_atomic_as(&w, &chat, &super::super::to_jsonl_bytes(&setup).unwrap()).unwrap();
+    let first = ino();
+    // A skip still flushes the file, so lines that reached it by buffered appends are durable as a replace left them.
+    let synced = || fuigo_session_writer::seams::sync_count(&chat);
+    let before = synced();
+    adapter.replace_chat_history(&info, &setup).await.unwrap();
+    assert_eq!(ino(), first, "the same history is not rewritten");
+    assert_eq!(synced(), before + 1, "the skipped reporting rewrite flushes the file");
+    super::super::write_bytes_atomic_as(&w, &chat, &super::super::to_jsonl_bytes(&setup).unwrap()).unwrap();
+    assert_eq!(ino(), first, "nor by the sync writer");
+    assert_eq!(synced(), before + 2, "the skipped sync rewrite flushes the file");
+    adapter.replace_chat_history_through(&w, &info, &setup).unwrap();
+    assert_eq!(ino(), first, "nor by the repair's rewrite through the writer");
+    assert_eq!(synced(), before + 3, "the skipped rewrite through the writer flushes the file");
+    let changed = vec![ConversationItem::system("sys2"), ConversationItem::user("reminder")];
+    adapter.replace_chat_history(&info, &changed).await.unwrap();
+    assert_ne!(ino(), first, "a changed history is written");
+    let loaded = adapter.load_session(&info, crate::session::storage::Access::Reader).await.unwrap();
+    assert_eq!(loaded.chat_history.len(), 2);
 }

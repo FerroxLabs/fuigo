@@ -98,12 +98,17 @@ async fn plan_scrollbar_grab_zone_pty() {
         let mut col = 0usize;
         for run in &line.runs {
             let run_width = run.text.chars().count();
-            if col <= track_col && track_col < col + run_width && run.text.contains('\u{2588}') {
+            // The thumb is a space whose background is the thumb color (bg == fg), so native selection copies no glyph.
+            if col <= track_col
+                && track_col < col + run_width
+                && run.fg.is_some()
+                && run.bg == run.fg
+            {
                 thumb_cells += 1;
-                assert!(run.fg.is_some(), "thumb must have a color (run {run:?})");
                 assert_eq!(
-                    run.bg, run.fg,
-                    "thumb cell background must match the glyph color (run {run:?})"
+                    run.text.chars().nth(track_col - col),
+                    Some(' '),
+                    "thumb cell must be a background-filled space (run {run:?})"
                 );
             }
             col += run_width;

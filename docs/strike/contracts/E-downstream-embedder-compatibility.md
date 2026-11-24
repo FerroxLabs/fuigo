@@ -103,9 +103,13 @@ interface and are not renamed without notice. Folder trust in particular:
   and answers it.
 - With `--trust` the request is not sent.
 - A client that did not advertise the v2 capability is never asked, and commands that need trust ask the user instead.
+- An ACP host that answers `session/request_permission` but is not a recognised Fuigo client declares
+  `initialize` `_meta` `{"fuigo/permissionPrompts": true}`; changes outside the workspace that the user did not name are then
+  asked of it in every mode, bypass included, instead of refused (1.0.47; the client type is unchanged).
 
 **Tests.** `folder_trust_round_trip_without_trust_flag`, `trust_flag_suppresses_the_round_trip`,
-`v1_only_client_is_never_asked_and_commands_ask`.
+`v1_only_client_is_never_asked_and_commands_ask`, `ds04_headless_bypass_keeps_the_outside_database_and_the_control_runs`
+(permission prompts).
 
 ### E.5a Wire names and the leading underscore
 

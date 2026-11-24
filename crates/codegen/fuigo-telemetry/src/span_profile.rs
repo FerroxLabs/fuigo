@@ -64,7 +64,10 @@ impl SpanProfile {
             let _ = writeln!(body, "{path} {weight_us}");
         }
 
-        if let Err(error) = std::fs::write(&path, body) {
+        if let Err(error) = std::fs::write(
+            &path,
+            fuigo_secrets::at_rest::transform_whole(body.as_bytes()),
+        ) {
             // Restore so a later finalize on another exit path can retry.
             let mut folded = self.folded.lock().unwrap_or_else(PoisonError::into_inner);
             for (path, weight_us) in lines {

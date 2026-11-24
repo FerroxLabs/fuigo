@@ -26,7 +26,9 @@ use crate::actor::request_metadata::{
 use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
 use crate::doom_loop_recovery::{FailedResponseCapture, append_recovery_context};
-use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason};
+use crate::events::{
+    SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason,
+};
 use crate::handle::CollectedSamplingResult;
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
@@ -149,6 +151,8 @@ enum AttemptOutcome {
     Empty {
         context: EmptyResponseContext,
         doom_loop_signals: Vec<String>,
+        /// The attempt streamed visible text or a tool-call fragment before it ended empty.
+        streamed_output: bool,
     },
     /// Stream emitted [`SamplingEvent::Failed`].
     /// The captured raw error is what the retry loop classifies.
@@ -219,6 +223,7 @@ pub(crate) async fn run_request_task(
     let doom_policy = config.doom_loop_recovery;
     let doom_max_retries = doom_policy.map_or(0, |p| p.max_retries);
     let mut doom_retry_count: u32 = 0;
+    let mut first_think_only_at: Option<tokio::time::Instant> = None;
     let output_observed = Arc::new(AtomicBool::new(false));
 
     loop {
@@ -296,6 +301,7 @@ pub(crate) async fn run_request_task(
                     .usage
                     .as_ref()
                     .map(|usage| u64::from(usage.total_tokens));
+                metrics.last_attempt_usage = response.usage.clone();
                 let accounting = event_tx.snapshot();
                 response.usage = accounting.usage;
                 response.cost_usd_ticks = accounting.cost_usd_ticks;
@@ -339,9 +345,9 @@ pub(crate) async fn run_request_task(
                 return request_id;
             }
             AttemptOutcome::Empty {
-                context,
+                mut context,
                 doom_loop_signals,
-                ..
+                streamed_output,
             } => {
                 completion.merge_doom_loop_signals(doom_loop_signals);
                 tracing::warn!(
@@ -359,6 +365,31 @@ pub(crate) async fn run_request_task(
                     "empty response from model: {reason} (retrying)",
                     reason = context.reason,
                 );
+                // A think-only reply on Chat Completions gets a larger budget of unchanged resends (`THINK_ONLY_MAX_ATTEMPTS`)
+                // The extra ones are made only for a clean attempt and inside the window from the first think-only reply
+                if retry_mod::empty_response_max_attempts(context.reason, &client.api_backend())
+                    > retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS
+                {
+                    let first = *first_think_only_at.get_or_insert_with(tokio::time::Instant::now);
+                    if !think_only_resend_allowed(
+                        retry_counts.empty_response,
+                        streamed_output,
+                        first.elapsed(),
+                    ) {
+                        tracing::warn!(
+                            target: crate::sampling_log::TARGET,
+                            attempts = retry_counts.empty_response + 1,
+                            streamed_output,
+                            "think-only: no further resend (output streamed or resend window spent)"
+                        );
+                        context.attempts = Some(retry_counts.empty_response + 1);
+                        let err = SamplingError::EmptyResponse { context };
+                        let terminal_event_queued = emit_failed(&event_tx, &request_id, &err);
+                        send_completion(&mut completion, Err(err), terminal_event_queued);
+                        hand_off_attempt(false, &receipt, &cancel_token).await;
+                        return request_id;
+                    }
+                }
                 let err = SamplingError::EmptyResponse { context };
                 let resent = apply_retry_decision(
                     &err,
@@ -485,7 +516,7 @@ struct RetryCounts {
     /// Every resend; the configured `max_retries` budget bounds these.
     total: u32,
     /// Resends of an empty reply, reasoning-only and fully empty alike, on one shared
-    /// budget ([`retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS`]). Counted apart from `total` so a
+    /// count, capped per reply by [`retry_mod::empty_response_max_attempts`]. Counted apart from `total` so a
     /// retry of another kind never spends the empty-response budget, and vice versa.
     empty_response: u32,
     /// Resends of a stalled call, on their own cap ([`retry_mod::IDLE_TIMEOUT_MAX_ATTEMPTS`]) so an earlier retry of
@@ -526,6 +557,7 @@ fn announce_resend(
     let attempt = retry_counts.record_resend(empty_response, stalled);
     let announced = if empty_response {
         retry_mod::empty_response_announced_attempts(
+            max_retries,
             retry_counts.empty_response,
             retry_counts.total,
             configured_max_retries,
@@ -596,7 +628,27 @@ async fn apply_retry_decision(
     // It still never runs past the configured budget, which bounds every resend of the request
     // `max_retries` becomes the cap here so `Retrying` events and the exhaustion span report the budget actually applied
     let configured_max_retries = max_retries;
-    let max_retries = retry_mod::effective_max_retries(err, configured_max_retries);
+    // A think-only reply on Chat Completions has its own, higher cap; `classify_error` holds every other empty reply to the shared one
+    let think_only_cap = match err {
+        SamplingError::EmptyResponse { context } => {
+            retry_mod::empty_response_max_attempts(context.reason, &client.api_backend())
+        }
+        _ => retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS,
+    };
+    // Its resends have their own budget: a configured budget (`FUIGO_MAX_RETRIES`, `max_retries`) of 0 turns them off but never lowers them
+    let think_only_budget =
+        think_only_cap > retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS && configured_max_retries > 0;
+    let max_retries = if think_only_budget {
+        think_only_cap
+    } else {
+        retry_mod::effective_max_retries(err, configured_max_retries)
+    };
+    // Unbounded here so the shared-budget stop and the announced denominator follow the think-only cap alone
+    let configured_max_retries = if think_only_budget {
+        u32::MAX
+    } else {
+        configured_max_retries
+    };
     let empty_response = matches!(err, SamplingError::EmptyResponse { .. });
     let stalled = matches!(err, SamplingError::IdleTimeout { .. });
     let prompt_ended = config
@@ -614,6 +666,14 @@ async fn apply_retry_decision(
             configured_max_retries,
             rate_limit_threshold,
         )
+    } else if think_only_budget {
+        if retry_counts.empty_response + 1 >= max_retries {
+            RetryDecision::Fatal(clone_error(err))
+        } else {
+            RetryDecision::Retry {
+                backoff: retry_mod::EMPTY_RESPONSE_RETRY_BACKOFF,
+            }
+        }
     } else if empty_response {
         classify_error(
             err,
@@ -827,6 +887,18 @@ async fn apply_retry_decision(
     }
 }
 
+/// Whether a think-only reply may be resent after `empty_resends_used` empty-reply resends.
+/// Resends inside [`retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS`] are unchanged; the extra ones need an attempt that streamed
+/// no visible text or tool-call fragment, and less than [`retry_mod::THINK_ONLY_EXTRA_RESEND_WINDOW`] since the first think-only reply.
+fn think_only_resend_allowed(
+    empty_resends_used: u32,
+    streamed_output: bool,
+    since_first_think_only: Duration,
+) -> bool {
+    empty_resends_used + 1 < retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS
+        || (!streamed_output && since_first_think_only < retry_mod::THINK_ONLY_EXTRA_RESEND_WINDOW)
+}
+
 async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -> bool {
     tokio::select! {
         biased;
@@ -1001,6 +1073,7 @@ async fn drive_l2(
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
     let mut doom_loop_signals = Vec::new();
+    let mut streamed_output = false;
     let mut await_first_output_span = Some(tracing::info_span!("sampling.await_first_output"));
     loop {
         tokio::select! {
@@ -1061,6 +1134,7 @@ async fn drive_l2(
                         return AttemptOutcome::Empty {
                             context,
                             doom_loop_signals: all_triggers,
+                            streamed_output,
                         };
                     }
                     return AttemptOutcome::Completed { response, metrics };
@@ -1092,6 +1166,17 @@ async fn drive_l2(
                 }
                 Some(other) => {
                     let opens_attempt = matches!(other, SamplingEvent::StreamStarted { .. });
+                    streamed_output |= match &other {
+                        SamplingEvent::ChannelToken {
+                            channel: SamplingChannel::Text,
+                            text,
+                            ..
+                        } => !text.is_empty(),
+                        SamplingEvent::ToolCallDelta { .. }
+                        | SamplingEvent::BackendToolCallStarted { .. }
+                        | SamplingEvent::BackendToolCallCompleted { .. } => true,
+                        _ => false,
+                    };
                     if matches!(
                         other,
                         SamplingEvent::FirstToken { .. }
@@ -2263,12 +2348,17 @@ mod tests {
         );
 
         // A configured budget that funds no resend at all still reports its single attempt.
-        let unfunded = retry_ladder(|_| empty_response_err(ReasoningOnly), 1).await;
+        let unfunded = retry_ladder(|_| empty_response_err(NoVisibleContent), 1).await;
         assert_eq!(unfunded.calls, 1);
         assert_eq!(unfunded.failed_empty_attempts, Some(1));
+        // Think-only resends have their own budget; only a configured 0 (resends off) turns them off.
+        let think_only_off = retry_ladder(|_| empty_response_err(ReasoningOnly), 0).await;
+        assert_eq!(think_only_off.calls, 1);
+        assert_eq!(think_only_off.failed_empty_attempts, Some(1));
     }
 
     /// A 503 retry must not spend the empty-response budget: it counts empty replies only.
+    /// The ladder runs on Chat Completions (the default backend), so a think-only reply has its five resends.
     #[tokio::test(start_paused = true)]
     async fn empty_replies_after_a_503_keep_their_own_budget() {
         use fuigo_sampling_types::EmptyReason::ReasoningOnly;
@@ -2284,17 +2374,24 @@ mod tests {
             ladder.retrying,
             vec![
                 retrying(1, 15, "api"),
-                retrying(1, 3, "empty_response"),
-                retrying(2, 3, "empty_response")
+                retrying(1, 6, "empty_response"),
+                retrying(2, 6, "empty_response"),
+                retrying(3, 6, "empty_response"),
+                retrying(4, 6, "empty_response"),
+                retrying(5, 6, "empty_response")
             ],
-            "the 503 retry, then both empty-response resends announced against their own budget"
+            "the 503 retry, then all five think-only resends announced against their own budget"
         );
-        assert_eq!(ladder.calls, 4, "503, the empty reply, and its two resends");
+        assert_eq!(
+            ladder.calls, 7,
+            "503, the empty reply, and its five resends"
+        );
         assert_eq!(ladder.failed_kind.as_deref(), Some("empty_response"));
+        assert_eq!(ladder.failed_empty_attempts, Some(6));
         assert!(
-            ladder.slept >= Duration::from_millis(5_600)
-                && ladder.slept <= Duration::from_millis(6_400),
-            "the 503's ~2 s (+/-20%) plus two fixed 2 s waits: {:?}",
+            ladder.slept >= Duration::from_millis(11_600)
+                && ladder.slept <= Duration::from_millis(12_400),
+            "the 503's ~2 s (+/-20%) plus five fixed 2 s waits: {:?}",
             ladder.slept
         );
     }
@@ -2334,7 +2431,7 @@ mod tests {
         );
     }
 
-    /// An empty response never raises the budget of what follows: a 503 after a reasoning-only resend runs out on the configured budget.
+    /// A think-only resend has its own budget and never raises the budget of what follows: a 503 after it runs out on the configured budget.
     #[tokio::test(start_paused = true)]
     async fn a_503_after_a_reasoning_only_resend_stays_on_the_configured_budget() {
         use fuigo_sampling_types::EmptyReason::ReasoningOnly;
@@ -2349,10 +2446,11 @@ mod tests {
         assert_eq!(
             ladder.retrying,
             vec![
-                retrying(1, 3, "empty_response"),
+                retrying(1, 6, "empty_response"),
                 retrying(2, 4, "api"),
                 retrying(3, 4, "api"),
-            ]
+            ],
+            "the think-only resend is announced against its own 6, and the 503s keep counting against the configured 4"
         );
         assert_eq!(
             ladder.calls, 4,
@@ -2431,5 +2529,40 @@ mod boundary_refusal_tests {
             SamplingError::Auth { status: 401, .. }
         ));
         assert_eq!(reconstructed.upstream(), original.upstream());
+    }
+
+    /// Past the shared empty-response cap a think-only reply is resent only for a clean attempt, and only inside the
+    /// window from the first think-only reply; once the window is spent the turn ends without the remaining attempts.
+    #[tokio::test(start_paused = true)]
+    async fn think_only_extra_resends_need_a_clean_attempt_inside_the_window() {
+        let first = tokio::time::Instant::now();
+        // Inside the shared cap nothing changes, whatever was streamed and however long it took.
+        assert!(think_only_resend_allowed(
+            0,
+            true,
+            Duration::from_secs(3_600)
+        ));
+        assert!(think_only_resend_allowed(
+            1,
+            true,
+            Duration::from_secs(3_600)
+        ));
+        tokio::time::advance(retry_mod::THINK_ONLY_EXTRA_RESEND_WINDOW - Duration::from_secs(1))
+            .await;
+        assert!(think_only_resend_allowed(2, false, first.elapsed()));
+        assert!(think_only_resend_allowed(4, false, first.elapsed()));
+        assert!(
+            !think_only_resend_allowed(2, true, first.elapsed()),
+            "an attempt that streamed text or a tool-call fragment is never resent under this budget"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            !think_only_resend_allowed(2, false, first.elapsed()),
+            "the window is spent"
+        );
+        assert_eq!(
+            retry_mod::THINK_ONLY_EXTRA_RESEND_WINDOW,
+            Duration::from_secs(180)
+        );
     }
 }

@@ -22,7 +22,7 @@ use crate::db::{
     HealAwareLogCounter, log_session_index_failure, search_db_path, search_index_exists,
     with_search_index, with_search_index_blocking,
 };
-use crate::doc::{UpsertOutcome, build_session_doc, upsert_unless_unchanged};
+use crate::doc::{FileStamp, UpsertOutcome, build_session_doc, upsert_unless_unchanged};
 use crate::fts::{META_KEY_BOOTSTRAP_CLAIM, META_KEY_LAST_BOOTSTRAP, SessionSearchRow};
 #[cfg(test)]
 use crate::fts::{META_KEY_SCHEMA_VERSION, SessionSearchIndex};
@@ -447,10 +447,14 @@ async fn upsert_session(
     session: &IndexableSession,
     extract: ContentExtractor,
 ) -> io::Result<UpsertOutcome> {
-    let (content, bytes_read) = if let Some(updates_path) = session.updates_path.clone() {
-        tokio::task::spawn_blocking(move || extract(&updates_path))
-            .await
-            .map_err(io::Error::other)??
+    let ((content, bytes_read), stamp) = if let Some(updates_path) = session.updates_path.clone() {
+        tokio::task::spawn_blocking(move || {
+            // Stamped before the read: a write landing during extraction leaves a stale stamp, which only costs a re-read
+            let stamp = FileStamp::of(&updates_path);
+            extract(&updates_path).map(|extracted| (extracted, stamp))
+        })
+        .await
+        .map_err(io::Error::other)??
     } else {
         return Ok(UpsertOutcome::NoContent);
     };
@@ -459,7 +463,7 @@ async fn upsert_session(
 
     tokio::task::spawn_blocking(move || {
         with_search_index(&db_path, |index| {
-            upsert_unless_unchanged(index, &doc, bytes_read)
+            upsert_unless_unchanged(index, &doc, bytes_read, stamp)
         })
     })
     .await

@@ -12,7 +12,6 @@ and the unknown-rule remedy calling every budget a token budget, and lists the t
 rules in the headless guide's rule table (which the_guide_lists_every_rule pins)
 and in the agent guide's budget-denial table.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../fuigo-pager/docs/user-guide/14-headless-mode.md | 13 ++++++++-----
  .../fuigo-pager/docs/user-guide/15-agent-mode.md    |  2 ++

@@ -1950,6 +1950,10 @@ enum ListEdit {
 /// Only a missing file counts as empty. Any other read error (permissions, invalid
 /// UTF-8) is returned: treating it as empty would replace a file this process could
 /// not read with one holding nothing but this list.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: a config file (config.toml and friends), outside the at-rest roots (sessions/, logs/)"
+)]
 fn edit_config_string_list(
     config_path: &std::path::Path,
     section: &str,
@@ -2302,6 +2306,10 @@ pub(crate) fn add_hooks_path(path: &str) -> Result<(), Box<dyn std::error::Error
     )
 }
 /// Add a hook path to a specific file (for tests).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: a config file (config.toml and friends), outside the at-rest roots (sessions/, logs/)"
+)]
 pub(crate) fn add_hooks_path_to_file(
     path: &str,
     paths_file: &std::path::Path,
@@ -2361,6 +2369,10 @@ pub(crate) fn remove_hooks_path(path: &str) -> Result<bool, Box<dyn std::error::
     )
 }
 /// Remove a hook path from a specific file (for tests).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: a config file (config.toml and friends), outside the at-rest roots (sessions/, logs/)"
+)]
 pub(crate) fn remove_hooks_path_from_file(
     path: &str,
     paths_file: &std::path::Path,

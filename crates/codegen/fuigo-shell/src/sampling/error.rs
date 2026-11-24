@@ -285,11 +285,10 @@ fn map_sampling_err_to_acp_inner(err: SamplingError) -> acp::Error {
             None,
             kind,
         )),
-        SamplingError::EmptyResponse { context } => {
+        SamplingError::EmptyResponse { ref context } => {
             acp::Error::internal_error().data(terminal_error_data(
                 format!(
-                    "empty response from model ({}): model={}, had_reasoning={}, finish_reason={}",
-                    context.reason,
+                    "{err}: model={}, had_reasoning={}, finish_reason={}",
                     context.model,
                     context.had_reasoning,
                     context.finish_reason_str(),

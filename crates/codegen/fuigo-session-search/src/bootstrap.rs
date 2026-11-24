@@ -15,7 +15,9 @@ use crate::db::{
     HealAwareLogCounter, log_bootstrap_timeout, log_session_index_failure, search_db_path,
     sqlite_to_io_error, with_search_index, with_search_index_blocking,
 };
-use crate::doc::{UpsertOutcome, build_session_doc, should_skip_session, upsert_unless_unchanged};
+use crate::doc::{
+    FileStamp, UpsertOutcome, build_session_doc, should_skip_session, upsert_unless_unchanged,
+};
 use crate::fts::{META_KEY_BOOTSTRAP_CLAIM, META_KEY_LAST_BOOTSTRAP, SessionSearchIndex};
 use crate::recovery;
 use crate::source::{ContentExtractor, IndexableSession, SessionSource};
@@ -536,9 +538,26 @@ async fn reindex_all(
             }
 
             match tokio::time::timeout(per_session_timeout, async move {
-                let (content, bytes_read) = if let Some(path) = updates_path {
-                    match tokio::task::spawn_blocking(move || extract(&path)).await {
-                        Ok(Ok(result)) => result,
+                let db_path = search_db_path(&root);
+                let ((content, bytes_read), stamp) = if let Some(path) = updates_path {
+                    let (shared, db_path) = (shared.clone(), db_path.clone());
+                    let (session_id, title) = (session.session_id.clone(), session.title.clone());
+                    match tokio::task::spawn_blocking(move || {
+                        // Stamped before the read: a write landing during extraction leaves a stale stamp, which only costs a re-read
+                        let stamp = FileStamp::of(&path);
+                        if let Some(stamp) = stamp
+                            && let Ok(true) = shared.with(&db_path, |index| {
+                                index.unchanged_since_stamp(&session_id, &title, stamp)
+                            })
+                        {
+                            return Ok(None);
+                        }
+                        extract(&path).map(|extracted| Some((extracted, stamp)))
+                    })
+                    .await
+                    {
+                        Ok(Ok(Some(result))) => result,
+                        Ok(Ok(None)) => return Ok(UpsertOutcome::Unchanged { bytes_read: 0 }),
                         Ok(Err(e)) => return Err(e),
                         Err(e) => return Err(io::Error::other(e)),
                     }
@@ -547,11 +566,10 @@ async fn reindex_all(
                 };
 
                 let doc = build_session_doc(&session, content);
-                let db_path = search_db_path(&root);
 
                 match tokio::task::spawn_blocking(move || {
                     shared.with(&db_path, |index| {
-                        upsert_unless_unchanged(index, &doc, bytes_read)
+                        upsert_unless_unchanged(index, &doc, bytes_read, stamp)
                     })
                 })
                 .await

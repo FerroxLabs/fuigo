@@ -677,7 +677,11 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
         // Also any reasoning with no Responses item id: it came from another protocol (Anthropic thinking,
         // chat-completions, synthesized). The API requires a real `rs_...` id and would reject a foreign signature
         // as `encrypted_content`, so it cannot be replayed.
-        ConversationItem::Reasoning(r) if is_redacted_thinking_item(r) || r.id.is_empty() => {
+        ConversationItem::Reasoning(r)
+            if is_redacted_thinking_item(r)
+                || is_display_only_reasoning_item(r)
+                || r.id.is_empty() =>
+        {
             Vec::new()
         }
         ConversationItem::Reasoning(r) => {

@@ -18,14 +18,16 @@
     reason = "the choke point: SessionWriter performs every session-folder mutation (design F5 5.1-5.3)"
 )]
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write as _};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
+use fuigo_secrets::at_rest::{self, AtRestStream, Verbatim};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -65,6 +67,32 @@ fn refused(refusal: Refusal) -> io::Error {
 /// The [`Refusal`] inside an error a writer method returned, if it was one.
 pub fn refusal(error: &io::Error) -> Option<Refusal> {
     error.get_ref()?.downcast_ref::<Refusal>().copied()
+}
+
+/// `bytes` as they are written to the session file `rel` (1.0.47 S2, design §2.2): through the at-rest layer, unless
+/// `rel` is a verbatim store that keeps these bytes ([`Verbatim::for_session_write`]: media by its signature).
+fn at_rest_for<'b>(rel: &Path, bytes: &'b [u8]) -> Cow<'b, [u8]> {
+    if Verbatim::for_session_write(rel, bytes).is_some() {
+        Cow::Borrowed(bytes)
+    } else {
+        at_rest::transform_whole(bytes)
+    }
+}
+
+/// [`Verbatim::for_session_write`] for the file `src` about to be copied or moved to `rel`: decided on its first bytes.
+fn verbatim_source(rel: &Path, src: &Path) -> io::Result<bool> {
+    let Some(store) = Verbatim::for_session_rel(rel) else {
+        return Ok(false);
+    };
+    let mut head = Vec::with_capacity(12);
+    File::open(src)?.take(12).read_to_end(&mut head)?;
+    Ok(store.holds(&head))
+}
+
+/// Whether appends to `rel` are written verbatim. Media is not: its signature is in the first write only, and the
+/// layer leaves bytes that hold no recorded value unchanged.
+fn verbatim_append(rel: &Path) -> bool {
+    Verbatim::for_session_rel(rel).is_some_and(|store| store != Verbatim::Media)
 }
 
 /// Why [`SessionWriter::claim`] did not get the session.
@@ -529,10 +557,17 @@ impl SessionWriter {
 
     // ---- the write API (design §5.3) -----------------------------------------------------------------------------
 
+    /// `bytes` exactly as a write of them to `rel` lands on disk (S2, design §2.6): for code that fingerprints bytes
+    /// before writing them, so the fingerprint matches the file.
+    pub fn at_rest_bytes<'b>(&self, rel: impl AsRef<Path>, bytes: &'b [u8]) -> Cow<'b, [u8]> {
+        at_rest_for(rel.as_ref(), bytes)
+    }
+
     /// Append `bytes` to `rel`, creating it owner-only.
     pub fn append_sync(&self, rel: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
+        let bytes = at_rest_for(rel.as_ref(), bytes);
         self.mutate(rel.as_ref(), true, |path| {
-            owner_only::open(OpenOptions::new().create(true).append(true), path)?.write_all(bytes)
+            owner_only::open(OpenOptions::new().create(true).append(true), path)?.write_all(&bytes)
         })
     }
 
@@ -545,7 +580,9 @@ impl SessionWriter {
     /// Append one line to `rel` and sync it, first ending a torn last line (a writer that died mid-line) so the new line
     /// is not swallowed into it. `line` should end with `\n`. (`append_event_checked`'s fix, as a writer method.)
     pub fn append_line_checked_sync(&self, rel: impl AsRef<Path>, line: &[u8]) -> io::Result<()> {
-        use std::io::{Read as _, Seek as _, SeekFrom};
+        use std::io::SeekFrom;
+        let line = at_rest_for(rel.as_ref(), line);
+        let line: &[u8] = &line;
         self.mutate(rel.as_ref(), true, |path| {
             let mut file = owner_only::open(
                 OpenOptions::new().read(true).create(true).append(true),
@@ -612,6 +649,9 @@ impl SessionWriter {
     }
 
     fn replace_now(&self, rel: &Path, bytes: &[u8]) -> Result<(), ReplaceError> {
+        // Transformed before the temporary sibling is written: a crash never leaves raw bytes in the folder.
+        let bytes = at_rest_for(rel, bytes);
+        let bytes: &[u8] = &bytes;
         let target = self.resolve(rel).map_err(ReplaceError::NotReplaced)?;
         self.ensure_dir_and_hold(true)
             .map_err(ReplaceError::NotReplaced)?;
@@ -654,9 +694,10 @@ impl SessionWriter {
 
     /// Create `rel` with `bytes`; `AlreadyExists` if it is there.
     pub fn create_new_sync(&self, rel: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
+        let bytes = at_rest_for(rel.as_ref(), bytes);
         self.mutate(rel.as_ref(), true, |path| {
             owner_only::open(OpenOptions::new().write(true).create_new(true), path)?
-                .write_all(bytes)
+                .write_all(&bytes)
         })
     }
 
@@ -690,9 +731,16 @@ impl SessionWriter {
         self.blocking(move |w| w.remove_sync(&rel)).await
     }
 
-    /// Rename `from` to `to`, both inside the folder. Never creates the folder; creates `to`'s parents.
+    /// Rename `from` to `to`, both inside the folder. Never creates the folder; creates `to`'s parents. A verbatim
+    /// store renamed to a transformed name is read, transformed and written instead (S2, design §2.2).
     pub fn rename_sync(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
         let (from, to) = (from.as_ref(), to.as_ref());
+        if Verbatim::for_session_rel(from).is_some() && Verbatim::for_session_rel(to).is_none() {
+            let data = std::fs::read(self.resolve(from)?)?;
+            self.ensure_dir_and_hold(false)?;
+            self.replace_now(to, &data).map_err(ReplaceError::into_io)?;
+            return self.remove_sync(from);
+        }
         let source = self.resolve(from)?;
         let target = self.resolve(to)?;
         self.ensure_dir_and_hold(false)?;
@@ -708,9 +756,28 @@ impl SessionWriter {
         self.blocking(move |w| w.rename_sync(&from, &to)).await
     }
 
-    /// Copy the file `src` (anywhere; only read) to `rel`, owner-only whatever `src`'s mode. Returns the bytes copied.
+    /// Copy the file `src` (anywhere; only read) to `rel`, owner-only whatever `src`'s mode. Returns the bytes read.
+    /// The bytes are streamed through the at-rest layer (S2, Astra A#4; Fable code review #5): only transformed bytes
+    /// ever land, a file is never read whole, and nothing is synced per file (as before S2; a fork copies many).
     pub fn copy_in_sync(&self, src: &Path, rel: impl AsRef<Path>) -> io::Result<u64> {
-        self.mutate(rel.as_ref(), true, |path| owner_only::copy(src, path))
+        let rel = rel.as_ref();
+        self.mutate(rel, true, |path| {
+            // Published through a temporary sibling: a reader never sees a half-written copy.
+            let tmp = temp_sibling(path);
+            let copied = (|| -> io::Result<u64> {
+                let copied = if verbatim_source(rel, src)? {
+                    owner_only::copy(src, &tmp)?
+                } else {
+                    copy_through_layer(rel, &mut File::open(src)?, &mut owner_only::create(&tmp)?)?
+                };
+                std::fs::rename(&tmp, path)?;
+                Ok(copied)
+            })();
+            if copied.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            copied
+        })
     }
 
     /// [`copy_in_sync`](Self::copy_in_sync) on the blocking pool.
@@ -723,11 +790,27 @@ impl SessionWriter {
         self.blocking(move |w| w.copy_in_sync(&src, &rel)).await
     }
 
-    /// Move the file `src` (outside the folder: a fork's staging directory) to `rel`, replacing what is there. A rename,
-    /// atomic on one filesystem, then the directory synced. Across filesystems (`EXDEV`) the bytes are copied to an
-    /// owner-only temporary sibling of `rel`, synced and renamed over it (as [`replace_atomic_sync`](Self::replace_atomic_sync)),
-    /// and then `src` is removed. `src` itself is never written.
+    /// Move the file `src` (outside the folder) to `rel`, replacing what is there. Its bytes are streamed through the
+    /// at-rest layer into an owner-only temporary sibling of `rel`, synced and renamed over it, then `src` is removed (an
+    /// error if it cannot be: a raw copy must not stay behind). A verbatim store is moved as
+    /// [`move_in_scrubbed_sync`](Self::move_in_scrubbed_sync) does. `src` itself is never written.
     pub fn move_in_sync(&self, src: &Path, rel: impl AsRef<Path>) -> io::Result<()> {
+        let rel = rel.as_ref();
+        if verbatim_source(rel, src)? {
+            return self.move_in_scrubbed_sync(src, rel);
+        }
+        let target = self.resolve(rel)?;
+        self.ensure_dir_and_hold(true)?;
+        self.ensure_parents(rel)?;
+        self.publish_copy(src, &target, true)?;
+        std::fs::remove_file(src)
+    }
+
+    /// [`move_in_sync`](Self::move_in_sync) for a `src` whose every byte the caller already wrote through the at-rest
+    /// layer (a fork's staged transcript, `UpdateLineWriter::copy_line`), so it is not read again (Fable code review
+    /// #5). A rename, atomic on one filesystem, then the directory synced. Across filesystems (`EXDEV`) the bytes are
+    /// copied to an owner-only temporary sibling of `rel`, synced and renamed over it, and then `src` is removed.
+    pub fn move_in_scrubbed_sync(&self, src: &Path, rel: impl AsRef<Path>) -> io::Result<()> {
         let rel = rel.as_ref();
         let target = self.resolve(rel)?;
         self.ensure_dir_and_hold(true)?;
@@ -738,24 +821,34 @@ impl SessionWriter {
             Ok(()) => durable::sync_parent(&target),
             Err(error) if error.kind() != io::ErrorKind::CrossesDevices => Err(error),
             Err(_) => {
-                let tmp = temp_sibling(&target);
-                trace::op(self.0.generation, &[&tmp, &target], || {
-                    let copied = (|| -> io::Result<()> {
-                        owner_only::copy(src, &tmp)?;
-                        durable::sync_file(&OpenOptions::new().write(true).open(&tmp)?)?;
-                        std::fs::rename(&tmp, &target)
-                    })();
-                    if let Err(error) = copied {
-                        let _ = std::fs::remove_file(&tmp);
-                        return Err(error);
-                    }
-                    durable::sync_parent(&target)
-                })?;
-                // The copy has landed; the staged original outside the folder is the caller's to lose.
-                let _ = std::fs::remove_file(src);
-                Ok(())
+                self.publish_copy(src, &target, false)?;
+                std::fs::remove_file(src)
             }
         }
+    }
+
+    /// Copy `src` to an owner-only temporary sibling of `target` (through the at-rest layer when `transform`), sync it,
+    /// rename it over `target` and sync the directory. The temporary is removed on failure.
+    fn publish_copy(&self, src: &Path, target: &Path, transform: bool) -> io::Result<()> {
+        let tmp = temp_sibling(target);
+        trace::op(self.0.generation, &[&tmp, target], || {
+            let copied = (|| -> io::Result<()> {
+                let mut source = File::open(src)?;
+                let mut file = owner_only::create(&tmp)?;
+                if transform {
+                    copy_through_layer(target, &mut source, &mut file)?;
+                } else {
+                    io::copy(&mut source, &mut file)?;
+                }
+                durable::sync_file(&file)?;
+                std::fs::rename(&tmp, target)
+            })();
+            if let Err(error) = copied {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(error);
+            }
+            durable::sync_parent(target)
+        })
     }
 
     /// [`move_in_sync`](Self::move_in_sync) on the blocking pool.
@@ -778,6 +871,13 @@ impl SessionWriter {
         dst_rel: impl AsRef<Path>,
     ) -> io::Result<()> {
         let (src_rel, dst_rel) = (src_rel.as_ref(), dst_rel.as_ref());
+        // S2: a link never gives a verbatim store's bytes a transformed name (or the other way round).
+        if Verbatim::for_session_rel(src_rel) != Verbatim::for_session_rel(dst_rel) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a hard link must stay within one at-rest class",
+            ));
+        }
         let source = self.resolve(src_rel)?;
         let target = self.resolve(dst_rel)?;
         self.ensure_dir_and_hold(false)?;
@@ -788,20 +888,23 @@ impl SessionWriter {
         })
     }
 
-    /// Open `rel` (creating it owner-only, read + append) and run `f` on the open file between the trace marks: for an
-    /// append that inspects the tail before it writes and reports where it failed (the shell's commit-aware JSONL
-    /// append, F5-C4). The file closes when `f` returns. An open failure is the outer error; `f`'s own result is inner.
+    /// Open `rel` (creating it owner-only, read + append) and run `f` on it between the trace marks: for an append that
+    /// inspects the tail before it writes and reports where it failed (the shell's commit-aware JSONL append, F5-C4).
+    /// `f` gets an [`AtRestAppend`], never the `File` (S2, Grok r2 #2): every byte it writes goes through the at-rest
+    /// layer. The file closes when `f` returns. An open failure is the outer error; `f`'s own result is inner.
     pub fn with_append_file<T>(
         &self,
         rel: impl AsRef<Path>,
-        f: impl FnOnce(&mut File) -> T,
+        f: impl FnOnce(&mut AtRestAppend) -> T,
     ) -> io::Result<T> {
-        self.mutate(rel.as_ref(), true, |path| {
-            let mut file = owner_only::open(
+        let rel = rel.as_ref();
+        let verbatim = verbatim_append(rel);
+        self.mutate(rel, true, |path| {
+            let file = owner_only::open(
                 OpenOptions::new().read(true).create(true).append(true),
                 path,
             )?;
-            Ok(f(&mut file))
+            Ok(f(&mut AtRestAppend { file, verbatim }))
         })
     }
 
@@ -874,22 +977,44 @@ impl SessionWriter {
     }
 
     /// Open `rel` for appending as a held handle that owns a clone of this writer (design §5.3, Astra M3): the writer
-    /// cannot be free while the handle exists. For `events.jsonl` and the terminal logs.
+    /// cannot be free while the handle exists. For `events.jsonl`: each write is one or more whole records, transformed
+    /// as such (S2).
     pub fn open_append(&self, rel: impl AsRef<Path>) -> io::Result<SessionAppend> {
-        let rel = rel.as_ref();
+        self.open_append_with(rel.as_ref(), None)
+    }
+
+    /// [`open_append`](Self::open_append) for output that arrives in arbitrary pieces (the terminal logs): the bytes go
+    /// through an [`AtRestStream`], released by [`SessionAppend::finish`] (S2, design §2.5).
+    pub fn open_append_stream(&self, rel: impl AsRef<Path>) -> io::Result<SessionAppend> {
+        self.open_append_with(rel.as_ref(), Some(AtRestStream::new()))
+    }
+
+    fn open_append_with(
+        &self,
+        rel: &Path,
+        stream: Option<AtRestStream>,
+    ) -> io::Result<SessionAppend> {
         let file = self.mutate(rel, true, |path| {
             owner_only::open(OpenOptions::new().create(true).append(true), path)
         })?;
+        let stream = stream.filter(|_| !verbatim_append(rel));
         Ok(SessionAppend {
-            writer: self.clone(),
-            file: Arc::new(file),
+            file: Arc::new(Mutex::new(AppendState {
+                file,
+                verbatim: verbatim_append(rel),
+                stream,
+                out: Vec::new(),
+            })),
             path: self.0.dir.join(rel),
+            writer: self.clone(),
         })
     }
 
     /// Open (creating it if missing, never truncating) a lock sidecar such as `turn_owner.lock` or `snapshot.lock`, so
-    /// sidecars are made through the writer and carry trace marks (design §5.6, Fable round-2 M4).
-    pub fn open_lock(&self, rel: impl AsRef<Path>) -> io::Result<File> {
+    /// sidecars are made through the writer and carry trace marks (design §5.6, Fable round-2 M4). The file is opened
+    /// read and write (an exclusive `flock` on a Linux NFS home needs a writable handle), but the [`SessionLock`] it
+    /// returns only locks: a lock holds no content, so nothing can be written through it (S2, design §2.2).
+    pub fn open_lock(&self, rel: impl AsRef<Path>) -> io::Result<SessionLock> {
         self.mutate(rel.as_ref(), true, |path| {
             owner_only::open(
                 OpenOptions::new()
@@ -900,6 +1025,7 @@ impl SessionWriter {
                 path,
             )
         })
+        .map(SessionLock)
     }
 
     /// Run the summary read-modify-write `rmw(summary.json, summary.json.lock)` as this writer's work (for actor
@@ -1013,12 +1139,55 @@ impl ReplaceError {
 
 /// An append handle that owns a clone of its [`SessionWriter`] (design §5.3): the writer is not free while it exists.
 /// Fields drop in order: the file closes before the writer clone, so a handle holding the last clone has closed its
-/// file before the writer is free (design §6.1; box B4).
+/// file before the writer is free (design §6.1; box B4). Every byte goes through the at-rest layer (S2); a stream
+/// handle releases what it holds back on [`finish`](Self::finish), and on drop.
 #[derive(Debug)]
 pub struct SessionAppend {
-    file: Arc<File>,
+    file: Arc<Mutex<AppendState>>,
     path: PathBuf,
     writer: SessionWriter,
+}
+
+#[derive(Debug)]
+struct AppendState {
+    file: File,
+    verbatim: bool,
+    stream: Option<AtRestStream>,
+    out: Vec<u8>,
+}
+
+impl AppendState {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        match &mut self.stream {
+            _ if self.verbatim => self.file.write_all(bytes),
+            None => self.file.write_all(&at_rest::transform_whole(bytes)),
+            Some(stream) => {
+                self.out.clear();
+                stream.push(bytes, &mut self.out);
+                self.file.write_all(&self.out)
+            }
+        }
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        if let Some(stream) = &mut self.stream {
+            self.out.clear();
+            stream.finish(&mut self.out);
+            self.file.write_all(&self.out)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AppendState {
+    fn drop(&mut self) {
+        // An abnormal end (no finish) still never writes held bytes raw (design §2.5 step 3).
+        let _ = self.finish();
+    }
+}
+
+fn locked(state: &Mutex<AppendState>) -> MutexGuard<'_, AppendState> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl SessionAppend {
@@ -1026,7 +1195,7 @@ impl SessionAppend {
     pub fn write_all(&self, bytes: &[u8]) -> io::Result<()> {
         self.writer.ensure_dir_and_hold(false)?;
         trace::op(self.writer.0.generation, &[&self.path], || {
-            (&*self.file).write_all(bytes)
+            locked(&self.file).write(bytes)
         })
     }
 
@@ -1036,17 +1205,51 @@ impl SessionAppend {
         self.writer
             .blocking(move |w| {
                 w.ensure_dir_and_hold(false)?;
-                trace::op(w.0.generation, &[&path], || (&*file).write_all(&bytes))
+                let written = trace::op(w.0.generation, &[&path], || locked(&file).write(&bytes));
+                // The file clone goes before the writer clone (field-order rule above).
+                drop(file);
+                written
             })
             .await
     }
 
-    /// Cut the file to `len` bytes (a terminal log's size cap). Later appends land at the new end (append mode).
+    /// Release what a stream handle holds back (S2, design §2.5): a held beginning of a recorded value is written as
+    /// `<redacted>`. Called where the output is complete (`flush_and_truncate_output_file`, an exit, EOF); a later write
+    /// still sees a value begun before it. A no-op for a record handle.
+    pub fn finish(&self) -> io::Result<()> {
+        self.writer.ensure_dir_and_hold(false)?;
+        trace::op(self.writer.0.generation, &[&self.path], || {
+            locked(&self.file).finish()
+        })
+    }
+
+    /// [`finish`](Self::finish) on the blocking pool.
+    pub async fn finish_async(&self) -> io::Result<()> {
+        let (file, path) = (self.file.clone(), self.path.clone());
+        self.writer
+            .blocking(move |w| {
+                w.ensure_dir_and_hold(false)?;
+                let finished = trace::op(w.0.generation, &[&path], || locked(&file).finish());
+                drop(file);
+                finished
+            })
+            .await
+    }
+
+    /// Cut the file to at most `len` bytes (a terminal log's size cap); never grows it (S2, Fable F#7). Held bytes are
+    /// released first. Later appends land at the new end (append mode).
     pub fn set_len(&self, len: u64) -> io::Result<()> {
         self.writer.ensure_dir_and_hold(false)?;
         trace::op(self.writer.0.generation, &[&self.path], || {
-            self.file.set_len(len)
+            Self::shrink(&self.file, len)
         })
+    }
+
+    fn shrink(state: &Mutex<AppendState>, len: u64) -> io::Result<()> {
+        let mut state = locked(state);
+        state.finish()?;
+        let current = state.file.metadata()?.len();
+        state.file.set_len(len.min(current))
     }
 
     /// [`set_len`](Self::set_len) on the blocking pool.
@@ -1055,14 +1258,16 @@ impl SessionAppend {
         self.writer
             .blocking(move |w| {
                 w.ensure_dir_and_hold(false)?;
-                trace::op(w.0.generation, &[&path], || file.set_len(len))
+                let cut = trace::op(w.0.generation, &[&path], || Self::shrink(&file, len));
+                drop(file);
+                cut
             })
             .await
     }
 
     /// Flush the appended data to stable storage.
     pub fn sync_data(&self) -> io::Result<()> {
-        self.file.sync_data()
+        locked(&self.file).file.sync_data()
     }
 
     /// The file's path, for display (the text shown to the model for a terminal log).
@@ -1073,6 +1278,98 @@ impl SessionAppend {
     /// The writer this handle holds.
     pub fn writer(&self) -> &SessionWriter {
         &self.writer
+    }
+}
+
+/// A lock sidecar's handle (S2, Fable code review #1): advisory locks only. It never exposes the `File` (no `Deref`,
+/// no `AsRef`, no `Write`), so a handle opened for writing still writes nothing.
+#[derive(Debug)]
+pub struct SessionLock(pub(crate) File);
+
+impl SessionLock {
+    pub fn lock_exclusive(&self) -> io::Result<()> {
+        fs2::FileExt::lock_exclusive(&self.0)
+    }
+
+    pub fn try_lock_exclusive(&self) -> io::Result<()> {
+        fs2::FileExt::try_lock_exclusive(&self.0)
+    }
+
+    pub fn lock_shared(&self) -> io::Result<()> {
+        fs2::FileExt::lock_shared(&self.0)
+    }
+
+    pub fn try_lock_shared(&self) -> io::Result<()> {
+        fs2::FileExt::try_lock_shared(&self.0)
+    }
+
+    pub fn unlock(&self) -> io::Result<()> {
+        fs2::FileExt::unlock(&self.0)
+    }
+
+    /// Another descriptor on the same open file description (what a forked child inherits).
+    pub fn try_clone(&self) -> io::Result<Self> {
+        self.0.try_clone().map(Self)
+    }
+}
+
+/// A lock file opened by path (a fork's read-only source sidecar, a test fixture) gets the same lock-only surface.
+impl From<File> for SessionLock {
+    fn from(file: File) -> Self {
+        Self(file)
+    }
+}
+
+/// The open file [`SessionWriter::with_append_file`] hands its closure (S2, Grok r2 #2, Fable r2 #3): `Read` and `Seek`
+/// for the torn-tail check, `metadata` and the syncs for durability, and a `Write` whose every call is transformed as
+/// one whole record by the at-rest layer. It never exposes the `File` (no `Deref`, no `AsRef`), so no raw write path
+/// exists through it.
+#[derive(Debug)]
+pub struct AtRestAppend {
+    file: File,
+    verbatim: bool,
+}
+
+impl AtRestAppend {
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        self.file.metadata()
+    }
+
+    /// `File::sync_all`: one full flush (`F_FULLFSYNC` on Apple targets).
+    pub fn sync_all(&self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+
+    pub fn sync_data(&self) -> io::Result<()> {
+        self.file.sync_data()
+    }
+}
+
+impl Read for AtRestAppend {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Seek for AtRestAppend {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl Write for AtRestAppend {
+    /// One call is one whole record (or several): it is transformed as such and written whole.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.verbatim {
+            self.file.write_all(buf)?;
+        } else {
+            self.file.write_all(&at_rest::transform_whole(buf))?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
     }
 }
 
@@ -1210,4 +1507,53 @@ pub(crate) fn test_replace_slot(id: &str, generation: u64, tx: watch::Sender<()>
 #[cfg(test)]
 pub(crate) fn test_remove_slot(id: &str) {
     slots().remove(id);
+}
+
+/// Copy `source` into `dest` through the at-rest layer the way a normal write of the same content would be (Sean's S2
+/// decision): a JSON document (`*.json`, `*.json.*`) whole through the record-aware JSON edit; JSON lines (a name with
+/// `.jsonl`, such as the load repair's `chat_history.jsonl.pre-repair.<id>.tmp`, or content that begins with `{` or
+/// `[`, such as a compaction segment) one record at a time through [`at_rest::AtRestLines`], which also catches a value
+/// spanning records (Astra code review round 3, High 3); anything else through the stream scrubber. A line and the
+/// layer's window are the most held in memory for JSON lines. Returns the bytes read.
+fn copy_through_layer(
+    rel: &Path,
+    source: &mut impl Read,
+    dest: &mut impl Write,
+) -> io::Result<u64> {
+    let name = rel
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut reader = io::BufReader::new(source);
+    let first = io::BufRead::fill_buf(&mut reader)?
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .copied();
+    if name.ends_with(".json") || name.contains(".json.") {
+        let mut whole = Vec::new();
+        let copied = reader.read_to_end(&mut whole)? as u64;
+        dest.write_all(&at_rest::transform_whole(&whole))?;
+        return Ok(copied);
+    }
+    if !name.contains(".jsonl") && !matches!(first, Some(b'{' | b'[')) {
+        let mut scrubbed = at_rest::AtRestFile::stream(dest);
+        let copied = io::copy(&mut reader, &mut scrubbed)?;
+        scrubbed.finish()?;
+        return Ok(copied);
+    }
+    let mut lines = at_rest::AtRestLines::new();
+    let (mut line, mut out, mut copied) = (Vec::new(), Vec::new(), 0u64);
+    loop {
+        line.clear();
+        out.clear();
+        let n = io::BufRead::read_until(&mut reader, b'\n', &mut line)?;
+        if n == 0 {
+            lines.finish(&mut out)?;
+            dest.write_all(&out)?;
+            return Ok(copied);
+        }
+        copied += n as u64;
+        lines.push(&line, &mut out)?;
+        dest.write_all(&out)?;
+    }
 }

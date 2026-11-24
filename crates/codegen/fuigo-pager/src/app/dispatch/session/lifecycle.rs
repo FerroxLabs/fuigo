@@ -1238,6 +1238,10 @@ pub(in crate::app::dispatch) fn handle_session_created(
             agent_id,
             session_id: session_id_clone.clone(),
         });
+        effects.push(Effect::CheckHeldMcpServers {
+            agent_id,
+            cwd: cwd.clone(),
+        });
         effects.push(Effect::CheckMarketplaceUpdates {
             agent_id,
             session_id: session_id_clone.clone(),
@@ -1355,6 +1359,10 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         effects.push(Effect::RefreshAvailableCommands {
             agent_id,
             session_id: session_id_clone.clone(),
+        });
+        effects.push(Effect::CheckHeldMcpServers {
+            agent_id,
+            cwd: cwd.clone(),
         });
         effects.push(Effect::CheckMarketplaceUpdates {
             agent_id,

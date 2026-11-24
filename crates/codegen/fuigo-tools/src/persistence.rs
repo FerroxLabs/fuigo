@@ -414,7 +414,8 @@ impl ResourcesPersistence {
     async fn write_json(path: &Path, value: &serde_json::Value) -> io::Result<()> {
         let (tmp_path, json) = Self::prepare_write(path, value)?;
         let mut file = Self::create_owner_only(&tmp_path).await?;
-        file.write_all(&json).await?;
+        file.write_all(&fuigo_secrets::at_rest::transform_whole(&json))
+            .await?;
         // tokio's File acknowledges a write before the blocking write has run; flush waits for it and reports its error
         // (ENOSPC, ...) before the temp replaces the last good snapshot (Astra P145 r1 #1).
         file.flush().await?;
@@ -454,7 +455,8 @@ impl ResourcesPersistence {
         let (tmp_path, json) = Self::prepare_write(path, value)?;
         let result = async {
             let mut file = Self::create_owner_only(&tmp_path).await?;
-            file.write_all(&json).await?;
+            file.write_all(&fuigo_secrets::at_rest::transform_whole(&json))
+                .await?;
             file.sync_all().await?;
             drop(file);
             Self::publish_durable(path, &tmp_path).await

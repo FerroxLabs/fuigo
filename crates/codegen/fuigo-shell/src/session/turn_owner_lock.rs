@@ -42,11 +42,13 @@ pub(crate) const RECOVERY_APPEND_TIMEOUT: Duration = Duration::from_secs(10);
 fn open_lock_file(
     session_dir: &Path,
     writer: Option<&fuigo_session_writer::SessionWriter>,
-) -> std::io::Result<std::fs::File> {
+) -> std::io::Result<fuigo_session_writer::SessionLock> {
     // Through the writer only into an existing folder: a missing one stays NotFound, as on the by-path open.
     if let Some(writer) = writer.filter(|_| session_dir.is_dir()) {
         return writer.open_lock(TURN_OWNER_LOCK_FILE);
     }
+    // Read and write: an exclusive `flock` on a Linux NFS home needs a writable handle; the lock-only wrapper writes
+    // nothing (S2).
     crate::session::storage::owner_only::open(
         // F5-A: lock sidecar (§5.6): turn_owner.lock
         std::fs::OpenOptions::new()
@@ -56,6 +58,7 @@ fn open_lock_file(
             .truncate(false),
         &session_dir.join(TURN_OWNER_LOCK_FILE),
     )
+    .map(Into::into)
 }
 
 static UNKNOWN_WARNED: AtomicBool = AtomicBool::new(false);
@@ -86,8 +89,8 @@ pub(crate) fn report_lock_unavailable(
 /// are close-on-exec), so merely closing ours can leave the session looking live to everyone else for a moment. An
 /// explicit unlock releases the description's lock whoever still holds a copy of it. Errors cannot be reported from
 /// a destructor, and closing the descriptor (which follows) releases the lock anyway.
-fn unlock_on_drop(file: &std::fs::File) {
-    let _ = fs2::FileExt::unlock(file);
+fn unlock_on_drop(file: &fuigo_session_writer::SessionLock) {
+    let _ = file.unlock();
 }
 
 /// Held by a live session actor (or by a recovery whose marker is still being written); dropping it (or the process
@@ -95,7 +98,7 @@ fn unlock_on_drop(file: &std::fs::File) {
 #[derive(Debug)]
 pub(crate) struct TurnOwnerLock {
     /// `None` only inside `drop`. Dropping unlocks explicitly, see [`unlock_on_drop`].
-    file: Option<std::fs::File>,
+    file: Option<fuigo_session_writer::SessionLock>,
 }
 
 /// Another process held the session's exclusive recovery lock for [`OWNER_WAIT_LIMIT`].
@@ -115,7 +118,7 @@ impl Drop for TurnOwnerLock {
 #[cfg(test)]
 impl TurnOwnerLock {
     /// The held descriptor, so a test can make an inherited copy of it (what a forked child holds before it execs).
-    fn file(&self) -> &std::fs::File {
+    fn file(&self) -> &fuigo_session_writer::SessionLock {
         self.file.as_ref().expect("a live lock holds its file")
     }
 }
@@ -179,7 +182,7 @@ impl TurnOwnerLock {
         let mut warned = false;
         loop {
             // UFCS: std's inherent `File::try_lock_shared` (Rust 1.89+) returns a different error type.
-            match fs2::FileExt::try_lock_shared(&file) {
+            match file.try_lock_shared() {
                 Ok(()) => return Ok(Some(Self { file: Some(file) })),
                 Err(error) if fuigo_workspace::util::is_lock_contended(&error) => {
                     let waited = started.elapsed();
@@ -228,7 +231,7 @@ pub(crate) enum RecoveryLock {
 #[derive(Debug)]
 pub(crate) struct RecoveryGuard {
     /// `None` once [`RecoveryGuard::into_shared`] has handed the descriptor over; otherwise unlocked on drop.
-    file: Option<std::fs::File>,
+    file: Option<fuigo_session_writer::SessionLock>,
 }
 
 impl Drop for RecoveryGuard {
@@ -242,7 +245,7 @@ impl Drop for RecoveryGuard {
 #[cfg(test)]
 impl RecoveryGuard {
     /// See [`TurnOwnerLock::file`].
-    fn file(&self) -> &std::fs::File {
+    fn file(&self) -> &fuigo_session_writer::SessionLock {
         self.file.as_ref().expect("a live guard holds its file")
     }
 }
@@ -259,18 +262,18 @@ impl RecoveryGuard {
     /// a failed conversion does not promise to have released the exclusive hold (Linux can fail with `ENOMEM` before it
     /// touches the existing lock), and a forked child's copy of the descriptor would keep it.
     pub(crate) fn into_shared(self) -> Option<TurnOwnerLock> {
-        self.into_shared_with(fs2::FileExt::try_lock_shared)
+        self.into_shared_with(fuigo_session_writer::SessionLock::try_lock_shared)
     }
 
     /// [`Self::into_shared`] with the conversion injected (tests make it fail).
     fn into_shared_with(
         mut self,
-        lock_shared: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+        lock_shared: impl FnOnce(&fuigo_session_writer::SessionLock) -> std::io::Result<()>,
     ) -> Option<TurnOwnerLock> {
         // Taken out so that dropping `self` below does not unlock: the hold is handed over, not released.
         let file = self.file.take().expect("a live guard holds its file");
         #[cfg(windows)]
-        let _ = fs2::FileExt::unlock(&file);
+        let _ = file.unlock();
         match lock_shared(&file) {
             Ok(()) => Some(TurnOwnerLock { file: Some(file) }),
             Err(error) => {
@@ -304,7 +307,7 @@ fn try_recovery_lock_with(
         Ok(file) => file,
         Err(error) => return RecoveryLock::Unknown(error),
     };
-    match fs2::FileExt::try_lock_exclusive(&file) {
+    match file.try_lock_exclusive() {
         Ok(()) => RecoveryLock::Acquired(RecoveryGuard { file: Some(file) }),
         Err(error) if fuigo_workspace::util::is_lock_contended(&error) => {
             RecoveryLock::HeldElsewhere

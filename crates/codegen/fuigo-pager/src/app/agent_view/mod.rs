@@ -2027,6 +2027,15 @@ fn translate_local_submit(
             },
         });
     }
+    if let LocalQuestionKind::McpHeld { servers } = kind {
+        let approve = servers
+            .into_iter()
+            .zip(&qv.selections)
+            .filter(|(_, sel)| matches!(sel, QuestionSelection::Single(Some(0))))
+            .map(|(name, _)| name)
+            .collect();
+        return InputOutcome::Action(Action::McpHeldAnswered { approve });
+    }
     let Some(QuestionSelection::Single(Some(idx))) = qv.selections.first() else {
         if let LocalQuestionKind::FeedbackTrace { report, images } = kind {
             return InputOutcome::Action(Action::SendFeedback {
@@ -2122,6 +2131,7 @@ fn translate_local_submit(
                 confirmed: *idx == 0,
             })
         }
+        LocalQuestionKind::McpHeld { .. } => unreachable!("answered above"),
         LocalQuestionKind::Feedback => {
             unreachable!(
                 "feedback report submits through submit_feedback_pane, which returns first"

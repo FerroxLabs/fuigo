@@ -258,7 +258,7 @@ while read -r ppkg pkind ptgt pthr pflt; do
   [[ "$pthr" =~ ^[1-9][0-9]*$ ]] || bad=$((bad+1))
   case "$pkind" in
     test) [ -n "$(find "$ROOT/crates" -path "*/$ppkg/tests/$ptgt.rs" -o -path "*/$ppkg/tests/$ptgt/mod.rs" -o -path "*/$ppkg/tests/$ptgt/main.rs" 2>/dev/null | head -1)" ] || bad=$((bad+1));;
-    lib|tests) ;;
+    lib|release-lib|tests) ;;
     *) bad=$((bad+1));;
   esac
 done < "$PTYT"

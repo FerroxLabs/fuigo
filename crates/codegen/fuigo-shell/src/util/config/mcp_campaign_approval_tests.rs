@@ -48,7 +48,13 @@ fn campaign_stdio_server_needs_approval_bound_to_its_command() {
     );
 
     // Approved through the ordinary enable path: it starts.
-    block_on(save_mcp_server_enabled_in("fresh", true, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "fresh",
+        true,
+        cwd.path(),
+        campaign_approval_shown("fresh", cwd.path()).0,
+    ))
+    .unwrap();
     let disabled = disabled_mcp_server_names(cwd.path());
     assert!(
         !disabled.contains("fresh"),
@@ -68,9 +74,21 @@ fn campaign_stdio_server_needs_approval_bound_to_its_command() {
     );
 
     // Turning it off withdraws the approval.
-    block_on(save_mcp_server_enabled_in("fresh", true, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "fresh",
+        true,
+        cwd.path(),
+        campaign_approval_shown("fresh", cwd.path()).0,
+    ))
+    .unwrap();
     assert!(!disabled_mcp_server_names(cwd.path()).contains("fresh"));
-    block_on(save_mcp_server_enabled_in("fresh", false, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "fresh",
+        false,
+        cwd.path(),
+        CampaignApproval::Clear,
+    ))
+    .unwrap();
     let saved = std::fs::read_to_string(&config).unwrap();
     let root: TomlValue = toml::from_str(&saved).unwrap();
     assert!(
@@ -118,7 +136,13 @@ fn a_changed_campaign_command_or_cwd_needs_approval_again() {
         "[[campaigns]]\nid = \"c702\"\n[campaigns.mcp_servers.fresh]\ncommand = \"c702-srv\"\ncwd = \"/c702/a\"\n",
     )
     .unwrap();
-    block_on(save_mcp_server_enabled_in("fresh", true, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "fresh",
+        true,
+        cwd.path(),
+        campaign_approval_shown("fresh", cwd.path()).0,
+    ))
+    .unwrap();
     assert!(
         !disabled_mcp_server_names(cwd.path()).contains("fresh"),
         "approved"
@@ -133,7 +157,13 @@ fn a_changed_campaign_command_or_cwd_needs_approval_again() {
         "a changed command needs approval again"
     );
 
-    block_on(save_mcp_server_enabled_in("fresh", true, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "fresh",
+        true,
+        cwd.path(),
+        campaign_approval_shown("fresh", cwd.path()).0,
+    ))
+    .unwrap();
     assert!(
         !disabled_mcp_server_names(cwd.path()).contains("fresh"),
         "approved again"
@@ -197,7 +227,13 @@ fn unapproved_campaign_server_does_not_start_through_a_renamed_forwarded_copy() 
     );
 
     // Approved, it starts under the renamed id.
-    block_on(save_mcp_server_enabled_in("acme.tools", true, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "acme.tools",
+        true,
+        cwd.path(),
+        campaign_approval_shown("acme.tools", cwd.path()).0,
+    ))
+    .unwrap();
     let started = names(&admit().merged);
     assert!(
         started.iter().any(|n| n == "acme-tools"),
@@ -236,7 +272,13 @@ fn unapproved_campaign_server_does_not_start_in_the_agent_pool() {
         "{spawned:?}"
     );
 
-    block_on(save_mcp_server_enabled_in("fresh", true, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "fresh",
+        true,
+        cwd.path(),
+        campaign_approval_shown("fresh", cwd.path()).0,
+    ))
+    .unwrap();
     let spawned = names(&crate::extensions::mcp::agent_pool_spawnable(
         configs,
         cwd.path(),
@@ -265,7 +307,13 @@ fn approving_through_setup_names_the_program() {
     );
     assert!(campaign_approval_notice("own", cwd.path()).is_none());
     assert!(campaign_approval_notice("web", cwd.path()).is_none());
-    block_on(save_mcp_server_enabled_in("fresh", true, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "fresh",
+        true,
+        cwd.path(),
+        campaign_approval_shown("fresh", cwd.path()).0,
+    ))
+    .unwrap();
     assert!(
         campaign_approval_notice("fresh", cwd.path()).is_none(),
         "already approved: nothing new to say"
@@ -284,7 +332,13 @@ fn moving_a_string_between_args_and_cwd_needs_approval_again() {
     let config = home.path().join("config.toml");
     let approved = "[[campaigns]]\nid = \"c702\"\n[campaigns.mcp_servers.fresh]\ncommand = \"node\"\nargs = [\"server.js\"]\ncwd = \"/approved\"\n";
     std::fs::write(&config, approved).unwrap();
-    block_on(save_mcp_server_enabled_in("fresh", true, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "fresh",
+        true,
+        cwd.path(),
+        campaign_approval_shown("fresh", cwd.path()).0,
+    ))
+    .unwrap();
     assert!(
         !disabled_mcp_server_names(cwd.path()).contains("fresh"),
         "approved"
@@ -328,7 +382,13 @@ fn a_changed_setup_mapping_needs_approval_again() {
         disabled_mcp_server_names(cwd.path()).contains("fresh"),
         "not approved yet"
     );
-    block_on(save_mcp_server_enabled_in("fresh", true, cwd.path())).unwrap();
+    block_on(save_mcp_server_enabled_in(
+        "fresh",
+        true,
+        cwd.path(),
+        campaign_approval_shown("fresh", cwd.path()).0,
+    ))
+    .unwrap();
     assert!(
         !disabled_mcp_server_names(cwd.path()).contains("fresh"),
         "approved"

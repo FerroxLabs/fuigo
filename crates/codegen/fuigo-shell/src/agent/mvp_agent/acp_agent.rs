@@ -1657,6 +1657,10 @@ impl acp::Agent for MvpAgent {
             .chat_state_handle
             .get_last_turn_usage()
             .await;
+        let last_attempt_usage_for_meta = handle
+            .chat_state_handle
+            .get_last_attempt_usage()
+            .await;
         turn_usage_span.close();
         let applied_tool_overrides = stop_result
             .as_ref()
@@ -1678,6 +1682,7 @@ impl acp::Agent for MvpAgent {
                                 total_tokens: 0,
                                 model_id: &model,
                                 last_turn_usage: None,
+                                last_attempt_usage: None,
                                 prompt_usage: None,
                                 cancellation_category: None,
                                 cancellation_context: None,
@@ -2226,6 +2231,7 @@ impl acp::Agent for MvpAgent {
                                     total_tokens,
                                     model_id: &model,
                                     last_turn_usage: last_turn_usage.as_ref(),
+                                    last_attempt_usage: last_attempt_usage_for_meta.as_ref(),
                                     prompt_usage,
                                     cancellation_category,
                                     cancellation_context,

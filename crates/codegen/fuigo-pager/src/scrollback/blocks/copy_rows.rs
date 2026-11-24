@@ -78,7 +78,8 @@ fn truncate_label(label: &str) -> String {
 }
 
 /// A table's rows of cell text (header first), or `None` when the cell grid does not match its column count.
-fn table_grid(meta: &TableCopyMeta) -> Option<Vec<Vec<String>>> {
+/// `markdown` keeps inline-code delimiters (the Markdown copy); otherwise a cell is its displayed text.
+fn table_grid(meta: &TableCopyMeta, markdown: bool) -> Option<Vec<Vec<String>>> {
     if meta.n_cols == 0 || meta.cells.is_empty() || !meta.cells.len().is_multiple_of(meta.n_cols) {
         return None;
     }
@@ -87,7 +88,14 @@ fn table_grid(meta: &TableCopyMeta) -> Option<Vec<Vec<String>>> {
             .chunks(meta.n_cols)
             .map(|row| {
                 row.iter()
-                    .map(|cell| cell.copy_text().replace(['\n', '\r'], " "))
+                    .map(|cell| {
+                        let text = if markdown {
+                            cell.copy_text()
+                        } else {
+                            &cell.text
+                        };
+                        text.replace(['\n', '\r'], " ")
+                    })
                     .collect()
             })
             .collect(),
@@ -97,7 +105,7 @@ fn table_grid(meta: &TableCopyMeta) -> Option<Vec<Vec<String>>> {
 /// The table as tab-separated values: cells joined by tabs, rows by newlines.
 /// Tabs inside a cell become spaces so the shape survives pasting into a spreadsheet.
 pub(crate) fn table_tsv(meta: &TableCopyMeta) -> Option<String> {
-    let grid = table_grid(meta)?;
+    let grid = table_grid(meta, false)?;
     Some(
         grid.iter()
             .map(|row| {
@@ -114,7 +122,7 @@ pub(crate) fn table_tsv(meta: &TableCopyMeta) -> Option<String> {
 /// The table as a GitHub-style Markdown table: a header row, a `---` separator row, then the body rows.
 /// A literal `|` inside a cell is escaped so it does not split the cell.
 pub(crate) fn table_markdown(meta: &TableCopyMeta) -> Option<String> {
-    let grid = table_grid(meta)?;
+    let grid = table_grid(meta, true)?;
     let line = |row: &[String]| {
         let cells: Vec<String> = row.iter().map(|c| c.replace('|', "\\|")).collect();
         format!("| {} |", cells.join(" | "))
@@ -145,7 +153,7 @@ pub(crate) fn copy_row_count(code_blocks: &[CodeBlockSpan], tables: &[TableCopyM
         .count()
         + tables
             .iter()
-            .filter(|t| t.line_count > 0 && table_grid(t).is_some())
+            .filter(|t| t.line_count > 0 && table_grid(t, false).is_some())
             .count()
 }
 

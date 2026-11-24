@@ -133,6 +133,7 @@ pub(crate) async fn materialize_descriptors_for_gateway_tools(
             for (file_name, bytes) in files {
                 let path = tools_dir.join(&file_name);
                 let write_result =
+                    // at-rest: outside-roots the MCP descriptor root (workspace_mcps_root), never under sessions/ or logs/
                     tempfile::NamedTempFile::new_in(&tools_dir).and_then(|mut tmp| {
                         std::io::Write::write_all(&mut tmp, &bytes)?;
                         tmp.persist(&path).map_err(|e| e.error)

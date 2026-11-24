@@ -88,7 +88,7 @@ them conflicting (`cli.rs:657`, `:664`), so the case cannot occur on the command
 
 ## 2. The change
 
-Four commits on `45bd14ee`, in this order, all trailers `Co-Authored-By: Claude Sonnet 5.5`:
+Four commits on `45bd14ee`, in this order:
 
 | Commit | What |
 |---|---|

@@ -1095,6 +1095,8 @@ impl MvpAgent {
         let notice_scope = fuigo_config::key_naming::NoticeScope::new();
         // P138 d-2: see `new_session_inner`.
         let _closer = notice_scope.close_on_drop();
+        // F5: the load's readers of `updates.jsonl` share one read.
+        let _updates_read_once = crate::session::storage::updates_cache::LoadScope::enter();
         let session_id = arguments.session_id.clone();
         // Ownership rule (leader mode): the leader decides who owns a session and flags a load of a session somebody else
         // owns. Such a load attaches (replay, routing) but is neither an owner nor allowed to steer the session: no mode

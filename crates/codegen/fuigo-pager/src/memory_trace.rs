@@ -16,6 +16,7 @@
 //!
 //! `$FUIGO_HOME/memtrace/<start-ts>-<pid>.jsonl` (and a `.1` after 4 MiB rotation) plus `<stem>-jemalloc-<seq>.txt` threshold dumps.
 //! Files are created lazily on the first event so short-lived CLI invocations leave no debris.
+//! Files untouched for 7 days are pruned when a traced process starts.
 //! Traces contain **process memory numbers only** (no user content), so they are safe to ship for analysis.
 //!
 //! ## Hooks (installed by the composition-root binary, mirrors `memory_release`)
@@ -450,6 +451,8 @@ pub fn start(dir: PathBuf) {
     let _ = std::thread::Builder::new()
         .name("fuigo-memtrace".into())
         .spawn(move || {
+            // Off the startup path: sweep traces from past processes before the first wait.
+            prune_old_traces(&dir, TRACE_RETENTION);
             let mut wrote_start = false;
             loop {
                 wait_full_interval(interval);
@@ -477,6 +480,32 @@ pub fn start(dir: PathBuf) {
                 });
             }
         });
+}
+
+/// Trace files older than this are pruned at start, like `~/.fuigo/debug` logs.
+const TRACE_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Remove trace and dump files in `dir` not written for `max_age`. Age-based, not
+/// count-based, so a live trace from a concurrent process (sampled every interval) is
+/// never unlinked; files not named like traces are left alone. Best-effort.
+fn prune_old_traces(dir: &Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let is_trace = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| parse_trace_name(name).is_some());
+        let is_old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| now.duration_since(modified).is_ok_and(|age| age > max_age));
+        if is_trace && is_old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Appends without taking the sink's write lock.
@@ -804,6 +833,29 @@ mod tests {
             .unwrap()
             .set_modified(SystemTime::now() - Duration::from_secs(age_secs))
             .unwrap();
+    }
+
+    #[test]
+    fn prune_old_traces_removes_only_old_trace_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let week = 7 * 24 * 60 * 60;
+        for (name, age) in [
+            ("100-1.jsonl", week + 60),
+            ("100-1.jsonl.1", week + 60),
+            ("100-1-jemalloc-0.txt", week + 60),
+            ("200-2.jsonl", 60),
+            ("200-2-jemalloc-1.txt", 60),
+            ("notes.txt", week + 60),
+        ] {
+            write_aged(dir.path(), name, 8, age);
+        }
+        prune_old_traces(dir.path(), Duration::from_secs(week));
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["200-2-jemalloc-1.txt", "200-2.jsonl", "notes.txt"]);
     }
 
     fn names(exported: &[ExportedTrace]) -> Vec<&str> {

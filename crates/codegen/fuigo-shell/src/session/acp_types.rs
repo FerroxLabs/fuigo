@@ -553,6 +553,9 @@ pub struct StartupHints {
     /// Stamped by the agent from the session's own kind, never accepted from client metadata.
     #[serde(skip)]
     pub(crate) headless_session: bool,
+    /// S1 (1.0.47): the host declared `fuigo/permissionPrompts` at initialize. Stamped by the agent, never from session meta.
+    #[serde(skip)]
+    pub(crate) client_prompts: bool,
     #[serde(default)]
     pub skip_git_status: bool,
     /// Parent project cwd for a child/worktree seat's overlay kill switch. Not on the wire.

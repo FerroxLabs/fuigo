@@ -6,8 +6,15 @@ version = "0.1.0"
 description = "Regex sanitizer for Fuigo outbound data (Sentry / Mixpanel / product-event scrubbing)"
 
 [dependencies]
+# S2 test 11: the matcher's SIMD prefilter (both are already in the tree through regex).
+aho-corasick = { workspace = true }
+# S2: id placeholders are a digest of the id, the same in every process.
+blake3 = { workspace = true }
+memchr = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
+# S2: the at-rest set warns once when it grows past its soft size.
+tracing = { workspace = true }
 url = { workspace = true }
 
 # P145: the owner-only file ACL (owner_only.rs), reachable from every session-file writer.

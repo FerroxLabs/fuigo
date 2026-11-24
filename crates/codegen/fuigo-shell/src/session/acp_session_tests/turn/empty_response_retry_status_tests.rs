@@ -211,7 +211,7 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
                 }
             }
 
-            let reason = "empty response from model (reasoning_only)";
+            let reason = "empty response from model (reasoning_only) - think-only, the model reasoned but sent no reply or tool call";
             let retrying = |attempt| {
                 let mut state = RetryState::Retrying {
                     attempt,
@@ -244,17 +244,17 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
                 vec![
                     Frame::Fuigo(retrying(1)),
                     mirror(
-                        "\n\nRetrying the model (1/3), discarding the partial reply above: empty response from model (reasoning_only)\n\n",
+                        "\n\nRetrying the model (1/3), discarding the partial reply above: empty response from model (reasoning_only) - think-only, the model reasoned but sent no reply or tool call\n\n",
                         &retrying(1),
                     ),
                     Frame::Fuigo(retrying(2)),
                     mirror(
-                        "\n\nRetrying the model (2/3), discarding the partial reply above: empty response from model (reasoning_only)\n\n",
+                        "\n\nRetrying the model (2/3), discarding the partial reply above: empty response from model (reasoning_only) - think-only, the model reasoned but sent no reply or tool call\n\n",
                         &retrying(2),
                     ),
                     Frame::Fuigo(exhausted.clone()),
                     mirror(
-                        "\n\nThe model request failed after 3 attempts: empty response from model (reasoning_only)\n\n",
+                        "\n\nThe model request failed after 3 attempts: empty response from model (reasoning_only) - think-only, the model reasoned but sent no reply or tool call\n\n",
                         &exhausted,
                     ),
                 ],
@@ -1110,13 +1110,13 @@ fn a_mirror_after_reasoning_starts_its_own_paragraph() {
             let reasoning = format!("{REASONING} ");
             let retry = |n| {
                 format!(
-                    "\n\nRetrying the model ({n}/3), discarding the partial reply above: empty response from model (reasoning_only)\n\n"
+                    "\n\nRetrying the model ({n}/3), discarding the partial reply above: empty response from model (reasoning_only) - think-only, the model reasoned but sent no reply or tool call\n\n"
                 )
             };
             assert_eq!(
                 thoughts,
                 format!(
-                    "{reasoning}{}{reasoning}{}{reasoning}\n\nThe model request failed after 3 attempts: empty response from model (reasoning_only)\n\n",
+                    "{reasoning}{}{reasoning}{}{reasoning}\n\nThe model request failed after 3 attempts: empty response from model (reasoning_only) - think-only, the model reasoned but sent no reply or tool call\n\n",
                     retry(1),
                     retry(2),
                 ),
@@ -1288,6 +1288,255 @@ fn a_rewound_turn_charges_the_request_it_had_in_flight() {
             assert!(state.total_tokens > 0, "and charged an estimate: {state:?}");
             assert!(!state.unknown_usage, "{state:?}");
             execution.release(&session);
+        })
+    });
+}
+
+/// [`sse`] events with every `response.completed` usage replaced by `input`/`output` (total = their sum).
+fn with_usage(
+    events: Vec<fuigo_test_support::SseEvent>,
+    input: u64,
+    output: u64,
+) -> Vec<fuigo_test_support::SseEvent> {
+    with_cached_usage(events, input, output, 0)
+}
+
+/// [`with_usage`] with `cached` of the `input` tokens served from cache (the Responses API counts them inside `input`).
+fn with_cached_usage(
+    events: Vec<fuigo_test_support::SseEvent>,
+    input: u64,
+    output: u64,
+    cached: u64,
+) -> Vec<fuigo_test_support::SseEvent> {
+    events
+        .into_iter()
+        .map(|event| {
+            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+                return event;
+            };
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("response.completed")
+                && let Some(response) = value.get_mut("response").and_then(|r| r.as_object_mut())
+            {
+                response.insert(
+                    "usage".to_string(),
+                    serde_json::json!({
+                        "input_tokens": input,
+                        "output_tokens": output,
+                        "total_tokens": input + output,
+                        "input_tokens_details": { "cached_tokens": cached },
+                        "output_tokens_details": { "reasoning_tokens": 0 }
+                    }),
+                );
+            }
+            fuigo_test_support::SseEvent::data(value.to_string())
+        })
+        .collect()
+}
+
+/// A turn its think-only resends rescued counts one attempt against the context window, not their sum.
+///
+/// The sampler's usage adds every resend together (that is the bill). Recording that sum as the context
+/// made a 13.3k-token turn read as 39.9k after three attempts, over a 32k window, so the next step
+/// compacted mid-turn and the model re-ran the tools it had already run.
+#[test]
+fn a_think_only_chain_counts_one_attempt_against_the_context_window() {
+    const ANSWER: &str = "Here is the answer the resend produced.";
+    const INPUT: u64 = 13_000;
+    const OUTPUT: u64 = 300;
+    on_session_stack(|| {
+        run_paused(|| async {
+            let attempts = fuigo_sampler::EMPTY_RESPONSE_MAX_ATTEMPTS;
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            for _ in 1..attempts {
+                server.enqueue_response(
+                    "/v1/responses",
+                    ScriptedResponse::sse(with_usage(
+                        sse::responses_api_reasoning_only_events("Let me think", "test"),
+                        INPUT,
+                        OUTPUT,
+                    )),
+                );
+            }
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(with_usage(
+                    sse::responses_api_script_exact(ANSWER, "test"),
+                    INPUT,
+                    OUTPUT,
+                )),
+            );
+            let policy = fuigo_sampler::RetryPolicy {
+                max_retries: fuigo_sampler::DEFAULT_MAX_RETRIES,
+                ..Default::default()
+            };
+            let (actor, frames) = actor_under_test_for_session(
+                &server,
+                SessionKind::Main,
+                policy,
+                true,
+                drain_frames,
+                "session-think-only-context",
+            )
+            .await;
+            let mut cfg = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("test actor has sampling config");
+            cfg.context_window = std::num::NonZeroU64::new(32_768).expect("non-zero");
+            actor.chat_state_handle.update_sampling_config(cfg);
+
+            let (outcome, _frames, _elapsed, submissions) =
+                drive_turn(actor.clone(), frames, &server, "req-think-only-context").await;
+            assert!(outcome.is_ok(), "the resend answers: {:?}", outcome.err());
+            assert_eq!(submissions, attempts, "think-only replies, then the answer");
+
+            let one_attempt = INPUT + OUTPUT;
+            assert_eq!(
+                actor.chat_state_handle.get_total_tokens().await,
+                one_attempt,
+                "context use is the last attempt's total, not the sum of {attempts} attempts",
+            );
+            assert!(
+                actor.check_auto_compact_needed().await.is_none(),
+                "{one_attempt} tokens is under 85% of a 32,768-token window",
+            );
+
+            // Billing keeps every attempt.
+            let billed = actor
+                .chat_state_handle
+                .get_last_turn_usage()
+                .await
+                .expect("turn usage recorded");
+            assert_eq!(
+                u64::from(billed.total_tokens),
+                one_attempt * u64::from(attempts)
+            );
+            let session = actor
+                .chat_state_handle
+                .try_get_session_usage()
+                .await
+                .expect("session usage");
+            assert_eq!(session.totals.input_tokens, INPUT * u64::from(attempts));
+            assert_eq!(session.totals.output_tokens, OUTPUT * u64::from(attempts));
+        })
+    });
+}
+
+/// The prompt response's `_meta` puts every token field on one basis after think-only resends.
+///
+/// `totalTokens` is the last attempt (context use), so `inputTokens` / `outputTokens` / `cachedReadTokens`
+/// must be that same attempt. Mixing in the billed sum of every attempt makes a client that infers the
+/// cache shape from `totalTokens` misread cache and context use. The billed sum rides `billed*`.
+#[test]
+fn a_think_only_chain_reports_one_basis_in_the_prompt_response_meta() {
+    const ANSWER: &str = "Here is the answer the resend produced.";
+    const INPUT: u64 = 13_000;
+    const CACHED: u64 = 4_000;
+    const OUTPUT: u64 = 300;
+    on_session_stack(|| {
+        run_paused(|| async {
+            let attempts = 3;
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            for _ in 1..attempts {
+                server.enqueue_response(
+                    "/v1/responses",
+                    ScriptedResponse::sse(with_cached_usage(
+                        sse::responses_api_reasoning_only_events("Let me think", "test"),
+                        INPUT,
+                        OUTPUT,
+                        CACHED,
+                    )),
+                );
+            }
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(with_cached_usage(
+                    sse::responses_api_script_exact(ANSWER, "test"),
+                    INPUT,
+                    OUTPUT,
+                    CACHED,
+                )),
+            );
+            let policy = fuigo_sampler::RetryPolicy {
+                max_retries: fuigo_sampler::DEFAULT_MAX_RETRIES,
+                ..Default::default()
+            };
+            let (actor, frames) = actor_under_test_for_session(
+                &server,
+                SessionKind::Main,
+                policy,
+                true,
+                drain_frames,
+                "session-think-only-meta-basis",
+            )
+            .await;
+            let (outcome, _frames, _elapsed, submissions) =
+                drive_turn(actor.clone(), frames, &server, "req-think-only-meta-basis").await;
+            assert!(outcome.is_ok(), "the resend answers: {:?}", outcome.err());
+            assert_eq!(
+                submissions, attempts,
+                "two think-only replies, then the answer"
+            );
+
+            // The same chat-state reads and builder the ACP agent uses for `PromptResponse._meta`.
+            let total_tokens = actor.chat_state_handle.get_total_tokens().await;
+            let billed = actor.chat_state_handle.get_last_turn_usage().await;
+            let last_attempt = actor.chat_state_handle.get_last_attempt_usage().await;
+            let meta = crate::agent::mvp_agent::build_prompt_response_meta(
+                crate::agent::mvp_agent::PromptResponseMetaArgs {
+                    session_id: "session-think-only-meta-basis",
+                    prompt_id: "req-think-only-meta-basis",
+                    total_tokens,
+                    model_id: "test",
+                    last_turn_usage: billed.as_ref(),
+                    last_attempt_usage: last_attempt.as_ref(),
+                    prompt_usage: None,
+                    cancellation_category: None,
+                    cancellation_context: None,
+                    cancel_trigger: None,
+                    structured_output: None,
+                    tool_overrides: None,
+                },
+            );
+            let n = |k: &str| {
+                meta[k]
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("{k} missing: {meta}"))
+            };
+            let (total, input, output, cached) = (
+                n("totalTokens"),
+                n("inputTokens"),
+                n("outputTokens"),
+                n("cachedReadTokens"),
+            );
+            // Fuigo counts cache reads inside inputTokens: total = uncached + cached + output.
+            assert_eq!(total, INPUT + OUTPUT, "totalTokens is one attempt: {meta}");
+            assert_eq!(
+                total,
+                (input - cached) + output + cached,
+                "one basis: totalTokens == input + output + cached of the same attempt: {meta}",
+            );
+            assert_eq!(
+                (input, output, cached),
+                (INPUT, OUTPUT, CACHED),
+                "siblings are the last attempt: {meta}"
+            );
+            let a = u64::from(attempts);
+            assert_eq!(
+                (
+                    n("billedTotalTokens"),
+                    n("billedInputTokens"),
+                    n("billedOutputTokens"),
+                    n("billedCachedReadTokens"),
+                ),
+                ((INPUT + OUTPUT) * a, INPUT * a, OUTPUT * a, CACHED * a),
+                "billing keeps every attempt: {meta}",
+            );
         })
     });
 }

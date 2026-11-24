@@ -646,6 +646,17 @@ impl SessionActor {
             traceparent: _,
         } = request;
         let prompt_id = prompt_id.as_str();
+        // S1 (1.0.47): the paths the human typed (the full text blocks, before any offload or truncation) exempt
+        // their own outside changes. No other origin adds authority.
+        if input_origin.as_prompt_origin().adds_typed_paths() {
+            let text = user_prompt_text(&prompt_blocks);
+            let shell_cwd = self.rebuild_spec.terminal_backend.get_shell_cwd().await;
+            self.permissions.note_user_text(
+                &text,
+                std::path::Path::new(self.session_info.cwd.as_str()),
+                shell_cwd.as_deref(),
+            );
+        }
         let handle_prompt_start = std::time::Instant::now();
         let prompt_length: usize = prompt_blocks
             .iter()
@@ -3896,8 +3907,11 @@ impl SessionActor {
             self.observe_compaction_validation(latency.last_attempt_total_tokens)
                 .await;
             if let Some(usage) = response.usage.as_ref() {
-                self.chat_state_handle
-                    .record_token_usage(u64::from(usage.total_tokens));
+                self.chat_state_handle.record_token_usage(
+                    latency
+                        .last_attempt_total_tokens
+                        .unwrap_or(u64::from(usage.total_tokens)),
+                );
                 self.send_available_commands_update().await;
             }
             turn_span_totals.record(&tracing::Span::current(), &response);
@@ -3934,7 +3948,13 @@ impl SessionActor {
                     },
                 );
             }
-            self.record_response_token_usage(&response, Some(model_duration_ms));
+            self.record_response_token_usage(
+                &response,
+                Some(model_duration_ms),
+                latency.last_attempt_total_tokens,
+            );
+            self.chat_state_handle
+                .record_last_attempt_usage(latency.last_attempt_usage.clone());
             let response_completed = self.response_completed_update(&response);
             if let Some(mut pt) = prompt_timing.take() {
                 pt.record_stream_latency(
@@ -5208,4 +5228,16 @@ pub(crate) fn mark_freeform_apply_patch(tools: &mut [ToolSpec]) {
             definition: APPLY_PATCH_LARK_GRAMMAR.to_string(),
         });
     }
+}
+
+/// The text blocks of a prompt, joined (S1: never resource or attachment bodies).
+pub(super) fn user_prompt_text(blocks: &[acp::ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

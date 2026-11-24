@@ -2534,6 +2534,7 @@ impl SubagentRecords {
             RecordSink::Fixture => {
                 // F5-A: unit-test fixture staging by path (cfg(test) only), not a product write.
                 fuigo_config::create_dir_all_owner_only(&self.dir)?;
+                // at-rest: outside-roots cfg(test) fixture arm only
                 let tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
                 std::fs::write(tmp.path(), contents)?;
                 tmp.persist(self.dir.join(file))?;

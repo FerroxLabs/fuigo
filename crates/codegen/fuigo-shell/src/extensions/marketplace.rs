@@ -1097,6 +1097,10 @@ async fn handle_remove_source(
 ///
 /// `Ok(true)` when the block was found and removed; `Ok(false)` when the source is not in `config.toml` at all.
 /// `Err` carries the message to show.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: a marketplace/plugin config file, outside the at-rest roots (sessions/, logs/)"
+)]
 fn remove_source_from_config(
     config_path: &std::path::Path,
     source_url_or_path: &str,

@@ -316,6 +316,11 @@ fn take_option_operand<'a>(cmd: &'a [String], i: &mut usize) -> Option<&'a str> 
     }
 }
 
+/// The directory a leading `env` moves to (`-C`/`--chdir`, the last one wins), for the S1 guard.
+pub(crate) fn env_chdir(cmd: &[String]) -> Option<&str> {
+    env_scan(cmd).chdir
+}
+
 /// Scan a leading `env`'s options and assignments into an [`EnvScan`]; the last `-C`/`--chdir` wins.
 /// `env` permutes options with `NAME=VALUE`.
 /// The option table is a minimal GNU/BSD subset; unknown arity fails closed.

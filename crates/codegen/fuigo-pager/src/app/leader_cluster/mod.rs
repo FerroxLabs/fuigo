@@ -250,6 +250,8 @@ struct PagerLeaderCluster {
     /// `kill_leader` aborts and drains them so a respawn can never race a still-running old agent on the same FUIGO_HOME.
     /// (Two agents writing one updates.jsonl is the corruption the real leader's flock exists to prevent.)
     generation_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// The current generation's agent input, for the session reap in `kill_leader`.
+    agent_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     client_count: Arc<AtomicUsize>,
     workdir: TempDir,
     authenticated: bool,
@@ -300,6 +302,7 @@ impl PagerLeaderCluster {
             server,
             server_cancel: CancellationToken::new(),
             generation_tasks: Vec::new(),
+            agent_tx: None,
             client_count,
             workdir,
             authenticated: false,
@@ -315,6 +318,7 @@ impl PagerLeaderCluster {
     async fn spawn_leader_generation(&mut self) {
         let _ = std::fs::remove_file(&self.sock_path);
         let (acp_tx, acp_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        self.agent_tx = Some(acp_tx.clone());
         let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let cancel = CancellationToken::new();
         self.server_cancel = cancel.clone();
@@ -365,7 +369,29 @@ impl PagerLeaderCluster {
     }
 
     /// Kill the current leader generation (server and agent die together, like a real leader process crash) and wait for the socket to vanish.
-    async fn kill_leader(&mut self) {
+    /// `sessions` are the ids the generation holds: a real crash frees their writers with the process, so they are reaped here.
+    async fn kill_leader(&mut self, sessions: &[&str]) {
+        // A crash ends every session thread with the process, and with them the per-process writer slots (F5).
+        // In process, an aborted agent leaves each session thread running (its actor keeps its own command sender),
+        // holding the writer, so the respawned generation's `session/load` waits 10 s and answers `still closing`.
+        // Reap them as the leader does when its clients go: the client-disconnect detach unloads idle sessions.
+        let evict = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "_fuigo/internal/evict_sessions",
+            "params": { "sessionIds": sessions },
+        });
+        let _ = self
+            .agent_tx
+            .take()
+            .expect("a live generation")
+            .send(evict.to_string());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        for sid in sessions {
+            assert!(
+                fuigo_session_writer::SessionWriter::wait_free(sid, deadline).await,
+                "old leader generation never freed the writer of {sid}"
+            );
+        }
         self.server_cancel.cancel();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while self.sock_path.exists() && tokio::time::Instant::now() < deadline {

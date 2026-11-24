@@ -366,7 +366,8 @@ impl TableGeometry {
         meta: Option<&TableCopyMeta>,
     ) -> String {
         if let Some(copy) = self.cell_copy(cell, meta) {
-            return copy.copy_text().to_owned();
+            // A cell or TSV copy is the text shown; only the Markdown table copy re-adds inline-code delimiters.
+            return copy.text.clone();
         }
         let Some(n_cols) = self.checked_n_cols() else {
             return String::new();

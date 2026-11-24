@@ -223,6 +223,10 @@ fn write_import_marker(config_path: &Path) -> anyhow::Result<()> {
 /// file (this file can carry imported credentials), as `write_atomically` with
 /// `replacement_mode(.., 0o600)` did. Lock and write failures come back as
 /// their `std::io::Error`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: the Claude-import state file in the Fuigo home, outside the at-rest roots (sessions/, logs/)"
+)]
 fn edit_owner_only<T>(
     config_path: &Path,
     edit: impl FnMut(
@@ -371,6 +375,10 @@ fn apply_items_to_text(
 /// Existing entries with the same `(event, matcher, command)` triple are deduped.
 ///
 /// Returns the number of newly added hook entries.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: the Claude-import state file in the Fuigo home, outside the at-rest roots (sessions/, logs/)"
+)]
 fn apply_hooks_to_dir(hooks_dir: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
     if !items
         .iter()

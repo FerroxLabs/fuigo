@@ -1978,6 +1978,24 @@ pub fn is_redacted_thinking_item(r: &rs::ReasoningItem) -> bool {
     r.id == REDACTED_THINKING_ITEM_ID
 }
 
+/// Sentinel `ReasoningItem.id` marking reasoning that is shown and stored but never sent back to any API.
+/// Chat Completions uses it for reasoning that arrived in `delta.reasoning` (ollama, OpenRouter, Groq, Cerebras, vLLM):
+/// echoing that as `reasoning_content` would change what those providers receive, so every request builder skips it.
+pub const DISPLAY_ONLY_REASONING_ITEM_ID: &str = "fuigo:display_only_reasoning";
+
+/// Like [`synthesized_reasoning_item`], but marked display-only (see [`DISPLAY_ONLY_REASONING_ITEM_ID`]).
+pub fn display_only_reasoning_item(text: impl Into<String>) -> rs::ReasoningItem {
+    rs::ReasoningItem {
+        id: DISPLAY_ONLY_REASONING_ITEM_ID.to_owned(),
+        ..synthesized_reasoning_item(text)
+    }
+}
+
+/// Whether `r` is a display-only item built by [`display_only_reasoning_item`].
+pub fn is_display_only_reasoning_item(r: &rs::ReasoningItem) -> bool {
+    r.id == DISPLAY_ONLY_REASONING_ITEM_ID
+}
+
 /// Construct an `rs::ReasoningItem` carrying a single `SummaryText` part.
 /// Every non-Responses-API streaming consumer (`stream/chat_completions`, `stream/messages`, `stream/responses` fallback) synthesizes this shape.
 /// They use it when adapting a non-typed reasoning string to the sibling-`Reasoning` data model.

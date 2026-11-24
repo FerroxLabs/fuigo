@@ -282,6 +282,7 @@ fn sanitize_session_id(session_id: &str) -> String {
 }
 /// `<root>/sessions/<sanitized_id>`, creating the directory when possible.
 fn ensure_session_dir(root: &std::path::Path, session_id: &str) -> (PathBuf, std::io::Result<()>) {
+    // at-rest: outside-roots <tool_state_home>/sessions (the workspace home); tool_state.json goes through ResourcesPersistence, which writes through the at-rest layer
     let dir = root.join("sessions").join(sanitize_session_id(session_id));
     let created = std::fs::create_dir_all(&dir);
     (dir, created)

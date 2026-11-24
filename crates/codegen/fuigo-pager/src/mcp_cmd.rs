@@ -80,15 +80,23 @@ pub enum McpCommand {
         #[arg(short = 's', long, value_enum)]
         scope: Option<McpScope>,
     },
-    /// Enable an MCP server
+    /// Enable an MCP server; also approves its current definition when it changed since you approved it
     Enable {
         /// Server name
         name: String,
+        /// Approve the held inline server `name` of this agent definition instead (it has no config entry to enable)
+        #[arg(long, value_name = "AGENT")]
+        agent: Option<String>,
     },
     /// Disable an MCP server
     Disable {
         /// Server name
         name: String,
+    },
+    /// Manage the approved MCP server definitions (~/.fuigo/mcp_approved_definitions.json)
+    Approvals {
+        #[command(subcommand)]
+        action: McpApprovalsCommand,
     },
     /// Diagnose MCP server configuration and connectivity
     Doctor {
@@ -98,6 +106,13 @@ pub enum McpCommand {
         /// Server name to check
         name: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum McpApprovalsCommand {
+    /// Start a new approvals file. The current one is kept aside as mcp_approved_definitions.json.bad-<UTC>, and the
+    /// next session records every server configured NOW as approved: run it only if you trust your current MCP config.
+    Reset,
 }
 
 // Everything `mcp add` accepts, before validation; `resolve_add` turns it into a transport config
@@ -190,10 +205,118 @@ pub async fn run(mcp_args: McpArgs) -> Result<()> {
         McpCommand::List { json } => run_list(json),
         McpCommand::Add(args) => run_add(args).await,
         McpCommand::Remove { name, scope } => run_remove(&name, scope).await,
-        McpCommand::Enable { name } => run_set_enabled(&name, true).await,
+        McpCommand::Enable {
+            name,
+            agent: Some(agent),
+        } => run_enable_agent(&name, &agent),
+        McpCommand::Enable { name, agent: None } => run_set_enabled(&name, true).await,
         McpCommand::Disable { name } => run_set_enabled(&name, false).await,
+        McpCommand::Approvals {
+            action: McpApprovalsCommand::Reset,
+        } => run_approvals_reset(),
         McpCommand::Doctor { json, name } => run_doctor(json, name).await,
     }
+}
+
+fn run_approvals_reset() -> Result<()> {
+    match fuigo_shell::util::config::reset_mcp_approvals()? {
+        Some(aside) => fuigo_tty_utils::cli_println!(
+            "MCP approvals reset. The old file is kept as {}. The next session records every server configured now as approved.",
+            fuigo_tty_utils::untrusted(aside.display())
+        ),
+        None => fuigo_tty_utils::cli_println!(
+            "No MCP approvals file to reset. The next session records every server configured now as approved."
+        ),
+    }
+    Ok(())
+}
+
+/// `fuigo mcp enable <name> --agent <agent>` (MC-03): approve exactly the held inline server printed here. An agent's
+/// inline server has no config entry to switch on, so this only approves.
+fn run_enable_agent(name: &str, agent: &str) -> Result<()> {
+    let cwd = current_dir_or_exit();
+    let Some(held) = fuigo_shell::util::config::held_agent_mcp_definition(&cwd, agent, name)?
+    else {
+        fuigo_tty_utils::cli_println!(
+            "MCP server '{}' of agent '{}' is not held; nothing to approve.",
+            fuigo_tty_utils::untrusted(name),
+            fuigo_tty_utils::untrusted(agent)
+        );
+        return Ok(());
+    };
+    fuigo_shell::util::config::approve_held_mcp_definition(&held)?;
+    fuigo_tty_utils::cli_println!(
+        "Approving `{}` of agent `{}` from {}: {}",
+        fuigo_tty_utils::untrusted(&held.name),
+        fuigo_tty_utils::untrusted(agent),
+        fuigo_tty_utils::untrusted(&held.origin),
+        fuigo_tty_utils::untrusted(&held.display)
+    );
+    fuigo_tty_utils::cli_println!(
+        "Approved MCP server '{}'; it starts in the next session that runs agent '{}' (or turn it on in /mcp).",
+        fuigo_tty_utils::untrusted(name),
+        fuigo_tty_utils::untrusted(agent)
+    );
+    Ok(())
+}
+
+fn held_reason(held: &fuigo_shell::util::config::HeldMcpDefinition) -> String {
+    if held.store_unavailable {
+        "stopped: the approvals file could not be read (run `fuigo mcp approvals reset`)".to_owned()
+    } else {
+        format!(
+            "stopped: definition changed since approved ({}); approve with `fuigo mcp enable {}`",
+            held.origin, held.name
+        )
+    }
+}
+
+/// `fuigo mcp list --json`: every configured server with its existing fields unchanged, plus `held` (MC-03). A held
+/// server also carries `held_reason`, `held_origin`, `held_definition` and `held_digest` (12 hex digits); one held
+/// from a source outside config.toml (a JSON file, an agent) is appended with only `name`, `enabled` and those fields.
+pub fn list_json(cwd: &std::path::Path) -> serde_json::Value {
+    let servers = fuigo_shell::util::config::load_mcp_server_configs_with_project(cwd);
+    let disabled = fuigo_shell::util::config::disabled_mcp_server_names(cwd);
+    let mut held = fuigo_shell::util::config::held_mcp_definitions(cwd);
+    let held_fields =
+        |obj: &mut serde_json::Map<String, serde_json::Value>,
+         h: Option<fuigo_shell::util::config::HeldMcpDefinition>| {
+            obj.insert("held".into(), serde_json::Value::Bool(h.is_some()));
+            if let Some(h) = h {
+                obj.insert("held_reason".into(), held_reason(&h).into());
+                obj.insert("held_origin".into(), h.origin.clone().into());
+                obj.insert("held_definition".into(), h.display.clone().into());
+                obj.insert("held_digest".into(), h.digest_summary().into());
+            }
+        };
+    let mut payload: Vec<serde_json::Value> = servers
+        .iter()
+        .map(|(name, (config, scope))| {
+            let mut entry = serde_json::to_value(config).unwrap_or_default();
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("name".into(), serde_json::Value::String(name.clone()));
+                obj.insert("scope".into(), serde_json::Value::String(scope.to_string()));
+                obj.insert(
+                    "enabled".into(),
+                    serde_json::Value::Bool(!disabled.contains(name)),
+                );
+                let h = held
+                    .iter()
+                    .position(|h| &h.name == name)
+                    .map(|i| held.remove(i));
+                held_fields(obj, h);
+            }
+            entry
+        })
+        .collect();
+    for h in held {
+        let mut obj = serde_json::Map::new();
+        obj.insert("name".into(), h.name.clone().into());
+        obj.insert("enabled".into(), (!disabled.contains(&h.name)).into());
+        held_fields(&mut obj, Some(h));
+        payload.push(obj.into());
+    }
+    payload.into()
 }
 
 fn run_list(json: bool) -> Result<()> {
@@ -203,22 +326,7 @@ fn run_list(json: bool) -> Result<()> {
     let disabled = fuigo_shell::util::config::disabled_mcp_server_names(&cwd);
 
     if json {
-        let payload: serde_json::Value = servers
-            .iter()
-            .map(|(name, (config, scope))| {
-                let mut entry = serde_json::to_value(config).unwrap_or_default();
-                if let Some(obj) = entry.as_object_mut() {
-                    obj.insert("name".into(), serde_json::Value::String(name.clone()));
-                    obj.insert("scope".into(), serde_json::Value::String(scope.to_string()));
-                    obj.insert(
-                        "enabled".into(),
-                        serde_json::Value::Bool(!disabled.contains(name)),
-                    );
-                }
-                entry
-            })
-            .collect();
-        fuigo_tty_utils::cli_println!("{}", serde_json::to_string_pretty(&payload)?);
+        fuigo_tty_utils::cli_println!("{}", serde_json::to_string_pretty(&list_json(&cwd))?);
     } else if servers.is_empty() {
         fuigo_tty_utils::cli_println!(
             "No MCP servers configured. Run `fuigo mcp add --help` to get started."
@@ -249,6 +357,16 @@ fn run_list(json: bool) -> Result<()> {
                 "  {}: {}{status}{scope_note}",
                 fuigo_tty_utils::untrusted(name),
                 fuigo_tty_utils::untrusted(&transport)
+            );
+        }
+    }
+    if !json {
+        for held in fuigo_shell::util::config::held_mcp_definitions(&cwd) {
+            let why = held_reason(&held);
+            fuigo_tty_utils::cli_println!(
+                "  {}: {}",
+                fuigo_tty_utils::untrusted(&held.name),
+                fuigo_tty_utils::untrusted(why)
             );
         }
     }
@@ -681,8 +799,36 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
 
     let was_disabled = fuigo_shell::util::config::disabled_mcp_server_names(&cwd).contains(name);
 
-    let modified =
-        fuigo_shell::util::config::save_mcp_server_enabled_in(name, enabled, &cwd).await?;
+    // MC-03: enabling approves exactly the definition printed here, when the launch gate would hold it.
+    let mut approved_definition = false;
+    if enabled && let Some(held) = fuigo_shell::util::config::held_mcp_definition(&cwd, name) {
+        fuigo_tty_utils::cli_println!(
+            "Approving `{}` from {}: {}",
+            fuigo_tty_utils::untrusted(&held.name),
+            fuigo_tty_utils::untrusted(&held.origin),
+            fuigo_tty_utils::untrusted(&held.display)
+        );
+        fuigo_shell::util::config::approve_held_mcp_definition(&held)?;
+        approved_definition = true;
+    }
+    // Review C7-02: the campaign approval recorded is the one of the command this notice names.
+    let campaign_approval = if enabled {
+        let (approval, notice) = fuigo_shell::util::config::campaign_approval_shown(name, &cwd);
+        if let Some(notice) = notice {
+            fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted(notice));
+        }
+        approval
+    } else {
+        fuigo_shell::util::config::CampaignApproval::Clear
+    };
+
+    let modified = fuigo_shell::util::config::save_mcp_server_enabled_in(
+        name,
+        enabled,
+        &cwd,
+        campaign_approval,
+    )
+    .await?;
 
     let now_disabled = fuigo_shell::util::config::disabled_mcp_server_names(&cwd).contains(name);
     let now_enabled = !now_disabled;
@@ -702,7 +848,12 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
         std::process::exit(1);
     }
 
-    if was_disabled == now_disabled {
+    if was_disabled == now_disabled && approved_definition {
+        fuigo_tty_utils::cli_println!(
+            "Approved MCP server '{}'; it starts in the next session (or turn it on in /mcp).",
+            fuigo_tty_utils::untrusted(name)
+        );
+    } else if was_disabled == now_disabled {
         let state = if now_enabled { "enabled" } else { "disabled" };
         fuigo_tty_utils::cli_println!(
             "MCP server '{}' is already {state}.",
@@ -857,9 +1008,128 @@ async fn run_doctor(json: bool, name: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// MC-03 test fixture: under the test `FUIGO_HOME` at `home`, Fuigo saves `notes` (which records its definition as
+/// approved), then something else edits its arguments, so the launch gate holds it.
+#[cfg(test)]
+pub(crate) fn held_notes_fixture(home: &Path) {
+    let config: McpServerConfig = toml::from_str("command = \"notes-srv\"\nargs = [\"--v1\"]\n")
+        .expect("stdio config parses");
+    let path = home.join("config.toml");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(fuigo_shell::util::config::save_mcp_server_config_at(
+            &path, "notes", &config,
+        ))
+        .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("--v1", "--v2")).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enable_approves_the_definition_it_printed_and_a_later_edit_stays_held() {
+        // Review Astra confirm H1 through `fuigo mcp enable`: it approves the digest of the definition it prints; an edit
+        // that lands after it was read is a new definition and stays held.
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = fuigo_test_support::FuigoHome::new();
+        let cwd = tempfile::tempdir().unwrap();
+        held_notes_fixture(home.path());
+        let shown =
+            fuigo_shell::util::config::held_mcp_definition(cwd.path(), "notes").expect("v2 held");
+        assert!(shown.display.contains("--v2"), "{}", shown.display);
+        let path = home.path().join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("--v2", "--v3")).unwrap();
+        fuigo_shell::util::config::approve_held_mcp_definition(&shown).unwrap();
+        let still = fuigo_shell::util::config::held_mcp_definition(cwd.path(), "notes")
+            .expect("v3 still held");
+        assert!(still.display.contains("--v3"), "{}", still.display);
+        assert_ne!(still.digest(), shown.digest());
+        // Back to the printed definition: approved, so not held.
+        std::fs::write(&path, text).unwrap();
+        assert!(fuigo_shell::util::config::held_mcp_definition(cwd.path(), "notes").is_none());
+    }
+
+    #[test]
+    fn mcp_list_json_keeps_existing_fields_and_adds_held_status() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = fuigo_test_support::FuigoHome::new();
+        let cwd = tempfile::tempdir().unwrap();
+        held_notes_fixture(home.path());
+        let payload = list_json(cwd.path());
+        let entries = payload.as_array().expect("an array");
+        assert_eq!(entries.len(), 1, "{payload}");
+        let notes = &entries[0];
+        // Existing fields first, unchanged; the held fields are appended after them.
+        let keys: Vec<&str> = notes
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let held_at = keys.iter().position(|k| *k == "held").unwrap();
+        for existing in ["command", "args", "name", "scope", "enabled"] {
+            let at = keys
+                .iter()
+                .position(|k| *k == existing)
+                .unwrap_or_else(|| panic!("{existing}: {keys:?}"));
+            assert!(at < held_at, "{keys:?}");
+        }
+        assert_eq!(notes["name"], "notes");
+        assert_eq!(notes["command"], "notes-srv");
+        assert_eq!(notes["args"], serde_json::json!(["--v2"]));
+        assert_eq!(notes["enabled"], true);
+        assert_eq!(notes["held"], true);
+        assert!(
+            notes["held_reason"]
+                .as_str()
+                .unwrap()
+                .contains("changed since approved"),
+            "{notes}"
+        );
+        assert!(
+            notes["held_definition"]
+                .as_str()
+                .unwrap()
+                .contains("notes-srv --v2"),
+            "{notes}"
+        );
+        let digest = notes["held_digest"].as_str().unwrap();
+        assert!(
+            digest.len() == 12 && digest.chars().all(|c| c.is_ascii_hexdigit()),
+            "{digest}"
+        );
+
+        // Approved (what `fuigo mcp enable notes` does): no longer held, and no held_* fields.
+        let held = fuigo_shell::util::config::held_mcp_definition(cwd.path(), "notes").unwrap();
+        fuigo_shell::util::config::approve_held_mcp_definition(&held).unwrap();
+        let payload = list_json(cwd.path());
+        let notes = &payload[0];
+        assert_eq!(notes["held"], false, "{payload}");
+        assert!(notes.get("held_reason").is_none() && notes.get("held_digest").is_none());
+    }
+
+    #[test]
+    fn enable_parses_agent_flag() {
+        let args =
+            PagerArgs::try_parse_from(["fuigo", "mcp", "enable", "notes", "--agent", "seat"])
+                .expect("enable --agent should parse");
+        match args.command {
+            Some(Command::Mcp(McpArgs {
+                command: McpCommand::Enable { name, agent },
+            })) => assert_eq!((name.as_str(), agent.as_deref()), ("notes", Some("seat"))),
+            other => panic!("expected mcp enable, got {other:?}"),
+        }
+    }
     use crate::app::{Command, PagerArgs};
     use clap::Parser as _;
 
@@ -1425,7 +1695,7 @@ url = "https://mcp.example.test/sse"
             .expect("enable should parse");
         match args.command {
             Some(Command::Mcp(McpArgs {
-                command: McpCommand::Enable { name },
+                command: McpCommand::Enable { name, agent: None },
             })) => assert_eq!(name, "user-grafana"),
             other => panic!("expected mcp enable, got {other:?}"),
         }

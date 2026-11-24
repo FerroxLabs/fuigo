@@ -23,7 +23,7 @@ pub use self::{
     },
 };
 
-pub use self::line_reader::LineBufferedRead;
+pub use self::line_reader::{LineBufferedRead, MAX_LINE_SIZE};
 pub use self::stdin_reader::spawn_stdin_line_reader;
 
 #[doc(hidden)]
@@ -42,5 +42,9 @@ pub mod fuzz_support {
         max: usize,
     ) -> std::io::Result<usize> {
         crate::stdin_reader::read_until_capped(reader, buf, max)
+    }
+
+    pub fn is_json_array_line(line: &[u8]) -> bool {
+        crate::line_reader::is_json_array_line(line)
     }
 }

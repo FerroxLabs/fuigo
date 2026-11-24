@@ -21,6 +21,8 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 fuigo-config = { workspace = true }
+# S2: index text goes through the at-rest layer.
+fuigo-secrets = { workspace = true }
 fuigo-telemetry = { workspace = true }
 fuigo-sqlite-journal = { workspace = true }
 

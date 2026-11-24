@@ -20,9 +20,15 @@ pub struct PeerInfluence(
     Arc<AtomicBool>,
     Arc<AtomicBool>,
     crate::permission::peer_denials::DenialLog,
+    crate::permission::shell_access::OutsideGuard,
 );
 
 impl PeerInfluence {
+    /// S1 (1.0.47): the session's outside-change guard state (typed paths, approvals, created files), shared like the
+    /// flag with every clone of the handle and with subagents, in memory only.
+    pub fn outside(&self) -> &crate::permission::shell_access::OutsideGuard {
+        &self.3
+    }
     /// S7: the session tree's denial ring and carried denials (shared with subagents like the flag).
     pub fn denials(&self) -> &crate::permission::peer_denials::DenialLog {
         &self.2

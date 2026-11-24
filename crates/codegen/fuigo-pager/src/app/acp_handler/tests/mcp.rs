@@ -57,6 +57,7 @@
                     wire_source: crate::views::mcps_modal::McpWireSource::Local,
                     plugin_name: None,
                     is_managed_gateway: false,
+                    held_digest: None,
                 },
             ]));
         }
@@ -553,6 +554,7 @@
                     wire_source: crate::views::mcps_modal::McpWireSource::Local,
                     plugin_name: None,
                     is_managed_gateway: false,
+                    held_digest: None,
                 },
             ]));
         }

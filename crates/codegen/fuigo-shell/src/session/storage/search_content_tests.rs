@@ -297,3 +297,165 @@ fn test_single_pass_reports_bytes_read() {
         "bytes_read should be non-zero for non-empty file"
     );
 }
+
+fn append_bytes(path: &Path, bytes: &[u8]) {
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    f.write_all(bytes).unwrap();
+}
+
+/// Full single pass over a copy, so neither the reference nor `path`'s cached state touches the other.
+fn full_pass(path: &Path) -> String {
+    let dir = tempfile::TempDir::new().unwrap();
+    let copy = dir.path().join("copy.jsonl");
+    std::fs::copy(path, &copy).unwrap();
+    let content = collect_all_indexable_content_single_pass(&copy).unwrap().0;
+    forget_cached_tail(&copy);
+    content
+}
+
+fn user_pi(text: &str, prompt_index: usize) -> String {
+    acp_update(&format!(
+        r#"{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":"{text}"}},"_meta":{{"promptIndex":{prompt_index}}}}}"#
+    ))
+}
+
+fn agent(text: &str) -> String {
+    acp_update(&format!(
+        r#"{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{text}"}}}}"#
+    ))
+}
+
+/// F3: extraction resumed from the cached prefix gives exactly the text of a full pass, through rewinds, tool calls,
+/// invalid UTF-8, a record caught half-written, and a file that shrinks or is replaced.
+#[test]
+fn test_incremental_extraction_matches_full_pass() {
+    let f = write_updates_jsonl(&[user_pi("first prompt", 0), agent("first reply")]);
+    let path = f.path();
+    forget_cached_tail(path);
+    let incremental = |path: &Path| collect_all_indexable_content_single_pass(path).unwrap().0;
+    // That read seeded the cache; every stage below resumes from the previous one
+    assert_eq!(incremental(path), full_pass(path));
+
+    let tool = acp_update(
+        r#"{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read file","kind":"read","locations":[{"path":"/tmp/foo.rs"}]}"#,
+    );
+    let rewind = fuigo_update(
+        r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
+    );
+    let half = user_pi("half written prompt", 3);
+    let stages: Vec<Vec<u8>> = vec![
+        format!(
+            "{}\n{}\n{tool}\n",
+            user_pi("second prompt", 1),
+            agent("second reply")
+        )
+        .into_bytes(),
+        format!("{rewind}\n{}\n", user_pi("replacement prompt", 1)).into_bytes(),
+        // A chunk split across reads continues the same user message
+        format!("{}\n\n", user_pi("continued", 1)).into_bytes(),
+        b"\xff\xfe not utf8\r\n".to_vec(),
+        format!("{}\n", agent("after the bad line")).into_bytes(),
+        half.as_bytes()[..half.len() / 2].to_vec(),
+        format!("{}\n", &half[half.len() / 2..]).into_bytes(),
+    ];
+    for (i, stage) in stages.iter().enumerate() {
+        append_bytes(path, stage);
+        let got = incremental(path);
+        let want = full_pass(path);
+        assert_eq!(
+            got, want,
+            "stage {i}: incremental text differs from a full pass"
+        );
+    }
+    let all = full_pass(path);
+    assert!(all.contains("replacement prompt") && !all.contains("second prompt"));
+    assert!(all.contains("half written prompt"));
+
+    // Shrunk in place: the cached prefix no longer holds
+    std::fs::write(path, format!("{}\n", user_pi("rewritten", 0))).unwrap();
+    assert_eq!(incremental(path), full_pass(path));
+
+    // Replaced by rename with a longer file: a new inode is a new file
+    let dir = tempfile::TempDir::new().unwrap();
+    let other = dir.path().join("u.jsonl");
+    std::fs::write(
+        &other,
+        format!(
+            "{}\n{}\n{}\n",
+            user_pi("renamed in", 0),
+            agent("x"),
+            user_pi("more", 1)
+        ),
+    )
+    .unwrap();
+    std::fs::rename(&other, path).unwrap();
+    assert_eq!(incremental(path), full_pass(path));
+}
+
+/// F3: once a transcript is cached, the next extraction reads only the appended bytes.
+/// Proved by changing an early byte in place: the resumed text still has the old word, a full pass has the new one.
+#[test]
+fn test_incremental_extraction_reads_only_the_appended_tail() {
+    let filler = agent(&"filler ".repeat(40));
+    let f = write_updates_jsonl(&[user_pi("alpha prompt", 0), filler]);
+    let path = f.path();
+    forget_cached_tail(path);
+    collect_all_indexable_content_single_pass(path).unwrap();
+
+    let original = std::fs::read(path).unwrap();
+    let at = original.windows(5).position(|w| w == b"alpha").unwrap();
+    let mut edited = original.clone();
+    edited[at..at + 5].copy_from_slice(b"omega");
+    {
+        use std::io::{Seek as _, Write as _};
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(io::SeekFrom::Start(0)).unwrap();
+        file.write_all(&edited).unwrap();
+    }
+    append_bytes(path, format!("{}\n", user_pi("bravo prompt", 1)).as_bytes());
+
+    let (resumed, _) = collect_all_indexable_content_single_pass(path).unwrap();
+    assert!(resumed.contains("alpha prompt") && resumed.contains("bravo prompt"));
+    assert!(
+        !resumed.contains("omega"),
+        "the cached prefix must not be re-read"
+    );
+    forget_cached_tail(path);
+    let full = collect_all_indexable_content_single_pass(path).unwrap().0;
+    assert!(full.contains("omega prompt") && !full.contains("alpha"));
+}
+
+/// Measurement for F3 (run with `--ignored --nocapture`): a ~20 MB, 10k-turn transcript, full pass vs one appended turn.
+#[test]
+#[ignore = "measurement, not a gate"]
+fn measure_incremental_extraction_10k_turns() {
+    let reply = "r".repeat(1_900);
+    let mut lines = Vec::new();
+    for i in 0..10_000 {
+        lines.push(user_pi(&format!("prompt {i}"), i));
+        lines.push(agent(&reply));
+    }
+    let f = write_updates_jsonl(&lines);
+    let path = f.path();
+    let size = std::fs::metadata(path).unwrap().len();
+    forget_cached_tail(path);
+    let t = std::time::Instant::now();
+    let full = collect_all_indexable_content_single_pass(path).unwrap().0;
+    let full_time = t.elapsed();
+    append_bytes(
+        path,
+        format!("{}\n{}\n", user_pi("prompt 10000", 10_000), agent(&reply)).as_bytes(),
+    );
+    let grown = std::fs::metadata(path).unwrap().len();
+    let t = std::time::Instant::now();
+    let resumed = collect_all_indexable_content_single_pass(path).unwrap().0;
+    let tail_time = t.elapsed();
+    assert_ne!(full, resumed);
+    assert_eq!(resumed, full_pass(path));
+    forget_cached_tail(path);
+    println!(
+        "F3 measure: file {size} B; full pass reads {size} B in {full_time:?}; after one turn the resumed pass reads {} B in {tail_time:?}",
+        grown - size
+    );
+}

@@ -265,7 +265,8 @@ impl HunkRecordWriter for JsonlHunkRecordWriter {
         let mut line = serde_json::to_string(record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push('\n');
-        file.write_all(line.as_bytes()).await?;
+        file.write_all(&fuigo_secrets::at_rest::transform_whole(line.as_bytes()))
+            .await?;
         Ok(())
     }
 

@@ -108,12 +108,12 @@ pub(crate) enum Opener<'w> {
 
 /// Open `path` as a lock file (created when missing). `None` when it cannot be opened: the caller goes on without the lock.
 /// `Err(Interrupted)`: a fork's source is held by another process and the sidecar is missing; the copy is refused.
-fn open(path: &Path, opener: Opener<'_>) -> io::Result<Option<std::fs::File>> {
+fn open(path: &Path, opener: Opener<'_>) -> io::Result<Option<fuigo_session_writer::SessionLock>> {
     let opened = match opener {
         Opener::Writer(writer) => writer.rel_of(path).and_then(|rel| writer.open_lock(rel)),
         Opener::Source(writer) => open_source_sidecar(writer, path),
         #[cfg(test)]
-        Opener::UnownedSource => open_unowned_source(path),
+        Opener::UnownedSource => open_unowned_source(path).map(Into::into),
     };
     match opened {
         Ok(file) => Ok(Some(file)),
@@ -150,7 +150,7 @@ fn open_unowned_source(path: &Path) -> io::Result<std::fs::File> {
 pub(crate) fn open_source_sidecar(
     writer: Option<&fuigo_session_writer::SessionWriter>,
     path: &Path,
-) -> io::Result<std::fs::File> {
+) -> io::Result<fuigo_session_writer::SessionLock> {
     let mut held_elsewhere = false;
     if let Some(writer) = writer {
         match writer.rel_of(path).and_then(|rel| writer.open_lock(rel)) {
@@ -177,7 +177,7 @@ pub(crate) fn open_source_sidecar(
                 ),
             ))
         }
-        opened => opened,
+        opened => opened.map(Into::into),
     }
 }
 
@@ -202,7 +202,7 @@ pub(crate) fn acquire_blocking_as(
     };
     let deadline = Instant::now() + SNAPSHOT_LOCK_WAIT;
     loop {
-        match fs2::FileExt::try_lock_exclusive(&file) {
+        match file.try_lock_exclusive() {
             Ok(()) => return Ok(Some(crate::session::storage::jsonl::HeldLock::new(file))),
             Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
                 #[cfg(test)]
@@ -236,7 +236,7 @@ pub(crate) async fn acquire_async(
     let file = open(&path, Opener::Writer(writer)).ok().flatten()?;
     let deadline = Instant::now() + SNAPSHOT_LOCK_WAIT;
     loop {
-        match fs2::FileExt::try_lock_exclusive(&file) {
+        match file.try_lock_exclusive() {
             Ok(()) => return Some(crate::session::storage::jsonl::HeldLock::new(file)),
             Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
                 #[cfg(test)]

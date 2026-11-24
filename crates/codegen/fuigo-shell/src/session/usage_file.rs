@@ -5,6 +5,14 @@ use fuigo_sampling_types::reported_cost_ticks;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+/// Per-turn rows kept in `usage.json` (audit 1.0.47 F4: it is rewritten whole every turn). Older rows move, append-only,
+/// to [`USAGE_ARCHIVE_FILE`]; the session totals and `turnCount` still cover every turn.
+pub const MAX_TURN_ROWS: usize = 200;
+
+/// One JSON [`TurnUsage`] per line: the rows drained from `usage.json` (F4). A row also in `usage.json`, or repeated
+/// here by a crash between the append and the rewrite, is read once: the `usage.json` row, else the last line.
+pub const USAGE_ARCHIVE_FILE: &str = "usage_turns.jsonl";
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionUsageFile {
@@ -198,10 +206,7 @@ impl SessionUsageFile {
     }
 
     pub fn load_for_session(session_id: &str) -> std::io::Result<UsageLoad> {
-        load_for_session_in_root(
-            session_id,
-            &crate::util::fuigo_home::fuigo_home().join("sessions"),
-        )
+        load_for_session_in_root(session_id, &fuigo_config::sessions_root())
     }
 
     pub fn turn(&self, turn_number: u32) -> Option<&TurnUsage> {
@@ -210,7 +215,57 @@ impl SessionUsageFile {
             .find(|turn| turn.turn_number == turn_number)
     }
 
+    /// Take the oldest rows past [`MAX_TURN_ROWS`] as archive lines (F4). The caller appends them to
+    /// [`USAGE_ARCHIVE_FILE`] before it rewrites `usage.json`, so a crash between the two only repeats a line.
+    pub fn drain_overflow(&mut self) -> std::io::Result<Vec<u8>> {
+        let excess = self.turns.len().saturating_sub(MAX_TURN_ROWS);
+        let mut lines = Vec::new();
+        for turn in self.turns.drain(..excess) {
+            serde_json::to_writer(&mut lines, &turn)?;
+            lines.push(b'\n');
+        }
+        Ok(lines)
+    }
+
+    /// Put back the rows `dir`'s [`USAGE_ARCHIVE_FILE`] holds and `usage.json` no longer does, oldest first (F4).
+    pub fn merge_archive(&mut self, dir: &std::path::Path) -> std::io::Result<()> {
+        let data = match std::fs::read(dir.join(USAGE_ARCHIVE_FILE)) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let mut archived = std::collections::BTreeMap::new();
+        // A torn last line (a crash mid-append) is skipped; its row is still in `usage.json`.
+        for turn in data
+            .split(|b| *b == b'\n')
+            .filter_map(|line| serde_json::from_slice::<TurnUsage>(line).ok())
+        {
+            archived.insert(turn.turn_number, turn);
+        }
+        for turn in &self.turns {
+            archived.remove(&turn.turn_number);
+        }
+        if !archived.is_empty() {
+            let kept = std::mem::take(&mut self.turns);
+            self.turns = archived.into_values().chain(kept).collect();
+        }
+        Ok(())
+    }
+
     pub fn retain_turns_through(&mut self, max_turn: u32) {
+        if self.session.turn_count > self.turns.len() as u64 {
+            // Older rows were capped away (F4): their usage lives only in `session`, so subtract the dropped later rows.
+            let mut session = self.session.clone();
+            let mut dropped = 0;
+            for turn in self.turns.iter().filter(|turn| turn.turn_number > max_turn) {
+                session = session.saturating_sub(&turn.usage);
+                dropped += 1;
+            }
+            self.turns.retain(|turn| turn.turn_number <= max_turn);
+            session.turn_count = self.session.turn_count.saturating_sub(dropped);
+            self.session = session;
+            return;
+        }
         self.turns.retain(|turn| turn.turn_number <= max_turn);
         let mut session = UsageSummary::default();
         for turn in &self.turns {
@@ -281,8 +336,9 @@ impl SessionUsageFile {
             existing.usage = existing.usage.saturating_add(&turn_usage);
             existing.usage.turn_count = 1;
             existing.usage.primary_model_id = primary_model(&existing.usage.model_usage);
+            let turn_count = self.session.turn_count.max(self.turns.len() as u64);
             self.session = self.session.saturating_add(&turn_usage);
-            self.session.turn_count = self.turns.len() as u64;
+            self.session.turn_count = turn_count;
             return fold_n;
         }
 
@@ -309,8 +365,9 @@ impl SessionUsageFile {
             usage: turn_usage.clone(),
         });
 
+        let turn_count = (self.session.turn_count + 1).max(self.turns.len() as u64);
         self.session = self.session.saturating_add(&turn_usage);
-        self.session.turn_count = self.turns.len() as u64;
+        self.session.turn_count = turn_count;
         self.session.primary_model_id = primary_model(&self.session.model_usage);
         turn_number
     }
@@ -332,13 +389,13 @@ fn load_for_session_in_root(
         return Ok(UsageLoad::NoUsage);
     }
     let data = std::fs::read(&path)?;
-    if data.iter().all(u8::is_ascii_whitespace) {
+    if data.iter().all(u8::is_ascii_whitespace) || fuigo_secrets::at_rest::is_withheld(&data) {
         return Ok(UsageLoad::NoUsage);
     }
-    match serde_json::from_slice(&data) {
-        Ok(file) => Ok(UsageLoad::Ready(Box::new(file))),
-        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-    }
+    let mut file: SessionUsageFile = serde_json::from_slice(&data)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    file.merge_archive(&dir)?;
+    Ok(UsageLoad::Ready(Box::new(file)))
 }
 
 fn is_zero_u64(value: &u64) -> bool {

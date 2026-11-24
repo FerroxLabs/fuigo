@@ -625,7 +625,7 @@ fn storage_view(sessions_root: &Path) -> RelocationResult<RelocationView> {
 /// A session is only "already local" if it lives under the **same** cwd as the current invocation.
 /// A session stored under a different cwd does NOT satisfy this check; the caller must still run the remote restore into the requested cwd.
 pub fn session_exists_for_cwd(session_id: &str, cwd: &str) -> bool {
-    let sessions_root = crate::util::fuigo_home::fuigo_home().join("sessions");
+    let sessions_root = fuigo_config::sessions_root();
     session_exists_for_cwd_in_root(session_id, cwd, &sessions_root)
 }
 
@@ -656,7 +656,7 @@ fn session_exists_for_cwd_in_root(session_id: &str, cwd: &str, sessions_root: &P
 ///
 /// Returns `Some(local_child_id)` when at least one matching child is found.
 pub fn find_local_child_for_remote(remote_session_id: &str, cwd: &str) -> Option<String> {
-    let sessions_root = crate::util::fuigo_home::fuigo_home().join("sessions");
+    let sessions_root = fuigo_config::sessions_root();
     find_local_child_for_remote_in_root(remote_session_id, cwd, &sessions_root)
 }
 
@@ -702,7 +702,7 @@ pub(crate) fn resolve_local_session_for_repo(
     session_id: &str,
     candidate_cwds: &[&str],
 ) -> Option<ResolvedLocalSession> {
-    let sessions_root = crate::util::fuigo_home::fuigo_home().join("sessions");
+    let sessions_root = fuigo_config::sessions_root();
     resolve_local_session_for_repo_in_root(session_id, candidate_cwds, &sessions_root)
 }
 
@@ -817,7 +817,7 @@ pub fn resolve_local_session_any_cwd(session_id: &str) -> Option<String> {
 pub fn resolve_local_session_ids_any_cwd<S: AsRef<str>>(
     session_ids: &[S],
 ) -> io::Result<std::collections::HashSet<String>> {
-    resolve_local_session_ids_any_cwd_in_root(session_ids, &fuigo_home().join("sessions"))
+    resolve_local_session_ids_any_cwd_in_root(session_ids, &fuigo_config::sessions_root())
         .map_err(io::Error::other)
 }
 
@@ -838,7 +838,7 @@ fn resolve_local_session_ids_any_cwd_in_root<S: AsRef<str>>(
 }
 
 pub(crate) fn resolve_local_session_any_cwd_result(session_id: &str) -> io::Result<Option<String>> {
-    resolve_local_session_any_cwd_in_root(session_id, &fuigo_home().join("sessions"))
+    resolve_local_session_any_cwd_in_root(session_id, &fuigo_config::sessions_root())
         .map_err(io::Error::other)
 }
 
@@ -863,7 +863,7 @@ pub fn find_session_dir_by_id(session_id: &str) -> Option<PathBuf> {
 pub(crate) fn find_persisted_session_dir_by_id_result(
     session_id: &str,
 ) -> io::Result<Option<PathBuf>> {
-    find_persisted_session_dir_by_id_in_root_result(session_id, &fuigo_home().join("sessions"))
+    find_persisted_session_dir_by_id_in_root_result(session_id, &fuigo_config::sessions_root())
 }
 
 pub(crate) fn find_persisted_session_dir_by_id_in_root_result(
@@ -876,7 +876,7 @@ pub(crate) fn find_persisted_session_dir_by_id_in_root_result(
 }
 
 pub(crate) fn find_any_session_dir_by_id_result(session_id: &str) -> io::Result<Option<PathBuf>> {
-    storage_view(&fuigo_home().join("sessions"))
+    storage_view(&fuigo_config::sessions_root())
         .and_then(|view| view.find_any_session_dir(session_id))
         .map_err(io::Error::other)
 }
@@ -898,12 +898,12 @@ pub(crate) fn title_is_manual_in_dir(session_dir: &Path) -> bool {
 
 /// Find and read a session summary given only its ID (scans all CWD directories).
 pub(crate) fn find_summary_by_session_id(session_id: &str) -> Option<Summary> {
-    find_summary_by_session_id_in_root(session_id, &fuigo_home().join("sessions"))
+    find_summary_by_session_id_in_root(session_id, &fuigo_config::sessions_root())
 }
 
 /// The folder of the persisted session `session_id`, under whichever cwd it was recorded (scans all CWD directories).
 pub(crate) fn find_persisted_session_dir(session_id: &str) -> Option<PathBuf> {
-    storage_view(&fuigo_home().join("sessions"))
+    storage_view(&fuigo_config::sessions_root())
         .ok()?
         .find_persisted_session_dir(session_id)
         .ok()
@@ -921,6 +921,28 @@ pub(crate) fn find_summary_by_session_id_in_root(
         .ok()
         .flatten()?;
     read_summary_from_dir(&path).ok()
+}
+
+/// A `summary.json` the at-rest layer withheld (S2, Fable code review #6) is rebuilt as a fresh summary of `info`, so the
+/// session stays listed and loadable; `None` for any other bytes.
+pub(crate) fn rebuilt_if_withheld(bytes: &[u8], info: &Info) -> Option<Summary> {
+    if !fuigo_secrets::at_rest::is_withheld(bytes) {
+        return None;
+    }
+    tracing::warn!(session = %info.id.0, "summary.json was withheld at rest; using a rebuilt summary");
+    Summary::new(info, default_model_id()).ok()
+}
+
+/// [`rebuilt_if_withheld`] for a session folder found by listing `cwd` (the folder name is the id).
+fn rebuilt_summary_in(session_dir: &Path, cwd: &str) -> Option<Summary> {
+    let info = Info {
+        id: acp::SessionId::new(session_dir.file_name()?.to_str()?),
+        cwd: cwd.to_owned(),
+    };
+    rebuilt_if_withheld(
+        &std::fs::read(session_dir.join("summary.json")).ok()?,
+        &info,
+    )
 }
 
 fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
@@ -942,7 +964,7 @@ pub(crate) struct SessionKindIndex {
 
 impl SessionKindIndex {
     pub(crate) fn load() -> io::Result<Self> {
-        Self::load_in_root(&fuigo_home().join("sessions"))
+        Self::load_in_root(&fuigo_config::sessions_root())
     }
 
     pub(crate) fn load_in_root(sessions_root: &Path) -> io::Result<Self> {
@@ -1042,7 +1064,7 @@ pub fn local_summaries_for_cwd_sync(
     cwd: &str,
     selection: RecentSessionSelection,
 ) -> io::Result<Vec<Summary>> {
-    local_summaries_for_cwd_sync_in_root(cwd, selection, &fuigo_home().join("sessions"))
+    local_summaries_for_cwd_sync_in_root(cwd, selection, &fuigo_config::sessions_root())
 }
 
 fn local_summaries_for_cwd_sync_in_root(
@@ -1054,7 +1076,11 @@ fn local_summaries_for_cwd_sync_in_root(
     let dirs = view.session_dirs(Some(cwd)).map_err(io::Error::other)?;
     Ok(dirs
         .iter()
-        .filter_map(|dir| read_summary_from_dir(dir).ok())
+        .filter_map(|dir| {
+            read_summary_from_dir(dir)
+                .ok()
+                .or_else(|| rebuilt_summary_in(dir, cwd))
+        })
         .filter(|summary| !summary.is_hidden() && selection.admits(summary))
         .collect())
 }
@@ -1073,7 +1099,7 @@ pub fn resumed_session_sandbox_profile(
     session_id: Option<&str>,
     cwd: Option<&str>,
 ) -> Option<String> {
-    resumed_session_sandbox_profile_in_root(session_id, cwd, &fuigo_home().join("sessions"))
+    resumed_session_sandbox_profile_in_root(session_id, cwd, &fuigo_config::sessions_root())
 }
 
 /// Resolve the saved profile for the same typed most-recent view used at startup.
@@ -1083,7 +1109,7 @@ pub fn resolve_recent_session_sandbox_profile(
 ) -> Option<String> {
     most_recent_local_summary_for_cwd_in_view(
         cwd?,
-        &storage_view(&fuigo_home().join("sessions")).ok()?,
+        &storage_view(&fuigo_config::sessions_root()).ok()?,
         read_summary_from_dir,
         selection,
     )
@@ -2190,11 +2216,20 @@ impl SessionPersistence {
         result
     }
 
+    /// Write the summary counters the storage holds between turn boundaries (audit 1.0.47 F2). Best effort: they are
+    /// display counters, and a miss is retried by the next summary write.
+    async fn flush_summary(&self) {
+        if let Err(error) = self.storage.flush_summary(&self.info).await {
+            tracing::warn!(%error, "could not write held summary counters");
+        }
+    }
+
     /// Flush pending writes and sync the files dirtied since the last successful barrier to stable media; an idle barrier syncs nothing.
     /// First error wins: a NotCommitted drain outranks a failed sync.
     /// A Committed drain is already on the dirty set and does not fail the ack.
     async fn flush_and_sync(&mut self) -> io::Result<()> {
         let flushed = self.flush_pending().await;
+        self.flush_summary().await;
         let prior_write = self.take_pending_write_error();
         let synced = self.sync_files_and_clear(self.dirty_files).await;
         flushed.and(prior_write).and(synced)
@@ -2236,6 +2271,7 @@ impl SessionPersistence {
     /// Stealing the latch would let a later FlushAndAck ack after a buffered write never reached disk.
     async fn flush_and_sync_all(&mut self) -> io::Result<()> {
         let flushed = self.flush_pending().await;
+        self.flush_summary().await;
         let synced = self
             .sync_files_and_clear(crate::session::storage::SessionFileSet::ALL)
             .await;
@@ -2339,6 +2375,7 @@ impl SessionPersistence {
                 }
                 PersistenceMsg::ReleaseWriter => {
                     let _ = self.flush_pending().await;
+                    self.flush_summary().await;
                     self.storage.release_writer();
                     break;
                 }
@@ -2960,6 +2997,7 @@ impl SessionPersistence {
         }
 
         let _ = self.flush_pending().await;
+        self.flush_summary().await;
     }
 
     /// Replace `chat_history.jsonl` with `messages` (atomically: the file is the old history or the new one).
@@ -3069,7 +3107,7 @@ mod archive_logs;
 /// Collect MCP server stderr logs from `~/.fuigo/logs/mcp/` for inclusion in the session archive.
 /// Each log is capped at [`archive_logs::MAX_ARCHIVED_LOG_BYTES`] (first and last half around a marker).
 fn collect_mcp_stderr_logs(files: &mut Vec<CopiedSessionFile>) {
-    let mcp_log_dir = fuigo_config::fuigo_home().join("logs").join("mcp");
+    let mcp_log_dir = fuigo_config::logs_dir().join("mcp");
     let Ok(entries) = std::fs::read_dir(&mcp_log_dir) else {
         return;
     };
@@ -4148,7 +4186,7 @@ pub(crate) fn cleanup_stale_sessions(live_session_dir: &Path) {
     }
     CLEANUP_SESSIONS_ONCE.call_once(|| {
         let ttl_days = resolve_cleanup_ttl_days();
-        let sessions_root = fuigo_home().join("sessions");
+        let sessions_root = fuigo_config::sessions_root();
 
         tracing::info!(
             target: "fuigo_shell::session::persistence",

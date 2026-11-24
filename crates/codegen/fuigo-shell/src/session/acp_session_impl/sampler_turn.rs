@@ -2709,16 +2709,18 @@ impl SessionActor {
     /// Without it `state.total_tokens` would stay frozen at the `estimate_conversation_tokens` seed from `ChatState::new`.
     /// That freezes `/context` and corrupts the resume restore that reads `meta.totalTokens` from `updates.jsonl`.
     /// Resetting `estimated_tokens_since_model = 0` here also keeps the preflight-overflow guard accurate against the next turn's tool-result deltas.
+    /// `context_total_tokens` is the last attempt's own total: `response.usage` sums every resend for billing, so it overstates the context.
     pub(crate) fn record_response_token_usage(
         &self,
         response: &ConversationResponse,
         api_duration_ms: Option<u64>,
+        context_total_tokens: Option<u64>,
     ) {
         if let Some(ref u) = response.usage {
             self.tool_context
                 .record_task_model_output(u64::from(u.completion_tokens));
             self.chat_state_handle
-                .record_token_usage(u64::from(u.total_tokens));
+                .record_token_usage(context_total_tokens.unwrap_or(u64::from(u.total_tokens)));
             self.chat_state_handle.record_last_turn_usage(u.clone());
             self.chat_state_handle.record_model_call_usage(
                 response.assistant().and_then(|a| a.model_id.clone()),

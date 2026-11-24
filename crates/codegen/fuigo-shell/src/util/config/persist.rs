@@ -137,6 +137,10 @@ pub(crate) fn rmw_lock_path(path: &std::path::Path) -> std::path::PathBuf {
 ///
 /// `edit` decides from the bytes it is given (it may run more than once, so it
 /// must have no side effects). Write failures read `failed to write <path>: …`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: a config file, outside the at-rest roots (sessions/, logs/)"
+)]
 pub(crate) async fn edit_config_file<T: Send + 'static>(
     path: &std::path::Path,
     edit: impl FnMut(fuigo_config::fs_atomic::Current<'_>) -> Result<fuigo_config::fs_atomic::Edit<T>>
@@ -178,6 +182,10 @@ pub(crate) async fn edit_config_file_with<T: Send + 'static>(
 
 /// [`edit_config_file`] for a caller already on a blocking thread. Takes the
 /// cross-process lock only (not [`SAVE_LOCK`], which an async caller holds).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: a config file, outside the at-rest roots (sessions/, logs/)"
+)]
 pub(crate) fn edit_config_file_blocking<T>(
     path: &std::path::Path,
     edit: impl FnMut(fuigo_config::fs_atomic::Current<'_>) -> Result<fuigo_config::fs_atomic::Edit<T>>,
@@ -205,6 +213,10 @@ pub(crate) fn edit_config_file_blocking_with<T>(
 
 /// [`edit_config_file_blocking_with`] with the helper's error kept apart (lock,
 /// write, or the edit's own), for a caller that words each one itself.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: a config file, outside the at-rest roots (sessions/, logs/)"
+)]
 pub(crate) fn edit_config_file_raw<T>(
     path: &std::path::Path,
     stage: StageFn,
@@ -340,6 +352,10 @@ where
     update_config_inner(f, true).await
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "1.0.47 S2 by-path atomic write: a config file, outside the at-rest roots (sessions/, logs/)"
+)]
 async fn update_config_inner<F>(mut f: F, record: bool) -> Result<()>
 where
     F: FnMut(&mut Config),

@@ -423,6 +423,16 @@ pub(crate) async fn spawn_session_actor(
             let _ = cmd_tx.send(SessionCommand::NotifyConfigNotice { notice });
         }
     }
+    // MC-03: the one launch gate, on the exact list this session installs (after every overlay, subagents and forks
+    // included). Held servers never reach `McpState::configs`; their notices go to the client, not the model.
+    let admission =
+        crate::session::mcp_admission::admit_off_reactor(wf_sid.clone(), mcp_servers).await;
+    for notice in &admission.notices {
+        let _ = cmd_tx.send(SessionCommand::NotifyConfigNotice {
+            notice: notice.clone(),
+        });
+    }
+    mcp_servers = admission.servers();
     tracing::info!(
         "Session '{}' created with {} MCP servers",
         session_info.id.0,
@@ -565,6 +575,9 @@ pub(crate) async fn spawn_session_actor(
             &conversation,
         );
         let permissions = permissions.with_peer_influence(tool_context.peer_influence.clone());
+        if startup_hints.client_prompts {
+            permissions.outside_guard().set_client_prompts();
+        }
         if crate::util::config::auto_mode_session_active(
             crate::util::config::auto_permission_mode_enabled_from_disk(),
             session_auto_mode,
