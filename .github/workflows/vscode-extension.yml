@@ -6,8 +6,10 @@
 # path-filtered required check blocks PRs that miss the filter; see binary-driven-tests.yml).
 #
 # Publishing: only on a `vscode-v<version>` tag, after the checks pass, through the `vscode-publish` environment.
-# Needs the VSCE_PAT (VS Code Marketplace, publisher ferroxlabs) and OVSX_PAT (Open VSX, namespace ferroxlabs) secrets;
-# without them the job fails with an error naming the missing secret and publishes nothing.
+# No stored tokens: both registries trust this workflow through GitHub OIDC (trusted publishing). The VS Code
+# Marketplace policy (publisher ferroxlabs) and the Open VSX trusted publisher (namespace ferroxlabs) both pin this repo,
+# this workflow file and the vscode-publish environment; any other caller gets no publish token. Exception: Open VSX's
+# first version needs an OVSX_PAT environment secret (see the Open VSX step).
 name: vscode extension
 on:
   pull_request:
@@ -103,20 +105,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: vscode-publish
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - name: Refuse without both registry tokens
-        working-directory: .
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        run: |
-          missing=()
-          [ -n "$VSCE_PAT" ] || missing+=(VSCE_PAT)
-          [ -n "$OVSX_PAT" ] || missing+=(OVSX_PAT)
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "::error::missing secret(s): ${missing[*]}. Nothing was published. Add them to the vscode-publish environment."
-            exit 1
-          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -141,10 +133,15 @@ jobs:
           echo "VSIX=$VSIX" >> "$GITHUB_ENV"
       # The same VSIX bytes go to both registries.
       - name: Publish to the VS Code Marketplace
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx --no-install vsce publish --packagePath "$VSIX"
+        run: npx --no-install vsce publish --oidc --packagePath "$VSIX"
+      # Open VSX only accepts a trusted publisher for an extension that already exists, so the first version goes up
+      # with OVSX_PAT; once the trusted publisher is registered the secret is deleted and this falls through to OIDC.
       - name: Publish to Open VSX
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        run: npx --no-install ovsx publish "$VSIX"
+        run: |
+          if [ -n "$OVSX_PAT" ]; then
+            npx --no-install ovsx publish "$VSIX"
+          else
+            npx --no-install ovsx publish --trusted-publishing "$VSIX"
+          fi
