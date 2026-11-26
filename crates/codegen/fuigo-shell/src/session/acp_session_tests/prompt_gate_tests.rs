@@ -30,11 +30,12 @@ fn prompt_gate_registry(script: &str) -> fuigo_hooks::discovery::HookRegistry {
         source_dir: std::path::PathBuf::from("/tmp"),
         extra_env: std::collections::HashMap::new(),
         layer: fuigo_hooks::config::HookProvenance::File,
+        mcp_tool: None,
     }]);
     registry
 }
 
-fn text_prompt(text: &str) -> Vec<acp::ContentBlock> {
+pub(super) fn text_prompt(text: &str) -> Vec<acp::ContentBlock> {
     vec![acp::ContentBlock::Text(acp::TextContent::new(text))]
 }
 
@@ -773,6 +774,58 @@ async fn blocked_prompt_never_enters_chat_state() {
             assert!(
                 serialized.contains("a clean prompt"),
                 "the allow path must still commit the prompt: {serialized}"
+            );
+        })
+        .await;
+}
+
+/// An allowing hook's `additionalContext` reaches the model: it lands in the conversation right behind the typed prompt,
+/// tagged as an untrusted hook note, the way PostToolUse context does.
+#[tokio::test(flavor = "current_thread")]
+async fn allowing_prompt_hook_context_reaches_the_conversation() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let _annotations = spawn_persistence_drain(persistence_rx);
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor.hook_resolved_workspace_root = "/tmp".to_string();
+            let actor = Arc::new(actor);
+            *actor.hook_registry.borrow_mut() = Some(std::sync::Arc::new(prompt_gate_registry(
+                r#"printf '%s' '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"ticket 42 is the context"}}'"#,
+            )));
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                Box::pin(actor.handle_prompt(
+                    "p-ctx",
+                    text_prompt("fix the bug"),
+                    PromptMode::Agent,
+                    /* trace_gcs_config */ None,
+                    /* artifact_tracker */ None,
+                    /* client_identifier */ None,
+                    /* screen_mode */ None,
+                    /* verbatim */ false,
+                    /* send_now */ false,
+                    /* json_schema */ None,
+                    /* persist_ack */ None,
+                    /* parsed_prompt_tx */ None,
+                )),
+            )
+            .await
+            .expect("the turn must finish (sampler error is fine)");
+            let serialized =
+                serde_json::to_string(&actor.chat_state_handle.get_conversation().await)
+                    .expect("serialize conversation");
+            let prompt_at = serialized.find("fix the bug").expect("prompt committed");
+            let context_at = serialized
+                .find("ticket 42 is the context")
+                .unwrap_or_else(|| panic!("hook context missing from the conversation: {serialized}"));
+            assert!(prompt_at < context_at, "context must follow the prompt");
+            assert!(
+                serialized.contains("Context from UserPromptSubmit hook 'test/promptgate'"),
+                "context must carry the hook note label: {serialized}"
             );
         })
         .await;

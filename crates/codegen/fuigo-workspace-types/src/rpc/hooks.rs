@@ -68,6 +68,9 @@ pub struct HookSpecWire {
     /// `default` decodes a server that predates this field as `file`.
     #[serde(default = "default_layer")]
     pub layer: String,
+    /// The `mcp_tool` handler's target (`server`, `tool`, `input`); absent for every other type and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_tool: Option<serde_json::Value>,
 }
 
 /// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there. This leaf crate has no URL redactor, so the hook URL prints as present / absent.
@@ -91,6 +94,7 @@ impl std::fmt::Debug for HookSpecWire {
             source_dir,
             extra_env,
             layer,
+            mcp_tool,
         } = self;
         f.debug_struct("HookSpecWire")
             .field("name", name)
@@ -115,6 +119,7 @@ impl std::fmt::Debug for HookSpecWire {
                     .collect::<Vec<_>>(),
             )
             .field("layer", layer)
+            .field("mcp_tool", &mcp_tool.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -136,6 +141,7 @@ pub enum HookEventNameWire {
     PostToolUse,
     PostToolUseFailure,
     PermissionDenied,
+    PermissionRequest,
     UserPromptSubmit,
     Notification,
     SubagentStart,
@@ -158,6 +164,7 @@ impl HookEventNameWire {
             Self::PostToolUse => "post_tool_use",
             Self::PostToolUseFailure => "post_tool_use_failure",
             Self::PermissionDenied => "permission_denied",
+            Self::PermissionRequest => "permission_request",
             Self::UserPromptSubmit => "user_prompt_submit",
             Self::Notification => "notification",
             Self::SubagentStart => "subagent_start",
@@ -192,6 +199,7 @@ impl<'de> Deserialize<'de> for HookEventNameWire {
             "post_tool_use" => Self::PostToolUse,
             "post_tool_use_failure" => Self::PostToolUseFailure,
             "permission_denied" => Self::PermissionDenied,
+            "permission_request" => Self::PermissionRequest,
             "user_prompt_submit" => Self::UserPromptSubmit,
             "notification" => Self::Notification,
             "subagent_start" => Self::SubagentStart,
@@ -229,6 +237,7 @@ mod tests {
                 "post_tool_use_failure",
             ),
             (HookEventNameWire::PermissionDenied, "permission_denied"),
+            (HookEventNameWire::PermissionRequest, "permission_request"),
             (HookEventNameWire::UserPromptSubmit, "user_prompt_submit"),
             (HookEventNameWire::Notification, "notification"),
             (HookEventNameWire::SubagentStart, "subagent_start"),

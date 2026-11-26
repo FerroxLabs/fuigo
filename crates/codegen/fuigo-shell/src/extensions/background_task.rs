@@ -148,7 +148,10 @@ fn truncate_row_fields(row: &mut BackgroundTaskRow) {
 }
 
 fn frame_budget() -> usize {
-    FRAME_MAX_BYTES.saturating_sub(jsonrpc_line_len(SESSION_NOTIFICATION_METHOD, 0))
+    FRAME_MAX_BYTES.saturating_sub(
+        jsonrpc_line_len(SESSION_NOTIFICATION_METHOD, 0)
+            + crate::tools::task_completed_frame::SCOPE_META_RESERVE,
+    )
 }
 
 /// Serialize each row once; track remaining budget while dropping from the end.

@@ -100,6 +100,7 @@ fn hook_spec_to_info_with(
         HookEventName::PostToolUse => HookEvent::PostToolUse,
         HookEventName::PostToolUseFailure => HookEvent::PostToolUseFailure,
         HookEventName::PermissionDenied => HookEvent::PermissionDenied,
+        HookEventName::PermissionRequest => HookEvent::PermissionRequest,
         HookEventName::UserPromptSubmit => HookEvent::UserPromptSubmit,
         HookEventName::Notification => HookEvent::Notification,
         HookEventName::SubagentStart => HookEvent::SubagentStart,
@@ -117,7 +118,12 @@ fn hook_spec_to_info_with(
     let command_display = spec
         .command_raw
         .clone()
-        .or_else(|| spec.command.as_ref().map(|p| p.display().to_string()));
+        .or_else(|| spec.command.as_ref().map(|p| p.display().to_string()))
+        .or_else(|| {
+            spec.mcp_tool
+                .as_ref()
+                .map(|t| format!("mcp_tool {}:{}", t.server, t.tool))
+        });
     let url_display = spec.url_raw.clone().or_else(|| spec.url.clone());
 
     let source_dir = spec.source_dir.display().to_string();
@@ -358,6 +364,7 @@ mod tests {
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),
             layer: fuigo_hooks::config::HookProvenance::File,
+            mcp_tool: None,
         }
     }
 

@@ -86,10 +86,6 @@ impl<S: AcpSide> AcpGatewaySender<S> {
         Self { tx, tracing: false }
     }
 
-    pub fn tx(&self) -> mpsc::UnboundedSender<S::OutMessage> {
-        self.tx.clone()
-    }
-
     pub fn with_tracing(mut self, tracing: bool) -> Self {
         self.tracing = tracing;
         self
@@ -317,13 +313,16 @@ impl<S: AcpSide> AcpGatewaySender<S> {
     /// dropped-receiver log to the right public method.
     fn enqueue<T>(
         &self,
-        request: T,
+        mut request: T,
         caller: &'static str,
     ) -> (bool, oneshot::Receiver<AcpResult<T::Response>>)
     where
         T: AcpRequest,
         S::OutMessage: From<AcpArgs<T>>,
     {
+        if S::STAMPS_PROMPT_SCOPE {
+            request.stamp_prompt_scope();
+        }
         let (response_tx, response_rx) = oneshot::channel();
         let method = request.method_name();
         let args = AcpArgs {
@@ -362,10 +361,12 @@ impl<S: AcpSide> AcpGatewaySender<S> {
 
     /// Send a request and await the response. Returns a `Send` future.
     ///
+    /// Named `send_request` (not `send`) so the fuigo-shell prompt-scope send-site scan (WF-4) can count every call.
+    ///
     /// Equivalent to the `acp::Client` / `acp::Agent` trait methods but the
     /// returned future is `Send` because this is an inherent async fn — not
     /// wrapped by `#[async_trait(?Send)]`.
-    pub async fn send<T>(&self, request: T) -> AcpResult<T::Response>
+    pub async fn send_request<T>(&self, request: T) -> AcpResult<T::Response>
     where
         T: AcpRequest,
         S::OutMessage: From<AcpArgs<T>>,
@@ -373,11 +374,15 @@ impl<S: AcpSide> AcpGatewaySender<S> {
         self.forward(request).await
     }
 
-    async fn forward<T>(&self, request: T) -> AcpResult<T::Response>
+    async fn forward<T>(&self, mut request: T) -> AcpResult<T::Response>
     where
         T: AcpRequest,
         S::OutMessage: From<AcpArgs<T>>,
     {
+        // Prompt scope (1.0.48): every agent-to-client frame leaves through `enqueue` or here, so both stamp it.
+        if S::STAMPS_PROMPT_SCOPE {
+            request.stamp_prompt_scope();
+        }
         if self.tracing {
             let method = crate::common::compact_json(&request.method_name());
             tracing::debug!(

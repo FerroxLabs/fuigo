@@ -5535,6 +5535,7 @@ async fn dead_requester_is_skipped_without_prompting() {
             drop(rx);
             cmd_tx
                 .send(PermissionCommand::Request {
+                    scope: None,
                     request: PermissionRequest::new(
                         AccessKind::Bash("curl http://example.com".into()),
                         tool_call(),
@@ -5624,6 +5625,7 @@ async fn requester_death_during_classify_omits_classifier_telemetry() {
             let (respond_to, response) = oneshot::channel::<PermissionResolution>();
             cmd_tx
                 .send(PermissionCommand::Request {
+                    scope: None,
                     request: PermissionRequest::new(
                         AccessKind::MCPTool {
                             name: "test_server__do_thing".into(),
@@ -5691,6 +5693,7 @@ async fn requester_death_mid_prompt_frees_actor() {
             let (tx, rx) = oneshot::channel::<PermissionResolution>();
             cmd_tx
                 .send(PermissionCommand::Request {
+                    scope: None,
                     request: PermissionRequest::new(
                         AccessKind::Bash("curl http://example.com".into()),
                         tool_call(),
@@ -9335,6 +9338,7 @@ async fn requester_gone_timeout_prompt_preserves_consecutive_denials() {
             let (respond_to, response) = oneshot::channel::<PermissionResolution>();
             cmd_tx
                 .send(PermissionCommand::Request {
+                    scope: None,
                     request: PermissionRequest::new(access(), tool_call()),
                     respond_to,
                 })
@@ -11265,4 +11269,205 @@ mod u35_g9_no_grant_flag {
             })
             .await;
     }
+}
+
+mod prompt_hook {
+    use super::*;
+    use crate::permission::types::{HookAsk, PromptHook, PromptHookAnswer};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    fn counting_hook(answer: Option<PromptHookAnswer>) -> (PromptHook, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let hook = PromptHook(Arc::new(move || {
+            counter.fetch_add(1, AtomicOrdering::SeqCst);
+            let answer = answer.clone();
+            Box::pin(async move { answer }) as futures::future::LocalBoxFuture<'static, _>
+        }));
+        (hook, calls)
+    }
+
+    async fn request(
+        mgr: &PermissionHandle,
+        hook: PromptHook,
+        hook_ask: Option<HookAsk>,
+    ) -> PermissionResolution {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            mgr.request(PermissionRequest {
+                hook_ask,
+                prompt_hook: Some(hook),
+                ..PermissionRequest::new(AccessKind::Read(Some("a.rs".into())), tool_call())
+            }),
+        )
+        .await
+        .expect("permission request must resolve, not hang")
+    }
+
+    fn forced_prompt() -> Option<HookAsk> {
+        Some(HookAsk {
+            hook_name: "guard".to_owned(),
+            reason: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_hook_answer_replaces_the_prompt_and_no_answer_shows_it() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                for (answer, expect_prompt) in [
+                    (Some(PromptHookAnswer::Allow), false),
+                    (Some(PromptHookAnswer::Deny("no reads".to_owned())), false),
+                    (None, true),
+                ] {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, mut events) =
+                        manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                    let (hook, calls) = counting_hook(answer.clone());
+
+                    let resolution = request(&mgr, hook, forced_prompt()).await;
+
+                    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "{answer:?}");
+                    assert_eq!(prompts.borrow().len(), usize::from(expect_prompt), "{answer:?}");
+                    let ev = events.try_recv().expect("event must be emitted");
+                    match answer {
+                        Some(PromptHookAnswer::Allow) => {
+                            assert!(matches!(resolution.decision, Decision::Allow));
+                            assert!(!ev.user_prompted);
+                            assert_eq!(
+                                ev.decision_reason.as_deref(),
+                                Some(reasons::HOOK_PERMISSION_REQUEST)
+                            );
+                            assert!(
+                                resolution.approved_without_grant(),
+                                "a hook allow is not a grant"
+                            );
+                        }
+                        Some(PromptHookAnswer::Deny(_)) => {
+                            assert!(
+                                matches!(resolution.decision, Decision::PolicyDeny(ref m) if m == "no reads")
+                            );
+                            assert_eq!(
+                                ev.decision_reason.as_deref(),
+                                Some(reasons::HOOK_PERMISSION_REQUEST)
+                            );
+                        }
+                        None => assert!(ev.user_prompted),
+                    }
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn the_hook_is_not_asked_when_no_prompt_would_show() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (mgr, _events) = manager_with_recording_client(
+                    &cwd,
+                    None,
+                    RecordingClient::default(),
+                    ClientType::Generic,
+                );
+                mgr.set_yolo_mode(true);
+                let (hook, calls) = counting_hook(Some(PromptHookAnswer::Deny("x".to_owned())));
+
+                let resolution = request(&mgr, hook, None).await;
+
+                assert!(matches!(resolution.decision, Decision::Allow));
+                assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+            })
+            .await;
+    }
+}
+
+/// WF-8 (1.0.48 prompt scope, parked turn): the manager actor sends `session/request_permission` from its own task, so the
+/// request must carry the scope of the work that asked, bound on the caller's task. P1's background work asking while P2
+/// is the running turn gets P1's pair; P2's own ask gets P2's; an ask from outside any prompt is session-level `null`s.
+#[tokio::test]
+async fn wf8_permission_request_carries_the_asking_works_scope() {
+    use fuigo_acp_lib::PromptScope;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (mgr, _events) = spawn_permission_manager_with_pin(
+                acp::SessionId::new(Arc::from("wf8-session")),
+                GatewaySender::new(tx),
+                cwd,
+                ClientType::Generic,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                true,
+                None,
+                None,
+            );
+            let mgr = std::rc::Rc::new(mgr);
+            let mut seen = Vec::new();
+            for (scope, file) in [
+                (Some(PromptScope::client("wf8-p1")), "src/p1.rs"),
+                (Some(PromptScope::client("wf8-p2")), "src/p2.rs"),
+                (None, "src/none.rs"),
+            ] {
+                let asker = mgr.clone();
+                let ask = async move {
+                    decide(
+                        &asker,
+                        AccessKind::Edit(file.into()),
+                        acp::ToolCallUpdate::new(
+                            acp::ToolCallId::new(file),
+                            acp::ToolCallUpdateFields::new(),
+                        ),
+                    )
+                    .await
+                };
+                let task = match scope {
+                    Some(scope) => tokio::task::spawn_local(scope.scope(ask)),
+                    None => tokio::task::spawn_local(ask),
+                };
+                let Some(fuigo_acp_lib::AcpClientMessage::RequestPermission(args)) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                        .await
+                        .expect("the manager prompts")
+                else {
+                    panic!("expected a permission request");
+                };
+                let meta = args.request.meta.clone().unwrap_or_default();
+                seen.push((
+                    file,
+                    meta.get("promptId").cloned(),
+                    meta.get("originPromptId").cloned(),
+                ));
+                let _ = args
+                    .response_tx
+                    .send(Ok(acp::RequestPermissionResponse::new(
+                        acp::RequestPermissionOutcome::Cancelled,
+                    )));
+                let _ = task.await;
+            }
+            let id = |s: &str| Some(serde_json::json!(s));
+            let null = Some(serde_json::Value::Null);
+            assert_eq!(
+                seen,
+                vec![
+                    ("src/p1.rs", id("wf8-p1"), id("wf8-p1")),
+                    ("src/p2.rs", id("wf8-p2"), id("wf8-p2")),
+                    ("src/none.rs", null.clone(), null),
+                ]
+            );
+        })
+        .await;
 }

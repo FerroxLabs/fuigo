@@ -1315,3 +1315,200 @@ async fn f13_process_exit_flush_still_runs_the_session_end_hook_inline() {
     })
     .await;
 }
+
+/// Runs one typed prompt to its end (a sampler error is fine) and returns the serialized conversation.
+async fn prompt_and_serialize(actor: &Arc<SessionActor>, prompt_id: &str, text: &str) -> String {
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        Box::pin(actor.handle_prompt(
+            prompt_id,
+            super::prompt_gate_tests::text_prompt(text),
+            PromptMode::Agent,
+            /* trace_gcs_config */ None,
+            /* artifact_tracker */ None,
+            /* client_identifier */ None,
+            /* screen_mode */ None,
+            /* verbatim */ false,
+            /* send_now */ false,
+            /* json_schema */ None,
+            /* persist_ack */ None,
+            /* parsed_prompt_tx */ None,
+        )),
+    )
+    .await
+    .expect("the turn must finish");
+    serde_json::to_string(&actor.chat_state_handle.get_conversation().await)
+        .expect("serialize conversation")
+}
+
+const START_CONTEXT_HOOK: &str = r#"sleep 0.3; printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"deploy target is staging"}}'"#;
+
+/// A SessionStart hook's `additionalContext` reaches the model on the first turn: the turn waits for the still-running
+/// hook, and the tagged note sits ahead of the first prompt. A second turn does not repeat it.
+#[tokio::test(flavor = "current_thread")]
+async fn session_start_context_reaches_the_first_turn() {
+    run(async {
+        let mut h = Harness::with_hook_workspace().await;
+        *h.actor.hook_registry.borrow_mut() = Some(Arc::new(
+            super::client_hooks_tests::file_registry_with_spec(
+                HookEventName::SessionStart,
+                START_CONTEXT_HOOK,
+            ),
+        ));
+        let (cmd_tx, _fired) = h.spawn_loop().await;
+        cmd_tx
+            .send(SessionCommand::DispatchSessionStartHook {
+                source: "startup".into(),
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+        let serialized = prompt_and_serialize(&h.actor, "p1", "fix the bug").await;
+        let context_at = serialized
+            .find("deploy target is staging")
+            .unwrap_or_else(|| panic!("start context missing from the first turn: {serialized}"));
+        let prompt_at = serialized.find("fix the bug").expect("prompt committed");
+        assert!(context_at < prompt_at, "context must open the conversation");
+        assert!(
+            serialized.contains("Context from SessionStart hook '"),
+            "context must carry the hook note label: {serialized}"
+        );
+        let serialized = prompt_and_serialize(&h.actor, "p2", "and the docs").await;
+        assert_eq!(
+            serialized.matches("deploy target is staging").count(),
+            1,
+            "delivered once: {serialized}"
+        );
+        drop(cmd_tx);
+    })
+    .await;
+}
+
+/// No SessionStart hook, or a subagent session: nothing is parked, so the first turn never waits and gets no note.
+#[tokio::test(flavor = "current_thread")]
+async fn session_start_context_is_not_parked_without_a_hook_or_in_a_subagent() {
+    run(async {
+        for subagent in [false, true] {
+            let mut h = if subagent {
+                Harness::subagent().await
+            } else {
+                Harness::with_hook_workspace().await
+            };
+            if subagent {
+                *h.actor.hook_registry.borrow_mut() = Some(Arc::new(
+                    super::client_hooks_tests::file_registry_with_spec(
+                        HookEventName::SessionStart,
+                        START_CONTEXT_HOOK,
+                    ),
+                ));
+            }
+            let (cmd_tx, _fired) = h.spawn_loop().await;
+            cmd_tx
+                .send(SessionCommand::DispatchSessionStartHook {
+                    source: "startup".into(),
+                })
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(
+                h.actor.session_start_context.borrow().is_none(),
+                "subagent={subagent}: nothing parked"
+            );
+            let serialized = prompt_and_serialize(&h.actor, "p1", "fix the bug").await;
+            assert!(
+                !serialized.contains("SessionStart hook"),
+                "subagent={subagent}: no note: {serialized}"
+            );
+            drop(cmd_tx);
+        }
+    })
+    .await;
+}
+
+/// Releases a held hook on drop, so a failing assert never leaves its process waiting.
+struct ReleaseOnDrop(std::path::PathBuf);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, "");
+    }
+}
+
+/// A SessionStart hook that outlasts the wait cap (its own timeout is 120 s) does not hold the first turn past
+/// `SESSION_START_CONTEXT_WAIT`, and its context is not lost: released later, it lands on the next turn, ahead of that
+/// prompt, once.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test code: the hook's release and done files live in a test-owned temp dir"
+)]
+#[tokio::test(flavor = "current_thread")]
+async fn slow_session_start_context_waits_only_the_cap_and_lands_on_the_next_turn() {
+    run(async {
+        let gate = tempfile::TempDir::new().unwrap();
+        let release = gate.path().join("release");
+        let done = gate.path().join("done");
+        let _release_guard = ReleaseOnDrop(release.clone());
+        let script = format!(
+            r#"until [ -e '{}' ]; do sleep 0.05; done; touch '{}'; printf '%s' '{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":"late deploy target"}}}}'"#,
+            release.display(),
+            done.display()
+        );
+        let mut h = Harness::with_hook_workspace().await;
+        *h.actor.hook_registry.borrow_mut() = Some(Arc::new(
+            super::client_hooks_tests::file_registry_with_timeout(
+                HookEventName::SessionStart,
+                &script,
+                120_000,
+            ),
+        ));
+        let (cmd_tx, _fired) = h.spawn_loop().await;
+        cmd_tx
+            .send(SessionCommand::DispatchSessionStartHook {
+                source: "startup".into(),
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+        let started = std::time::Instant::now();
+        let serialized = prompt_and_serialize(&h.actor, "p1", "fix the bug").await;
+        let waited = started.elapsed();
+        assert!(
+            waited < SESSION_START_CONTEXT_WAIT + std::time::Duration::from_secs(5),
+            "the first turn must not wait out the hook's own timeout: {waited:?}"
+        );
+        assert!(
+            !serialized.contains("late deploy target"),
+            "the hook has not finished: {serialized}"
+        );
+        assert!(
+            h.actor.session_start_context.borrow().is_some(),
+            "late context stays parked"
+        );
+
+        std::fs::write(&release, "").expect("release the hook");
+        let arrived = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while h
+                .actor
+                .session_start_context
+                .borrow()
+                .as_ref()
+                .is_some_and(|(_, rx)| rx.is_empty())
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(arrived.is_ok(), "the released hook must report its context");
+        assert!(done.exists(), "the hook ran to its end");
+        let serialized = prompt_and_serialize(&h.actor, "p2", "and the docs").await;
+        let context_at = serialized
+            .find("late deploy target")
+            .unwrap_or_else(|| panic!("late context missing from the next turn: {serialized}"));
+        let prompt_at = serialized.find("and the docs").expect("prompt committed");
+        assert!(context_at < prompt_at, "context sits ahead of the prompt it arrived with");
+        assert_eq!(
+            serialized.matches("late deploy target").count(),
+            1,
+            "delivered once: {serialized}"
+        );
+        drop(cmd_tx);
+    })
+    .await;
+}

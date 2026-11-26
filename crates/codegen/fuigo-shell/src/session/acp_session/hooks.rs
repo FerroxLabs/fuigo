@@ -29,7 +29,11 @@ fn default_client_gate_timeout(gate: fuigo_hooks::event::GateKind) -> Duration {
     use fuigo_hooks::event::GateKind;
     match gate {
         GateKind::Stop | GateKind::PostTool => CLIENT_VERIFICATION_GATE_TIMEOUT,
-        GateKind::Observe | GateKind::Tool | GateKind::Prompt => CLIENT_HOOK_TIMEOUT,
+        GateKind::Observe
+        | GateKind::Tool
+        | GateKind::Prompt
+        | GateKind::Permission
+        | GateKind::Compact => CLIENT_HOOK_TIMEOUT,
     }
 }
 

@@ -1,0 +1,38 @@
+{
+  "_note": "Lane L2 entries for L1/integration to merge into package.json `contributes`. The view goes in L1's `fuigo` view container; use `explorer` if L1 names its container differently.",
+  "commands": [
+    { "command": "fuigo.edits.accept", "title": "Accept Edit", "category": "Fuigo", "icon": "$(check)" },
+    { "command": "fuigo.edits.reject", "title": "Reject Edit", "category": "Fuigo", "icon": "$(discard)" },
+    { "command": "fuigo.edits.acceptAll", "title": "Accept All Edits", "category": "Fuigo", "icon": "$(check-all)" },
+    { "command": "fuigo.edits.rejectAll", "title": "Reject All Edits", "category": "Fuigo", "icon": "$(close-all)" },
+    { "command": "fuigo.edits.refresh", "title": "Refresh Edits", "category": "Fuigo", "icon": "$(refresh)" },
+    { "command": "fuigo.edits.open", "title": "Open Edit Diff", "category": "Fuigo" },
+    { "command": "fuigo.edits.reviewPermission", "title": "Review Edit Permission (internal)", "category": "Fuigo" }
+  ],
+  "views": {
+    "fuigo": [{ "id": "fuigo.edits", "name": "Fuigo edits", "when": "fuigo.edits.pending" }]
+  },
+  "menus": {
+    "commandPalette": [
+      { "command": "fuigo.edits.open", "when": "false" },
+      { "command": "fuigo.edits.reviewPermission", "when": "false" },
+      { "command": "fuigo.edits.accept", "when": "fuigo.edits.pending" },
+      { "command": "fuigo.edits.reject", "when": "fuigo.edits.pending" },
+      { "command": "fuigo.edits.acceptAll", "when": "fuigo.edits.pending" },
+      { "command": "fuigo.edits.rejectAll", "when": "fuigo.edits.pending" }
+    ],
+    "view/title": [
+      { "command": "fuigo.edits.acceptAll", "when": "view == fuigo.edits", "group": "navigation@1" },
+      { "command": "fuigo.edits.rejectAll", "when": "view == fuigo.edits", "group": "navigation@2" },
+      { "command": "fuigo.edits.refresh", "when": "view == fuigo.edits", "group": "navigation@3" }
+    ],
+    "view/item/context": [
+      { "command": "fuigo.edits.accept", "when": "view == fuigo.edits", "group": "inline@1" },
+      { "command": "fuigo.edits.reject", "when": "view == fuigo.edits", "group": "inline@2" }
+    ],
+    "editor/title": [
+      { "command": "fuigo.edits.accept", "when": "resourceScheme == fuigo-edit || resourcePath in fuigo.edits.pendingPaths", "group": "navigation@1" },
+      { "command": "fuigo.edits.reject", "when": "resourceScheme == fuigo-edit || resourcePath in fuigo.edits.pendingPaths", "group": "navigation@2" }
+    ]
+  }
+}

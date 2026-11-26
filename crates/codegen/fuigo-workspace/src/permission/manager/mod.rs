@@ -2690,6 +2690,7 @@ impl PermissionHandle {
                 let msg = PermissionCommand::Request {
                     request,
                     respond_to: tx,
+                    scope: fuigo_acp_lib::PromptScope::current(),
                 };
                 if let Err(e) = cmd_tx.send(msg) {
                     tracing::error!(?e, "failed to send permission request");
@@ -2969,6 +2970,7 @@ pub(crate) fn approved_without_grant(
         | R::BashRequestFloor
         | R::OpaqueShell
         | R::HookAsk
+        | R::HookPermissionRequest
         | R::OutsideChange
         | R::RequesterGone => true,
     };
@@ -3518,7 +3520,10 @@ fn spawn_permission_manager_with_pin(
                 PermissionCommand::Request {
                     request,
                     respond_to,
+                    scope,
                 } => {
+                    // Prompt scope (1.0.48): the actor runs on its own task; the prompt is sent in the caller's scope.
+                    let request_scope = scope.unwrap_or_default();
                     // 1.0.36 item a (R3): under a launch policy the body's answer is held, and its events buffered, so
                     // the launch-ask clamp below can replace an answer the client did not give. Without one, nothing
                     // is held and the body runs exactly as before.
@@ -3559,6 +3564,7 @@ fn spawn_permission_manager_with_pin(
                                 mcp_definition,
                                 mcp_definition_legacy,
                                 outside_change,
+                                prompt_hook,
                             },
                             respond_to,
                         )) = pending.take()
@@ -4801,6 +4807,33 @@ fn spawn_permission_manager_with_pin(
                             );
                             continue;
                         }
+                        // A `PermissionRequest` hook may answer this prompt instead of the user; no answer shows it.
+                        let hook_answer = match &prompt_hook {
+                            Some(hook) => (hook.0)().await,
+                            None => None,
+                        };
+                        if let Some(answer) = hook_answer {
+                            let decision = match answer {
+                                crate::permission::types::PromptHookAnswer::Allow => {
+                                    Decision::Allow
+                                }
+                                crate::permission::types::PromptHookAnswer::Deny(message) => {
+                                    Decision::PolicyDeny(message)
+                                }
+                            };
+                            let event = emit_event(
+                                &decision,
+                                false,
+                                false,
+                                None,
+                                Some(reasons::HOOK_PERMISSION_REQUEST),
+                            );
+                            let _ = respond_to.send(PermissionResolution {
+                                decision,
+                                event: Some(event),
+                            });
+                            continue;
+                        }
                         {
                             let slot = user_prompt_notify_actor.lock();
                             if let Some(tx) = slot.as_ref() {
@@ -4814,7 +4847,7 @@ fn spawn_permission_manager_with_pin(
                                     bash_evaluation.as_ref().and_then(|e| e.env_steering),
                                 );
                                 let prompt_outcome = tokio::select! {
-                                    outcome = prompter.request(&access, &prompt_update, protected_edit, hook_ask.as_ref()) => outcome,
+                                    outcome = request_scope.clone().scope(prompter.request(&access, &prompt_update, protected_edit, hook_ask.as_ref())) => outcome,
                                     _ = respond_to.closed() => PromptOutcome::Cancelled,
                                 };
                                 // 1.0.36 item a: answering a launch-policy ask remembers nothing.
@@ -4888,7 +4921,7 @@ fn spawn_permission_manager_with_pin(
                             }
                             _ => {
                                 let prompt_outcome = tokio::select! {
-                                    outcome = prompter.request(&access, &tool_call_update, protected_edit, hook_ask.as_ref()) => outcome,
+                                    outcome = request_scope.clone().scope(prompter.request(&access, &tool_call_update, protected_edit, hook_ask.as_ref())) => outcome,
                                     _ = respond_to.closed() => PromptOutcome::Cancelled,
                                 };
                                 // One call only: an "always" answer for an agent message or a side-effecting tool is an allow-once
@@ -5150,7 +5183,7 @@ fn spawn_permission_manager_with_pin(
                                     }
                                 }
                                 let outcome = tokio::select! {
-                                    outcome = prompter.request(&clamp.access, &clamp.prompt_update, clamp.protected_edit, clamp.hook_ask.as_ref()) => outcome,
+                                    outcome = request_scope.clone().scope(prompter.request(&clamp.access, &clamp.prompt_update, clamp.protected_edit, clamp.hook_ask.as_ref())) => outcome,
                                     _ = inner.closed() => PromptOutcome::Cancelled,
                                 };
                                 let outcome = once_only(outcome);

@@ -478,7 +478,7 @@ impl SessionActor {
             fuigo_hooks::event::clip_reason(&flat)
         };
         // (a) UserPromptSubmit: a block refuses; context and rewrites do not apply to a shell line.
-        if let PromptDecision::Block { reason, hook_name } = self
+        if let (PromptDecision::Block { reason, hook_name }, _) = self
             .dispatch_prompt_submit_hook(
                 HookPayload::UserPromptSubmit {
                     prompt: Some(command.to_owned()),

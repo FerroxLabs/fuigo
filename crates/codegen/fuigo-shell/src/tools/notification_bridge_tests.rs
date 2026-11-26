@@ -75,6 +75,7 @@ fn make_test_config_full_raw() -> (
     let (session_cmd_tx, session_cmd_rx) = mpsc::unbounded_channel();
     let (persistence_tx, persistence_rx) = mpsc::unbounded_channel();
     let config = NotificationBridgeConfig {
+        prompt_scope: Default::default(),
         gateway,
         session_id: acp::SessionId::new("test-session"),
         hunk_tracker_handle: HunkTrackerHandle::noop(),
@@ -1968,10 +1969,12 @@ async fn task_completed_notification_is_frame_bounded() {
             persisted = Some(serde_json::to_value(&*saved).unwrap());
         }
     }
-    assert_eq!(
-        persisted.expect("the completion must be persisted"),
-        serde_json::from_str::<serde_json::Value>(&params).unwrap(),
-    );
+    // The persisted copy is the frame without the prompt-scope pair the gateway adds on the way out.
+    let mut sent = serde_json::from_str::<serde_json::Value>(&params).unwrap();
+    let meta = sent["_meta"].as_object_mut().expect("_meta");
+    assert_eq!(meta.remove("promptId"), Some(serde_json::Value::Null));
+    assert_eq!(meta.remove("originPromptId"), Some(serde_json::Value::Null));
+    assert_eq!(persisted.expect("the completion must be persisted"), sent);
 }
 
 /// The wake prompt carries its origin explicitly; the shell never re-derives it from the id.
@@ -2085,4 +2088,198 @@ async fn u36_plan_tool_round_trip_returns_to_browser_mode() {
             "plan tools never change the bit"
         );
     }
+}
+
+/// WF-1b (1.0.48 prompt scope): a task backgrounded by P1's tool call is bound to P1 even when the bridge only gets to
+/// it after P2 started; its persisted `task_backgrounded` frame names P1. A task whose tool call is unknown is bound to
+/// session-level nulls, never to the latest turn.
+#[tokio::test]
+async fn wf1b_backgrounded_task_binds_to_its_tool_calls_turn_not_the_latest() {
+    use crate::session::prompt_scope::{self as ps, PromptScope};
+    let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+    let backgrounded = |call: &str, task: &str| {
+        ToolNotification::BashExecutionBackgrounded(
+            fuigo_tools::notification::types::BashExecutionBackgrounded {
+                base: fuigo_tools::notification::types::BashNotificationBase {
+                    tool_call_id: call.into(),
+                    command: "sleep 100".into(),
+                    output: Vec::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                    cwd: PathBuf::from("/tmp"),
+                },
+                output_file: PathBuf::from("/tmp/out.log"),
+                task_id: task.into(),
+                monitor_description: None,
+                description: None,
+            },
+        )
+    };
+    config
+        .prompt_scope
+        .begin_turn(&PromptScope::client("wf1b-p1"));
+    config.prompt_scope.record(
+        &ps::tool_call_work_id("call-wf1b"),
+        PromptScope::client("wf1b-p1"),
+    );
+    config
+        .prompt_scope
+        .begin_turn(&PromptScope::client("wf1b-p2"));
+    let mut offsets = HashMap::new();
+
+    handle_notification(
+        &config,
+        backgrounded("call-wf1b", "task-wf1b"),
+        &mut offsets,
+    )
+    .await;
+    assert_eq!(
+        config.prompt_scope.root_of(&ps::bash_work_id("task-wf1b")),
+        Some(Some("wf1b-p1".to_string()))
+    );
+    match persistence_rx.try_recv().expect("must persist") {
+        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Fuigo(notif)) => {
+            let meta = notif.meta.clone().expect("meta");
+            assert_eq!(meta[ps::META_PROMPT_ID], "wf1b-p1");
+            assert_eq!(meta[ps::META_ORIGIN_PROMPT_ID], "wf1b-p1");
+        }
+        _ => panic!("expected Fuigo update"),
+    }
+
+    handle_notification(
+        &config,
+        backgrounded("call-unknown", "task-unknown"),
+        &mut offsets,
+    )
+    .await;
+    assert_eq!(
+        config
+            .prompt_scope
+            .root_of(&ps::bash_work_id("task-unknown")),
+        Some(None)
+    );
+}
+
+/// WF-9 (1.0.48 prompt scope, two prompts in sequence on one warm process). P1 backgrounded a command and ended; P2 runs.
+/// P1's late output and P1's task completion that reach the client during P2 carry P1's pair, and P2's own tool output
+/// carries P2's, although every notification here is raised on a task bound to P2 (the label is bound when the work
+/// started, never read from the turn running when it is sent). The frames are otherwise unchanged for any client.
+#[tokio::test]
+async fn wf9_p1_background_frames_during_p2_carry_p1_not_p2() {
+    use crate::session::prompt_scope::{self as ps, PromptScope};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (config, mut gateway_rx, _persistence_rx, _cmd_rx) = make_test_config_full();
+            let registry = config.prompt_scope.clone();
+            let base =
+                |call: &str, output: &str| fuigo_tools::notification::types::BashNotificationBase {
+                    tool_call_id: call.into(),
+                    command: "make build".into(),
+                    output: output.as_bytes().to_vec(),
+                    total_bytes: output.len(),
+                    truncated: false,
+                    cwd: PathBuf::from("/tmp"),
+                };
+            let chunk = |call: &str, output: &str| {
+                ToolNotification::BashOutputChunk(
+                    fuigo_tools::notification::types::BashOutputChunk {
+                        base: base(call, output),
+                    },
+                )
+            };
+            // P1: its tool call is bound at its ToolCall frame; the command is backgrounded as task-p1.
+            registry.begin_turn(&PromptScope::client("wf9-p1"));
+            registry.record(
+                &ps::tool_call_work_id("call-p1"),
+                PromptScope::client("wf9-p1"),
+            );
+            let handle = spawn_notification_bridge(config);
+            PromptScope::client("wf9-p1")
+                .scope(async {
+                    handle.send(ToolNotification::BashExecutionBackgrounded(
+                        fuigo_tools::notification::types::BashExecutionBackgrounded {
+                            base: base("call-p1", ""),
+                            output_file: PathBuf::from("/tmp/wf9.log"),
+                            task_id: "task-p1".into(),
+                            monitor_description: None,
+                            description: None,
+                        },
+                    ));
+                })
+                .await;
+            // P2 starts on the same process; everything below is raised while P2 is the running turn.
+            registry.begin_turn(&PromptScope::client("wf9-p2"));
+            registry.record(
+                &ps::tool_call_work_id("call-p2"),
+                PromptScope::client("wf9-p2"),
+            );
+            PromptScope::client("wf9-p2")
+                .scope(async {
+                    handle.send(chunk("call-p1", "late output of p1"));
+                    handle.send(chunk("call-p2", "output of p2"));
+                    handle.send(ToolNotification::TaskCompleted(make_task_snapshot(
+                        "task-p1",
+                        TaskKind::Bash,
+                    )));
+                })
+                .await;
+            let mut frames = Vec::new();
+            while let Ok(Some(msg)) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), gateway_rx.recv()).await
+            {
+                let (method, value) = match msg {
+                    fuigo_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                        let _ = args.response_tx.send(Ok(()));
+                        (
+                            "session/update".to_string(),
+                            serde_json::to_value(&args.request).unwrap(),
+                        )
+                    }
+                    fuigo_acp_lib::AcpClientMessage::ExtNotification(args) => (
+                        args.request.method.to_string(),
+                        serde_json::from_str(args.request.params.get()).unwrap(),
+                    ),
+                    _ => continue,
+                };
+                frames.push((method, value));
+            }
+            let with_text = |needle: &str| {
+                frames
+                    .iter()
+                    .find(|(_, v)| v.to_string().contains(needle))
+                    .unwrap_or_else(|| panic!("no frame with {needle:?} in {frames:#?}"))
+            };
+            let pair = |v: &serde_json::Value| {
+                (
+                    v["_meta"][ps::META_PROMPT_ID].clone(),
+                    v["_meta"][ps::META_ORIGIN_PROMPT_ID].clone(),
+                )
+            };
+            let p1 = (serde_json::json!("wf9-p1"), serde_json::json!("wf9-p1"));
+            let p2 = (serde_json::json!("wf9-p2"), serde_json::json!("wf9-p2"));
+            assert_eq!(
+                pair(&with_text("late output of p1").1),
+                p1,
+                "P1 output during P2"
+            );
+            assert_eq!(pair(&with_text("output of p2").1), p2, "P2's own output");
+            let completed = frames
+                .iter()
+                .find(|(m, v)| {
+                    m == "fuigo/task_completed" || v.to_string().contains("task_completed")
+                })
+                .unwrap_or_else(|| panic!("no task completion frame in {frames:#?}"));
+            assert_eq!(pair(&completed.1), p1, "P1's task completion during P2");
+            // No frame of P1's work is labelled with P2.
+            for (method, v) in &frames {
+                let s = v.to_string();
+                if s.contains("task-p1") || s.contains("late output of p1") {
+                    assert_ne!(pair(v), p2, "{method}: P1 work delivered as P2: {v}");
+                }
+            }
+            // A client that ignores `_meta` sees the same update: the output is carried as before.
+            assert!(with_text("late output of p1").1["update"].is_object());
+        })
+        .await;
 }

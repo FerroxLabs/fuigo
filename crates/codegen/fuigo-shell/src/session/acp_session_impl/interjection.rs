@@ -306,6 +306,7 @@ impl SessionActor {
         // Those attribute the turn, which this skill did not start
         // `SkillDispatched` still carries `plugin_source`, so dispatch counts stay complete
         for sk in &parsed {
+            self.ship_guard.on_typed_skill(&sk.name, &sk.args);
             fuigo_telemetry::session_ctx::log_event(fuigo_telemetry::events::SlashCommandUsed {
                 command: sk.name.clone(),
                 args_provided: !sk.args.is_empty(),

@@ -173,6 +173,7 @@ impl McpTransport for McpClientTransportAdapter {
         };
         let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
         params.arguments = args_object;
+        fuigo_mcp::servers::stamp_prompt_scope(&mut params);
         // No client-side timeout: the hub owns the deadline; only its Cancel ends a call the server never answers.
         // Dropping this future (the hub's Cancel) now tells the server with `notifications/cancelled`.
         let response = call_tool_cancel_aware(&service, params, None)

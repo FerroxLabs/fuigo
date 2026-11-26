@@ -286,6 +286,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models() {
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                ship_guard: Default::default(),
                 admin_policy_watch: Default::default(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
@@ -353,6 +354,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models() {
                 plugin_registry_live: Default::default(),
                 scheduler_handle_live: Default::default(),
                 turn_report: Default::default(),
+                session_start_context: Default::default(),
                 turn_abort: Default::default(),
                 turn_end_tx: Default::default(),
                 client_hooks: Default::default(),

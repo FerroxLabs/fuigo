@@ -1,0 +1,15 @@
+{
+  "commands": [
+    { "command": "fuigo.addSelectionToContext", "title": "Add Selection to Fuigo", "category": "Fuigo" }
+  ],
+  "menus": {
+    "editor/context": [
+      { "command": "fuigo.addSelectionToContext", "when": "editorHasSelection", "group": "9_fuigo" }
+    ],
+    "commandPalette": [
+      { "command": "fuigo.addSelectionToContext", "when": "editorHasSelection" }
+    ]
+  },
+  "activationEvents": "none needed (onCommand is implied for engines >= 1.74); registerIdeTools must run on activation",
+  "note": "No keybinding proposed; L1 may bind one."
+}

@@ -1477,6 +1477,8 @@ mod session_registry;
 mod session_lifecycle;
 mod agent_ops;
 mod acp_agent;
+#[cfg(test)]
+pub(crate) use acp_agent::agent_capabilities_meta;
 pub(crate) mod reasoning_effort;
 mod sampler_prewarm;
 mod session_setup;
@@ -2288,12 +2290,19 @@ impl MvpAgent {
             maybe_sync_bundle_to_root,
         };
         use std::sync::atomic::Ordering;
+        let root = crate::bundle::bundled_root();
+        // The skills compiled into this binary need no credentials; install them once per process.
+        static BUILTIN_SKILLS: std::sync::Once = std::sync::Once::new();
+        BUILTIN_SKILLS.call_once(|| {
+            if let Err(error) = crate::bundle::install_builtin_skills(&root) {
+                tracing::warn!(%error, "could not install the built-in skills");
+            }
+        });
         let am = self.auth_manager.clone();
         let deployment_key = self.deployment_key();
         if !has_bundle_credentials(Some(&am), deployment_key.as_deref()) {
             return;
         }
-        let root = crate::bundle::bundled_root();
         if !force && bundle_cache_is_fresh(&root, BUNDLE_SYNC_TTL) {
             tracing::debug!("proactive bundle sync skipped pre-spawn: cache is fresh");
             return;

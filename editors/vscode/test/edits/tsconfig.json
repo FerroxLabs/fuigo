@@ -1,0 +1,14 @@
+{
+  "//": "Lane L2 unit tests: tsc -p test/edits && mocha <outDir>/test/edits/*.test.js. controller.ts has no vscode runtime import, so no extension host is needed.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "../..",
+    "outDir": "../../out-test",
+    "types": ["node", "mocha", "vscode"]
+  },
+  "include": ["../../src/edits/**/*.ts", "../../src/acp/types.ts", "./**/*.ts"]
+}

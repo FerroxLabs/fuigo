@@ -711,6 +711,15 @@ impl ToolBridge {
     }
 
     /// Gives the output of all terminal tasks which are managed by the tool bridge
+    /// Live (not completed) background tasks, without client I/O; `None` when the backend cannot tell.
+    pub async fn live_task_count(&self) -> Option<usize> {
+        match &self.terminal {
+            // No terminal backend: no background task can exist.
+            None => Some(0),
+            Some(t) => t.live_task_count().await,
+        }
+    }
+
     pub async fn list_tasks(&self) -> Option<Vec<TaskSnapshot>> {
         if let Some(terminal) = &self.terminal {
             Some(terminal.list_tasks().await)

@@ -294,6 +294,17 @@ impl SessionActor {
         is_replay: bool,
     ) {
         self.close_rewind_window().await;
+        // Prompt scope (1.0.48): a tool call is bound to the turn that starts it, so background work it spawns (a
+        // backgrounded shell command, reported later by the notification bridge) is bound at origin, not to whatever
+        // turn is current when the bridge gets to it.
+        if let (acp::SessionUpdate::ToolCall(tool_call), Some(scope)) =
+            (&update, self.bound_prompt_scope())
+        {
+            self.tool_context.prompt_scope.record(
+                &crate::session::prompt_scope::tool_call_work_id(&tool_call.tool_call_id.0),
+                scope,
+            );
+        }
         if let acp::SessionUpdate::ToolCall(tool_call) = &update
             && matches!(tool_call.kind, acp::ToolKind::Edit)
         {
@@ -330,9 +341,9 @@ impl SessionActor {
         let obj = meta
             .as_object_mut()
             .expect("json! literal is always an Object");
-        if let Some(pid) = self.current_prompt_id.lock().ok().and_then(|g| g.clone()) {
-            obj.insert("promptId".to_string(), pid.into());
-        }
+        // Prompt scope (1.0.48): the pair bound when this work started. Work outside any bound scope is session-level
+        // (`null`s): never labelled with whichever prompt is running when it is sent.
+        self.bound_prompt_scope().unwrap_or_default().stamp(obj);
         if let Some(ms) = stream_start_ms {
             obj.insert("streamStartMs".to_string(), ms.into());
         }
@@ -603,7 +614,7 @@ impl SessionActor {
         &self,
         state: &crate::extensions::notification::RetryState,
     ) -> acp::SessionNotification {
-        let prompt_id = self.current_prompt_id.lock().ok().and_then(|g| g.clone());
+        let prompt_id = self.bound_prompt_scope().and_then(|s| s.prompt_id);
         // Open a paragraph of its own after streamed reasoning; the line ends with a blank
         // line of its own, so the mirror after a mirror needs no second separator.
         let after_thought_text = self
@@ -628,9 +639,16 @@ impl SessionActor {
         let notification = FuigoSessionNotification {
             session_id: self.session_info.id.clone(),
             update,
-            meta: Some(serde_json::json!({
-                "agentTimestampMs": chrono::Utc::now().timestamp_millis(),
-            })),
+            meta: Some({
+                let mut meta = serde_json::json!({
+                    "agentTimestampMs": chrono::Utc::now().timestamp_millis(),
+                });
+                if let (Some(scope), Some(obj)) = (self.bound_prompt_scope(), meta.as_object_mut())
+                {
+                    scope.stamp(obj);
+                }
+                meta
+            }),
         };
         let params = serde_json::to_value(&notification)
             .and_then(|v| serde_json::value::to_raw_value(&v))
@@ -759,6 +777,20 @@ impl SessionActor {
             ),
             _ => (None, None),
         }
+    }
+    /// Prompt scope (1.0.48): the pair a frame produced now carries: the scope bound to the calling task, if any.
+    /// Work outside any bound scope carries no pair (a prompt-scoped client treats it as unknown).
+    pub(crate) fn bound_prompt_scope(&self) -> Option<crate::session::prompt_scope::PromptScope> {
+        crate::session::prompt_scope::PromptScope::current()
+    }
+    /// The scope the RUNNING turn was bound with at its start, while `current_prompt_id` still names it. Only for work
+    /// that belongs to the running turn by construction but runs on the actor loop (sampler events).
+    pub(crate) fn running_turn_scope(&self) -> Option<crate::session::prompt_scope::PromptScope> {
+        let live = self.current_prompt_id.lock().ok().and_then(|g| g.clone())?;
+        self.tool_context
+            .prompt_scope
+            .current()
+            .filter(|scope| scope.prompt_id.as_deref() == Some(live.as_str()))
     }
     /// Generates a unique event ID for correlation across agent/relay/client
     fn generate_event_id(&self) -> String {
@@ -1124,6 +1156,10 @@ impl SessionActor {
         extra_meta: Option<serde_json::Map<String, serde_json::Value>>,
         durability: crate::session::storage::jsonl::AppendDurability,
     ) {
+        // Prompt scope (1.0.48): stamp the pair bound to the calling work now, before the update is queued; delivery may
+        // run later on the actor loop, outside that work's scope. Caller keys win.
+        let extra_meta =
+            crate::session::prompt_scope::with_scope(self.bound_prompt_scope(), extra_meta);
         // P70b display sink, before the fan-out: the client, `updates.jsonl`, the retry mirror and the notification
         // hooks all get error text with every credential this process sent upstream replaced (exact match).
         update.scrub_sent_credentials();

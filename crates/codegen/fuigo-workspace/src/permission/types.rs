@@ -279,6 +279,25 @@ pub struct PermissionRequest {
     /// S1 (1.0.47): what the outside-change guard found. Always computed by the permission handle, never by the caller
     /// (any value given is overwritten).
     pub outside_change: Option<crate::permission::shell_access::OutsideChange>,
+    /// Asked right before the permission prompt is shown (a `PermissionRequest` hook); `None` when no such hook is set.
+    pub prompt_hook: Option<PromptHook>,
+}
+/// What a `PermissionRequest` hook answered for a prompt about to be shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptHookAnswer {
+    Allow,
+    /// Refused; the text tells the model why.
+    Deny(String),
+}
+type PromptHookFn =
+    dyn Fn() -> futures::future::LocalBoxFuture<'static, Option<PromptHookAnswer>> + Send + Sync;
+/// The hook the manager awaits in place of showing a prompt; it yields `None` to let the prompt show.
+#[derive(Clone)]
+pub struct PromptHook(pub std::sync::Arc<PromptHookFn>);
+impl std::fmt::Debug for PromptHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PromptHook")
+    }
 }
 /// u35 g11 (Astra r10 High): the working directory a bash tool input names (OpenCode bash `workdir`), resolved as the
 /// tool resolves it (absolute, or under `session_cwd`); `None` when the tool runs in the session directory.
@@ -314,6 +333,7 @@ impl PermissionRequest {
             mcp_definition: None,
             mcp_definition_legacy: None,
             outside_change: None,
+            prompt_hook: None,
         }
     }
 }
@@ -440,6 +460,8 @@ pub enum PermissionCommand {
     Request {
         request: PermissionRequest,
         respond_to: oneshot::Sender<PermissionResolution>,
+        /// Prompt scope (1.0.48): the caller's (promptId, originPromptId); the prompt it causes carries it.
+        scope: Option<fuigo_acp_lib::PromptScope>,
     },
     /// Read-only: the configured deny verdict for `access`, never a prompt, a grant or a state change (bang-controls).
     DecideOnly {

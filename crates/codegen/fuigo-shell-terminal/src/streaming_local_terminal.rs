@@ -69,7 +69,7 @@ impl SessionNotificationSender for fuigo_acp_lib::AcpAgentGatewaySender {
         &self,
         notification: acp::SessionNotification,
     ) -> Result<(), acp::Error> {
-        self.send(notification).await
+        self.send_request(notification).await
     }
 }
 
@@ -475,7 +475,8 @@ impl AsyncTerminalRunner for StreamingLocalTerminalRunner {
             let command = request.command.clone();
             let cwd = request.cwd.to_string();
 
-            tokio::task::spawn_local(async move {
+            // Prompt scope (1.0.48): the completion's frames belong to the prompt that started the command.
+            tokio::task::spawn_local(fuigo_acp_lib::PromptScope::inherit(async move {
                 wait_background_completion(
                     child_handle,
                     output_state,
@@ -488,7 +489,7 @@ impl AsyncTerminalRunner for StreamingLocalTerminalRunner {
                 )
                 .await;
                 deregister_entry(&session_id, &tool_call_id).await;
-            });
+            }));
         }
 
         result

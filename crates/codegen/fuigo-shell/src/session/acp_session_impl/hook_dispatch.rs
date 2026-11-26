@@ -82,6 +82,38 @@ pub(super) fn notification_hook_for_update(
     }
 }
 
+/// The session's own MCP client, lent to `mcp_tool` hooks: only servers the session already connected are reachable.
+struct ShellMcpCaller(Arc<tokio::sync::Mutex<crate::session::mcp_servers::McpState>>);
+
+impl fuigo_hooks::runner::mcp::McpToolCaller for ShellMcpCaller {
+    fn call<'a>(
+        &'a self,
+        server: &'a str,
+        tool: &'a str,
+        arguments: serde_json::Value,
+    ) -> fuigo_hooks::runner::mcp::McpCallFuture<'a> {
+        Box::pin(async move {
+            let response =
+                crate::extensions::mcp::call_mcp_tool(&self.0, server, None, tool, arguments)
+                    .await?;
+            Ok(fuigo_hooks::runner::mcp::McpToolReply {
+                text: response
+                    .content
+                    .iter()
+                    .filter(|block| block.kind == "text")
+                    .map(|block| block.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                is_error: response.is_error == Some(true),
+            })
+        })
+    }
+}
+
+/// Where a `PermissionRequest` hook run leaves its result for the tool call that asked.
+pub(super) type PermissionHookSlot =
+    Arc<std::sync::Mutex<Option<fuigo_hooks::dispatcher::PermissionRequestResult>>>;
+
 pub(super) struct DeferredPostToolUseScrollback {
     tool_name: String,
     tool_call_id: String,
@@ -94,6 +126,7 @@ impl SessionActor {
             session_id: &self.session_info.id.0,
             workspace_root: &self.hook_resolved_workspace_root,
             process_scope: self.tool_context.process_scope.clone(),
+            mcp: Some(Arc::new(ShellMcpCaller(self.mcp_state.clone()))),
         }
     }
 
@@ -301,6 +334,87 @@ impl SessionActor {
             .await;
     }
 
+    /// The `PermissionRequest` hook for one permission check, run by the permission manager only when it is about to
+    /// show a prompt. `None` when no such hook is configured, so the normal path is unchanged. The slot receives what the
+    /// hooks answered (results for the transcript, an allowing hook's `updatedInput`).
+    pub(super) fn permission_prompt_hook(
+        &self,
+        tool_name: &str,
+        raw_input: &serde_json::Value,
+    ) -> Option<(
+        fuigo_workspace::permission::types::PromptHook,
+        PermissionHookSlot,
+    )> {
+        use fuigo_hooks::dispatcher::PermissionRequestDecision as Answer;
+        use fuigo_hooks::event::{HookEventName, HookPayload};
+        use fuigo_workspace::permission::types::PromptHookAnswer;
+        let registry = self
+            .hook_registry
+            .borrow()
+            .clone()
+            .filter(|r| r.has_enabled_hooks_for_canonical(HookEventName::PermissionRequest))?;
+        let (tool_input, tool_input_truncated) =
+            fuigo_hooks::event::truncate_payload(with_retired_bash_background_field(
+                raw_input.clone(),
+                self.bash_auto_background_enabled(),
+            ));
+        let envelope = self.make_hook_envelope(
+            HookEventName::PermissionRequest,
+            None,
+            HookPayload::PermissionRequest {
+                tool_name: tool_name.to_owned(),
+                tool_input,
+                tool_input_truncated,
+            },
+        );
+        let ctx = self.hook_run_ctx();
+        let (session_id, workspace_root, process_scope, mcp) = (
+            ctx.session_id.to_owned(),
+            ctx.workspace_root.to_owned(),
+            ctx.process_scope,
+            ctx.mcp,
+        );
+        let slot = PermissionHookSlot::default();
+        let hook_slot = slot.clone();
+        let hook = move || {
+            let (registry, envelope, slot) =
+                (registry.clone(), envelope.clone(), hook_slot.clone());
+            let (session_id, workspace_root, process_scope, mcp) = (
+                session_id.clone(),
+                workspace_root.clone(),
+                process_scope.clone(),
+                mcp.clone(),
+            );
+            let run: futures::future::LocalBoxFuture<'static, Option<PromptHookAnswer>> =
+                Box::pin(async move {
+                    let ctx = fuigo_hooks::runner::RunContext {
+                        session_id: &session_id,
+                        workspace_root: &workspace_root,
+                        process_scope,
+                        mcp,
+                    };
+                    let result = fuigo_hooks::dispatcher::dispatch_permission_request(
+                        &registry, &envelope, &ctx,
+                    )
+                    .await;
+                    let answer = match &result.decision {
+                        Some(Answer::Allow { .. }) => Some(PromptHookAnswer::Allow),
+                        Some(Answer::Deny { message, .. }) => {
+                            Some(PromptHookAnswer::Deny(message.clone()))
+                        }
+                        None => None,
+                    };
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                    answer
+                });
+            run
+        };
+        Some((
+            fuigo_workspace::permission::types::PromptHook(Arc::new(hook)),
+            slot,
+        ))
+    }
+
     /// The user's effective `auto_background_on_timeout` for the Bash tool, the same resolved `[toolset.bash]` params
     /// the tool runs with (`BashTool::auto_background_on_timeout_enabled`: the setting and background enabled).
     pub(super) fn bash_auto_background_enabled(&self) -> bool {
@@ -476,20 +590,48 @@ impl SessionActor {
     }
 
     /// Run the `UserPromptSubmit` prompt gate: observe client hooks, then the on-disk registry, with shared scrollback and telemetry side effects.
-    /// Returns the gate verdict; the caller decides whether to enforce it (`Block` rejects the prompt).
+    /// Returns the gate verdict and the allowing hooks' `additionalContext`; the caller decides whether to enforce the verdict (`Block` rejects the prompt) and whether to deliver the context.
+    /// `PreCompact` (a gate since upstream lets it block): the decision and the hooks' extra summary instructions.
+    pub(crate) async fn dispatch_pre_compact_hook(
+        &self,
+        payload: fuigo_hooks::event::HookPayload,
+    ) -> (
+        fuigo_hooks::result::PromptDecision,
+        Vec<fuigo_hooks::dispatcher::AdditionalContext>,
+    ) {
+        let event = fuigo_hooks::event::HookEventName::PreCompact;
+        if !self.may_have_hooks_for(event) {
+            return (fuigo_hooks::result::PromptDecision::Allow, Vec::new());
+        }
+        let envelope = self.fire_hook(event, None, payload);
+        let Some(registry) = self.hook_registry.borrow().clone() else {
+            return (fuigo_hooks::result::PromptDecision::Allow, Vec::new());
+        };
+        let ctx = self.hook_run_ctx();
+        let gate = fuigo_hooks::dispatcher::dispatch_pre_compact(&registry, &envelope, &ctx).await;
+        self.send_hook_execution(&event.to_string(), None, None, None, &gate.results)
+            .await;
+        self.emit_hook_executed_telemetry(&event.to_string(), None, &gate.results)
+            .await;
+        (gate.decision, gate.additional_context)
+    }
+
     pub(super) async fn dispatch_prompt_submit_hook(
         &self,
         payload: fuigo_hooks::event::HookPayload,
         prompt_id: Option<&str>,
-    ) -> fuigo_hooks::result::PromptDecision {
+    ) -> (
+        fuigo_hooks::result::PromptDecision,
+        Vec<fuigo_hooks::dispatcher::AdditionalContext>,
+    ) {
         let event = fuigo_hooks::event::HookEventName::UserPromptSubmit;
         if !self.may_have_hooks_for(event) {
-            return fuigo_hooks::result::PromptDecision::Allow;
+            return (fuigo_hooks::result::PromptDecision::Allow, Vec::new());
         }
         // Fires observe-only client hooks before (and independent of) the on-disk registry guard below.
         let envelope = self.fire_hook(event, prompt_id.map(|s| s.to_string()), payload);
         let Some(registry) = self.hook_registry.borrow().clone() else {
-            return fuigo_hooks::result::PromptDecision::Allow;
+            return (fuigo_hooks::result::PromptDecision::Allow, Vec::new());
         };
         let ctx = self.hook_run_ctx();
         let gate = fuigo_hooks::dispatcher::dispatch_prompt_gate(&registry, &envelope, &ctx).await;
@@ -497,7 +639,7 @@ impl SessionActor {
             .await;
         self.emit_hook_executed_telemetry(&event.to_string(), None, &gate.results)
             .await;
-        gate.decision
+        (gate.decision, gate.additional_context)
     }
 
     /// Decision 35: run the blocking `UserPromptSubmit` hook on a real peer message. Returns true when the message must be refused.

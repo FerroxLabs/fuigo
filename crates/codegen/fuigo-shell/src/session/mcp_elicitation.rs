@@ -40,14 +40,17 @@ pub(crate) fn spawn_elicitation_coordinator(
     let inbox = job_rx.clone();
     let task = tokio::task::spawn_local(async move {
         while let Some(job) = job_rx.recv().await {
-            handle_one_job(
-                job,
-                &gateway,
-                &session_id,
-                &pending_interactions,
-                non_interactive.get(),
-            )
-            .await;
+            // Prompt scope (1.0.48): the card belongs to the tool call the server raised it during.
+            let scope = job.scope.clone().unwrap_or_default();
+            scope
+                .scope(handle_one_job(
+                    job,
+                    &gateway,
+                    &session_id,
+                    &pending_interactions,
+                    non_interactive.get(),
+                ))
+                .await;
         }
     });
     ElicitationCoordinatorGuard {
@@ -68,6 +71,7 @@ async fn handle_one_job(
         server_name,
         fields,
         mut response_tx,
+        scope: _,
     } = job;
 
     if non_interactive {

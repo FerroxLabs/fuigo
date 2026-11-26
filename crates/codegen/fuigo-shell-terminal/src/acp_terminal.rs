@@ -24,7 +24,7 @@ impl AsyncTerminalRunner for AcpTerminalRunner {
         let command = request.command.clone();
         let create_res = self
             .gateway
-            .send(
+            .send_request(
                 acp::CreateTerminalRequest::new(session_id.clone(), command)
                     .args(vec![])
                     // u37: on Windows, the `PATH` the classifier judged (see `client_terminal_env`). A command the
@@ -53,14 +53,15 @@ impl AsyncTerminalRunner for AcpTerminalRunner {
                     )])),
             )),
         );
-        let _ = self.gateway.send(notification).await;
+        let _ = self.gateway.send_request(notification).await;
 
         let result = tokio::time::timeout(
             request.timeout,
-            self.gateway.send(acp::WaitForTerminalExitRequest::new(
-                session_id.clone(),
-                create_res.terminal_id.clone(),
-            )),
+            self.gateway
+                .send_request(acp::WaitForTerminalExitRequest::new(
+                    session_id.clone(),
+                    create_res.terminal_id.clone(),
+                )),
         )
         .await;
 
@@ -71,7 +72,7 @@ impl AsyncTerminalRunner for AcpTerminalRunner {
                 // The wait timed out, so kill the command
                 let _ = self
                     .gateway
-                    .send(acp::KillTerminalRequest::new(
+                    .send_request(acp::KillTerminalRequest::new(
                         session_id.clone(),
                         create_res.terminal_id.clone(),
                     ))
@@ -82,7 +83,7 @@ impl AsyncTerminalRunner for AcpTerminalRunner {
 
         let output = self
             .gateway
-            .send(acp::TerminalOutputRequest::new(
+            .send_request(acp::TerminalOutputRequest::new(
                 session_id.clone(),
                 create_res.terminal_id.clone(),
             ))
@@ -91,7 +92,7 @@ impl AsyncTerminalRunner for AcpTerminalRunner {
 
         let _ = self
             .gateway
-            .send(acp::ReleaseTerminalRequest::new(
+            .send_request(acp::ReleaseTerminalRequest::new(
                 session_id,
                 create_res.terminal_id,
             ))

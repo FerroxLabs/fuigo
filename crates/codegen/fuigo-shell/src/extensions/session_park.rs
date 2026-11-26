@@ -755,7 +755,7 @@ pub(crate) async fn implicit_unpark(
             ));
         };
         let barrier = acp::ExtRequest::new(PARK_BARRIER_METHOD, std::sync::Arc::from(params));
-        if tokio::time::timeout(STEP_BOUND, agent.gateway.send(barrier))
+        if tokio::time::timeout(STEP_BOUND, agent.gateway.send_request(barrier))
             .await
             .is_err()
         {

@@ -122,6 +122,12 @@ hook_events! {
         aliases: ["PermissionDenied", "permission_denied", "permissionDenied"],
         traits: (Observe, Tested, true),
     },
+    /// Fires when a permission prompt is about to be shown; a hook may answer it (allow or deny) instead.
+    PermissionRequest {
+        display: "permission_request",
+        aliases: ["PermissionRequest", "permission_request", "permissionRequest"],
+        traits: (Permission, Tested, false),
+    },
     Stop {
         display: "stop",
         aliases: ["Stop", "stop"],
@@ -165,7 +171,7 @@ hook_events! {
     PreCompact {
         display: "pre_compact",
         aliases: ["PreCompact", "pre_compact", "preCompact"],
-        traits: (Observe, Tested, true),
+        traits: (Compact, Tested, true),
     },
     PostCompact {
         display: "post_compact",
@@ -189,6 +195,12 @@ pub enum GateKind {
     /// The block reason is user-facing, never model context.
     /// Exit 2 blocks regardless of JSON, and the default timeout is 30s.
     Prompt,
+    /// Permission-prompt answer (`hookSpecificOutput.decision.behavior` allow/deny, `updatedInput`, `message`).
+    /// Exit 2 is not a decision here, and every failure fails open to the normal prompt.
+    Permission,
+    /// Compaction control (upstream PreCompact): exit 2 or `decision: "block"` blocks the compaction; other stdout on
+    /// exit 0 is extra instructions for the summary. Every failure fails open (the compaction runs as before).
+    Compact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,6 +387,7 @@ const SNAKE_CASE_ALIASES: &[(&str, &str)] = &[
     ("toolUseId", "tool_use_id"),
     ("durationMs", "duration_ms"),
     ("isInterrupt", "is_interrupt"),
+    ("customInstructions", "custom_instructions"),
 ];
 
 impl HookEventEnvelope {
@@ -529,6 +542,15 @@ pub enum HookPayload {
         #[serde(rename = "toolInputTruncated")]
         tool_input_truncated: bool,
     },
+    /// Like `PreToolUse` but without a tool-use id, as upstream sends it.
+    PermissionRequest {
+        #[serde(rename = "toolName")]
+        tool_name: String,
+        #[serde(rename = "toolInput")]
+        tool_input: serde_json::Value,
+        #[serde(rename = "toolInputTruncated")]
+        tool_input_truncated: bool,
+    },
 
     UserPromptSubmit {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -595,6 +617,11 @@ pub enum HookPayload {
 
     PreCompact {
         source: String,
+        /// Upstream's name for `source` (`manual` / `auto`).
+        trigger: String,
+        /// What the user typed after `/compact`; `null` when nothing was typed.
+        #[serde(rename = "customInstructions")]
+        custom_instructions: Option<String>,
     },
     PostCompact {
         source: String,
@@ -607,14 +634,15 @@ impl HookPayload {
             Self::PreToolUse { tool_name, .. }
             | Self::PostToolUse { tool_name, .. }
             | Self::PostToolUseFailure { tool_name, .. }
-            | Self::PermissionDenied { tool_name, .. } => tool_name,
+            | Self::PermissionDenied { tool_name, .. }
+            | Self::PermissionRequest { tool_name, .. } => tool_name,
             Self::Notification {
                 notification_type, ..
             } => notification_type,
             Self::SubagentStart { subagent_type, .. }
             | Self::SubagentStop { subagent_type, .. } => subagent_type,
             Self::SessionStart { source, .. }
-            | Self::PreCompact { source }
+            | Self::PreCompact { source, .. }
             | Self::PostCompact { source } => source,
             Self::SessionEnd { reason, .. } => reason,
             Self::StopFailure { error, .. } => return Some(error.as_str()),
@@ -674,6 +702,11 @@ mod tests {
                 "PermissionDenied",
                 "permission_denied",
                 HookEventName::PermissionDenied,
+            ),
+            (
+                "PermissionRequest",
+                "permission_request",
+                HookEventName::PermissionRequest,
             ),
             (
                 "SubagentStart",

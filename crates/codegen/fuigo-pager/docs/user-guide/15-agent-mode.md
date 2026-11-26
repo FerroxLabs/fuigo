@@ -119,7 +119,7 @@ stdio is the common local integration path. The agent speaks JSON-RPC on stdin a
 fuigo agent --always-approve stdio
 ```
 
-Typical clients: IDE extensions (Zed, Neovim, Emacs), custom tools, and ACP SDKs.
+Typical clients: IDE extensions (Zed, Neovim, Emacs, and the native [VS Code extension](29-vscode-extension.md)), custom tools, and ACP SDKs.
 
 ### Options
 
@@ -424,6 +424,43 @@ The flag is also accepted as a top-level `_meta` field of `initialize`. It is re
 session `_meta` or repository content), and it changes nothing else: the client type and every other prompt stay as
 they were.
 
+## Prompt scope: `fuigo/promptScope`
+
+A client that keeps one `fuigo agent stdio` process for several prompts has to know which prompt each frame belongs to,
+including frames from work that outlives its prompt (a background command, a monitor, a subagent, the turn a finished
+task wakes). Fuigo labels every frame with two `_meta` keys:
+
+| Key | Value |
+| --- | --- |
+| `promptId` | The turn that produced the frame: the client's prompt id, or the id of an internal turn (for example `notifications-...` when a finished background task wakes the agent). |
+| `originPromptId` | The client prompt at the root of the work. A client prompt is its own root. An internal turn names the client prompt whose work woke it. |
+
+- **Send an id.** Put a fresh `_meta.promptId` on every `session/prompt`. Fuigo adopts it (a prompt without one gets a
+  generated id).
+- **Every agent-to-client frame carries both keys:** `session/update`, `fuigo/session_notification` and every other
+  `fuigo/*` notification, `session/request_permission`, `fs/*`, `terminal/*` and every extension request. Keys a frame
+  already had are kept.
+- **Bound when the work starts, never relabelled.** A command that P1 put in the background and that prints, asks for
+  permission or finishes while P2 runs is still labelled P1. Subagents carry the prompt that spawned them. Nothing is
+  labelled with "the prompt running now".
+- **Session-level frames carry `null`, never nothing.** A frame no prompt caused has `"promptId": null,
+  "originPromptId": null`, so "session-level" is different from "missing". They include: `available_commands_update` and
+  `current_mode_update`, MCP server status and tool-list changes, `models_updated`, model and config answers to your own
+  requests, session titles and info, file-watcher notices, LSP and scheduler notices, prompt-queue changes, interjection
+  echoes, peer messages, the disk-full notice, folder-trust prompts, the `unparked` marker, and terminals you open with
+  `_fuigo/terminal`. `session/load` replay frames keep the pair they were stored with, or carry `null` when none was stored. A frame is never labelled with a
+  prompt that did not cause it.
+- **Turn boundaries.** Before the first update of a prompt, `fuigo/session_notification` sends
+  `{"sessionUpdate": "turn_started", "prompt_id": P, "origin_prompt_id": ...}`. `turn_completed` carries the turn's pair
+  and `_meta.background`: the number of background tasks, subagents and queued wake-up turns still live at the end
+  (left out when it cannot be counted without waiting). A process is quiet when it is present and `0`.
+- **MCP calls.** Every outgoing MCP `tools/call` carries `params._meta.promptId` and `params._meta.originPromptId` of the
+  work that made the call.
+- **Capability.** The `initialize` answer carries `agentCapabilities._meta["fuigo/promptScope"]: 1` only in a build where
+  all of the above holds. A client that does not see the key must not reuse the process for another prompt.
+
+A client that ignores `_meta` sees no change: only the two keys are added, and nothing else in a frame moves.
+
 ---
 
 ## ACP SDKs
@@ -448,7 +485,29 @@ Official SDK libraries are available for multiple languages:
 | [Neovim](https://neovim.io) (CodeCompanion, avante.nvim) | Supported   |
 | [Emacs](https://github.com/xenodium/agent-shell)         | Supported   |
 | [marimo notebook](https://github.com/marimo-team/marimo) | Supported   |
-| JetBrains                                                | Coming soon |
+| [JetBrains IDEs](https://www.jetbrains.com/help/ai-assistant/acp.html) (2025.3+, AI Assistant) | Supported as a custom agent ([setup](#jetbrains-ides)) |
+| VS Code, Cursor, Windsurf, VSCodium                      | Native extension, see [29](29-vscode-extension.md) |
+
+### JetBrains IDEs
+
+JetBrains AI Assistant talks to any ACP agent, and you do not need a JetBrains AI subscription to use one. Add Fuigo as a custom agent: in the AI Chat tool window click the menu button in the upper-right corner and choose **Add Custom Agent**. That creates and opens `~/.jetbrains/acp.json`. Add:
+
+```json
+{
+  "agent_servers": {
+    "Fuigo": {
+      "command": "fuigo",
+      "args": ["agent", "stdio"]
+    }
+  }
+}
+```
+
+The key (`Fuigo`) is the name shown in AI Chat. If the agent does not start, put the full path to the `fuigo` binary in `command` (`which fuigo`), since the IDE may not inherit your shell `PATH`; **Get ACP Logs** in the same menu collects the agent logs. Run `fuigo login` in a terminal first so the agent is signed in. Fuigo's own approval prompts show in the IDE; do not add `--always-approve` unless you want every action auto-approved. ACP agents are not supported in WSL, and an organization using JetBrains IDE Services can disable custom agents. Reference: <https://www.jetbrains.com/help/ai-assistant/acp.html#add-custom-agent>.
+
+### VS Code and Cursor
+
+Use the native Fuigo extension (`ferroxlabs.fuigo`): a chat panel, native diffs for edits, and native permission prompts, for VS Code and the editors built on it. See [VS Code Extension](29-vscode-extension.md).
 
 ---
 

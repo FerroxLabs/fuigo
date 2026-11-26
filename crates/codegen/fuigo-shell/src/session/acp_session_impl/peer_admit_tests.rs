@@ -1335,6 +1335,7 @@ mod p6a {
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
             layer: fuigo_hooks::config::HookProvenance::File,
+            mcp_tool: None,
         }]);
         registry
     }
@@ -4889,6 +4890,7 @@ mod mut3 {
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
             layer: fuigo_hooks::config::HookProvenance::File,
+            mcp_tool: None,
         }]);
         registry
     }

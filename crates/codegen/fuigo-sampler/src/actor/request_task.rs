@@ -43,6 +43,10 @@ use crate::types::RequestId;
 /// That is long enough for cold-start reasoning and short enough to detect dead streams before the user gives up.
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 
+/// Appended once, to the one resend made after the think-only budget is spent.
+/// An unchanged resend to a deterministic model (temperature 0, fixed seed) replays the same think-only reply.
+const THINK_ONLY_NUDGE: &str = "Your last reply ended after reasoning, with no answer and no tool call. Reply to the user now with a visible answer, or make the tool call you planned.";
+
 /// Provider reports are cumulative within an attempt, additive between attempts.
 #[derive(Default)]
 struct AccountingLedger {
@@ -153,6 +157,8 @@ enum AttemptOutcome {
         doom_loop_signals: Vec<String>,
         /// The attempt streamed visible text or a tool-call fragment before it ended empty.
         streamed_output: bool,
+        /// Hash of the reply's reasoning text (`None` without any), to spot a model replaying the same think-only reply.
+        reasoning_hash: Option<u64>,
     },
     /// Stream emitted [`SamplingEvent::Failed`].
     /// The captured raw error is what the retry loop classifies.
@@ -224,6 +230,8 @@ pub(crate) async fn run_request_task(
     let doom_max_retries = doom_policy.map_or(0, |p| p.max_retries);
     let mut doom_retry_count: u32 = 0;
     let mut first_think_only_at: Option<tokio::time::Instant> = None;
+    let mut think_only_nudged = false;
+    let mut last_think_only_hash: Option<u64> = None;
     let output_observed = Arc::new(AtomicBool::new(false));
 
     loop {
@@ -348,6 +356,7 @@ pub(crate) async fn run_request_task(
                 mut context,
                 doom_loop_signals,
                 streamed_output,
+                reasoning_hash,
             } => {
                 completion.merge_doom_loop_signals(doom_loop_signals);
                 tracing::warn!(
@@ -365,32 +374,76 @@ pub(crate) async fn run_request_task(
                     "empty response from model: {reason} (retrying)",
                     reason = context.reason,
                 );
+                // Once the unchanged resends are spent, a clean think-only reply gets one more resend that asks for the answer
+                let think_only = context.reason == fuigo_sampling_types::EmptyReason::ReasoningOnly;
+                let nudge_ready = !think_only_nudged
+                    && think_only
+                    && !streamed_output
+                    && effective_max_retries > 0;
+                // The same think-only reply twice in a row: the model is stuck, so the plain resends left cannot help
+                let stuck = think_only
+                    && reasoning_hash.is_some()
+                    && reasoning_hash == last_think_only_hash;
+                if think_only {
+                    last_think_only_hash = reasoning_hash;
+                }
+                let empty_cap =
+                    retry_mod::empty_response_max_attempts(context.reason, &client.api_backend());
+                let mut resends_spent = false;
                 // A think-only reply on Chat Completions gets a larger budget of unchanged resends (`THINK_ONLY_MAX_ATTEMPTS`)
                 // The extra ones are made only for a clean attempt and inside the window from the first think-only reply
-                if retry_mod::empty_response_max_attempts(context.reason, &client.api_backend())
-                    > retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS
-                {
+                if empty_cap > retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS {
                     let first = *first_think_only_at.get_or_insert_with(tokio::time::Instant::now);
-                    if !think_only_resend_allowed(
+                    resends_spent = !think_only_resend_allowed(
                         retry_counts.empty_response,
                         streamed_output,
                         first.elapsed(),
-                    ) {
-                        tracing::warn!(
-                            target: crate::sampling_log::TARGET,
-                            attempts = retry_counts.empty_response + 1,
-                            streamed_output,
-                            "think-only: no further resend (output streamed or resend window spent)"
-                        );
-                        context.attempts = Some(retry_counts.empty_response + 1);
-                        let err = SamplingError::EmptyResponse { context };
-                        let terminal_event_queued = emit_failed(&event_tx, &request_id, &err);
-                        send_completion(&mut completion, Err(err), terminal_event_queued);
-                        hand_off_attempt(false, &receipt, &cancel_token).await;
-                        return request_id;
-                    }
+                    );
+                }
+                // A think-only reply to the nudged resend ends the request: the nudge was its last attempt
+                if resends_spent && !nudge_ready || think_only && think_only_nudged {
+                    tracing::warn!(
+                        target: crate::sampling_log::TARGET,
+                        attempts = retry_counts.empty_response + 1,
+                        streamed_output,
+                        think_only_nudged,
+                        "think-only: no further resend (nudged, output streamed or resend window spent)"
+                    );
+                    context.attempts = Some(retry_counts.empty_response + 1);
+                    let err = SamplingError::EmptyResponse { context };
+                    let terminal_event_queued = emit_failed(&event_tx, &request_id, &err);
+                    send_completion(&mut completion, Err(err), terminal_event_queued);
+                    hand_off_attempt(false, &receipt, &cancel_token).await;
+                    return request_id;
                 }
                 let err = SamplingError::EmptyResponse { context };
+                if nudge_ready
+                    && (stuck
+                        || resends_spent
+                        || empty_resends_spent(
+                            &err,
+                            &retry_counts,
+                            effective_max_retries,
+                            empty_cap,
+                        ))
+                {
+                    think_only_nudged = true;
+                    request
+                        .items
+                        .push(fuigo_sampling_types::ConversationItem::system_reminder(
+                            THINK_ONLY_NUDGE,
+                        ));
+                    let attempt = retry_counts.record_resend(true, false);
+                    tracing::warn!(
+                        target: crate::sampling_log::TARGET,
+                        attempts = attempt,
+                        "think-only: unchanged resends spent, one resend with a nudge to answer"
+                    );
+                    // Announced as the last of `attempt + 1` attempts (the original counts), like the budgeted resends' x/cap
+                    emit_retrying(&event_tx, &request_id, attempt, attempt + 1, &err);
+                    hand_off_attempt(true, &receipt, &cancel_token).await;
+                    continue;
+                }
                 let resent = apply_retry_decision(
                     &err,
                     &mut retry_counts,
@@ -887,6 +940,35 @@ async fn apply_retry_decision(
     }
 }
 
+/// Hash of a response's reasoning text, or `None` when it carries none (an encrypted-only reasoning item, for one).
+fn reasoning_hash(response: &ConversationResponse) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut any = false;
+    for item in response.reasoning_items() {
+        let text = fuigo_sampling_types::reasoning_item_text(item);
+        any |= !text.is_empty();
+        text.hash(&mut hasher);
+    }
+    any.then(|| hasher.finish())
+}
+
+/// Whether `apply_retry_decision` ends the request on this empty reply instead of resending it (its empty-response budget, mirrored).
+fn empty_resends_spent(
+    err: &SamplingError,
+    retry_counts: &RetryCounts,
+    configured_max_retries: u32,
+    empty_cap: u32,
+) -> bool {
+    if empty_cap > retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS {
+        retry_counts.empty_response + 1 >= empty_cap
+    } else {
+        retry_counts.empty_response + 1
+            >= retry_mod::effective_max_retries(err, configured_max_retries)
+            || retry_counts.total + 1 >= configured_max_retries
+    }
+}
+
 /// Whether a think-only reply may be resent after `empty_resends_used` empty-reply resends.
 /// Resends inside [`retry_mod::EMPTY_RESPONSE_MAX_ATTEMPTS`] are unchanged; the extra ones need an attempt that streamed
 /// no visible text or tool-call fragment, and less than [`retry_mod::THINK_ONLY_EXTRA_RESEND_WINDOW`] since the first think-only reply.
@@ -1135,6 +1217,7 @@ async fn drive_l2(
                             context,
                             doom_loop_signals: all_triggers,
                             streamed_output,
+                            reasoning_hash: reasoning_hash(&response),
                         };
                     }
                     return AttemptOutcome::Completed { response, metrics };

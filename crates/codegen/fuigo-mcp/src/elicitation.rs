@@ -24,6 +24,8 @@ pub struct ElicitationJob {
     /// Pre-validated by [`bridge_elicit`] via [`wire_mode_and_fields`], so consumers never see an unsupported mode.
     pub fields: WireElicitFields,
     pub response_tx: oneshot::Sender<ElicitResult>,
+    /// Prompt scope (1.0.48): the (promptId, originPromptId) of the tool call the request was raised during.
+    pub scope: Option<fuigo_acp_lib::PromptScope>,
 }
 
 /// Why an elicitation ended without the user's answer reaching the server.
@@ -143,6 +145,9 @@ pub(crate) struct ServiceId(u64);
 
 #[derive(Debug, Default)]
 struct CallAsks {
+    /// Prompt scope (1.0.48): bound on the calling task when the request starts, for input requests the server raises
+    /// on its own task during it.
+    scope: Option<fuigo_acp_lib::PromptScope>,
     state: parking_lot::Mutex<CallAskState>,
     ask_ended: Notify,
 }
@@ -176,7 +181,10 @@ impl RequestTracker {
     }
 
     pub(crate) fn begin_request(self: &Arc<Self>) -> RunningRequest {
-        let asks = Arc::new(CallAsks::default());
+        let asks = Arc::new(CallAsks {
+            scope: fuigo_acp_lib::PromptScope::current(),
+            ..CallAsks::default()
+        });
         self.running.lock().push(Arc::clone(&asks));
         RunningRequest {
             tracker: Arc::clone(self),
@@ -327,6 +335,11 @@ impl AskGuard {
         }
     }
 
+    /// The scope of the request this input request was raised during.
+    fn scope(&self) -> Option<fuigo_acp_lib::PromptScope> {
+        self.owner.as_ref().and_then(|(asks, _)| asks.scope.clone())
+    }
+
     fn unowned() -> AskGuard {
         AskGuard {
             owner: None,
@@ -426,6 +439,7 @@ pub(crate) async fn bridge_elicit(
         server_name: server_name.to_string(),
         fields,
         response_tx,
+        scope: fuigo_acp_lib::PromptScope::current().or_else(|| ask.scope()),
     };
     if tx.push(job).is_err() {
         tracing::warn!(
@@ -635,6 +649,7 @@ mod tests {
         assert!(
             inbox
                 .push(ElicitationJob {
+                    scope: None,
                     server_name: "srv".into(),
                     fields: url_fields("late", "https://example.com", "late"),
                     response_tx,
@@ -656,6 +671,7 @@ mod tests {
                 let (response_tx, response_rx) = oneshot::channel();
                 let rejected = pusher
                     .push(ElicitationJob {
+                        scope: None,
                         server_name: "srv".into(),
                         fields: url_fields("race", "https://example.com", "race"),
                         response_tx,
@@ -688,6 +704,7 @@ mod tests {
             let (response_tx, response_rx) = oneshot::channel();
             inbox
                 .push(ElicitationJob {
+                    scope: None,
                     server_name: "a".into(),
                     fields: url_fields("first", "https://example.com/1", "1"),
                     response_tx,
@@ -697,6 +714,7 @@ mod tests {
         };
         inbox
             .push(ElicitationJob {
+                scope: None,
                 server_name: "b".into(),
                 fields: url_fields("second", "https://example.com/2", "2"),
                 response_tx: oneshot::channel().0,

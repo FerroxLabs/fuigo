@@ -1092,6 +1092,7 @@ fn file_registry_timed(
         source_dir: std::path::PathBuf::from("/tmp"),
         extra_env: std::collections::HashMap::new(),
         layer: fuigo_hooks::config::HookProvenance::File,
+        mcp_tool: None,
     }]);
     registry
 }
@@ -1510,6 +1511,7 @@ fn pre_tool_use_command_registry(script: &str) -> fuigo_hooks::discovery::HookRe
         source_dir: std::path::PathBuf::from("/tmp"),
         extra_env: std::collections::HashMap::new(),
         layer: fuigo_hooks::config::HookProvenance::File,
+        mcp_tool: None,
     }]);
     registry
 }

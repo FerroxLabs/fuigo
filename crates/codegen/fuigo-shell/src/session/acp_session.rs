@@ -977,6 +977,8 @@ pub(crate) struct SessionActor {
     /// First skill the current prompt activated via its slash-skill path, recorded as `skill.name` on the turn span.
     /// Reset at the start of each prompt (`handle_prompt`), so it never leaks across turns.
     pub(crate) active_skill: parking_lot::Mutex<Option<String>>,
+    /// The `/ship` and `/steward` never-merge rule (armed by a typed `/ship` or `/steward`).
+    pub(crate) ship_guard: std::sync::Arc<crate::session::ship_guard::ShipGuard>,
     /// P186c: what this session has already told its user about the admin-policy lock-down (once per broken version).
     pub(crate) admin_policy_watch: crate::session::admin_policy_watch::AdminPolicyWatch,
     /// Canonical session mode last set via ACP `session/set_mode`.
@@ -1140,6 +1142,15 @@ pub(crate) struct SessionActor {
     /// The turn's single end-of-turn hook report.
     /// Actor-scoped rather than turn-local because the gate runs on the turn task while a cancel runs on the command loop.
     pub(crate) turn_report: turn_report_slot::TurnReportSlot,
+    /// The running `SessionStart` hooks' `additionalContext`, parked for the first accepted turn of a top-level session,
+    /// with the deadline a turn may wait for it until (see [`SESSION_START_CONTEXT_WAIT`]); after that a turn only takes
+    /// it if it is already there. `None` when no SessionStart hook is configured (or once delivered).
+    pub(crate) session_start_context: std::cell::RefCell<
+        Option<(
+            tokio::time::Instant,
+            tokio::sync::oneshot::Receiver<Vec<fuigo_hooks::dispatcher::AdditionalContext>>,
+        )>,
+    >,
     /// Keyed on the same turn epoch as `turn_report`: a turn announces its abort at most once.
     pub(crate) turn_abort: turn_report_slot::AbortAnnouncement,
     /// Set once by [`turn_end_hooks::TurnEndQueue::spawn`]; `None` before the loop starts.
@@ -2013,6 +2024,10 @@ mod rewind_cross_compaction_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/rewind_synthetic_turn_tests.rs"]
 mod rewind_synthetic_turn_tests;
+/// `/ship` and `/steward` never-merge rule at the tool gate.
+#[cfg(test)]
+#[path = "acp_session_tests/ship_guard_gate_tests.rs"]
+mod ship_guard_gate_tests;
 #[allow(
     clippy::disallowed_methods,
     reason = "test code: fixtures create, corrupt and remove files in test-owned temp dirs or a test FUIGO_HOME; no product session writer runs there"
@@ -2150,6 +2165,7 @@ mod tool_meta_stamp_tests {
                                     tool_call_update, ..
                                 },
                             respond_to,
+                            ..
                         } = cmd
                         {
                             *captured_in_task.lock().await = Some(tool_call_update);
@@ -2214,6 +2230,7 @@ mod tool_meta_stamp_tests {
                         if let PermissionCommand::Request {
                             request,
                             respond_to,
+                            ..
                         } = cmd
                         {
                             *captured_in_task.lock().await =
@@ -2292,6 +2309,7 @@ mod tool_meta_stamp_tests {
                         if let PermissionCommand::Request {
                             request,
                             respond_to,
+                            ..
                         } = cmd
                         {
                             *captured_in_task.lock().await =
@@ -2523,6 +2541,9 @@ mod park_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/prompt_scope_tests.rs"]
+mod prompt_scope_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/rate_limit_backoff_tests.rs"]
 mod rate_limit_backoff_tests;
@@ -2800,3 +2821,9 @@ mod reminder_policy_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/subagent_handoff_tests.rs"]
 mod subagent_handoff_tests;
+
+/// How long the first turn may wait, from the moment the start hooks are dispatched, for `SessionStart` context. The
+/// SessionStart default timeout: a hook within it reaches turn 1, a slower one (its own `timeout` can be minutes) never
+/// holds a prompt longer, and its context is delivered on the first turn after it finishes.
+pub(crate) const SESSION_START_CONTEXT_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(5);

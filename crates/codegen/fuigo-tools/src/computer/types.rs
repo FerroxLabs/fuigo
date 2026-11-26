@@ -501,6 +501,12 @@ pub trait TerminalBackend: Send + Sync {
     /// Used for context compaction to include task state in summaries.
     async fn list_tasks(&self) -> Vec<TaskSnapshot>;
 
+    /// Tasks not yet completed, from this process's own state (never a client round-trip). `None` when the backend
+    /// cannot tell that way. Read at every turn end (prompt scope, 1.0.48), so it must stay cheap.
+    async fn live_task_count(&self) -> Option<usize> {
+        None
+    }
+
     /// Return the persistent shell's current working directory, if persistent
     /// shell state is enabled. Returns `None` when persistence is off or the
     /// backend doesn't support it (e.g. ACP/remote).

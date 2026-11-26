@@ -341,8 +341,18 @@ pub async fn run_http_hook(
         GateKind::Stop => parse_http_stop_result(&response_text, status, &spec.name),
         GateKind::PostTool => parse_http_post_tool_use_result(&response_text, status, &spec.name),
         GateKind::Prompt => parse_http_prompt_result(&response_text, status, &spec.name),
-        GateKind::Observe if status.is_success() => HookRunnerResult::Success,
-        GateKind::Observe => HookRunnerResult::Failed(format!("HTTP status {status}")),
+        GateKind::Permission if status.is_success() => {
+            super::permission_result(&response_text, 0, &spec.name)
+        }
+        GateKind::Compact if status.is_success() => {
+            super::compact_result(&response_text, "", 0, &spec.name)
+        }
+        GateKind::Observe if status.is_success() => {
+            PromptHookJson::observe_success(envelope, &response_text)
+        }
+        GateKind::Observe | GateKind::Permission | GateKind::Compact => {
+            HookRunnerResult::Failed(format!("HTTP status {status}"))
+        }
     };
     // `failClosed`: a non-success status or an unreadable decision must not pass as an allow.
     let result = super::enforce_fail_closed(
@@ -436,7 +446,7 @@ fn parse_http_prompt_result(
                 reason,
                 hook_name: hook_name.to_string(),
             },
-            Ok(None) => HookRunnerResult::Success,
+            Ok(None) => json.allow_result(),
             Err(err) => HookRunnerResult::Failed(err),
         },
         Err(e) => {
@@ -753,19 +763,25 @@ mod tests {
 
     #[test]
     fn http_prompt_allows_on_success_without_verdict() {
-        for body in [
-            "",
-            "plain text",
-            "{}",
-            r#"{"hookSpecificOutput":{"additionalContext":"ctx"}}"#,
-            "not json at all",
-        ] {
+        for body in ["", "plain text", "{}", "not json at all"] {
             let result = parse_http_prompt_result(body, StatusCode::OK, "prompt-hook");
             assert!(
                 matches!(result, HookRunnerResult::Success),
                 "body {body:?} must allow"
             );
         }
+        let result = parse_http_prompt_result(
+            r#"{"hookSpecificOutput":{"additionalContext":"ctx"}}"#,
+            StatusCode::OK,
+            "prompt-hook",
+        );
+        assert!(
+            matches!(
+                result,
+                HookRunnerResult::Allow { additional_context: Some(ref c), .. } if c == "ctx"
+            ),
+            "{result:?}"
+        );
     }
 
     #[test]
@@ -1054,6 +1070,7 @@ mod tests {
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,
+            mcp_tool: None,
         }
     }
 
@@ -1187,6 +1204,7 @@ mod tests {
             session_id: "test",
             workspace_root: "/tmp",
             process_scope: None,
+            mcp: None,
         }
     }
 
@@ -1570,7 +1588,7 @@ mod tests {
         );
         assert!(matches!(
             parse_http_prompt_result(ok, StatusCode::OK, "h"),
-            HookRunnerResult::Success
+            HookRunnerResult::Allow { .. }
         ));
         let typo = r#"{"hookSpecificOutput":{"additionalContxt":"ctx"}}"#;
         assert!(

@@ -1,0 +1,8 @@
+# Known load flakes of the final gate (final-gate.sh). A test listed here may fail in a loaded full run; the run is
+# still judged by gate-verify.sh, and each listed failure must be rerun ALONE with the gate's own binary (slot-run.sh,
+# unshare -n) and pass 3/3 before the gate counts as passing. Listing never skips, ignores or loosens a test.
+# <crate> <test path>  -- evidence
+fuigo-workspace permission::shell_access::outside_change::outside_change_tests::perf_budget_p99_under_one_millisecond  -- p99 24-32 ms under gate load on 1.0.47 and 1.0.48; alone p99 ~250 us (1048-integration.md)
+fuigo-tools computer::local::shell_state::fifo_tests::r1h3_sequential_commands_are_not_slowed_and_keep_state  -- bash-fd 3.3-4.2 s under load, also on c111fd65 and v1.0.47; alone 3/3 pass, ~37 ms (1048-integration.md, u48-int/r6/reruns.log)
+fuigo-shell session::acp_session::peer_admit::tests::p6a::p6a_peer_message_after_a_clear_reflags_and_is_stored_after_the_marker  -- 3 s INTEGRITY_WAIT can time out under load; alone 3/3 on 1.0.48 and both bases (1048-integration.md)
+fuigo-shell session::acp_session::withheld_instructions::tests::a_reply_a_second_after_the_prompt_reaches_the_first_turn  -- timing under load (1048-integration.md)

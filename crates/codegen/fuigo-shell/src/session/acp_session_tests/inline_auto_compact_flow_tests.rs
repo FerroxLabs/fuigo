@@ -210,6 +210,7 @@ async fn create_test_actor(
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
+        ship_guard: Default::default(),
         admin_policy_watch: Default::default(),
         plan_mode: Arc::new(parking_lot::Mutex::new(
             crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
@@ -273,6 +274,7 @@ async fn create_test_actor(
         plugin_registry_live: Default::default(),
         scheduler_handle_live: Default::default(),
         turn_report: Default::default(),
+        session_start_context: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
         client_hooks: Default::default(),
@@ -664,6 +666,7 @@ async fn create_test_actor_with_memory(
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
+        ship_guard: Default::default(),
         admin_policy_watch: Default::default(),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
@@ -730,6 +733,7 @@ async fn create_test_actor_with_memory(
         plugin_registry_live: Default::default(),
         scheduler_handle_live: Default::default(),
         turn_report: Default::default(),
+        session_start_context: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
         client_hooks: Default::default(),

@@ -138,7 +138,7 @@ async fn replay_forwards_records_within_the_limit_untouched() {
     );
 
     let params = next_ext_notification_params(&mut rx).expect("forwarded");
-    assert_eq!(params, serde_json::to_string(&record).unwrap());
+    assert_eq!(params, with_null_scope(&serde_json::to_string(&record).unwrap()));
 }
 
 #[tokio::test]
@@ -159,7 +159,7 @@ async fn replay_leaves_other_oversized_records_alone() {
     );
 
     let params = next_ext_notification_params(&mut rx).expect("forwarded");
-    assert_eq!(params, recorded);
+    assert_eq!(params, with_null_scope(&recorded));
 }
 
 #[tokio::test]
@@ -219,6 +219,15 @@ fn build_agent_with_gateway() -> (
     )
     .expect("valid test config");
     (agent, rx)
+}
+
+/// A record stored without a prompt-scope pair replays session-level: the gateway splices the null pair in front and
+/// keeps every stored byte.
+fn with_null_scope(stored: &str) -> String {
+    format!(
+        r#"{{"_meta":{{"promptId":null,"originPromptId":null}},{}"#,
+        &stored[1..]
+    )
 }
 
 fn next_ext_notification_params(

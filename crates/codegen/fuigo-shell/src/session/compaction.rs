@@ -1117,21 +1117,42 @@ impl SessionActor {
                 is_subagent: self.startup_hints.is_subagent,
             },
         );
-        // The summarizer is pinned to the active goal; a `/compact <text>` focus the user typed still leads
+        let compact_source = trigger_str;
+        // Upstream PreCompact control: a hook may block this compaction or add instructions for the summary.
+        let (decision, hook_instructions) = self
+            .dispatch_pre_compact_hook(fuigo_hooks::event::HookPayload::PreCompact {
+                source: compact_source.into(),
+                trigger: compact_source.into(),
+                custom_instructions: user_context.clone(),
+            })
+            .await;
+        if let fuigo_hooks::result::PromptDecision::Block { reason, hook_name } = decision {
+            let detail = format!("compaction blocked by PreCompact hook '{hook_name}': {reason}");
+            tracing::info!(session_id = %self.session_info.id, %detail, "compaction blocked by hook");
+            // An automatic compaction is skipped until the next turn, so a blocked overflow check does not loop on it.
+            if matches!(trigger, fuigo_telemetry::events::CompactionTrigger::Auto) {
+                self.suppress_auto_compaction(
+                    SuppressReason::Other,
+                    &detail,
+                    tokens_before,
+                    context_window,
+                )
+                .await;
+            }
+            return Err(crate::acp_error::compaction(detail));
+        }
+        let hook_instructions = hook_instructions
+            .into_iter()
+            .map(|context| context.text)
+            .reduce(|all, text| format!("{all}\n\n{text}"));
+        // The summarizer is pinned to the active goal; a `/compact <text>` focus the user typed still leads, then hooks'
         let user_context = crate::session::acp_session::merge_compaction_user_context(
-            user_context,
+            crate::session::acp_session::merge_compaction_user_context(
+                user_context,
+                hook_instructions,
+            ),
             self.goal_compaction_user_context(),
         );
-        let compact_source = trigger_str;
-        self.dispatch_hook(
-            fuigo_hooks::event::HookEventName::PreCompact,
-            fuigo_hooks::event::HookPayload::PreCompact {
-                source: compact_source.into(),
-            },
-            None,
-            None,
-        )
-        .await;
         let max_retries = 3u32;
         let retry_delay_secs = 3u64;
         let (compaction_epoch, prompt_index_at_compaction, full_conversation) = self

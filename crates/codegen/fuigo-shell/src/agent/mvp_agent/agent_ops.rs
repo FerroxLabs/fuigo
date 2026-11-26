@@ -4656,7 +4656,12 @@ impl MvpAgent {
         if handle_display_cwd.is_some() {
             handle.display_cwd = handle_display_cwd;
         }
-        let source = if chat_history.is_empty() { "new" } else { "load" };
+        // Claude Code's `source` values: `startup` for a new session, `resume` for one loaded with its history.
+        let source = if chat_history.is_empty() {
+            "startup"
+        } else {
+            "resume"
+        };
         let _ = handle
             .cmd_tx
             .send(SessionCommand::DispatchSessionStartHook {

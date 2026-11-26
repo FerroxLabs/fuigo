@@ -2001,6 +2001,7 @@ impl McpErasedTool {
         let timeout_duration = std::time::Duration::from_secs(tool_timeout);
         let mut params = CallToolRequestParams::new(self.tool.name.clone());
         params.arguments = raw.as_object().cloned();
+        stamp_prompt_scope(&mut params);
 
         let call = client.request_tracker.begin_request();
         let mut input_rounds = 0usize;
@@ -5677,10 +5678,26 @@ impl McpClient {
             .call_tool({
                 let mut params = CallToolRequestParams::new(tool_name.to_string());
                 params.arguments = arguments.as_object().cloned();
+                stamp_prompt_scope(&mut params);
                 params
             })
             .await?;
         Ok(result)
+    }
+}
+
+/// Prompt scope (1.0.48, design A7): an outgoing `tools/call` carries `params._meta.{promptId, originPromptId}` of the work
+/// that made the call (bound on the calling task); a call outside any prompt is left as it was.
+pub fn stamp_prompt_scope(params: &mut CallToolRequestParams) {
+    let mut meta = serde_json::Map::new();
+    fuigo_acp_lib::prompt_scope::stamp_if_bound(&mut meta);
+    if !meta.is_empty() {
+        let object = params
+            .meta
+            .get_or_insert_with(rmcp::model::RequestMetaObject::new);
+        for (key, value) in meta {
+            object.0.0.entry(key).or_insert(value);
+        }
     }
 }
 

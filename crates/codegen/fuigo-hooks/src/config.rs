@@ -120,6 +120,13 @@ pub struct RawHandler {
     #[serde(default)]
     pub shell: Option<String>,
     pub url: Option<String>,
+    /// `mcp_tool` handlers: the configured MCP server, its tool, and the tool arguments (`${path}` filled from the event).
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
     /// Seconds (converted to milliseconds internally).
     pub timeout: Option<u64>,
     /// `"failClosed": true`: a `PreToolUse` or `UserPromptSubmit` hook that fails (timeout, crash, bad output)
@@ -141,6 +148,9 @@ impl std::fmt::Debug for RawHandler {
             args,
             shell,
             url,
+            server,
+            tool,
+            input,
             timeout,
             fail_closed,
             env,
@@ -151,6 +161,9 @@ impl std::fmt::Debug for RawHandler {
             .field("args", &args.as_ref().map(Vec::len))
             .field("shell", shell)
             .field("url", &url.as_deref().map(fuigo_auth::redact_url))
+            .field("server", server)
+            .field("tool", tool)
+            .field("input", &input.as_ref().map(|_| "<redacted>"))
             .field("timeout", timeout)
             .field("fail_closed", fail_closed)
             .field(
@@ -224,7 +237,9 @@ fn default_timeout_ms(event: crate::event::HookEventName) -> u64 {
     match event.traits().gate {
         GateKind::Stop | GateKind::PostTool => DEFAULT_VERIFICATION_GATE_TIMEOUT_MS,
         GateKind::Prompt => DEFAULT_PROMPT_GATE_TIMEOUT_MS,
-        GateKind::Observe | GateKind::Tool => DEFAULT_TIMEOUT_MS,
+        GateKind::Observe | GateKind::Tool | GateKind::Permission | GateKind::Compact => {
+            DEFAULT_TIMEOUT_MS
+        }
     }
 }
 
@@ -234,6 +249,18 @@ fn default_timeout_ms(event: crate::event::HookEventName) -> u64 {
 pub enum HandlerType {
     Command,
     Http,
+    /// Calls a tool on a configured MCP server; its text result is read like a command hook's stdout.
+    McpTool,
+}
+
+/// What an `mcp_tool` handler calls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpToolTarget {
+    pub server: String,
+    pub tool: String,
+    /// The tool arguments; absent means the event JSON itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
 }
 
 impl HandlerType {
@@ -241,6 +268,7 @@ impl HandlerType {
         match self {
             Self::Command => "command",
             Self::Http => "http",
+            Self::McpTool => "mcp_tool",
         }
     }
 }
@@ -252,6 +280,7 @@ impl std::str::FromStr for HandlerType {
         match s {
             "command" => Ok(Self::Command),
             "http" => Ok(Self::Http),
+            "mcp_tool" => Ok(Self::McpTool),
             _ => Err(()),
         }
     }
@@ -298,6 +327,9 @@ pub struct HookSpec {
     /// `#[serde(default)]` maps specs serialized before this field existed to `File`.
     #[serde(default)]
     pub layer: HookProvenance,
+    /// `mcp_tool` handlers only; `None` for every other type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_tool: Option<McpToolTarget>,
 }
 
 /// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there, and the command (which `extra_env` is expanded into) prints as present / absent.
@@ -322,6 +354,7 @@ impl std::fmt::Debug for HookSpec {
             source_dir,
             extra_env,
             layer,
+            mcp_tool,
         } = self;
         f.debug_struct("HookSpec")
             .field("name", name)
@@ -347,6 +380,12 @@ impl std::fmt::Debug for HookSpec {
                     .collect::<Vec<_>>(),
             )
             .field("layer", layer)
+            .field(
+                "mcp_tool",
+                &mcp_tool
+                    .as_ref()
+                    .map(|t| (&t.server, &t.tool, t.input.is_some())),
+            )
             .finish()
     }
 }
@@ -831,6 +870,7 @@ fn build_one_spec(
     };
 
     let mut args: Option<Vec<String>> = None;
+    let mut mcp_tool = None;
     let shell = handler.shell.take();
     let (command, command_raw, url, url_raw) = match handler_type {
         HandlerType::Command => {
@@ -876,6 +916,21 @@ fn build_one_spec(
             }
             (None, None, Some(expanded), Some(url))
         }
+        HandlerType::McpTool => {
+            let (Some(server), Some(tool)) = (handler.server.take(), handler.tool.take()) else {
+                return Err(HookError::InvalidConfig {
+                    name,
+                    path: ctx.error_path.to_path_buf(),
+                    detail: "mcp_tool handler requires 'server' and 'tool' fields".into(),
+                });
+            };
+            mcp_tool = Some(McpToolTarget {
+                server,
+                tool,
+                input: handler.input.take(),
+            });
+            (None, None, None, None)
+        }
     };
 
     Ok(HookSpec {
@@ -896,6 +951,7 @@ fn build_one_spec(
         source_dir: ctx.source_dir.to_path_buf(),
         extra_env,
         layer: ctx.provenance,
+        mcp_tool,
     })
 }
 
@@ -1339,7 +1395,10 @@ mod tests {
                 match spec.event.traits().gate {
                     GateKind::Stop | GateKind::PostTool => DEFAULT_VERIFICATION_GATE_TIMEOUT_MS,
                     GateKind::Prompt => DEFAULT_PROMPT_GATE_TIMEOUT_MS,
-                    GateKind::Observe | GateKind::Tool => DEFAULT_TIMEOUT_MS,
+                    GateKind::Observe
+                    | GateKind::Tool
+                    | GateKind::Permission
+                    | GateKind::Compact => DEFAULT_TIMEOUT_MS,
                 }
             };
             assert_eq!(spec.timeout_ms, expected, "event {}", spec.event);
@@ -1513,6 +1572,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_mcp_tool_handler_type_as_upstream_writes_it() {
+        let json = r#"{
+            "hooks": {
+                "PostToolUse": [
+                    { "matcher": "Write", "hooks": [{
+                        "type": "mcp_tool",
+                        "server": "my_server",
+                        "tool": "security_scan",
+                        "input": { "file_path": "${tool_input.file_path}" }
+                    }] }
+                ]
+            }
+        }"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/test.json"));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(specs[0].handler_type, HandlerType::McpTool);
+        assert_eq!(
+            specs[0].mcp_tool,
+            Some(McpToolTarget {
+                server: "my_server".into(),
+                tool: "security_scan".into(),
+                input: Some(serde_json::json!({ "file_path": "${tool_input.file_path}" })),
+            })
+        );
+        // The event's default timeout, as for a command hook.
+        assert_eq!(
+            specs[0].timeout_ms,
+            default_timeout_ms(HookEventName::PostToolUse)
+        );
+
+        let missing = r#"{ "hooks": { "PreToolUse": [ { "hooks": [{ "type": "mcp_tool", "server": "s" }] } ] } }"#;
+        let (specs, errors) = parse_hook_file(missing, Path::new("/tmp/test.json"));
+        assert!(specs.is_empty());
+        assert!(matches!(&errors[0], HookError::InvalidConfig { .. }));
+    }
+
+    #[test]
     fn parse_http_handler_type() {
         let json = r#"{
             "hooks": {
@@ -1652,9 +1748,15 @@ mod tests {
         }"#;
         let (specs, errors) = parse_hook_file(json, Path::new("/tmp/settings.json"));
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
-        assert_eq!(specs.len(), 2);
+        // PermissionRequest is a known event now; the other three are still skipped.
+        assert_eq!(specs.len(), 3);
         let has_pre = specs.iter().any(|s| s.event == HookEventName::PreToolUse);
         let has_post = specs.iter().any(|s| s.event == HookEventName::PostToolUse);
+        assert!(
+            specs
+                .iter()
+                .any(|s| s.event == HookEventName::PermissionRequest)
+        );
         assert!(has_pre, "expected PreToolUse hook");
         assert!(has_post, "expected PostToolUse hook");
     }

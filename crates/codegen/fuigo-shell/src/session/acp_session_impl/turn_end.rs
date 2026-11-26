@@ -224,6 +224,52 @@ impl SessionActor {
         rx.await.ok()
     }
 
+    /// Prompt scope (1.0.48, A8): live work at the end of `prompt_id`, from local state only (no client round-trip):
+    /// background tasks/monitors not yet completed (any prompt's: work an earlier prompt left is as unsafe to share),
+    /// subagents pending, active or queued (any prompt's), and drains already scheduled (pending notifications and queued
+    /// internal turns). `None` when any source cannot be read without waiting, so the field is omitted and a
+    /// prompt-scoped client does not park.
+    pub(super) async fn live_background_count(&self, prompt_id: &str) -> Option<u64> {
+        let bound = std::time::Duration::from_millis(250);
+        let tasks = tokio::time::timeout(bound, self.tool_bridge_handle().live_task_count())
+            .await
+            .ok()
+            .flatten();
+        let subagents = match &self.tool_context.subagent_event_tx {
+            None => Some(Default::default()),
+            Some(tx) => {
+                use fuigo_tools::implementations::fuigo_build::task::types::{
+                    SubagentEvent, SubagentRegistryCountsRequest,
+                };
+                let (respond_to, rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(SubagentEvent::RegistryCounts(
+                        SubagentRegistryCountsRequest { respond_to },
+                    ))
+                    .is_err()
+                {
+                    None
+                } else {
+                    tokio::time::timeout(bound, rx)
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                }
+            }
+        };
+        // Bounded: a caller that still holds the state lock costs 250 ms and an omitted field, never a deadlock.
+        let state = tokio::time::timeout(bound, self.state.lock()).await.ok();
+        let scheduled = state.map(|state| {
+            state.pending_notifications.len()
+                + state
+                    .pending_inputs
+                    .iter()
+                    .filter(|item| item.prompt_id != prompt_id && item.input_origin.is_synthetic())
+                    .count()
+        });
+        crate::session::prompt_scope::live_background_count(tasks, subagents.as_ref(), scheduled)
+    }
+
     /// Whether usage should be reported incomplete; the error-path attach and tests call this.
     /// Delegates to [`super::turn::UsageDrainOutcome::report_incomplete`].
     pub(super) fn usage_incomplete_from_reply(
@@ -543,6 +589,18 @@ impl SessionActor {
         }
         if let Some(ctx) = cancellation_context {
             extra.insert("cancellationContext".to_string(), ctx);
+        }
+        // Prompt scope (1.0.48): the pair the turn started with (this may run after the turn task ended), and A8's count of
+        // live background work. The count is omitted when it cannot be taken, so a prompt-scoped client does not park.
+        if let Some(origin) = self.tool_context.prompt_scope.turn_origin(&prompt_id) {
+            crate::session::prompt_scope::PromptScope::internal(&prompt_id, origin)
+                .stamp(&mut extra);
+        }
+        if let Some(n) = self.live_background_count(&prompt_id).await {
+            extra.insert(
+                crate::session::prompt_scope::META_BACKGROUND.to_string(),
+                serde_json::json!(n),
+            );
         }
         let extra_meta = (!extra.is_empty()).then_some(extra);
         // P119: the helper stamps the typed verdicts from the error as it stands now, before credentials are replaced in the text

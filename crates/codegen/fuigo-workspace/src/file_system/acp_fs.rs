@@ -58,7 +58,7 @@ impl AsyncFileSystem for AcpSessionFs {
     async fn exists(&self, path: &Path) -> Result<bool, FsError> {
         let resolved = self.resolve_path(path);
         let read_req = acp::ReadTextFileRequest::new(self.session_id.clone(), resolved).limit(0);
-        match self.gateway.send(read_req).await {
+        match self.gateway.send_request(read_req).await {
             Ok(_) => Ok(true),
             Err(e) if e.code == acp::ErrorCode::ResourceNotFound => Ok(false),
             Err(e) => Err(FsError::Other(e.to_string())),
@@ -70,7 +70,7 @@ impl AsyncFileSystem for AcpSessionFs {
         let read_req = acp::ReadTextFileRequest::new(self.session_id.clone(), resolved);
         let response = self
             .gateway
-            .send(read_req)
+            .send_request(read_req)
             .await
             .map_err(|e| FsError::Other(e.to_string()))?;
         Ok(response.content.into_bytes())
@@ -79,7 +79,7 @@ impl AsyncFileSystem for AcpSessionFs {
     async fn try_read_file(&self, path: &Path) -> Result<Option<Vec<u8>>, FsError> {
         let resolved = self.resolve_path(path);
         let read_req = acp::ReadTextFileRequest::new(self.session_id.clone(), resolved);
-        match self.gateway.send(read_req).await {
+        match self.gateway.send_request(read_req).await {
             Ok(response) => Ok(Some(response.content.into_bytes())),
             Err(e) if e.code == acp::ErrorCode::ResourceNotFound => Ok(None),
             Err(e) => Err(FsError::Other(e.to_string())),
@@ -94,7 +94,7 @@ impl AsyncFileSystem for AcpSessionFs {
             String::from_utf8(data.to_vec()).map_err(|e| FsError::Other(e.to_string()))?,
         );
         self.gateway
-            .send(write_req)
+            .send_request(write_req)
             .await
             .map_err(|e| FsError::Other(e.to_string()))?;
         Ok(())

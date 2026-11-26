@@ -139,6 +139,8 @@ pub(crate) struct SubagentSpawnContext {
     pub yolo_mode: bool,
     /// The parent was peer-influenced at spawn (S6.1): the child starts influenced.
     pub parent_peer_influence: fuigo_workspace::permission::PeerInfluence,
+    /// The parent session's never-merge guard, from which the child's is derived at spawn.
+    pub parent_ship_guard: Arc<crate::session::ship_guard::ShipGuard>,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
     pub parent_depth: u32,
     pub subagents_max_depth: u32,
@@ -2139,6 +2141,7 @@ fn spawn_progress_publisher(
     started_at: std::time::Instant,
     cancel_token: tokio_util::sync::CancellationToken,
     parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
+    scope: crate::session::prompt_scope::PromptScope,
 ) -> tokio_util::task::AbortOnDropHandle<()> {
     tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         let mut interval = tokio::time::interval(PROGRESS_PUBLISH_INTERVAL);
@@ -2182,10 +2185,14 @@ fn spawn_progress_publisher(
                 tools_used: signals.tools_used,
                 error_count: signals.error_count,
             };
+            // Prompt scope (1.0.48, WF-5): ticks carry the parent prompt bound when the subagent was spawned, even after
+            // that prompt ended and another one runs.
+            let mut meta = serde_json::Map::new();
+            scope.stamp(&mut meta);
             let notification = SessionNotification {
                 session_id: acp::SessionId::new(parent_session_id.clone()),
                 update,
-                meta: None,
+                meta: Some(serde_json::Value::Object(meta)),
             };
             let params = serde_json::to_value(&notification)
                 .and_then(|v| serde_json::value::to_raw_value(&v))

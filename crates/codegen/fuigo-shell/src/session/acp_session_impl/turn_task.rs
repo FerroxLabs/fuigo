@@ -381,17 +381,24 @@ impl AgentTask {
     ) -> Self {
         let started_at = std::time::Instant::now();
         let identity = TaskIdentity::new(());
+        // Prompt scope (1.0.48): bind the turn's (promptId, originPromptId) to the turn task when it starts, so every frame
+        // the turn emits carries it even if another turn is current by the time the frame is sent.
+        let scope = session.prompt_scope_for_turn(&request.prompt_id, &request.input_origin);
         Self {
             prompt_id: request.prompt_id.clone(),
             epoch,
             identity: identity.clone(),
-            handle: fuigo_telemetry::session_ctx::spawn_local_in_session_ctx(run_task(
-                session,
-                request,
-                epoch,
-                identity,
-                completion_tx,
-                started_at,
+            // Boxed: each wrapper (prompt scope, session telemetry) otherwise reserves a stack slot the size of the whole
+            // turn future, and a debug build overflowed the 8 MiB session thread on a hook-dispatching tool call.
+            handle: fuigo_telemetry::session_ctx::spawn_local_in_session_ctx(scope.scope(
+                Box::pin(run_task(
+                    session,
+                    request,
+                    epoch,
+                    identity,
+                    completion_tx,
+                    started_at,
+                )),
             ))
             .abort_handle(),
             started_at,
@@ -449,6 +456,14 @@ async fn run_task(
     started_at: std::time::Instant,
 ) {
     let prompt_id = request.prompt_id.clone();
+    // Prompt scope (1.0.48, A4): announce the turn and its root before its first update.
+    if let Some(scope) = crate::session::prompt_scope::PromptScope::current() {
+        session.tool_context.prompt_scope.begin_turn(&scope);
+        session.send_fuigo_notification_transient(FuigoSessionUpdate::TurnStarted {
+            prompt_id: prompt_id.clone(),
+            origin_prompt_id: scope.origin_prompt_id,
+        });
+    }
     let completed_by_peer = request.input_origin.as_prompt_origin().is_peer();
     // S5.6: the turn's conversation comes from this turn's origin and is cleared on every way out (cancel, error, panic, abort).
     let origin = request.input_origin.as_prompt_origin();
@@ -576,5 +591,34 @@ mod task_slot_tests {
             10,
             "only the re-armed task fires"
         );
+    }
+}
+
+impl SessionActor {
+    /// The (promptId, originPromptId) pair a turn starts with (design A1b). A client prompt is its own root; an internal
+    /// turn names the client prompt whose work woke it, read from the roots bound when that work started.
+    pub(crate) fn prompt_scope_for_turn(
+        &self,
+        prompt_id: &str,
+        input_origin: &InputOrigin,
+    ) -> crate::session::prompt_scope::PromptScope {
+        use crate::session::PromptOrigin;
+        use crate::session::prompt_scope::{self as ps, PromptScope};
+        let registry = &self.tool_context.prompt_scope;
+        let recorded = registry.take_internal_origin(prompt_id);
+        let origin = match input_origin.as_prompt_origin() {
+            PromptOrigin::User | PromptOrigin::UnverifiedScheduled => {
+                return PromptScope::client(prompt_id);
+            }
+            PromptOrigin::TaskCompleted { task_id } => registry
+                .root_of(&ps::bash_work_id(task_id))
+                .or_else(|| registry.root_of(&ps::monitor_work_id(task_id)))
+                .flatten(),
+            PromptOrigin::SubagentCompleted { subagent_id } => registry
+                .root_of(&ps::subagent_work_id(subagent_id))
+                .flatten(),
+            _ => recorded.flatten(),
+        };
+        PromptScope::internal(prompt_id, origin)
     }
 }

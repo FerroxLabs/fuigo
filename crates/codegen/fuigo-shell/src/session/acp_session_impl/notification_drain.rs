@@ -668,11 +668,27 @@ impl SessionActor {
             if to_surface.is_empty() {
                 false
             } else {
-                Self::drain_notifications_into_turn(
+                // Prompt scope (1.0.48, A1b): the drain turn is rooted in the client prompt whose work it reports, when
+                // every notification shares one root; mixed or unbound roots give `null`.
+                let origin = self.tool_context.prompt_scope.common_root(
+                    to_surface
+                        .iter()
+                        .map(|n| crate::session::prompt_scope::notification_work_id(&n.source))
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .map(String::as_str),
+                );
+                let drained = Self::drain_notifications_into_turn(
                     &mut state,
                     to_surface,
                     &self.tool_context.task_output_tool_name,
-                )
+                );
+                if let Some(item) = state.pending_inputs.back() {
+                    self.tool_context
+                        .prompt_scope
+                        .set_internal_origin(&item.prompt_id, origin);
+                }
+                drained
             }
         };
         // Mark reported whether dropped or surfaced, so the per-tool-call `TaskCompletionReminder` won't resurface the same completions

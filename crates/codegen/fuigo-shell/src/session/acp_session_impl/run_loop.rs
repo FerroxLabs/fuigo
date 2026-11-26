@@ -168,6 +168,8 @@ fn detach_session_end_hooks(
                     session_id: &session_id,
                     workspace_root: &workspace_root,
                     process_scope: Some(fuigo_tools::util::global_process_scope().clone()),
+                    // Detached after the session ended: its MCP servers may be gone, so `mcp_tool` hooks fail open here.
+                    mcp: None,
                 };
                 let results = fuigo_hooks::dispatcher::dispatch_non_blocking(
                     &registry,
@@ -2164,6 +2166,21 @@ pub(super) async fn run_session(
                             if !deferred_start.cancel.is_cancelled() {
                                 let s = session.clone();
                                 let cancel = deferred_start.cancel.clone();
+                                // A top-level session with a SessionStart hook holds its first turn for the hook's context, briefly.
+                                let (context_tx, context_rx) = tokio::sync::oneshot::channel();
+                                if !session.startup_hints.is_subagent
+                                    && session.hook_registry.borrow().as_ref().is_some_and(|registry| {
+                                        registry.has_enabled_hooks_for_canonical(
+                                            fuigo_hooks::event::HookEventName::SessionStart,
+                                        )
+                                    })
+                                {
+                                    *session.session_start_context.borrow_mut() = Some((
+                                        tokio::time::Instant::now()
+                                            + crate::session::acp_session::SESSION_START_CONTEXT_WAIT,
+                                        context_rx,
+                                    ));
+                                }
                                 let handle = tokio::task::spawn_local(async move {
                                     let run = async {
                                         if cancel.is_cancelled() {
@@ -2185,16 +2202,15 @@ pub(super) async fn run_session(
                                             return;
                                         };
                                         let ctx = s.hook_run_ctx();
-                                        let results = fuigo_hooks::dispatcher::dispatch_non_blocking(
-                                            &registry,
-                                            fuigo_hooks::event::HookEventName::SessionStart,
-                                            &envelope,
-                                            &ctx,
-                                        )
-                                        .await;
+                                        let (results, context) =
+                                            fuigo_hooks::dispatcher::dispatch_session_start(
+                                                &registry, &envelope, &ctx,
+                                            )
+                                            .await;
                                         if cancel.is_cancelled() {
                                             return;
                                         }
+                                        let _ = context_tx.send(context);
                                         s.send_hook_execution("session_start", None, None, None, &results)
                                             .await;
                                     };

@@ -56,3 +56,4 @@ Automate, script, and integrate Fuigo with other systems.
 | 26 | [Configuration Reference](26-config-reference.md) | Field list for `config.toml`, `managed_config.toml`, and `requirements.toml` |
 | 27 | [fuigo clone](27-fuigo-clone.md) | Depth-1 Grove clone, `--full-history`, and safe deepen/switch commands |
 | 28 | [Named Sessions and Peer Messaging](28-named-sessions.md) | Sessions on one machine list each other and send messages; off by default, `/peers`, holds, and limits |
+| 29 | [VS Code Extension](29-vscode-extension.md) | The native extension for VS Code, Cursor and other forks: chat panel, edit diffs, permission prompts, settings |

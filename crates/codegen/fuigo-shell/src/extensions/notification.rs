@@ -1025,6 +1025,13 @@ pub enum SessionUpdate {
     /// A previously-pending reverse-request **resolved** (answered, cancelled, or errored).
     /// Fire-and-forget, **never persisted**. Subscribers clear the pending ⏳ for this `tool_call_id`.
     InteractionResolved { tool_call_id: String },
+    /// Prompt scope (1.0.48): prompt `prompt_id` started. Sent before the first update of that prompt, fire-and-forget,
+    /// never persisted. `origin_prompt_id` is the client prompt at the root of the turn (the prompt itself for a client
+    /// prompt, the prompt whose work woke an internal turn, `null` when no client prompt caused it).
+    TurnStarted {
+        prompt_id: String,
+        origin_prompt_id: Option<String>,
+    },
     /// The durable, replayable signal that a turn reached its terminal outcome.
     /// Rides the persisted `_fuigo/session/update` rail, unlike the fire-and-forget `fuigo/session/prompt_complete` notification.
     /// A viewer that re-attaches mid-turn can therefore finalize the turn from replay instead of staying stuck on "Waiting…".

@@ -1,0 +1,258 @@
+{
+  "name": "fuigo",
+  "displayName": "Fuigo",
+  "description": "Fuigo coding agent in VS Code: chat panel, native permission prompts and edits.",
+  "version": "0.1.0",
+  "publisher": "ferroxlabs",
+  "license": "Apache-2.0",
+  "icon": "media/icon.png",
+  "homepage": "https://github.com/FerroxLabs/fuigo/tree/main/editors/vscode#readme",
+  "bugs": {
+    "url": "https://github.com/FerroxLabs/fuigo/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FerroxLabs/fuigo.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "fuigo",
+    "agent",
+    "ai",
+    "coding agent",
+    "acp",
+    "agent client protocol"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Fuigo runs an agent that reads and edits files and runs commands, so it stays off until you trust the workspace."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "fuigo",
+          "title": "Fuigo",
+          "icon": "media/fuigo.svg"
+        }
+      ]
+    },
+    "views": {
+      "fuigo": [
+        {
+          "type": "webview",
+          "id": "fuigo.chat",
+          "name": "Chat"
+        },
+        {
+          "id": "fuigo.edits",
+          "name": "Edits",
+          "when": "fuigo.edits.pending"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "fuigo.openInTerminal",
+        "title": "Open in Terminal",
+        "category": "Fuigo"
+      },
+      {
+        "command": "fuigo.newSession",
+        "title": "New Session",
+        "category": "Fuigo",
+        "icon": "$(add)"
+      },
+      {
+        "command": "fuigo.stop",
+        "title": "Stop",
+        "category": "Fuigo"
+      },
+      {
+        "command": "fuigo.focus",
+        "title": "Open Chat",
+        "category": "Fuigo"
+      },
+      {
+        "command": "fuigo.addSelectionToContext",
+        "title": "Add Selection to Fuigo",
+        "category": "Fuigo"
+      },
+      {
+        "command": "fuigo.edits.accept",
+        "title": "Accept Edit",
+        "category": "Fuigo",
+        "icon": "$(check)"
+      },
+      {
+        "command": "fuigo.edits.reject",
+        "title": "Reject Edit",
+        "category": "Fuigo",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "fuigo.edits.acceptAll",
+        "title": "Accept All Edits",
+        "category": "Fuigo",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "fuigo.edits.rejectAll",
+        "title": "Reject All Edits",
+        "category": "Fuigo",
+        "icon": "$(close-all)"
+      },
+      {
+        "command": "fuigo.edits.refresh",
+        "title": "Refresh Edits",
+        "category": "Fuigo",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "fuigo.edits.open",
+        "title": "Open Edit Diff",
+        "category": "Fuigo"
+      },
+      {
+        "command": "fuigo.edits.reviewPermission",
+        "title": "Review Edit Permission (internal)",
+        "category": "Fuigo"
+      }
+    ],
+    "configuration": {
+      "title": "Fuigo",
+      "properties": {
+        "fuigo.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Path to the fuigo binary. Empty: look on PATH, then in the npm global install. User settings only: a workspace value is ignored."
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "fuigo.addSelectionToContext",
+          "when": "editorHasSelection",
+          "group": "9_fuigo"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "fuigo.addSelectionToContext",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "fuigo.edits.open",
+          "when": "false"
+        },
+        {
+          "command": "fuigo.edits.reviewPermission",
+          "when": "false"
+        },
+        {
+          "command": "fuigo.edits.accept",
+          "when": "fuigo.edits.pending"
+        },
+        {
+          "command": "fuigo.edits.reject",
+          "when": "fuigo.edits.pending"
+        },
+        {
+          "command": "fuigo.edits.acceptAll",
+          "when": "fuigo.edits.pending"
+        },
+        {
+          "command": "fuigo.edits.rejectAll",
+          "when": "fuigo.edits.pending"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "fuigo.newSession",
+          "when": "view == fuigo.chat",
+          "group": "navigation"
+        },
+        {
+          "command": "fuigo.edits.acceptAll",
+          "when": "view == fuigo.edits",
+          "group": "navigation@1"
+        },
+        {
+          "command": "fuigo.edits.rejectAll",
+          "when": "view == fuigo.edits",
+          "group": "navigation@2"
+        },
+        {
+          "command": "fuigo.edits.refresh",
+          "when": "view == fuigo.edits",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "fuigo.edits.accept",
+          "when": "view == fuigo.edits",
+          "group": "inline@1"
+        },
+        {
+          "command": "fuigo.edits.reject",
+          "when": "view == fuigo.edits",
+          "group": "inline@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "fuigo.edits.accept",
+          "when": "resourceScheme == fuigo-edit || resourcePath in fuigo.edits.pendingPaths",
+          "group": "navigation@1"
+        },
+        {
+          "command": "fuigo.edits.reject",
+          "when": "resourceScheme == fuigo-edit || resourcePath in fuigo.edits.pendingPaths",
+          "group": "navigation@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p . --noEmit",
+    "compile-tests": "tsc -p tsconfig.test.json",
+    "test:unit": "npm run compile-tests && mocha 'out-test/test/unit/**/*.test.js' 'out-test/test/context/**/*.test.js' 'out-test/test/edits/**/*.test.js'",
+    "test:integration": "npm run build && npm run compile-tests && bash test/integration/run.sh",
+    "lint": "eslint .",
+    "package": "vsce package --no-dependencies",
+    "vscode:prepublish": "node esbuild.mjs --minify"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/markdown-it": "14.2.0",
+    "@types/mocha": "10.0.10",
+    "@types/node": "22.10.2",
+    "@types/vscode": "1.94.0",
+    "@vscode/test-electron": "2.4.1",
+    "@vscode/vsce": "4.1.1",
+    "esbuild": "0.24.2",
+    "eslint": "10.15.0",
+    "markdown-it": "15.0.3",
+    "mocha": "11.1.0",
+    "ovsx": "1.4.0",
+    "typescript": "5.7.2",
+    "typescript-eslint": "8.74.0"
+  }
+}

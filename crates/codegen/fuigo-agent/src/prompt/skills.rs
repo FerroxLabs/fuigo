@@ -3145,13 +3145,13 @@ mod tests {
     }
 
     /// RAII guard: set an env var, restore the prior value (or unset) on drop.
-    struct EnvVarGuard {
+    pub(super) struct EnvVarGuard {
         key: &'static str,
         prev: Option<std::ffi::OsString>,
     }
 
     impl EnvVarGuard {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        pub(super) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
             let prev = std::env::var_os(key);
             unsafe { std::env::set_var(key, value) };
             Self { key, prev }
@@ -3778,6 +3778,12 @@ mod discovery_budget_tests {
     #[tokio::test]
     #[serial_test::serial(home_env)]
     async fn a_large_skills_folder_is_scanned_once_and_a_late_skill_is_still_found() {
+        // The count is exact, so no ambient user or bundled skill may join it (e.g. the built-in /review, /ship and
+        // /steward that a fuigo-shell test installed under the real `~/.fuigo/bundled`).
+        let home = tempfile::tempdir().unwrap();
+        let _home = super::tests::EnvVarGuard::set("HOME", home.path());
+        let _userprofile = super::tests::EnvVarGuard::set("USERPROFILE", home.path());
+        let _fuigo_home = super::tests::EnvVarGuard::set("FUIGO_HOME", home.path().join(".fuigo"));
         let (tmp, cwd) = project_with_skill("anchor-skill");
         let skills_root = tmp.path().join(".fuigo").join("skills");
         for i in 0..600 {

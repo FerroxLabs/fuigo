@@ -475,6 +475,39 @@ Toggle message timestamps on or off.
 
 ---
 
+## Review and Ship
+
+These three are built-in skills (see [Skills](08-skills.md#built-in-skills-review-ship-steward)). A project or user skill with the same name replaces them.
+
+### `/review [effort] [target] [--fix] [--comment] [--max-findings n|all]`
+
+Review code for correctness bugs. Fuigo checks each finding against the code before reporting it, and lists them most severe first with `file:line`, what goes wrong, and the smallest fix.
+
+- **effort**: `low`, `medium`, `high` (default), `xhigh` or `max`. Lower levels report a few findings Fuigo is sure of; higher levels look wider and may include less certain ones, which are labelled.
+- **target**: nothing (the branch's changes that are not upstream yet, plus uncommitted work), a pull request number, a branch, a path, or a revision range such as `main...HEAD`.
+- `--fix` applies the fixes to your working tree after the report, through the normal permission flow. It does not commit.
+- `--comment` posts the findings as inline comments on the pull request (GitHub, via `gh`). It never approves or requests changes.
+
+```
+/review
+/review low 482
+/review max main...HEAD --fix
+```
+
+### `/ship [effort] | stop`
+
+Take the session's work to a watched pull request: commit, push, open a pull request if the branch has none, run `/review` on it, fix the real problems it finds, then watch the pull request the way `/steward` does. Fuigo prints one line before it commits and one before it pushes, then goes ahead (press Esc to stop it). On the default branch it creates a new branch first. It leaves out files whose names look like secrets (`.env`, `*.pem`, `*.key`, `credentials*`) and says which; it does not commit in public repositories, and it does not touch someone else's pull request. It never merges: you merge. `/ship stop` ends the watch.
+
+Needs `git` and the GitHub CLI (`gh`) signed in. With a remote that is not GitHub, `/ship` commits and pushes and then stops.
+
+### `/steward [PR] [+bot] | stop`
+
+Watch an open pull request (the current branch's, or the number you give) and keep it moving: fix failing checks (or re-run a flaky one once), merge the base branch to resolve conflicts, answer review comments from you, people with write access, and bots you name with `+name`, and push the fixes. It does not review the code first. The watch waits without polling the model: one background `gh pr checks --watch` for CI and one persistent monitor that wakes the session only when the pull request changes. It ends when the pull request is merged or closed, the branch changes, after 7 days, when the session ends, or on `/steward stop`.
+
+**Never-merge rule.** While a `/ship` or `/steward` watch is armed, Fuigo refuses, on every turn you did not type (a wake from a background command, monitor, subagent or `/loop`), a shell command that would merge a pull request (`gh pr merge`, a `gh api` merge), approve one (`gh pr review --approve`), enable auto-merge, or force-push (`git push --force`, `-f`, `--force-with-lease`, `--mirror`, `+branch`), and the same through a GitHub MCP tool: `merge_pull_request`; a review written with event `APPROVE` (`pull_request_review_write`, `create_pull_request_review`, `create_and_submit_pull_request_review`, `submit_pending_pull_request_review`); `enable_auto_merge` or `enable_pull_request_auto_merge`; and `update_ref` or `update_git_ref` with `force: true`. MCP tools are matched by tool name (under any server name) and arguments, never a whole server, so `update_pull_request_branch`, comments and other reviews still work. A subagent started on such a turn carries the rule for its whole life, and so do its own subagents; subagents started on a turn you typed are unaffected. The refusal comes back to the model as a denied tool call. Turns you type are never limited, and a session that never ran `/ship` or `/steward` sees no change. The rule is a guardrail, not a sandbox: auto-merge already enabled on GitHub still merges, and a script in the repository that the agent runs can still merge with your credentials. Guard limits: commands are recognised by a token scan, not a shell parser, so an alias, a wrapper script or `git -c alias.x=...` is not caught, and only the MCP tools listed above are matched; a GitHub MCP tool under another name is not.
+
+---
+
 ## Skills as Slash Commands
 
 Any enabled skill with `user-invocable: true` in its SKILL.md frontmatter shows up as a slash command. (Turn a skill off via `/skills` and it stops being advertised.) So a skill at `~/.fuigo/skills/commit/SKILL.md` runs as:
