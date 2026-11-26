@@ -8,7 +8,8 @@
 # Publishing: only on a `vscode-v<version>` tag, after the checks pass, through the `vscode-publish` environment.
 # No stored tokens: both registries trust this workflow through GitHub OIDC (trusted publishing). The VS Code
 # Marketplace policy (publisher ferroxlabs) and the Open VSX trusted publisher (namespace ferroxlabs) both pin this repo,
-# this workflow file and the vscode-publish environment; any other caller gets no publish token.
+# this workflow file and the vscode-publish environment; any other caller gets no publish token. Exception: Open VSX's
+# first version needs an OVSX_PAT environment secret (see the Open VSX step).
 name: vscode extension
 on:
   pull_request:
@@ -133,5 +134,14 @@ jobs:
       # The same VSIX bytes go to both registries.
       - name: Publish to the VS Code Marketplace
         run: npx --no-install vsce publish --oidc --packagePath "$VSIX"
+      # Open VSX only accepts a trusted publisher for an extension that already exists, so the first version goes up
+      # with OVSX_PAT; once the trusted publisher is registered the secret is deleted and this falls through to OIDC.
       - name: Publish to Open VSX
-        run: npx --no-install ovsx publish --trusted-publishing "$VSIX"
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -n "$OVSX_PAT" ]; then
+            npx --no-install ovsx publish "$VSIX"
+          else
+            npx --no-install ovsx publish --trusted-publishing "$VSIX"
+          fi
