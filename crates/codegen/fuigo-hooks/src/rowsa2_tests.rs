@@ -35,6 +35,7 @@ fn ctx() -> RunContext<'static> {
         session_id: "rowsa2",
         workspace_root: "/tmp",
         process_scope: None,
+        mcp: None,
     }
 }
 
@@ -57,6 +58,7 @@ fn spec_with(handler_type: HandlerType) -> HookSpec {
         source_dir: std::env::temp_dir(),
         extra_env: Default::default(),
         layer: HookProvenance::File,
+        mcp_tool: None,
     }
 }
 

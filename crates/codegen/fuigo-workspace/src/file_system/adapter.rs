@@ -36,7 +36,7 @@ impl AsyncFileSystem for AcpFsAdapter {
 
         let response = self
             .gateway
-            .send(read_req)
+            .send_request(read_req)
             .await
             .map_err(acp_error_to_computer_error)?;
 
@@ -72,7 +72,7 @@ impl AsyncFileSystem for AcpFsAdapter {
             acp::WriteTextFileRequest::new(self.session_id.clone(), path.to_path_buf(), content);
 
         self.gateway
-            .send(write_req)
+            .send_request(write_req)
             .await
             .map_err(acp_error_to_computer_error)?;
 

@@ -34,7 +34,7 @@ async fn poll_terminal_output(
     max_errors: u32,
 ) -> PollStep {
     match gateway
-        .send(acp::TerminalOutputRequest::new(
+        .send_request(acp::TerminalOutputRequest::new(
             session_id.clone(),
             terminal_id.clone(),
         ))
@@ -76,7 +76,7 @@ pub(super) async fn watch_for_exit(
 ) {
     let terminal_id = acp::TerminalId::new(task_id.clone());
 
-    let wait = gateway.send(acp::WaitForTerminalExitRequest::new(
+    let wait = gateway.send_request(acp::WaitForTerminalExitRequest::new(
         session_id.clone(),
         terminal_id.clone(),
     ));
@@ -143,7 +143,7 @@ pub(super) async fn watch_for_exit(
         }
         Exit::WithOutput(output) => *output,
         Exit::NeedFetch => match gateway
-            .send(acp::TerminalOutputRequest::new(
+            .send_request(acp::TerminalOutputRequest::new(
                 session_id.clone(),
                 terminal_id.clone(),
             ))
@@ -205,7 +205,7 @@ pub(super) async fn release_terminal(
     terminal_id: &acp::TerminalId,
 ) {
     if let Err(e) = gateway
-        .send(acp::ReleaseTerminalRequest::new(
+        .send_request(acp::ReleaseTerminalRequest::new(
             session_id.clone(),
             terminal_id.clone(),
         ))

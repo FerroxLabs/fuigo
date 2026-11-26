@@ -4,6 +4,7 @@ mod gateway;
 mod line_reader;
 mod message;
 mod normalize;
+pub mod prompt_scope;
 mod stdin_reader;
 
 pub use self::{
@@ -24,6 +25,7 @@ pub use self::{
 };
 
 pub use self::line_reader::{LineBufferedRead, MAX_LINE_SIZE};
+pub use self::prompt_scope::PromptScope;
 pub use self::stdin_reader::spawn_stdin_line_reader;
 
 #[doc(hidden)]

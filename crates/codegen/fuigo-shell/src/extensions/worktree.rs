@@ -35,7 +35,7 @@ impl WorktreeNotificationSender for GatewayWorktreeNotifier {
             }
         };
         let notification = acp::ExtNotification::new("fuigo/git/worktree/status", params.into());
-        if let Err(e) = self.gateway.send(notification).await {
+        if let Err(e) = self.gateway.send_request(notification).await {
             tracing::warn!(
                 "Failed to send worktree progress notification: {}",
                 crate::sampling::error::acp_error_text(&e)

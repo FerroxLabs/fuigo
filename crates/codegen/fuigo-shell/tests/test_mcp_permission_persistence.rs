@@ -142,6 +142,7 @@ impl FakeGateway {
 async fn request(handle: &PermissionHandle, access: AccessKind, id: &str) -> Decision {
     let (tx, rx) = oneshot::channel();
     let cmd = PermissionCommand::Request {
+        scope: None,
         request: PermissionRequest::new(access, tool_call_update(id, "mcp")),
         respond_to: tx,
     };

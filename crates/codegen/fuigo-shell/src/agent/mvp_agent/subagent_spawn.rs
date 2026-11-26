@@ -238,6 +238,7 @@ impl MvpAgent {
             inherited_tool_overrides,
             yolo_mode,
             parent_peer_influence: ps.map(|h| h.tool_context.peer_influence.clone()).unwrap_or_default(),
+            parent_ship_guard: ps.map(|h| h.tool_context.ship_guard.clone()).unwrap_or_default(),
             subagent_event_tx: self.subagent_event_tx.event_sender().0,
             parent_depth,
             subagents_max_depth: self.cfg.borrow().subagents_max_depth,

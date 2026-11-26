@@ -135,6 +135,8 @@ struct GateBlock {
 
 struct SequentialGateOutcome {
     block: Option<GateBlock>,
+    /// The last hook that answered with an explicit allow (read only by the permission-request gate).
+    allowed_by: Option<String>,
     pending_ask: Option<PendingAsk>,
     deferring_hook: Option<String>,
     updated_input: Option<InputRewrite>,
@@ -156,6 +158,7 @@ async fn dispatch_sequential_gate(
     if hooks.is_empty() {
         return SequentialGateOutcome {
             block: None,
+            allowed_by: None,
             pending_ask: None,
             deferring_hook: None,
             updated_input: None,
@@ -172,6 +175,7 @@ async fn dispatch_sequential_gate(
         let mut additional_context: Vec<AdditionalContext> = Vec::new();
         let mut pending_ask: Option<PendingAsk> = None;
         let mut deferring_hook: Option<String> = None;
+        let mut allowed_by: Option<String> = None;
         let disabled = crate::trust::DisabledHooks::load();
 
         for spec in hooks {
@@ -194,6 +198,7 @@ async fn dispatch_sequential_gate(
                             reason,
                             ends_turn: false,
                         }),
+                        allowed_by: None,
                         pending_ask: None,
                         deferring_hook: None,
                         updated_input: None,
@@ -238,6 +243,7 @@ async fn dispatch_sequential_gate(
                             reason,
                             ends_turn: false,
                         }),
+                        allowed_by: None,
                         pending_ask: None,
                         deferring_hook: None,
                         updated_input: None,
@@ -266,6 +272,7 @@ async fn dispatch_sequential_gate(
                             reason,
                             ends_turn: true,
                         }),
+                        allowed_by: None,
                         pending_ask: None,
                         deferring_hook: None,
                         updated_input: None,
@@ -284,6 +291,7 @@ async fn dispatch_sequential_gate(
                         additional_context = hook_additional_context.is_some(),
                         "hook allowed"
                     );
+                    allowed_by = Some(spec.name.clone());
                     if let Some(rewrite) = hook_updated_input {
                         record_rewrite(&mut updated_input, &spec.name, rewrite);
                     }
@@ -339,7 +347,8 @@ async fn dispatch_sequential_gate(
                 }
                 HookRunnerResult::Failed(err) => {
                     // Opt-in (`"failClosed": true`): this hook's failure blocks instead of being ignored.
-                    if spec.fail_closed {
+                    // Only the tool and prompt gates honour it; a permission-request failure always shows the prompt.
+                    if spec.fail_closed && matches!(gate, GateKind::Tool | GateKind::Prompt) {
                         tracing::warn!(
                             hook_name = %spec.name,
                             elapsed_ms = elapsed.as_millis() as u64,
@@ -364,6 +373,7 @@ async fn dispatch_sequential_gate(
                                 reason,
                                 ends_turn: false,
                             }),
+                            allowed_by: None,
                             pending_ask: None,
                             deferring_hook: None,
                             updated_input: None,
@@ -406,6 +416,7 @@ async fn dispatch_sequential_gate(
         record_dispatch_counts(&span, &run_results);
         SequentialGateOutcome {
             block: None,
+            allowed_by,
             pending_ask,
             deferring_hook,
             updated_input,
@@ -499,8 +510,61 @@ pub async fn dispatch_pre_tool_use(
     }
 }
 
+/// What `PermissionRequest` hooks answered for one permission prompt.
+pub enum PermissionRequestDecision {
+    /// Grant without prompting; `updated_input` (last writer wins) replaces the tool input.
+    Allow { updated_input: Option<InputRewrite> },
+    /// Refuse without prompting; `message` tells the model why.
+    Deny { hook_name: String, message: String },
+}
+
+pub struct PermissionRequestResult {
+    /// `None`: no hook answered (or every one failed), so the normal prompt is shown.
+    pub decision: Option<PermissionRequestDecision>,
+    pub results: Vec<HookRunResult>,
+}
+
+/// Run the `PermissionRequest` hooks for a prompt about to be shown: the first deny wins, otherwise any allow grants.
+/// Failures contribute nothing (fail open is the prompt, never an allow).
+pub async fn dispatch_permission_request(
+    registry: &HookRegistry,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> PermissionRequestResult {
+    let outcome = dispatch_sequential_gate(
+        registry,
+        HookEventName::PermissionRequest,
+        GateKind::Permission,
+        "denied",
+        envelope,
+        ctx,
+    )
+    .await;
+    let decision = match (outcome.block, outcome.allowed_by) {
+        (
+            Some(GateBlock {
+                hook_name, reason, ..
+            }),
+            _,
+        ) => Some(PermissionRequestDecision::Deny {
+            hook_name,
+            message: reason,
+        }),
+        (None, Some(_)) => Some(PermissionRequestDecision::Allow {
+            updated_input: outcome.updated_input,
+        }),
+        (None, None) => None,
+    };
+    PermissionRequestResult {
+        decision,
+        results: outcome.results,
+    }
+}
+
 pub struct PromptGateResult {
     pub decision: PromptDecision,
+    /// `additionalContext` from allowing hooks, in call order. Empty on a block.
+    pub additional_context: Vec<AdditionalContext>,
     pub results: Vec<HookRunResult>,
 }
 
@@ -509,22 +573,49 @@ pub async fn dispatch_prompt_gate(
     envelope: &HookEventEnvelope,
     ctx: &RunContext<'_>,
 ) -> PromptGateResult {
-    let outcome = dispatch_sequential_gate(
+    dispatch_text_gate(
         registry,
         HookEventName::UserPromptSubmit,
         GateKind::Prompt,
-        "blocked",
         envelope,
         ctx,
     )
-    .await;
+    .await
+}
+
+/// `PreCompact`: a block stops the compaction; `additional_context` holds the hooks' extra summary instructions.
+pub async fn dispatch_pre_compact(
+    registry: &HookRegistry,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> PromptGateResult {
+    dispatch_text_gate(
+        registry,
+        HookEventName::PreCompact,
+        GateKind::Compact,
+        envelope,
+        ctx,
+    )
+    .await
+}
+
+async fn dispatch_text_gate(
+    registry: &HookRegistry,
+    event: HookEventName,
+    gate: GateKind,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> PromptGateResult {
+    let outcome = dispatch_sequential_gate(registry, event, gate, "blocked", envelope, ctx).await;
+    let (decision, additional_context) = match outcome.block {
+        Some(GateBlock {
+            hook_name, reason, ..
+        }) => (PromptDecision::Block { reason, hook_name }, Vec::new()),
+        None => (PromptDecision::Allow, outcome.additional_context),
+    };
     PromptGateResult {
-        decision: match outcome.block {
-            Some(GateBlock {
-                hook_name, reason, ..
-            }) => PromptDecision::Block { reason, hook_name },
-            None => PromptDecision::Allow,
-        },
+        decision,
+        additional_context,
         results: outcome.results,
     }
 }
@@ -1121,6 +1212,34 @@ pub async fn dispatch_non_blocking(
     envelope: &HookEventEnvelope,
     ctx: &RunContext<'_>,
 ) -> Vec<HookRunResult> {
+    dispatch_observe(registry, event, envelope, ctx, &mut Vec::new()).await
+}
+
+/// Run the `SessionStart` hooks; also returns their `additionalContext` for the model, in call order.
+pub async fn dispatch_session_start(
+    registry: &HookRegistry,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> (Vec<HookRunResult>, Vec<AdditionalContext>) {
+    let mut context = Vec::new();
+    let results = dispatch_observe(
+        registry,
+        HookEventName::SessionStart,
+        envelope,
+        ctx,
+        &mut context,
+    )
+    .await;
+    (results, context)
+}
+
+async fn dispatch_observe(
+    registry: &HookRegistry,
+    event: HookEventName,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+    context: &mut Vec<AdditionalContext>,
+) -> Vec<HookRunResult> {
     debug_assert!(
         event.traits().gate == GateKind::Observe,
         "dispatch_non_blocking called with gate event {event:?}"
@@ -1200,6 +1319,16 @@ pub async fn dispatch_non_blocking(
                         elapsed_ms = elapsed.as_millis() as u64,
                         "hook completed"
                     );
+                    if let HookRunnerResult::Allow {
+                        additional_context: Some(text),
+                        ..
+                    } = result
+                    {
+                        context.push(AdditionalContext {
+                            hook_name: spec.name.clone(),
+                            text,
+                        });
+                    }
                     results.push(HookRunResult::Success {
                         hook_name: spec.name.clone(),
                         elapsed,
@@ -1372,6 +1501,7 @@ mod tests {
             session_id: "test-session",
             workspace_root: "/tmp",
             process_scope: None,
+            mcp: None,
         }
     }
 
@@ -1399,6 +1529,7 @@ mod tests {
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),
             layer: crate::config::HookProvenance::File,
+            mcp_tool: None,
         }
     }
 
@@ -1814,6 +1945,108 @@ mod tests {
         spec
     }
 
+    /// A `SessionStart` hook's JSON `additionalContext` is read on exit 0; plain stdout, blank text and a failed hook give none,
+    /// and every other observe event still ignores stdout.
+    #[tokio::test]
+    async fn session_start_observe_hook_reads_json_context() {
+        let doc = |text: &str| {
+            format!(
+                r#"printf '%s' '{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":"{text}"}}}}'"#
+            )
+        };
+        let start = |script: &str| {
+            let mut spec = make_command_spec("start", None, true, script);
+            spec.event = HookEventName::SessionStart;
+            spec
+        };
+        let run = |spec: HookSpec, envelope: HookEventEnvelope| async move {
+            runner::run_hook(&spec, &envelope, &run_ctx(), GateKind::Observe)
+                .await
+                .0
+        };
+        let got = run(start(&doc("repo is on staging")), session_start_envelope()).await;
+        assert!(
+            matches!(got, HookRunnerResult::Allow { additional_context: Some(ref c), .. } if c == "repo is on staging"),
+            "{got:?}"
+        );
+        for script in [
+            "echo plain text".to_string(),
+            doc("   "),
+            format!("{}; exit 1", doc("lost")),
+        ] {
+            let got = run(start(&script), session_start_envelope()).await;
+            assert!(
+                matches!(got, HookRunnerResult::Success | HookRunnerResult::Failed(_)),
+                "{script}: {got:?}"
+            );
+        }
+        let mut end = make_command_spec("end", None, true, &doc("ignored"));
+        end.event = HookEventName::SessionEnd;
+        let mut envelope = session_start_envelope();
+        envelope.hook_event_name = HookEventName::SessionEnd;
+        let got = run(end, envelope).await;
+        assert!(matches!(got, HookRunnerResult::Success), "{got:?}");
+    }
+
+    /// `dispatch_session_start` returns every hook's context in call order next to the usual results.
+    #[tokio::test]
+    async fn dispatch_session_start_collects_context_in_order() {
+        let doc = |text: &str| {
+            format!(
+                r#"printf '%s' '{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":"{text}"}}}}'"#
+            )
+        };
+        let start = |name: &str, script: &str| {
+            let mut spec = make_command_spec(name, None, true, script);
+            spec.event = HookEventName::SessionStart;
+            spec
+        };
+        let registry = registry_from_specs(vec![
+            start("first", &doc("ticket 42")),
+            start("quiet", "exit 0"),
+            start("third", &doc("be brief")),
+        ]);
+        let (results, context) =
+            dispatch_session_start(&registry, &session_start_envelope(), &run_ctx()).await;
+        assert_eq!(results.len(), 3);
+        let got: Vec<(&str, &str)> = context
+            .iter()
+            .map(|c| (c.hook_name.as_str(), c.text.as_str()))
+            .collect();
+        assert_eq!(got, [("first", "ticket 42"), ("third", "be brief")]);
+    }
+
+    /// An allowing `UserPromptSubmit` hook's `additionalContext` reaches the caller, in call order; a later block drops it.
+    #[tokio::test]
+    async fn prompt_gate_returns_additional_context_from_allowing_hooks() {
+        let doc = |text: &str| {
+            format!(
+                r#"printf '%s' '{{"hookSpecificOutput":{{"hookEventName":"UserPromptSubmit","additionalContext":"{text}"}}}}'"#
+            )
+        };
+        let registry = registry_from_specs(vec![
+            make_prompt_spec("first", &doc("ticket 42")),
+            make_prompt_spec("second", &doc("   ")),
+            make_prompt_spec("third", &doc("be brief")),
+        ]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        assert_eq!(result.decision, PromptDecision::Allow);
+        let got: Vec<(&str, &str)> = result
+            .additional_context
+            .iter()
+            .map(|c| (c.hook_name.as_str(), c.text.as_str()))
+            .collect();
+        assert_eq!(got, [("first", "ticket 42"), ("third", "be brief")]);
+
+        let registry = registry_from_specs(vec![
+            make_prompt_spec("first", &doc("ticket 42")),
+            make_prompt_spec("gate", "echo no >&2; exit 2"),
+        ]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        assert!(matches!(result.decision, PromptDecision::Block { .. }));
+        assert!(result.additional_context.is_empty());
+    }
+
     #[tokio::test]
     async fn prompt_gate_blocks_on_exit_2_with_stderr_reason() {
         let spec = make_prompt_spec("prompt-gate", "echo 'no prod deploys' >&2; exit 2");
@@ -1855,6 +2088,154 @@ mod tests {
             ref other => panic!("expected Block, got {other:?}"),
         }
         assert_eq!(result.results.len(), 1, "the second hook must not run");
+    }
+
+    fn permission_request_envelope() -> HookEventEnvelope {
+        let mut envelope = pre_tool_use_envelope("run_terminal_cmd");
+        envelope.hook_event_name = HookEventName::PermissionRequest;
+        envelope.payload = HookPayload::PermissionRequest {
+            tool_name: "run_terminal_cmd".into(),
+            tool_input: serde_json::json!({"command": "rm -rf node_modules"}),
+            tool_input_truncated: false,
+        };
+        envelope
+    }
+
+    fn permission_spec(name: &str, script: &str) -> HookSpec {
+        let mut spec = make_command_spec(name, Some("run_terminal_cmd"), true, script);
+        spec.event = HookEventName::PermissionRequest;
+        spec
+    }
+
+    async fn permission_decision(specs: Vec<HookSpec>) -> PermissionRequestResult {
+        let registry = registry_from_specs(specs);
+        dispatch_permission_request(&registry, &permission_request_envelope(), &run_ctx()).await
+    }
+
+    async fn pre_compact_with(command: &str) -> PromptGateResult {
+        let json = serde_json::json!({ "hooks": { "PreCompact": [ { "matcher": "manual", "hooks": [{
+            "type": "command", "command": command
+        }] } ] } });
+        let (specs, errors) =
+            crate::config::parse_hook_file(&json.to_string(), std::path::Path::new("/tmp/pc.json"));
+        assert!(errors.is_empty(), "{errors:?}");
+        let (mut registry, _) = crate::discovery::load_hooks(None, None);
+        registry.append_specs(specs);
+        let mut envelope = permission_request_envelope();
+        envelope.hook_event_name = HookEventName::PreCompact;
+        envelope.payload = HookPayload::PreCompact {
+            source: "manual".into(),
+            trigger: "manual".into(),
+            custom_instructions: None,
+        };
+        let ctx = RunContext {
+            session_id: "pc",
+            workspace_root: "/tmp",
+            process_scope: None,
+            mcp: None,
+        };
+        dispatch_pre_compact(&registry, &envelope, &ctx).await
+    }
+
+    #[tokio::test]
+    async fn pre_compact_blocks_as_upstream_documents() {
+        let by_exit = pre_compact_with("echo 'not now' >&2; exit 2").await;
+        assert!(matches!(
+            by_exit.decision,
+            PromptDecision::Block { ref reason, .. } if reason == "not now"
+        ));
+        let by_json =
+            pre_compact_with(r#"echo '{"decision":"block","reason":"mid-refactor"}'"#).await;
+        assert!(matches!(
+            by_json.decision,
+            PromptDecision::Block { ref reason, .. } if reason == "mid-refactor"
+        ));
+    }
+
+    #[tokio::test]
+    async fn pre_compact_stdout_is_summary_instructions_and_failures_never_block() {
+        let added = pre_compact_with("echo 'Keep every file path.'").await;
+        assert_eq!(added.decision, PromptDecision::Allow);
+        assert_eq!(added.additional_context[0].text, "Keep every file path.");
+        for command in ["exit 1", r#"echo '{"continue":false}'"#, "true"] {
+            let result = pre_compact_with(command).await;
+            assert_eq!(result.decision, PromptDecision::Allow, "{command}");
+            assert!(result.additional_context.is_empty(), "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_request_allow_carries_updated_input_as_upstream_documents() {
+        // The upstream example: allow, rewriting the command.
+        let result = permission_decision(vec![permission_spec(
+            "lint",
+            r#"echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"command":"npm run lint"}}}}'"#,
+        )])
+        .await;
+        match result.decision {
+            Some(PermissionRequestDecision::Allow {
+                updated_input: Some(rewrite),
+            }) => {
+                assert_eq!(rewrite.input["command"], "npm run lint");
+                assert_eq!(rewrite.hook_name, "lint");
+            }
+            _ => panic!("expected an allow with updatedInput"),
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_request_deny_carries_message_and_wins_over_an_allow() {
+        let allow = permission_spec(
+            "allow",
+            r#"echo '{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}'"#,
+        );
+        let deny = permission_spec(
+            "deny",
+            r#"echo '{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"no rm here"}}}'"#,
+        );
+        let result = permission_decision(vec![allow, deny]).await;
+        assert!(matches!(
+            result.decision,
+            Some(PermissionRequestDecision::Deny { ref hook_name, ref message })
+                if hook_name == "deny" && message == "no rm here"
+        ));
+        let allow_only = permission_decision(vec![permission_spec(
+            "allow",
+            r#"echo '{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}'"#,
+        )])
+        .await;
+        assert!(matches!(
+            allow_only.decision,
+            Some(PermissionRequestDecision::Allow {
+                updated_input: None
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn permission_request_without_an_answer_or_failing_shows_the_prompt() {
+        // No answer, exit 2 (not a decision on this event), a crash, a timeout-like failure and malformed decisions
+        // all leave the decision to the normal prompt: none of them allows.
+        for script in [
+            "true",
+            "echo 'plain text'",
+            r#"echo '{"decision":"approve"}'"#,
+            "echo 'nope' >&2; exit 2",
+            r#"echo '{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}'; exit 1"#,
+            r#"echo '{"hookSpecificOutput":{"decision":{"behavior":"maybe"}}}'"#,
+            r#"echo '{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedInput":"rm"}}}'"#,
+        ] {
+            let result = permission_decision(vec![permission_spec("h", script)]).await;
+            assert!(result.decision.is_none(), "for {script}");
+        }
+        let mut fail_closed = permission_spec("fc", "exit 1");
+        fail_closed.fail_closed = true;
+        assert!(
+            permission_decision(vec![fail_closed])
+                .await
+                .decision
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2944,6 +3325,7 @@ mod tests {
     #[test]
     fn hub_hook_kind_maps_all_hub_forwarded_events() {
         assert_eq!(hub_hook_kind(HookEventName::PreToolUse), None);
+        assert_eq!(hub_hook_kind(HookEventName::PermissionRequest), None);
 
         let cases: &[(HookEventName, &str)] = &[
             (HookEventName::SessionStart, "hook.session_start"),
@@ -2977,17 +3359,18 @@ mod tests {
                 | HookEventName::PostToolUse
                 | HookEventName::PostToolUseFailure
                 | HookEventName::PermissionDenied
+                | HookEventName::PermissionRequest
                 | HookEventName::UserPromptSubmit
                 | HookEventName::Notification
                 | HookEventName::SubagentStart
                 | HookEventName::SubagentStop
                 | HookEventName::SubagentEnd
                 | HookEventName::PreCompact
-                | HookEventName::PostCompact => 16,
+                | HookEventName::PostCompact => 17,
             }
         };
         assert_eq!(
-            cases.len() + 1,
+            cases.len() + 2,
             total_variants(HookEventName::SessionStart),
             "update hub_hook_kind test when new HookEventName variants are added"
         );

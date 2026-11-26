@@ -73,6 +73,7 @@ fn managed_registry() -> fuigo_hooks::discovery::HookRegistry {
         source_dir: std::env::temp_dir(),
         extra_env: std::collections::HashMap::new(),
         layer: fuigo_hooks::config::HookProvenance::Requirements,
+        mcp_tool: None,
     }])
 }
 

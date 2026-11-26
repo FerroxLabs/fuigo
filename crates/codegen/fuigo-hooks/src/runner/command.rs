@@ -343,33 +343,9 @@ pub async fn run_command_hook(
             );
 
             let system_message = extract_system_message(&stdout);
-            let (result, elapsed) = match mode {
-                GateKind::Observe => {
-                    if exit_code == 0 {
-                        (HookRunnerResult::Success, elapsed)
-                    } else {
-                        (
-                            HookRunnerResult::Failed(append_stderr_line(
-                                &format!("exit code {exit_code}"),
-                                &stderr,
-                            )),
-                            elapsed,
-                        )
-                    }
-                }
-                GateKind::Tool => {
-                    parse_blocking_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
-                }
-                GateKind::Stop => {
-                    parse_stop_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
-                }
-                GateKind::PostTool => {
-                    parse_post_tool_use_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
-                }
-                GateKind::Prompt => {
-                    parse_prompt_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
-                }
-            };
+            let (result, elapsed) = parse_hook_output(
+                mode, envelope, &stdout, &stderr, exit_code, &spec.name, elapsed,
+            );
             // `failClosed`: exit 2 is the gate's own denial; any other way of not exiting 0 is an execution failure
             // that an allowing decision printed before it must not hide.
             let exec_failure =
@@ -388,6 +364,48 @@ pub async fn run_command_hook(
             );
             (result, elapsed, system_message)
         }
+    }
+}
+
+/// Read a hook's output (stdout, stderr, exit code) for the event's gate. Shared with `mcp_tool` handlers, whose text
+/// result is read as stdout on exit 0.
+pub(crate) fn parse_hook_output(
+    mode: GateKind,
+    envelope: &HookEventEnvelope,
+    stdout: &str,
+    stderr: &str,
+    exit_code: i32,
+    hook_name: &str,
+    elapsed: Duration,
+) -> (HookRunnerResult, Duration) {
+    match mode {
+        GateKind::Observe => {
+            if exit_code == 0 {
+                (PromptHookJson::observe_success(envelope, stdout), elapsed)
+            } else {
+                (
+                    HookRunnerResult::Failed(append_stderr_line(
+                        &format!("exit code {exit_code}"),
+                        stderr,
+                    )),
+                    elapsed,
+                )
+            }
+        }
+        GateKind::Tool => parse_blocking_result(stdout, stderr, exit_code, hook_name, elapsed),
+        GateKind::Stop => parse_stop_result(stdout, stderr, exit_code, hook_name, elapsed),
+        GateKind::PostTool => {
+            parse_post_tool_use_result(stdout, stderr, exit_code, hook_name, elapsed)
+        }
+        GateKind::Prompt => parse_prompt_result(stdout, stderr, exit_code, hook_name, elapsed),
+        GateKind::Permission => (
+            super::permission_result(stdout, exit_code, hook_name),
+            elapsed,
+        ),
+        GateKind::Compact => (
+            super::compact_result(stdout, stderr, exit_code, hook_name),
+            elapsed,
+        ),
     }
 }
 
@@ -1361,6 +1379,7 @@ fn parse_prompt_result(
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     };
     let trimmed = stdout.trim();
+    let mut allowed = HookRunnerResult::Success;
     if !trimmed.is_empty() {
         match serde_json::from_str::<PromptHookJson>(trimmed) {
             Ok(json) => match prompt_json_to_block(&json, hook_name, stderr_message.as_deref()) {
@@ -1373,7 +1392,7 @@ fn parse_prompt_result(
                         elapsed,
                     );
                 }
-                Ok(None) => {}
+                Ok(None) => allowed = json.allow_result(),
                 Err(err) => {
                     if exit_code == GATE_EXIT_CODE {
                         tracing::warn!(
@@ -1401,7 +1420,7 @@ fn parse_prompt_result(
         }
     }
     match exit_code {
-        0 => (HookRunnerResult::Success, elapsed),
+        0 => (allowed, elapsed),
         GATE_EXIT_CODE => (
             HookRunnerResult::Block {
                 reason: stderr_message.unwrap_or_else(|| {
@@ -2328,19 +2347,33 @@ mod tests {
     }
 
     #[test]
-    fn prompt_allow_on_exit_0_discards_stdout() {
+    fn prompt_allow_on_exit_0_reads_only_the_json_context() {
         for stdout in [
             "",
             "plain context text",
             "{}",
-            r#"{"hookSpecificOutput":{"additionalContext":"ctx","sessionTitle":"t"}}"#,
+            r#"{"hookSpecificOutput":{"additionalContext":"  "}}"#,
         ] {
             let (result, _) = parse_prompt_result(stdout, "", 0, "p", Duration::ZERO);
             assert!(
                 matches!(result, HookRunnerResult::Success),
-                "stdout {stdout:?} must allow"
+                "stdout {stdout:?} must allow without context"
             );
         }
+        let (result, _) = parse_prompt_result(
+            r#"{"hookSpecificOutput":{"additionalContext":"ctx","sessionTitle":"t"}}"#,
+            "",
+            0,
+            "p",
+            Duration::ZERO,
+        );
+        assert!(
+            matches!(
+                result,
+                HookRunnerResult::Allow { additional_context: Some(ref c), .. } if c == "ctx"
+            ),
+            "{result:?}"
+        );
     }
 
     #[test]
@@ -2520,6 +2553,7 @@ mod tests {
                 source_dir: std::path::PathBuf::from(source),
                 extra_env: std::collections::HashMap::new(),
                 layer: crate::config::HookProvenance::File,
+                mcp_tool: None,
             };
         use crate::config::HandlerType;
         assert_eq!(
@@ -2565,6 +2599,7 @@ mod tests {
             source_dir: std::env::temp_dir(),
             extra_env: std::collections::HashMap::new(),
             layer: crate::config::HookProvenance::File,
+            mcp_tool: None,
         }
     }
 
@@ -2865,12 +2900,14 @@ mod tests {
             session_id: "test-session",
             workspace_root: "/tmp",
             process_scope: None,
+            mcp: None,
         }
     }
 
     fn make_scoped_ctx(scope: fuigo_tools::util::ProcessScope) -> RunContext<'static> {
         RunContext {
             process_scope: Some(scope),
+            mcp: None,
             ..make_ctx()
         }
     }
@@ -3035,6 +3072,7 @@ mod tests {
             session_id: "test-session",
             workspace_root: &workspace,
             process_scope: None,
+            mcp: None,
         };
         let (result, _, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
 
@@ -3227,6 +3265,7 @@ mod tests {
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,
+            mcp_tool: None,
         };
         let ctx = RunContext {
             workspace_root: "/nonexistent-u35-winenv-r2/workspace",
@@ -3275,6 +3314,7 @@ mod tests {
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,
+            mcp_tool: None,
         };
 
         let envelope = make_envelope();

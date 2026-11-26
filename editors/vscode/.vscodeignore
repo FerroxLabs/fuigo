@@ -1,0 +1,13 @@
+# Only dist/ (bundled), media/, package.json, README, CHANGELOG and LICENSE ship in the VSIX.
+src/**
+test/**
+out-test/**
+.vscode-test/**
+node_modules/**
+tsconfig*.json
+esbuild.mjs
+eslint.config.mjs
+package-lock.json
+**/*.map
+*.vsix
+.gitignore

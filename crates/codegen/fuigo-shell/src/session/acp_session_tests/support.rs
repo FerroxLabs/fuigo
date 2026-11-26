@@ -450,6 +450,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
+        ship_guard: Default::default(),
         admin_policy_watch: Default::default(),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
@@ -516,6 +517,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         plugin_registry_live: Default::default(),
         scheduler_handle_live: Default::default(),
         turn_report: Default::default(),
+        session_start_context: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
         client_hooks: Default::default(),
@@ -889,6 +891,7 @@ pub(crate) fn pre_tool_use_spec(
         source_dir: std::path::PathBuf::from("/tmp"),
         extra_env: std::collections::HashMap::new(),
         layer: fuigo_hooks::config::HookProvenance::File,
+        mcp_tool: None,
     }
 }
 #[cfg(test)]

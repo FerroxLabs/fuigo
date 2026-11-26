@@ -125,13 +125,27 @@ impl AcpReverseInvoker for GatewayAcpInvoker {
                 wire::MCP_SDK_CALL
             ));
         }
-        let meta = serde_json::Value::Object(
-            std::iter::once((
-                crate::session::reverse_ticket::TICKET_META_KEY.to_owned(),
-                ticket.id().into(),
-            ))
-            .collect(),
-        );
+        let mut meta: serde_json::Map<String, serde_json::Value> = std::iter::once((
+            crate::session::reverse_ticket::TICKET_META_KEY.to_owned(),
+            ticket.id().into(),
+        ))
+        .collect();
+        // Prompt scope (1.0.48, A7): rmcp writes this from its own task, so the frame takes the pair the inner MCP request
+        // was stamped with on the calling task (a `tools/call`); other MCP traffic is session-level.
+        if let Some(inner) = message
+            .pointer("/params/_meta")
+            .and_then(serde_json::Value::as_object)
+        {
+            for key in [
+                crate::session::prompt_scope::META_PROMPT_ID,
+                crate::session::prompt_scope::META_ORIGIN_PROMPT_ID,
+            ] {
+                if let Some(value) = inner.get(key) {
+                    meta.insert(key.to_owned(), value.clone());
+                }
+            }
+        }
+        let meta = serde_json::Value::Object(meta);
         let params = serde_json::value::to_raw_value(&SdkCallParams {
             server_id,
             message,
@@ -140,7 +154,7 @@ impl AcpReverseInvoker for GatewayAcpInvoker {
         .map_err(|err| err.to_string())?;
         let request = acp::ExtRequest::new(wire::MCP_SDK_CALL, params.into());
         // Bound the round trip: a missing or hung client fails this reverse call at the per-server tool timeout instead of stalling the tool loop
-        let response = tokio::time::timeout(timeout, self.gateway.send(request))
+        let response = tokio::time::timeout(timeout, self.gateway.send_request(request))
             .await
             .map_err(|_| {
                 format!(

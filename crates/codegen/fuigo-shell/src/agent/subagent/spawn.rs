@@ -550,6 +550,20 @@ pub(crate) fn emit_subagent_notification(
     update.scrub_sent_credentials();
     let mut meta = None;
     crate::util::event_id::ensure_event_id_meta(parent_session_id, &mut meta);
+    // Prompt scope (1.0.48, WF-5): a subagent's frames carry the parent prompt bound at its spawn, whichever task sends
+    // them; one not bound yet (its spawn notice, sent in the spawning turn) takes the sending task's scope at the gateway.
+    let subagent_id = match &update {
+        SessionUpdate::SubagentSpawned { subagent_id, .. }
+        | SessionUpdate::SubagentProgress { subagent_id, .. }
+        | SessionUpdate::SubagentFinished { subagent_id, .. } => Some(subagent_id.as_str()),
+        _ => None,
+    };
+    if let Some(scope) = subagent_id.and_then(|id| {
+        crate::session::prompt_scope::registry_for_session(parent_session_id)?
+            .scope_of(&crate::session::prompt_scope::subagent_work_id(id))
+    }) {
+        scope.stamp(meta.get_or_insert_with(Default::default));
+    }
     let notification = SessionNotification {
         session_id: acp::SessionId::new(parent_session_id),
         update,

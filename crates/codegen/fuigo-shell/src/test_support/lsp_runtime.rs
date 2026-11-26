@@ -74,6 +74,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         inherited_tool_overrides: None,
         yolo_mode: false,
         parent_peer_influence: Default::default(),
+        parent_ship_guard: Default::default(),
         subagent_event_tx: tx,
         hunk_tracker_handle: fuigo_hunk_tracker::HunkTrackerHandle::noop(),
         hunk_tracking_enabled: false,

@@ -254,7 +254,13 @@ pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
         let key = (
             spec.event.canonical(),
             spec.command_raw.clone().unwrap_or_default(),
-            spec.url_raw.clone().unwrap_or_default(),
+            // An `mcp_tool` handler has neither, so its target stands in (two different tools are two hooks).
+            spec.url_raw.clone().unwrap_or_else(|| {
+                spec.mcp_tool
+                    .as_ref()
+                    .map(|t| serde_json::to_string(t).unwrap_or_default())
+                    .unwrap_or_default()
+            }),
             spec.configured_matcher.clone().unwrap_or_default(),
         );
         match seen_content.get(&key) {
@@ -521,6 +527,8 @@ mod tests {
             HookEventName::Stop,
             HookEventName::SubagentStop,
             HookEventName::UserPromptSubmit,
+            HookEventName::PermissionRequest,
+            HookEventName::PreCompact,
         ]
         .into_iter()
         .collect();
@@ -832,6 +840,7 @@ mod tests {
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
             layer,
+            mcp_tool: None,
         };
         use crate::config::HookProvenance;
         for (first, second) in [
@@ -879,6 +888,7 @@ mod tests {
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
             layer,
+            mcp_tool: None,
         };
         use crate::config::HookProvenance;
 
@@ -949,6 +959,7 @@ mod tests {
             source_dir: std::path::PathBuf::from("/tmp"),
             extra_env: std::collections::HashMap::new(),
             layer: crate::config::HookProvenance::Requirements,
+            mcp_tool: None,
         };
         let mut registry = HookRegistry::default();
         registry.append_specs(vec![spec.clone()]);
@@ -1175,6 +1186,7 @@ mod tests {
             source_dir: PathBuf::from("/tmp"),
             extra_env: Default::default(),
             layer: crate::config::HookProvenance::File,
+            mcp_tool: None,
         }
     }
 

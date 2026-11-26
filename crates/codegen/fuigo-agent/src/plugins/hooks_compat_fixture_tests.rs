@@ -91,6 +91,7 @@ fn run_plugin_hooks(
             session_id: "fixture-session",
             workspace_root: "/tmp",
             process_scope: None,
+            mcp: None,
         };
         let result = rt
             .block_on(run_command_hook(

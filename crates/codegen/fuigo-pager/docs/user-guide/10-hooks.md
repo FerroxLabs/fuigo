@@ -94,29 +94,61 @@ Events fire at three cadences: once per session (`SessionStart`, `SessionEnd`), 
 
 | Event | When it fires | Blocking? |
 |-------|---------------|-----------|
-| `SessionStart` | A session starts. Does not fire for a subagent's own session. | No |
-| `UserPromptSubmit` | You submit a prompt. | Yes: can block the prompt |
+| `SessionStart` | A session starts (`source` is `startup`) or is resumed from disk (`resume`). Does not fire for a subagent's own session. | No, but it can add `additionalContext` for the model |
+| `UserPromptSubmit` | You submit a prompt. | Yes: can block the prompt, or add `additionalContext` for the model |
 | `PreToolUse` | A tool is about to run. | Yes: can deny |
 | `PostToolUse` | A tool finishes running (including a built-in logical error such as a non-zero `run_terminal_command` exit; a dispatch failure or an MCP error result fires `PostToolUseFailure` instead). | No, but it can feed the model feedback and replace the output the model sees |
 | `PostToolUseFailure` | A tool fails to dispatch, or an MCP tool returns an error result. | No, but it can feed the model `additionalContext` |
 | `PermissionDenied` | The permission system denies a tool call. | No |
+| `PermissionRequest` | A permission prompt is about to be shown for a tool call. | Yes: can answer the prompt (allow or deny) instead of you |
 | `Stop` | An agent turn ends on a genuine completion (an interrupt fires `StopCancelled` instead). | Yes: can block the stop |
 | `StopFailure` | A turn ends because of an API error. | No |
 | `StopCancelled` | Runs instead of `Stop` when a turn ends without completing: a user interrupt (Ctrl+C / a client stop), a declined permission prompt, the `--max-turns` limit, or a no-progress bail-out. | No |
 | `Notification` | User-attention events (`idle_prompt`, `permission_prompt`, `task_complete`, …). | No |
 | `SubagentStart` | A subagent starts. | No |
 | `SubagentStop` | A subagent's turn ends (fires once, in the subagent, with stop decision control). | Yes: can block the stop |
-| `PreCompact` | Conversation compaction is about to run. | No |
+| `PreCompact` | Conversation compaction is about to run. | Yes: can block the compaction or add instructions for the summary |
 | `PostCompact` | Conversation compaction completes. | No |
 | `SessionEnd` | The session ends. Carries `subagentType` for a child session, so a host can tell a child's teardown from its own. | No |
 
-`SubagentEnd` is accepted as an alias for `SubagentStop`. `PreToolUse` can block a tool call, `UserPromptSubmit` can block a prompt (see below), and `Stop`/`SubagentStop` can block the agent from stopping (see [Stop Decision Control](#stop-decision-control)). `PostToolUse` runs too late to block anything, but its stdout is read: it can feed the model feedback and replace the tool output the model sees (see [PostToolUse Output](#posttooluse-output)). Every other event is passive.
+`SubagentEnd` is accepted as an alias for `SubagentStop`. `PreToolUse` can block a tool call, `PermissionRequest` can answer a permission prompt (see [PermissionRequest Decision Control](#permissionrequest-decision-control)), `UserPromptSubmit` can block a prompt or add context for the model (see below), `PreCompact` can block a compaction or steer its summary (see [PreCompact Decision Control](#precompact-decision-control)), and `Stop`/`SubagentStop` can block the agent from stopping (see [Stop Decision Control](#stop-decision-control)). `PostToolUse` runs too late to block anything, but its stdout is read: it can feed the model feedback and replace the tool output the model sees (see [PostToolUse Output](#posttooluse-output)). Every other event is passive.
+
+### SessionStart Context
+
+A `SessionStart` hook can give the model context for the whole session: `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "Deploy target is staging"}}` on stdout, exit 0. It reaches the model as a tagged note at the start of the conversation, ahead of your first prompt, on the first turn: if you send that prompt while the hook is still running, the turn waits for it, but never past 5 seconds after the session started (whatever the hook's own `timeout`). A hook that finishes later is not lost: its context is added ahead of the next prompt you send after it finishes. Every hook's context is delivered, in the order the hooks ran; text over 10,000 characters is clipped and blank text is ignored. A hook that fails, exits non-zero or times out contributes nothing and the session carries on (fail-open). A resumed session fires the hook again with `source` `resume` and delivers its context again on its first turn after the resume, as Claude Code does. Subagent sessions do not fire it. Plain stdout text is not treated as context; use the JSON field. With no `SessionStart` hook configured nothing waits.
 
 ### UserPromptSubmit Decision Control
 
 A `UserPromptSubmit` hook can reject a prompt: exit 2 blocks (stderr becomes the message), and so does JSON `{"decision": "block", "reason": "..."}` on stdout, on any exit code. The reason is shown to you and is never added to the model's context. Only a prompt you typed can be blocked: auto-wake turns (task and subagent completions, scheduler fires) and subagent sessions run the hook observe-only. The default timeout for this event is 30 seconds; a timed-out or crashed hook fails open and the prompt proceeds, unless the hook sets [`failClosed`](#fail-closed-hooks), in which case the prompt is blocked.
 
-After a block, prompts already queued behind the blocked one do not auto-run: the queue holds until you act (send a prompt, or edit / remove / reorder / force-run a queued row). A blocked prompt is not recorded: it never enters the conversation history the model sees on later turns, the on-disk session record, or the session summary. It stays visible in the live scrollback and is held at the front of the queue for you to edit, resend, or discard — but after a session restart the blocked bubble is gone from the scrollback, exactly because nothing was stored. One deliberate exception: your client's local prompt history (the up-arrow recall) keeps the text, recorded at submit time before the hook runs, so a discarded prompt is still recoverable. One current limit: stdout of an allowing hook is discarded (no `additionalContext`).
+After a block, prompts already queued behind the blocked one do not auto-run: the queue holds until you act (send a prompt, or edit / remove / reorder / force-run a queued row). A blocked prompt is not recorded: it never enters the conversation history the model sees on later turns, the on-disk session record, or the session summary. It stays visible in the live scrollback and is held at the front of the queue for you to edit, resend, or discard — but after a session restart the blocked bubble is gone from the scrollback, exactly because nothing was stored. One deliberate exception: your client's local prompt history (the up-arrow recall) keeps the text, recorded at submit time before the hook runs, so a discarded prompt is still recoverable. An allowing hook can instead add context for the model: `{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "Ticket 42 is open"}}` on stdout. It reaches the model as a tagged note right after your prompt, the way `PostToolUse` context does (capped, blank text ignored, a later block drops it). Only a prompt you typed carries it: auto-wake turns and subagent sessions do not. Plain stdout text is not treated as context; use the JSON field.
+
+### PermissionRequest Decision Control
+
+A `PermissionRequest` hook runs only when Fuigo is about to show you a permission prompt; a call that rules, grants or the current mode already decide never reaches it. Its input is the `PreToolUse` input without `toolUseId` (`toolName`/`tool_name`, `toolInput`/`tool_input`), and its `matcher` tests the tool name. It answers with the [upstream shape](https://code.claude.com/docs/en/hooks#permissionrequest-decision-control):
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PermissionRequest",
+    "decision": { "behavior": "allow", "updatedInput": { "command": "npm run lint" } }
+  }
+}
+```
+
+- `"behavior": "allow"` grants the call without a prompt. An optional `updatedInput` replaces the whole tool input: it is checked against the tool's schema exactly as a `PreToolUse` `updatedInput` is (a rewrite that fails the schema or changes which tool runs blocks the call), and then the new input is judged by the permission rules once more, without the hook, so a deny or ask rule still applies to it.
+- `"behavior": "deny"` refuses the call without a prompt; `message` tells the model why. The turn goes on.
+- No `decision` (empty output, plain text, any other JSON) shows the normal prompt.
+
+With several hooks, the first `deny` wins; otherwise any `allow` grants, and the last `updatedInput` wins. Exit code 2 is not a decision on this event. Every failure (a timeout, a crash, a non-zero exit, an unknown `behavior`, an `updatedInput` that is not an object) shows the normal prompt and never allows; `failClosed` has no effect here. A hook allow is not a remembered grant: nothing is saved, and the next matching call asks again (the hook runs again). An ask required by a launch permission policy is still put to you even when a hook allows it. Upstream's `updatedPermissions` (which writes permission rules) and `interrupt` are not supported and are ignored. The default timeout is 5 seconds.
+
+### PreCompact Decision Control
+
+A `PreCompact` hook runs before every compaction, manual (`/compact`) or automatic. Its input adds `trigger` (`manual` or `auto`, also sent as `source`) and `custom_instructions`/`customInstructions` (what you typed after `/compact`, or `null`). It follows the [upstream rules](https://code.claude.com/docs/en/hooks#precompact):
+
+- Exit code 2, or stdout `{"decision": "block", "reason": "..."}` on exit 0, blocks the compaction. The reason (stderr for exit 2) is shown. A blocked `/compact` reports the block; a blocked automatic compaction is skipped and the conversation goes on, and it is tried again on the next turn. When compaction was the recovery from a context-limit error, the turn stops with an error instead, as upstream does.
+- Any other stdout on exit 0 (plain text, not JSON) is added to the instructions for the summary, after your `/compact` text, capped at 10,000 characters. Several hooks' instructions are joined in order.
+- Any other exit code, a timeout or a crash is a failure: it is recorded and the compaction runs as if the hook were not there. `failClosed` has no effect here. The default timeout is 5 seconds.
 
 ### Cursor Hook Compatibility
 
@@ -166,8 +198,8 @@ Each `.json` file can define hooks for multiple events:
 ### Key Fields
 
 - **Event name** (top-level key): any event listed in [Hook Events](#hook-events). Fuigo skips unrecognized event names so a shared Claude or Cursor settings file still loads.
-- **matcher** (optional): A regular expression that selects which invocations trigger the hook. What it tests depends on the event: the tool name on tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`), the notification type on `Notification`, the subagent type on `SubagentStart`/`SubagentStop` (e.g. `explore`), the start source on `SessionStart` (`startup`, `resume`, …), the end reason on `SessionEnd`, the compaction trigger on `PreCompact`/`PostCompact` (`manual` or `auto`), the error type on `StopFailure` (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`), and the reason on `StopCancelled` (`user_interrupt`, `permission_rejected`, `permission_cancelled`, `max_turns`, `no_progress`, or `unknown`). A matcher on `Stop` or `UserPromptSubmit` is ignored with a warning (those events always fire). An empty or omitted matcher matches everything. A finish-thinking chime should set `matcher` to `idle_prompt` on `Notification` (any turn end, then sustained idle); `permission_prompt` fires only when a permission UI is actually waiting. The matcher tests the real tool name; MCP calls routed through the internal `use_tool` dispatcher appear as the qualified `server__tool` name (e.g. `linear__save_issue`), so match on that, not the dispatcher name.
-- **type**: `"command"` (run a script or shell one-liner) or `"http"` (POST the event to a URL).
+- **matcher** (optional): A regular expression that selects which invocations trigger the hook. What it tests depends on the event: the tool name on tool events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`, `PermissionRequest`), the notification type on `Notification`, the subagent type on `SubagentStart`/`SubagentStop` (e.g. `explore`), the start source on `SessionStart` (`startup`, `resume`, …), the end reason on `SessionEnd`, the compaction trigger on `PreCompact`/`PostCompact` (`manual` or `auto`), the error type on `StopFailure` (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown`), and the reason on `StopCancelled` (`user_interrupt`, `permission_rejected`, `permission_cancelled`, `max_turns`, `no_progress`, or `unknown`). A matcher on `Stop` or `UserPromptSubmit` is ignored with a warning (those events always fire). An empty or omitted matcher matches everything. A finish-thinking chime should set `matcher` to `idle_prompt` on `Notification` (any turn end, then sustained idle); `permission_prompt` fires only when a permission UI is actually waiting. The matcher tests the real tool name; MCP calls routed through the internal `use_tool` dispatcher appear as the qualified `server__tool` name (e.g. `linear__save_issue`), so match on that, not the dispatcher name.
+- **type**: `"command"` (run a script or shell one-liner), `"http"` (POST the event to a URL), or `"mcp_tool"` (call a tool on a configured MCP server, see [MCP Tool Hooks](#mcp-tool-hooks)).
 - **command**: Path to executable (relative to the JSON file) or inline shell command.
 - **timeout**: Seconds before killing the hook (default: 5, or 600 for `Stop`/`SubagentStop`/`PostToolUse` gates). All hook failures (timeouts, crashes, malformed output, missing required env vars) are fail-open: the failure is recorded for the UI scrollback but the tool call is not blocked. Only an explicit `deny` decision returned by the hook blocks a tool call. To make a `PreToolUse` or `UserPromptSubmit` hook fail closed instead, see [`failClosed`](#fail-closed-hooks).
 - **failClosed**: Optional, `false` by default (see [Fail-closed hooks](#fail-closed-hooks)).
@@ -488,7 +520,8 @@ Inside a subagent, the gate fires as `SubagentStop` (agent-frontmatter `Stop` ho
 - **Task types**: `backgroundTasks[].type` is only `shell`, `monitor`, or `subagent`; Claude's other labels (`workflow`, `teammate`, …) are not emitted.
 - **StopFailure classes**: fuigo emits six (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, `unknown`). Capacity errors (503/529) classify as `rate_limit`. A matcher on an error class fuigo does not emit never fires.
 - **Default timeout**: fuigo defaults observe hooks to 5 seconds, which is shorter than most. Set `timeout` explicitly on an imported hook that does real work.
-- **`UserPromptSubmit` blocks, with one gap**: exit 2 and `decision: "block"` reject the prompt like Claude, and a blocked prompt never enters the conversation history — but an allowing hook's stdout / `additionalContext` is discarded rather than added as context.
+- **`UserPromptSubmit`**: exit 2 and `decision: "block"` reject the prompt like Claude, a blocked prompt never enters the conversation history, and an allowing hook's `hookSpecificOutput.additionalContext` is added as context. One difference: plain stdout text from an allowing hook is not added as context (Claude does); emit the JSON field.
+- **`SessionStart`**: `source` is `startup` or `resume` like Claude, and `hookSpecificOutput.additionalContext` is added as context ahead of the first prompt. fuigo does not fire it on `clear`, `compact` or `fork`, and, as with `UserPromptSubmit`, plain stdout text is not added as context (Claude does); emit the JSON field.
 - **`StopCancelled` is fuigo-specific**: a config that uses it is not portable to a runtime with no interrupt hook.
 - **`idle_prompt` fires on any turn end**: fuigo fires it after an interrupted or errored turn too, not only a completed one, because it reports a state rather than an outcome. Its `message` is display text and can change between releases, so match on `notificationType` instead.
 - **Subagent identity is `subagentType`, not `agent_type`**: fuigo puts it in the payload of the events that can fire inside a subagent, matching its own `SubagentStart`/`SubagentStop`, rather than in the common fields.
@@ -512,7 +545,7 @@ registered as `{ "type": "command", "command": "bin/stop-gate.sh", "timeout": 30
 
 ### Passive Hooks
 
-For events like `SessionStart` or `Notification`, stdout is ignored. Just exit 0 on success. The exceptions are `PreToolUse` (see [Output (Blocking Hooks)](#output-blocking-hooks)), `Stop`/`SubagentStop` (see [Stop Decision Control](#stop-decision-control)), and `PostToolUse`, whose stdout is read even though it blocks nothing (see [PostToolUse Output](#posttooluse-output)).
+For events like `Notification` or `SessionEnd`, stdout is ignored. Just exit 0 on success. The exceptions are `SessionStart`, whose JSON `additionalContext` is read (see [SessionStart Context](#sessionstart-context)), `PreToolUse` (see [Output (Blocking Hooks)](#output-blocking-hooks)), `Stop`/`SubagentStop` (see [Stop Decision Control](#stop-decision-control)), `PermissionRequest` and `PreCompact` (see their decision control sections above), and `PostToolUse`, whose stdout is read even though it blocks nothing (see [PostToolUse Output](#posttooluse-output)).
 
 ### Environment Variables
 
@@ -575,6 +608,25 @@ Instead of a local script, call a remote endpoint:
 ```
 
 The full event envelope is POSTed as JSON.
+
+## MCP Tool Hooks
+
+An `mcp_tool` handler calls a tool on an MCP server the session already has configured and connected, as [upstream](https://code.claude.com/docs/en/hooks#mcp-tool-hook-fields) does:
+
+```json
+{
+  "type": "mcp_tool",
+  "server": "my_server",
+  "tool": "security_scan",
+  "input": { "file_path": "${tool_input.file_path}" }
+}
+```
+
+- **server** and **tool** (required): the server's configured name and the tool to call. No new connection or process is started: a server that is not connected (not configured, still starting, or failed) makes the hook fail.
+- **input** (optional): the tool's arguments. String values may hold `${path}` references into the event JSON, a dot-separated path such as `${tool_input.file_path}` or `${hook_event_name}`; a string is inserted as is, any other value as its JSON text, and a path that is not there as an empty string. Without `input`, the tool receives the whole event JSON as its arguments.
+- **timeout**: as for a command hook, the event's default when absent.
+
+The tool's text content is read exactly as a command hook's stdout on exit 0, so it decides, adds context or does nothing by the same rules as a command hook for that event. A result flagged `isError`, a server that cannot be reached, or a timeout is a failure: it is recorded and fails open (a [`failClosed`](#fail-closed-hooks) `PreToolUse` or `UserPromptSubmit` hook blocks instead). Upstream's `onFailure` is not supported. The `SessionEnd` hooks of a session that has already closed have no MCP client, so an `mcp_tool` hook there fails open.
 
 ---
 

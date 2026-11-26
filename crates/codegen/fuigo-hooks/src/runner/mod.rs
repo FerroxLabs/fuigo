@@ -1,5 +1,6 @@
 pub mod command;
 pub mod http;
+pub mod mcp;
 
 use std::time::Duration;
 
@@ -17,6 +18,8 @@ pub struct RunContext<'a> {
     pub session_id: &'a str,
     pub workspace_root: &'a str,
     pub process_scope: Option<fuigo_tools::util::ProcessScope>,
+    /// The session's MCP client, for `mcp_tool` handlers; `None` where there is none (they then fail open).
+    pub mcp: Option<std::sync::Arc<dyn mcp::McpToolCaller>>,
 }
 
 #[derive(Debug)]
@@ -459,6 +462,36 @@ impl PromptHookJson {
             _ => Some("hookSpecificOutput".to_string()),
         }
     }
+
+    /// `hookSpecificOutput.additionalContext` for the model, as on the tool gates: a non-blank string, clipped.
+    pub(crate) fn additional_context(&self) -> Option<String> {
+        let text = self
+            .rest
+            .get("hookSpecificOutput")?
+            .get("additionalContext")?
+            .as_str()?;
+        (!text.trim().is_empty()).then(|| clip_text(text, MAX_HOOK_FEEDBACK_CHARS))
+    }
+
+    /// A successful observe hook's verdict: only `SessionStart` reads its JSON `additionalContext`; every other observe event stays `Success`.
+    pub(crate) fn observe_success(envelope: &HookEventEnvelope, stdout: &str) -> HookRunnerResult {
+        if envelope.hook_event_name != crate::event::HookEventName::SessionStart {
+            return HookRunnerResult::Success;
+        }
+        serde_json::from_str::<Self>(stdout.trim())
+            .map_or(HookRunnerResult::Success, |json| json.allow_result())
+    }
+
+    /// An allowing prompt hook's verdict: `Allow` carrying its context, or plain `Success` without any.
+    pub(crate) fn allow_result(&self) -> HookRunnerResult {
+        match self.additional_context() {
+            Some(text) => HookRunnerResult::Allow {
+                updated_input: None,
+                additional_context: Some(text),
+            },
+            None => HookRunnerResult::Success,
+        }
+    }
 }
 
 pub(crate) fn prompt_json_to_block(
@@ -485,6 +518,88 @@ pub(crate) fn prompt_json_to_block(
         })),
         Some(other) => Err(format!(
             "unknown decision value '{other}' from hook '{hook_name}'"
+        )),
+    }
+}
+
+/// A `PermissionRequest` hook's answer, read from `hookSpecificOutput.decision` as upstream documents it: `behavior`
+/// `"allow"` (with an optional `updatedInput` object) or `"deny"` (with an optional `message` for the model). No
+/// decision is `Success` (the prompt is shown). Exit 2 is not a decision on this event, so any non-zero exit, like a
+/// malformed decision, is a failure, and a failure shows the prompt too: it never allows.
+/// Upstream PreCompact decision control: exit 2 (stderr is the reason) or a JSON `"decision": "block"` (with `reason`)
+/// blocks the compaction. Other stdout on exit 0 becomes extra instructions for the summary, capped like upstream's.
+/// A JSON answer without a block carries no instructions; any other exit code is a failure, which never blocks.
+pub(crate) fn compact_result(
+    stdout: &str,
+    stderr: &str,
+    exit_code: i32,
+    hook_name: &str,
+) -> HookRunnerResult {
+    let block = |reason: Option<&str>| HookRunnerResult::Block {
+        reason: clip_reason(
+            non_empty(reason).unwrap_or(&format!("compaction blocked by hook '{hook_name}'")),
+        ),
+        hook_name: hook_name.to_string(),
+    };
+    let text = stdout.trim();
+    match exit_code {
+        2 => block(Some(stderr.trim())),
+        0 => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(serde_json::Value::Object(json)) => {
+                if json.get("decision").and_then(serde_json::Value::as_str) == Some("block") {
+                    block(json.get("reason").and_then(serde_json::Value::as_str))
+                } else {
+                    HookRunnerResult::Success
+                }
+            }
+            _ if text.is_empty() => HookRunnerResult::Success,
+            _ => HookRunnerResult::Allow {
+                updated_input: None,
+                additional_context: Some(clip_text(text, MAX_HOOK_FEEDBACK_CHARS)),
+            },
+        },
+        _ => HookRunnerResult::Failed(format!(
+            "hook '{hook_name}' failed with exit code {exit_code}"
+        )),
+    }
+}
+
+pub(crate) fn permission_result(stdout: &str, exit_code: i32, hook_name: &str) -> HookRunnerResult {
+    if exit_code != 0 {
+        return HookRunnerResult::Failed(format!(
+            "hook '{hook_name}' failed with exit code {exit_code}"
+        ));
+    }
+    let Some(decision) = serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .ok()
+        .and_then(|value| value.pointer("/hookSpecificOutput/decision").cloned())
+    else {
+        return HookRunnerResult::Success;
+    };
+    match decision.get("behavior").and_then(serde_json::Value::as_str) {
+        Some("allow") => match decision.get("updatedInput") {
+            None => HookRunnerResult::Allow {
+                updated_input: None,
+                additional_context: None,
+            },
+            Some(serde_json::Value::Object(input)) => HookRunnerResult::Allow {
+                updated_input: Some(input.clone()),
+                additional_context: None,
+            },
+            Some(_) => HookRunnerResult::Failed(format!(
+                "hook '{hook_name}' sent an updatedInput that is not an object"
+            )),
+        },
+        Some("deny") => HookRunnerResult::Deny {
+            reason: clip_reason(
+                non_empty(decision.get("message").and_then(serde_json::Value::as_str))
+                    .unwrap_or("denied by a PermissionRequest hook"),
+            ),
+            hook_name: hook_name.to_string(),
+        },
+        other => HookRunnerResult::Failed(format!(
+            "hook '{hook_name}' sent an unknown decision.behavior {}",
+            clip_reason(&format!("{other:?}"))
         )),
     }
 }
@@ -922,6 +1037,11 @@ pub async fn run_hook(
             (result, elapsed, None, system_message)
         }
         crate::config::HandlerType::Http => http::run_http_hook(spec, envelope, ctx, mode).await,
+        crate::config::HandlerType::McpTool => {
+            let (result, elapsed, system_message) =
+                mcp::run_mcp_tool_hook(spec, envelope, ctx, mode).await;
+            (result, elapsed, None, system_message)
+        }
     };
     // Remember what this run proved about the hook: a CONFIG failure means skip it from now on (and say so once), and the
     // last RUNTIME error is what `/hooks` lists. A blocking denial is a successful run, not a failure.
@@ -1296,6 +1416,7 @@ mod tests {
             source_dir: std::env::temp_dir(),
             extra_env: Default::default(),
             layer: crate::config::HookProvenance::File,
+            mcp_tool: None,
         }
     }
 

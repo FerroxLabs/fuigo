@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "rootDir": ".",
+    "outDir": "out-test",
+    "types": ["node", "mocha", "vscode"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

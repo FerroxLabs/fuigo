@@ -98,6 +98,31 @@ pub fn bundled_root() -> PathBuf {
     fuigo_config::fuigo_home().join(BUNDLED_DIR_NAME)
 }
 
+/// Skills compiled into the binary: `(name, SKILL.md)`. Installed under `<bundled>/skills/<name>/SKILL.md`, so
+/// they are `Bundled` scope and any local, repo or user skill of the same name overrides them.
+pub const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    ("review", include_str!("../skills/review/SKILL.md")),
+    ("ship", include_str!("../skills/ship/SKILL.md")),
+    ("steward", include_str!("../skills/steward/SKILL.md")),
+];
+
+/// Write [`BUILTIN_SKILLS`] into the bundled cache at `root`, rewriting a copy only when its bytes differ.
+/// A path the published bundle manages (in `manifest.json`, untouched) is left alone: the server copy wins.
+pub fn install_builtin_skills(root: &Path) -> Result<()> {
+    for (name, body) in BUILTIN_SKILLS {
+        let relative_path = relative_path_for(BundleFileKind::Skill, name);
+        if is_managed_bundle_file(root, &relative_path) {
+            continue;
+        }
+        let path = root.join(&relative_path);
+        if std::fs::read(&path).is_ok_and(|bytes| bytes == body.as_bytes()) {
+            continue;
+        }
+        write_bundle_file(&path, body.as_bytes())?;
+    }
+    Ok(())
+}
+
 pub fn read_cached_manifest(root: &Path) -> Result<Option<BundleManifest>> {
     let manifest_path = manifest_path(root);
     let bytes = match std::fs::read(&manifest_path) {
@@ -575,6 +600,35 @@ mod tests {
 
     fn cache_root(tmp: &TempDir) -> PathBuf {
         tmp.path().join("bundled")
+    }
+
+    #[test]
+    fn builtin_skills_install_idempotently_and_yield_to_a_published_copy() {
+        let tmp = TempDir::new().unwrap();
+        let root = cache_root(&tmp);
+        install_builtin_skills(&root).unwrap();
+        for (name, body) in BUILTIN_SKILLS {
+            let path = root.join("skills").join(name).join("SKILL.md");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), *body);
+            assert!(
+                body.starts_with("---\nname: "),
+                "{name} must have frontmatter"
+            );
+        }
+        // A stale copy is refreshed; an identical one is not rewritten.
+        let review = root.join("skills/review/SKILL.md");
+        std::fs::write(&review, "old").unwrap();
+        install_builtin_skills(&root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&review).unwrap(),
+            BUILTIN_SKILLS[0].1
+        );
+        // A copy the published bundle manages is left alone.
+        write_bundle_to_cache(&root, &bundle_with_skill("v1", "ship", "published")).unwrap();
+        let ship = root.join("skills/ship/SKILL.md");
+        let published = std::fs::read_to_string(&ship).unwrap();
+        install_builtin_skills(&root).unwrap();
+        assert_eq!(std::fs::read_to_string(&ship).unwrap(), published);
     }
 
     /// audit S7-F10: a symlink at the destination is refused, not written through; a normal write leaves no temp file.

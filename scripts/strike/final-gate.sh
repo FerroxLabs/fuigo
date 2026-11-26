@@ -32,6 +32,7 @@
 #
 # The log is judged by gate-verify.sh (A.2.1): headers == derived count (derive.py, from THE CANDIDATE), each
 # header reaching its own `test result:`, exit not 124/signal, GATE_DONE last, failing set from `failures:`.
+# Known load flakes (rerun alone, 3/3, before the gate counts as passing; never skipped): scripts/strike/known-load-flakes.txt.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # The gate must be its OWN session, or `pkill -s <gate sid>` (printed below) would hit the caller's whole session.

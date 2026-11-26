@@ -24,6 +24,17 @@ impl SessionActor {
         self: &Arc<Self>,
         event: fuigo_sampler::SamplingEvent,
     ) {
+        // Prompt scope (1.0.48): sampler events run on the actor loop, not the turn task, and belong to the running
+        // turn. They take the scope that turn was bound with at its start, only while it is still the live one.
+        match self.running_turn_scope() {
+            Some(scope) if crate::session::prompt_scope::PromptScope::current().is_none() => {
+                scope.scope(self.handle_sampling_event_scoped(event)).await
+            }
+            _ => self.handle_sampling_event_scoped(event).await,
+        }
+    }
+
+    async fn handle_sampling_event_scoped(self: &Arc<Self>, event: fuigo_sampler::SamplingEvent) {
         use fuigo_sampler::{SamplingChannel, SamplingEvent};
 
         let request_owned = self

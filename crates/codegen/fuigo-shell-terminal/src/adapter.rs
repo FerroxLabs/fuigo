@@ -209,7 +209,7 @@ impl AcpTerminalAdapter {
     ) -> Result<acp::CreateTerminalResponse, ComputerError> {
         let env = to_env(request)?;
         self.gateway
-            .send(
+            .send_request(
                 acp::CreateTerminalRequest::new(self.session_id.clone(), command)
                     .args(vec![])
                     .env(env)
@@ -233,10 +233,11 @@ impl TerminalBackend for AcpTerminalAdapter {
 
         let timed_out = match tokio::time::timeout(
             request.timeout,
-            self.gateway.send(acp::WaitForTerminalExitRequest::new(
-                self.session_id.clone(),
-                create_res.terminal_id.clone(),
-            )),
+            self.gateway
+                .send_request(acp::WaitForTerminalExitRequest::new(
+                    self.session_id.clone(),
+                    create_res.terminal_id.clone(),
+                )),
         )
         .await
         {
@@ -248,7 +249,7 @@ impl TerminalBackend for AcpTerminalAdapter {
             Err(_) => {
                 let _ = self
                     .gateway
-                    .send(acp::KillTerminalRequest::new(
+                    .send_request(acp::KillTerminalRequest::new(
                         self.session_id.clone(),
                         create_res.terminal_id.clone(),
                     ))
@@ -259,7 +260,7 @@ impl TerminalBackend for AcpTerminalAdapter {
 
         let output = match self
             .gateway
-            .send(acp::TerminalOutputRequest::new(
+            .send_request(acp::TerminalOutputRequest::new(
                 self.session_id.clone(),
                 create_res.terminal_id.clone(),
             ))
@@ -337,14 +338,15 @@ impl TerminalBackend for AcpTerminalAdapter {
             request.output_log,
         );
         recorder.initialize().await;
-        tokio::spawn(watch_for_exit(
+        // Prompt scope (1.0.48): the watcher's terminal/* requests belong to the prompt that started the task.
+        tokio::spawn(fuigo_acp_lib::PromptScope::inherit(watch_for_exit(
             self.gateway.clone(),
             self.session_id.clone(),
             task_id.clone(),
             Arc::clone(&self.tasks),
             notification_handle,
             recorder,
-        ));
+        )));
 
         Ok(BackgroundHandle {
             task_id,
@@ -359,7 +361,7 @@ impl TerminalBackend for AcpTerminalAdapter {
         // after the bound the snapshot comes from the task's log file, like any failed live poll.
         let live = tokio::time::timeout(
             LIVE_OUTPUT_BOUND,
-            self.gateway.send(acp::TerminalOutputRequest::new(
+            self.gateway.send_request(acp::TerminalOutputRequest::new(
                 self.session_id.clone(),
                 self.terminal_id(task_id),
             )),
@@ -493,7 +495,7 @@ impl TerminalBackend for AcpTerminalAdapter {
             Tracked::Unknown => {
                 let probe = self
                     .gateway
-                    .send(acp::TerminalOutputRequest::new(
+                    .send_request(acp::TerminalOutputRequest::new(
                         self.session_id.clone(),
                         self.terminal_id(task_id),
                     ))
@@ -513,7 +515,7 @@ impl TerminalBackend for AcpTerminalAdapter {
 
         let outcome = match self
             .gateway
-            .send(acp::KillTerminalRequest::new(
+            .send_request(acp::KillTerminalRequest::new(
                 self.session_id.clone(),
                 self.terminal_id(task_id),
             ))
@@ -576,7 +578,7 @@ impl TerminalBackend for AcpTerminalAdapter {
                 // Only a client that answered and disowned the id is a definitive miss
                 let probe = self
                     .gateway
-                    .send(acp::TerminalOutputRequest::new(
+                    .send_request(acp::TerminalOutputRequest::new(
                         self.session_id.clone(),
                         self.terminal_id(task_id),
                     ))
@@ -609,10 +611,11 @@ impl TerminalBackend for AcpTerminalAdapter {
 
         let gateway_result = tokio::time::timeout(
             timeout,
-            self.gateway.send(acp::WaitForTerminalExitRequest::new(
-                self.session_id.clone(),
-                self.terminal_id(task_id),
-            )),
+            self.gateway
+                .send_request(acp::WaitForTerminalExitRequest::new(
+                    self.session_id.clone(),
+                    self.terminal_id(task_id),
+                )),
         )
         .await;
 
@@ -647,6 +650,14 @@ impl TerminalBackend for AcpTerminalAdapter {
         let snapshot = self.get_task(task_id).await;
         live_waiter.finished = true;
         snapshot
+    }
+
+    async fn live_task_count(&self) -> Option<usize> {
+        let tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(tasks.values().filter(|t| !t.completed).count())
     }
 
     async fn list_tasks(&self) -> Vec<TaskSnapshot> {

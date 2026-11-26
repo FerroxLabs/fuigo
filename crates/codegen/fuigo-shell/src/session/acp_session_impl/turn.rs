@@ -684,6 +684,8 @@ impl SessionActor {
             })),
         );
         let policy = input_origin.policy();
+        self.ship_guard
+            .begin_turn(prompt_id, policy.authority.is_human_intent());
         self.open_subagent_spawn_admission();
         if let Some(completion_id) = input_origin.completion_id() {
             self.mark_completions_reported(&[completion_id]).await;
@@ -915,6 +917,9 @@ impl SessionActor {
                     );
                 }
                 for sk in &parsed_skills {
+                    if policy.authority.is_human_intent() {
+                        self.ship_guard.on_typed_skill(&sk.name, &sk.args);
+                    }
                     fuigo_telemetry::session_ctx::log_event(
                         fuigo_telemetry::events::SlashCommandUsed {
                             command: sk.name.clone(),
@@ -1172,6 +1177,7 @@ impl SessionActor {
         // S1.4: model-authored and peer text never reach the `UserPromptSubmit` gate, so a hook can be neither
         // satisfied nor bypassed by it.
         // A subagent task keeps running the (observe-only in a subagent) gate exactly as before the origin existed.
+        let mut prompt_hook_context = Vec::new();
         let prompt_block = if !matches!(
             policy.authority,
             InputAuthority::ModelAuthoredUntrusted | InputAuthority::PeerUntrusted
@@ -1180,7 +1186,7 @@ impl SessionActor {
             super::super::PromptOrigin::SubagentTask
                 | super::super::PromptOrigin::UnverifiedScheduled
         ) {
-            let prompt_gate_verdict = self
+            let (prompt_gate_verdict, gate_context) = self
                 .dispatch_prompt_submit_hook(
                     fuigo_hooks::event::HookPayload::UserPromptSubmit {
                         prompt: Some(text.clone()),
@@ -1214,7 +1220,13 @@ impl SessionActor {
                         .await;
                     None
                 }
-                (_, fuigo_hooks::result::PromptDecision::Allow) => None,
+                (enforced, fuigo_hooks::result::PromptDecision::Allow) => {
+                    // Only a prompt the user typed can carry hook context to the model, as the block is enforced only for it.
+                    if enforced {
+                        prompt_hook_context = gate_context;
+                    }
+                    None
+                }
             }
         } else {
             None
@@ -1224,6 +1236,41 @@ impl SessionActor {
                 let _ = ack.send(());
             }
         } else {
+            // SessionStart context opens the conversation ahead of the first accepted prompt, as in Claude Code. The wait
+            // ends at the parked deadline; a hook still running then stays parked and its context lands on a later turn.
+            // Polled in place (no borrow held across the await) so a turn cancelled while waiting leaves it for the next.
+            let start_deadline = self
+                .session_start_context
+                .borrow()
+                .as_ref()
+                .map(|(d, _)| *d);
+            let start_context = match start_deadline {
+                None => Vec::new(),
+                Some(deadline) => tokio::time::timeout_at(
+                    deadline,
+                    std::future::poll_fn(|cx| {
+                        let mut slot = self.session_start_context.borrow_mut();
+                        let Some((_, rx)) = slot.as_mut() else {
+                            return std::task::Poll::Ready(Vec::new());
+                        };
+                        std::future::Future::poll(std::pin::Pin::new(rx), cx).map(|context| {
+                            *slot = None;
+                            context.unwrap_or_default()
+                        })
+                    }),
+                )
+                .await
+                .unwrap_or_default(),
+            };
+            for context in &start_context {
+                self.chat_state_handle
+                    .push_user_message(self.wrap_hook_note(
+                        fuigo_hooks::event::HookEventName::SessionStart,
+                        HookNoteKind::Context,
+                        &context.hook_name,
+                        &context.text,
+                    ));
+            }
             self.chat_state_handle.increment_prompt_index();
             *self.tool_context.prompt_index.lock().await = current_prompt_index;
             self.tool_context
@@ -1538,6 +1585,16 @@ impl SessionActor {
                     prompt_id = %crate::session::cron_fire_tickets::loggable_prompt_id(prompt_id),
                     "user prompt commit skipped: chat-state actor unavailable"
                 );
+            }
+            // Delivered like PostToolUse context: a tagged untrusted note right behind the prompt, before sampling.
+            for context in &prompt_hook_context {
+                self.chat_state_handle
+                    .push_user_message(self.wrap_hook_note(
+                        fuigo_hooks::event::HookEventName::UserPromptSubmit,
+                        HookNoteKind::Context,
+                        &context.hook_name,
+                        &context.text,
+                    ));
             }
         }
         let turn_scope_guard =

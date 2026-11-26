@@ -11,6 +11,10 @@ use crate::extensions::notification::{SessionNotification, SessionUpdate};
 /// Half the 64 KiB a Python `asyncio` stream reader allows, the limit that reported this bug ("Separator is not found, and chunk exceed the limit").
 pub(crate) const FRAME_MAX_BYTES: usize = 32 * 1024;
 
+/// Room for the prompt-scope `_meta` pair (1.0.48) the gateway splices in after the frame is measured.
+/// shortcut: assumes prompt ids under ~200 bytes each; a longer client id can pass 32 KiB but stays far under 64 KiB.
+pub(crate) const SCOPE_META_RESERVE: usize = 512;
+
 /// The method the bridge sends; the budget is derived from it.
 pub(crate) const METHOD: &str = "fuigo/task_completed";
 
@@ -30,7 +34,7 @@ pub(crate) const FIELD_MAX_BYTES: usize = 1024;
 const COMPACTED_FIELDS: [&str; 4] = ["command", "display_command", "description", "cwd"];
 
 fn body_budget() -> usize {
-    FRAME_MAX_BYTES.saturating_sub(WRAPPER_BYTES + METHOD.len())
+    FRAME_MAX_BYTES.saturating_sub(WRAPPER_BYTES + METHOD.len() + SCOPE_META_RESERVE)
 }
 
 /// A message body proven to fit the frame budget.

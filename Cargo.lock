@@ -4384,6 +4384,7 @@ dependencies = [
  "agent-client-protocol",
  "async-trait",
  "axum",
+ "fuigo-acp-lib",
  "fuigo-computer-hub-sdk",
  "fuigo-config",
  "fuigo-extra-ca",
@@ -5154,8 +5155,10 @@ dependencies = [
  "obfstr",
  "parking_lot",
  "pretty_assertions",
+ "proc-macro2",
  "prod-mc-cli-chat-proxy-types",
  "prost",
+ "quote",
  "rand 0.9.5",
  "rcgen",
  "regex",
@@ -5172,6 +5175,7 @@ dependencies = [
  "sha2 0.10.9",
  "siphasher",
  "strum 0.27.2",
+ "syn 2.0.117",
  "tar",
  "tdigests",
  "tempfile",
@@ -5663,7 +5667,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.47"
+version = "1.0.48"
 dependencies = [
  "semver",
 ]

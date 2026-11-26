@@ -36,6 +36,7 @@ fn ctx(session: &str) -> RunContext<'_> {
         session_id: session,
         workspace_root: "/tmp",
         process_scope: None,
+        mcp: None,
     }
 }
 

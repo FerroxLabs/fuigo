@@ -814,8 +814,10 @@ pub(crate) async fn spawn_session_actor(
     let task_output_tool_name = Arc::new(std::sync::OnceLock::new());
     let read_tool_name = Arc::new(std::sync::OnceLock::new());
     let queue_exit_reminder_on_approved_exit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    crate::session::prompt_scope::register_session(&session_info.id.0, &tool_context.prompt_scope);
     let tools_notification_handle = crate::tools::notification_bridge::spawn_notification_bridge(
         crate::tools::notification_bridge::NotificationBridgeConfig {
+            prompt_scope: tool_context.prompt_scope.clone(),
             gateway: gateway.clone(),
             session_id: session_info.id.clone(),
             hunk_tracker_handle: hunk_tracker_handle_for_bridge.clone(),
@@ -2006,6 +2008,7 @@ pub(crate) async fn spawn_session_actor(
         fuigo_agent::AgentBuildError::InvalidConfig(format!("Could not load held wakes: {e}"))
     })?;
     let refusal_prompt = held_wakes.refusal_prompt();
+    let ship_guard = tool_context.ship_guard.clone();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         status_wake: Default::default(),
         session_info: session_info.clone(),
@@ -2163,6 +2166,7 @@ pub(crate) async fn spawn_session_actor(
         active_agent_type: parking_lot::Mutex::new(initial_agent_type),
         queue_exit_reminder_on_approved_exit,
         active_skill: parking_lot::Mutex::new(None),
+        ship_guard,
         admin_policy_watch: Default::default(),
         current_prompt_mode: current_prompt_mode.clone(),
         turn_start_prompt_mode: parking_lot::Mutex::new(restored_prompt_mode),
@@ -2260,6 +2264,7 @@ pub(crate) async fn spawn_session_actor(
         hook_registry: std::cell::RefCell::new(built_hook_registry),
         hook_registry_live: hook_registry_for_handle.clone(),
         turn_report: Default::default(),
+        session_start_context: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
         client_hooks: std::cell::RefCell::new(client_hooks),
@@ -2513,9 +2518,17 @@ pub(crate) async fn spawn_session_actor(
         let current_prompt_mode = session.current_prompt_mode.clone();
         let pending_interactions = session.pending_interactions.clone();
         let session_for_hooks = session.clone();
+        let question_scopes = session.tool_context.prompt_scope.clone();
         let mut user_question_rx = user_question_rx;
         tokio::task::spawn_local(async move {
             while let Some(mut request) = user_question_rx.recv().await {
+                // Prompt scope (1.0.48): this loop runs on its own task; the question belongs to the tool call that asked.
+                let question_scope = question_scopes
+                    .scope_of(&crate::session::prompt_scope::tool_call_work_id(
+                        &request.tool_call_id,
+                    ))
+                    .unwrap_or_default();
+                question_scope.scope(async {
                 use fuigo_tools::implementations::fuigo_build::ask_user_question::AskUserQuestionMode;
                 let mode = match *current_prompt_mode.lock() {
                     PromptMode::Plan => AskUserQuestionMode::Plan,
@@ -2585,6 +2598,7 @@ pub(crate) async fn spawn_session_actor(
                     }
                 };
                 let _ = request.result_tx.send(result);
+                            }).await;
             }
         });
     }

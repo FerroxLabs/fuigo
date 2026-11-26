@@ -1069,6 +1069,10 @@ pub(crate) async fn run_shell_child(
     tool_ctx.subagent_depth = child_depth;
     // S6.1: a subagent spawned by a peer-influenced session inherits the state.
     tool_ctx.peer_influence = ctx.parent_peer_influence.clone();
+    // A subagent of an unattended turn of an armed /ship or /steward session may not merge either.
+    tool_ctx.ship_guard = ctx
+        .parent_ship_guard
+        .for_child(request.parent_prompt_id.as_deref());
     tool_ctx.lsp = ctx.lsp.clone();
     tool_ctx.process_scope = ctx.process_scope.clone();
     let parent_traceparent = fuigo_file_utils::trace_context::current_traceparent();
@@ -1632,6 +1636,11 @@ pub(crate) async fn run_shell_child(
         start,
         cancel_token.clone(),
         goal_tick_cmd_tx(ctx.goal_enabled, ctx.parent_cmd_tx.as_ref()),
+        crate::session::prompt_scope::bind_subagent(
+            &ctx.parent_session_id,
+            request.parent_prompt_id.as_deref(),
+            &request.id,
+        ),
     );
     spawn_timer.record(
         SubagentSpawnPhase::ReadyToFirstTurn,

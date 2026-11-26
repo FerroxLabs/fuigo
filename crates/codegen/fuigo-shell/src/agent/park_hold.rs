@@ -274,7 +274,9 @@ impl ParkFrameHold {
             return ReleaseCounts { frames: 0, dropped };
         };
         let frames = self.flush_releasable(sink.as_ref()).await;
+        // Prompt scope (1.0.48): written below the gateway, so stamped here; an unpark is session-level.
         let marker = serde_json::json!({
+            "_meta": { "promptId": null, "originPromptId": null },
             "sessionId": session_id,
             "update": {
                 "sessionUpdate": UNPARKED_UPDATE,

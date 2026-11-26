@@ -3297,6 +3297,52 @@ fn goal_tick_cmd_tx_gates_on_goal_enabled() {
     assert!(goal_tick_cmd_tx(true, None).is_none());
     assert!(goal_tick_cmd_tx(false, None).is_none());
 }
+/// WF-5 (1.0.48 prompt scope): a subagent spawned in P1 still reports after P1 ended and P2 began; its progress ticks carry
+/// the parent prompt and root bound at spawn (P1), not the latest turn.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn wf5_subagent_progress_keeps_spawn_prompt_after_next_prompt_starts() {
+    use crate::session::prompt_scope::{self as ps, PromptScope};
+    use crate::session::signals::SessionSignalsHandle;
+    use crate::test_support::lsp_runtime::test_gateway;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let registry = std::sync::Arc::new(ps::PromptScopeRegistry::default());
+            ps::register_session("wf5-parent", &registry);
+            registry.begin_turn(&PromptScope::client("wf5-p1"));
+            let scope = ps::bind_subagent("wf5-parent", Some("wf5-p1"), "wf5-sub");
+            registry.begin_turn(&PromptScope::client("wf5-p2"));
+            let signals = SessionSignalsHandle::new();
+            signals.increment_turn();
+            tokio::task::yield_now().await;
+            let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let _publisher = spawn_progress_publisher(
+                signals,
+                test_gateway(),
+                "wf5-parent".to_string(),
+                "wf5-sub".to_string(),
+                "wf5-child".to_string(),
+                std::time::Instant::now(),
+                cancel.clone(),
+                Some(cmd_tx),
+                scope,
+            );
+            let cmd = tokio::time::timeout(std::time::Duration::from_secs(30), cmd_rx.recv())
+                .await
+                .expect("a tick must arrive within the publish interval")
+                .expect("channel open");
+            cancel.cancel();
+            let SessionCommand::FuigoSessionNotification { notification } = cmd else {
+                panic!("expected FuigoSessionNotification");
+            };
+            let meta = notification.meta.expect("progress tick carries _meta");
+            assert_eq!(meta[ps::META_PROMPT_ID], "wf5-p1");
+            assert_eq!(meta[ps::META_ORIGIN_PROMPT_ID], "wf5-p1");
+            assert_eq!(registry.root_of(&ps::subagent_work_id("wf5-sub")), Some(Some("wf5-p1".into())));
+        })
+        .await;
+}
 /// Producer side of the goal live-token wiring.
 /// A publisher tick must land on the parent command channel as a `SubagentProgress` notification carrying the child's signal values.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -3321,6 +3367,7 @@ async fn progress_publisher_delivers_ticks_to_parent_cmd_channel() {
                 std::time::Instant::now(),
                 cancel.clone(),
                 Some(cmd_tx),
+                crate::session::prompt_scope::PromptScope::session(),
             );
             let cmd = tokio::time::timeout(
                     std::time::Duration::from_secs(30),

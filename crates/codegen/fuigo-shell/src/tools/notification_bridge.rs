@@ -46,6 +46,8 @@ pub(crate) struct NotificationBridgeConfig {
     pub turn_prompt_mode: Arc<parking_lot::Mutex<crate::session::plan_mode::PromptMode>>,
     /// Session command channel for monitor events and task-completed injections.
     pub session_cmd_tx: mpsc::UnboundedSender<SessionCommand>,
+    /// Prompt scope (1.0.48): roots of background work, shared with the session actor's tool context.
+    pub prompt_scope: Arc<crate::session::prompt_scope::PromptScopeRegistry>,
     pub task_completion_reservations:
         fuigo_tools::reminders::task_completion::TaskCompletionReservations,
     pub task_wake_suppressed: fuigo_tools::reminders::task_completion::TaskWakeSuppressed,
@@ -202,7 +204,11 @@ pub(crate) fn spawn_notification_bridge(
                     }
                 }
                 notification => {
-                    handle_notification(&config, notification, &mut offsets).await;
+                    // Prompt scope (1.0.48): this task belongs to no prompt; each notification is sent in the scope of
+                    // the work it reports, bound when that work started.
+                    notification_scope(&config.prompt_scope, &notification)
+                        .scope(handle_notification(&config, notification, &mut offsets))
+                        .await;
                     if let Some(acknowledgement) = acknowledgement {
                         let _ = acknowledgement.send(Ok(()));
                     }
@@ -228,6 +234,46 @@ async fn emit_current_mode_update(config: &NotificationBridgeConfig, mode_id: &'
     ));
     config.gateway.forward_fire_and_forget(notification);
 }
+/// Prompt scope (1.0.48): the (promptId, originPromptId) of the work a tool notification reports, bound when that work
+/// started: the turn whose tool call it belongs to, or the turn that started the background task or monitor (a monitor is
+/// bound as a shell task when it is backgrounded). Never the turn running when the notification arrives. LSP and
+/// scheduler notices are session-level (`null`s). Exhaustive on purpose: a new notification kind must be placed here.
+fn notification_scope(
+    registry: &crate::session::prompt_scope::PromptScopeRegistry,
+    notification: &ToolNotification,
+) -> crate::session::prompt_scope::PromptScope {
+    use crate::session::prompt_scope as ps;
+    let tool_call = |id: &str| registry.scope_of(&ps::tool_call_work_id(id));
+    let task = |id: &str| {
+        registry
+            .scope_of(&ps::bash_work_id(id))
+            .or_else(|| registry.scope_of(&ps::monitor_work_id(id)))
+    };
+    match notification {
+        ToolNotification::BashOutputChunk(n) => tool_call(&n.base.tool_call_id),
+        ToolNotification::BashExecutionComplete(n) => tool_call(&n.base.tool_call_id),
+        ToolNotification::BashExecutionTimeout(n) => tool_call(&n.base.tool_call_id),
+        ToolNotification::BashExecutionBackgrounded(n) => tool_call(&n.base.tool_call_id),
+        ToolNotification::BashExecutionFailed(n) => tool_call(&n.tool_call_id),
+        ToolNotification::FileWritten(n) => tool_call(&n.tool_call_id),
+        ToolNotification::PlanModeEntered(n) => tool_call(&n.tool_call_id),
+        ToolNotification::PlanModeExited(n) => tool_call(&n.tool_call_id),
+        ToolNotification::UserQuestionAsked(n) => tool_call(&n.tool_call_id),
+        ToolNotification::TaskCompleted(n) => task(&n.task_id),
+        ToolNotification::MonitorEvent(n) => task(&n.task_id),
+        ToolNotification::SubagentCompleted(_)
+        | ToolNotification::LspServerStarting(_)
+        | ToolNotification::LspServerReady(_)
+        | ToolNotification::LspServerCrashed(_)
+        | ToolNotification::LspServerRetrying(_)
+        | ToolNotification::LspServerFailed(_)
+        | ToolNotification::ScheduledTaskFired(_)
+        | ToolNotification::ScheduledTaskRemoved(_)
+        | ToolNotification::ScheduledTaskCreated(_) => None,
+    }
+    .unwrap_or_default()
+}
+
 async fn handle_notification(
     config: &NotificationBridgeConfig,
     notification: ToolNotification,
@@ -330,6 +376,12 @@ async fn handle_notification(
             {
                 let mut meta_map = None;
                 stamp_event_id(config, &mut meta_map);
+                // Prompt scope (1.0.48): the task is bound to the turn whose tool call backgrounded it.
+                let scope = config.prompt_scope.bind_to_tool_call(
+                    &crate::session::prompt_scope::bash_work_id(&bg.task_id),
+                    &bg.base.tool_call_id,
+                );
+                scope.stamp(meta_map.get_or_insert_with(Default::default));
                 notification.meta = meta_map.map(serde_json::Value::Object);
             }
             let _ = config.persistence.tx.send(PersistenceMsg::Update(
@@ -588,6 +640,24 @@ async fn handle_notification(
             {
                 let mut meta_map = None;
                 stamp_event_id(config, &mut meta_map);
+                // Prompt scope (1.0.48): the completion carries the scope bound when the task started; the task is no
+                // longer live. An unbound task (a monitor) carries no pair, which a prompt-scoped client treats as unknown.
+                let work_id = if is_monitor {
+                    crate::session::prompt_scope::monitor_work_id(&task_id)
+                } else {
+                    crate::session::prompt_scope::bash_work_id(&task_id)
+                };
+                config.prompt_scope.finish(&work_id);
+                // A monitor started through the shell tool was bound as a shell task.
+                let bash_id = crate::session::prompt_scope::bash_work_id(&task_id);
+                config.prompt_scope.finish(&bash_id);
+                let bound = config
+                    .prompt_scope
+                    .scope_of(&work_id)
+                    .or_else(|| config.prompt_scope.scope_of(&bash_id));
+                if let Some(scope) = bound {
+                    scope.stamp(meta_map.get_or_insert_with(Default::default));
+                }
                 notification.meta = meta_map.map(serde_json::Value::Object);
             }
             if let Some(params) = task_completed_frame::encode(&mut notification) {

@@ -207,6 +207,8 @@ pub struct ToolContext {
     pub(crate) active_message_parent_prompt_index: Arc<std::sync::atomic::AtomicUsize>,
     /// Peer-influenced flag (S6.1), shared with this session's permission handle; a child session starts from its parent's value.
     pub(crate) peer_influence: fuigo_workspace::permission::PeerInfluence,
+    /// The /ship and /steward never-merge rule; a subagent of an unattended turn of an armed session gets an inherited one.
+    pub(crate) ship_guard: Arc<crate::session::ship_guard::ShipGuard>,
     /// Top-level sessions start at 0; child sessions are parent_depth + 1.
     pub subagent_depth: u32,
     /// Carries spawn, query, cancel, list-active, completions, and outstanding messages to the coordinator.
@@ -226,6 +228,8 @@ pub struct ToolContext {
     /// Used by the between-turn completion drain in `handle_prompt`.
     pub is_turn_active: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) unattributed_background_usage: Arc<std::sync::atomic::AtomicBool>,
+    /// Prompt scope (1.0.48): the client prompt at the root of each piece of background work, bound when it starts.
+    pub(crate) prompt_scope: Arc<crate::session::prompt_scope::PromptScopeRegistry>,
     /// The session turn loop (`inject_pending_monitor_events`) drains events pushed here.
     /// They are injected as ONE hidden synthetic user message before the next sampling step.
     pub monitor_event_buffer:
@@ -362,6 +366,7 @@ impl ToolContext {
             prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
             active_message_parent_prompt_index: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             peer_influence: fuigo_workspace::permission::PeerInfluence::new(),
+            ship_guard: Default::default(),
             subagent_depth: 0,
             subagent_event_tx: None,
             subagent_coordinator_sender: None,
@@ -369,6 +374,7 @@ impl ToolContext {
             lsp_server_names: Vec::new(),
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            prompt_scope: Default::default(),
             monitor_event_buffer: None,
             task_completion_reservations: None,
             task_wake_suppressed: None,
@@ -459,6 +465,7 @@ mod tests {
                     0,
                 )),
                 peer_influence: fuigo_workspace::permission::PeerInfluence::new(),
+                ship_guard: Default::default(),
                 subagent_depth: 0,
                 subagent_event_tx: None,
                 subagent_coordinator_sender: None,
@@ -466,6 +473,7 @@ mod tests {
                 lsp_server_names: Vec::new(),
                 is_turn_active: None,
                 unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                prompt_scope: Default::default(),
                 monitor_event_buffer: None,
                 task_completion_reservations: None,
                 task_wake_suppressed: None,

@@ -2269,6 +2269,7 @@ mod tests {
             source_dir: std::path::PathBuf::from("/home/u/.fuigo/hooks"),
             extra_env: std::collections::HashMap::from([("FOO".to_string(), "bar".to_string())]),
             layer: fuigo_hooks::config::HookProvenance::File,
+            mcp_tool: None,
         };
         let mut registry = fuigo_hooks::discovery::HookRegistry::default();
         registry.append_specs(vec![spec]);
@@ -2327,6 +2328,7 @@ mod tests {
                 E::PostToolUse => HookEventNameWire::PostToolUse,
                 E::PostToolUseFailure => HookEventNameWire::PostToolUseFailure,
                 E::PermissionDenied => HookEventNameWire::PermissionDenied,
+                E::PermissionRequest => HookEventNameWire::PermissionRequest,
                 E::UserPromptSubmit => HookEventNameWire::UserPromptSubmit,
                 E::Notification => HookEventNameWire::Notification,
                 E::SubagentStart => HookEventNameWire::SubagentStart,
@@ -2346,6 +2348,7 @@ mod tests {
             E::PostToolUse,
             E::PostToolUseFailure,
             E::PermissionDenied,
+            E::PermissionRequest,
             E::UserPromptSubmit,
             E::Notification,
             E::SubagentStart,
@@ -2389,6 +2392,7 @@ mod tests {
                 source_dir,
                 extra_env,
                 layer,
+                mcp_tool,
             } = spec;
             let event = serde_json::from_value(serde_json::to_value(event).unwrap()).unwrap();
             HookSpecWire {
@@ -2408,6 +2412,7 @@ mod tests {
                 source_dir,
                 extra_env,
                 layer: layer.as_str().to_string(),
+                mcp_tool: mcp_tool.map(|t| serde_json::to_value(t).unwrap()),
             }
         }
         let spec = HookSpec {
@@ -2428,6 +2433,7 @@ mod tests {
             source_dir: std::path::PathBuf::from("/home/u/.fuigo/hooks"),
             extra_env: std::collections::HashMap::from([("FOO".to_string(), "bar".to_string())]),
             layer: fuigo_hooks::config::HookProvenance::Managed,
+            mcp_tool: None,
         };
         assert_eq!(
             serde_json::to_value(&spec).unwrap(),

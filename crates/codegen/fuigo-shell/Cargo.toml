@@ -210,6 +210,10 @@ windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_Sys
 fuigo-win-acl = { workspace = true, features = ["test-support"] }
 
 [dev-dependencies]
+# WF-4 (prompt scope) parses the scanned sources to find every ACP send, in any call form (UFCS, macros).
+syn = { version = "2.0.117", features = ["full", "visit"] }
+proc-macro2 = "1.0.106"
+quote = "1.0.45"
 fuigo-session-writer = { workspace = true, features = ["test-support"] }
 fuigo-secrets = { workspace = true, features = ["test-support"] }
 fuigo-sampler = { path = "../fuigo-sampler", features = ["test-support"] }

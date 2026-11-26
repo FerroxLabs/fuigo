@@ -208,6 +208,7 @@ fn p188_failed_retry_state_and_its_agent_error_hook_run_on_the_caller() {
                     source_dir: dir.path().to_path_buf(),
                     extra_env: std::collections::HashMap::new(),
                     layer: fuigo_hooks::config::HookProvenance::Requirements,
+                    mcp_tool: None,
                 },
             ]);
             let mut blocked = blocked_loop().await;

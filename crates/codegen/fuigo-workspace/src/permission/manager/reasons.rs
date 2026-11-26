@@ -22,6 +22,8 @@ pub const NEEDS_USER: &str = "needs_user";
 pub const BASH_REQUEST_FLOOR: &str = "bash_request_floor";
 pub const OPAQUE_SHELL: &str = "opaque_shell";
 pub const HOOK_ASK: &str = "hook_ask";
+/// A `PermissionRequest` hook answered the prompt (allow or deny) instead of the user.
+pub const HOOK_PERMISSION_REQUEST: &str = "hook_permission_request";
 /// S1 (1.0.47): a destructive change outside the workspace that no exemption covers.
 pub const OUTSIDE_CHANGE: &str = "outside_change";
 pub const REQUESTER_GONE: &str = "requester_gone";
@@ -51,6 +53,7 @@ pub const ALL: &[&str] = &[
     BASH_REQUEST_FLOOR,
     OPAQUE_SHELL,
     HOOK_ASK,
+    HOOK_PERMISSION_REQUEST,
     OUTSIDE_CHANGE,
     REQUESTER_GONE,
 ];

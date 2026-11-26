@@ -1086,7 +1086,9 @@ impl SessionActor {
             Result<ToolRunResult, fuigo_tool_runtime::ToolError>,
             u64,
         )>();
-        let drainer = tokio::spawn(
+        // Prompt scope (1.0.48): the tool futures are polled on this task, so it carries the turn's scope; every
+        // request a tool sends (fs, terminal, permission, MCP) is then stamped with the turn that called it.
+        let drainer = tokio::spawn(crate::session::prompt_scope::PromptScope::inherit(
             async move {
                 while let Some(item) = dispatch_stream.next().await {
                     if dispatch_tx.send(item).is_err() {
@@ -1095,7 +1097,7 @@ impl SessionActor {
                 }
             }
             .in_current_span(),
-        );
+        ));
         let _drainer_guard = crate::util::AbortOnDrop(drainer);
         // An ACP error while delivering one call's result must not abandon the calls still running: leaving this loop early
         // drops `_drainer_guard`, which drops every sibling future with its command and its tool result. The first error is
@@ -1711,6 +1713,23 @@ impl SessionActor {
         let mut rewriting_hook: Option<String> = None;
         let mut hook_ask: Option<HookAsk> = None;
         let mut hook_additional_context = Vec::new();
+        // The /ship and /steward never-merge rule runs whether or not any PreToolUse hook is configured.
+        // `use_tool` carries the dispatched tool's own arguments under `tool_input`.
+        let guarded_input = match &dispatch_target_name {
+            Some(_) => raw_input.get("tool_input").unwrap_or(&raw_input),
+            None => &raw_input,
+        };
+        if let Some(reason) = self.ship_guard.refusal(&resolved_tool_name, guarded_input) {
+            return Ok(Err(self
+                .deny_tool(
+                    &call.id,
+                    &tool_call_id,
+                    &resolved_tool_name,
+                    "fuigo never-merge rule".to_owned(),
+                    reason,
+                )
+                .await?));
+        }
         let has_pre_tool_use_hooks =
             self.may_have_hooks_for(fuigo_hooks::event::HookEventName::PreToolUse);
         if has_pre_tool_use_hooks {
@@ -1788,7 +1807,7 @@ impl SessionActor {
                 }
             }
         }
-        let access_kind = AccessKind::from(&tool_input);
+        let mut access_kind = AccessKind::from(&tool_input);
         let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
         if plan_gate != PlanEditGate::Allow {
             tracing::info_span!(
@@ -1940,50 +1959,108 @@ impl SessionActor {
                 }
                 _ => (None, None),
             };
-            let resolution = {
-                let _pending_guard =
-                    crate::session::pending_interaction::PendingInteractionGuard::new(
-                        self.pending_interactions.clone(),
-                        self.notifications.gateway.clone(),
-                        self.session_info.id.clone(),
-                        tool_call_id.to_string(),
-                        crate::session::pending_interaction::PendingKind::Permission,
-                    );
-                self.permissions
-                    .request(PermissionRequest {
-                        path_context,
-                        session_id: Some(self.session_info.id.0.to_string()),
-                        hook_ask,
-                        // P184: a multi-file edit is judged per target, from the input that runs.
-                        edit_targets: fuigo_workspace::permission::edit_targets_for(&tool_input),
-                        // P174: every file a multi-file read reads, judged as a Read each.
-                        read_targets: fuigo_workspace::permission::read_targets_for(&tool_input),
-                        peer_note: None,
-                        mcp_definition,
-                        mcp_definition_legacy,
-                        // Audit S3-F2: where a persistent shell will really start the command (its tracked directory).
-                        shell_run_dir: if matches!(
-                            access_kind,
-                            fuigo_workspace::permission::AccessKind::Bash(_)
-                        ) {
-                            self.rebuild_spec.terminal_backend.get_shell_cwd().await
-                        } else {
-                            None
-                        },
-                        // u35 g11 (Astra r10 High): the directory the bash tool really runs the command in.
-                        exec_cwd: fuigo_workspace::permission::bash_exec_cwd_for(
-                            &tool_input,
-                            std::path::Path::new(self.session_info.cwd.as_str()),
-                        ),
-                        // Audit X2-F1: a Task child is judged in its parent's launch folder too.
-                        parent_run_dir: self
-                            .startup_hints
-                            .parent_cwd
-                            .clone()
-                            .filter(|_| self.startup_hints.is_subagent),
-                        ..PermissionRequest::new(access_kind.clone(), tool_call_update)
-                    })
-                    .await
+            // A `PermissionRequest` hook may answer the prompt (only built when one is configured). An allow that rewrites
+            // the input is checked against the tool's schema, then the new input is judged once more without the hook.
+            let mut permission_hook = self.permission_prompt_hook(&resolved_tool_name, &raw_input);
+            let resolution = loop {
+                let resolution = {
+                    let _pending_guard =
+                        crate::session::pending_interaction::PendingInteractionGuard::new(
+                            self.pending_interactions.clone(),
+                            self.notifications.gateway.clone(),
+                            self.session_info.id.clone(),
+                            tool_call_id.to_string(),
+                            crate::session::pending_interaction::PendingKind::Permission,
+                        );
+                    self.permissions
+                        .request(PermissionRequest {
+                            path_context: path_context.clone(),
+                            session_id: Some(self.session_info.id.0.to_string()),
+                            hook_ask: hook_ask.clone(),
+                            // P184: a multi-file edit is judged per target, from the input that runs.
+                            edit_targets: fuigo_workspace::permission::edit_targets_for(
+                                &tool_input,
+                            ),
+                            // P174: every file a multi-file read reads, judged as a Read each.
+                            read_targets: fuigo_workspace::permission::read_targets_for(
+                                &tool_input,
+                            ),
+                            peer_note: None,
+                            mcp_definition: mcp_definition.clone(),
+                            mcp_definition_legacy: mcp_definition_legacy.clone(),
+                            // Audit S3-F2: where a persistent shell will really start the command (its tracked directory).
+                            shell_run_dir: if matches!(
+                                access_kind,
+                                fuigo_workspace::permission::AccessKind::Bash(_)
+                            ) {
+                                self.rebuild_spec.terminal_backend.get_shell_cwd().await
+                            } else {
+                                None
+                            },
+                            // u35 g11 (Astra r10 High): the directory the bash tool really runs the command in.
+                            exec_cwd: fuigo_workspace::permission::bash_exec_cwd_for(
+                                &tool_input,
+                                std::path::Path::new(self.session_info.cwd.as_str()),
+                            ),
+                            // Audit X2-F1: a Task child is judged in its parent's launch folder too.
+                            parent_run_dir: self
+                                .startup_hints
+                                .parent_cwd
+                                .clone()
+                                .filter(|_| self.startup_hints.is_subagent),
+                            prompt_hook: permission_hook.as_ref().map(|(hook, _)| hook.clone()),
+                            ..PermissionRequest::new(access_kind.clone(), tool_call_update.clone())
+                        })
+                        .await
+                };
+                let Some(run) = permission_hook
+                    .take()
+                    .and_then(|(_, slot)| slot.lock().unwrap_or_else(|e| e.into_inner()).take())
+                else {
+                    break resolution;
+                };
+                self.send_hook_execution(
+                    "permission_request",
+                    Some(&resolved_tool_name),
+                    Some(&tool_call_id.0),
+                    None,
+                    &run.results,
+                )
+                .await;
+                self.emit_hook_executed_telemetry(
+                    "permission_request",
+                    Some(&resolved_tool_name),
+                    &run.results,
+                )
+                .await;
+                let Some(fuigo_hooks::dispatcher::PermissionRequestDecision::Allow {
+                    updated_input: Some(rewrite),
+                }) = run.decision
+                else {
+                    break resolution;
+                };
+                if !matches!(resolution.decision, Decision::Allow) {
+                    break resolution;
+                }
+                let validated = match self
+                    .validate_hook_rewrite(
+                        &call,
+                        &tool_call_id,
+                        &resolved_tool_name,
+                        &dispatch_target_name,
+                        rewrite,
+                    )
+                    .await?
+                {
+                    Ok(validated) => validated,
+                    Err(blocked) => return Ok(Err(blocked)),
+                };
+                tool_input = validated.rewritten;
+                raw_arguments = validated.updated_json.to_string();
+                raw_input = validated.updated_json;
+                concatenated_json_count = 0;
+                rewriting_hook = Some(validated.hook_name);
+                access_kind = AccessKind::from(&tool_input);
             };
             approved_without_grant = resolution.approved_without_grant();
             let manager_event = resolution.event;

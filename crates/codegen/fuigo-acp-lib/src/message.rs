@@ -22,6 +22,8 @@ pub trait AcpSide {
     type OtherSide: AcpSide;
     /// Display name for this side.
     const NAME: &'static str;
+    /// Whether this side's gateway stamps the prompt scope into what it sends (the agent side: agent-to-client frames).
+    const STAMPS_PROMPT_SCOPE: bool;
 }
 
 /// Marker type representing the agent's view of the ACP connection (as one side of that connection).
@@ -30,6 +32,7 @@ impl AcpSide for acp::AgentSide {
     type OutMessage = AcpClientMessage; // outbound messages = messages meant *for* the client
     type OtherSide = acp::ClientSide;
     const NAME: &'static str = "agent";
+    const STAMPS_PROMPT_SCOPE: bool = true;
 }
 
 /// Marker type representing the agent's view of the ACP connection (as one side of that connection).
@@ -38,6 +41,7 @@ impl AcpSide for acp::ClientSide {
     type OutMessage = AcpAgentMessage; // outbound messages = messages meant *for* the agent
     type OtherSide = acp::AgentSide;
     const NAME: &'static str = "client";
+    const STAMPS_PROMPT_SCOPE: bool = false;
 }
 
 /// Extends each request/response type pair with the side marker type and schema method name.
@@ -48,6 +52,11 @@ pub trait AcpMethod {
 /// Connect together ACP request and response types for each rpc method.
 pub trait AcpRequest: Clone + fmt::Debug + Serialize + AcpMethod {
     type Response: Clone + fmt::Debug + Serialize;
+
+    /// Prompt scope (1.0.48): write the sending task's (promptId, originPromptId) into this frame's `_meta`, keys
+    /// already present winning (see [`crate::prompt_scope`]). Called by the agent-side gateway on every
+    /// agent-to-client frame; client-to-agent requests keep the default (nothing).
+    fn stamp_prompt_scope(&mut self) {}
 }
 
 /// Contains an ACP request and a oneshot channel where the response of a matching type can be sent.
@@ -102,10 +111,40 @@ macro_rules! acp_define_request_response {
             }
         }
     };
+    // An agent-to-client frame with a typed `_meta`.
+    ($request:ty, $response:ty, $method:expr, meta $(,)?) => {
+        impl AcpRequest for $request {
+            type Response = $response;
+            fn stamp_prompt_scope(&mut self) {
+                crate::prompt_scope::stamp_meta(&mut self.meta);
+            }
+        }
+
+        impl AcpMethod for $request {
+            fn method_name(&self) -> &'static str {
+                $method
+            }
+        }
+    };
+    // An extension frame (raw params, either direction; only the agent-side gateway calls the stamp).
+    ($request:ty, $response:ty, $method:expr, params $(,)?) => {
+        impl AcpRequest for $request {
+            type Response = $response;
+            fn stamp_prompt_scope(&mut self) {
+                crate::prompt_scope::stamp_params(&mut self.params);
+            }
+        }
+
+        impl AcpMethod for $request {
+            fn method_name(&self) -> &'static str {
+                $method
+            }
+        }
+    };
 }
 
-acp_define_request_response!(acp::ExtRequest, acp::ExtResponse, "ext_method");
-acp_define_request_response!(acp::ExtNotification, (), "ext_notification");
+acp_define_request_response!(acp::ExtRequest, acp::ExtResponse, "ext_method", params);
+acp_define_request_response!(acp::ExtNotification, (), "ext_notification", params);
 
 pub trait StorageMarker: fmt::Debug + Clone + Copy {
     type Type<T>: Borrow<T> + From<T>;
@@ -133,46 +172,55 @@ mod client {
         acp::RequestPermissionRequest,
         acp::RequestPermissionResponse,
         acp::CLIENT_METHOD_NAMES.session_request_permission,
+        meta,
     );
     acp_define_request_response!(
         acp::ReadTextFileRequest,
         acp::ReadTextFileResponse,
         acp::CLIENT_METHOD_NAMES.fs_read_text_file,
+        meta,
     );
     acp_define_request_response!(
         acp::WriteTextFileRequest,
         acp::WriteTextFileResponse,
         acp::CLIENT_METHOD_NAMES.fs_write_text_file,
+        meta,
     );
     acp_define_request_response!(
         acp::SessionNotification,
         (),
         acp::CLIENT_METHOD_NAMES.session_update,
+        meta,
     );
     acp_define_request_response!(
         acp::CreateTerminalRequest,
         acp::CreateTerminalResponse,
         acp::CLIENT_METHOD_NAMES.terminal_create,
+        meta,
     );
     acp_define_request_response!(
         acp::TerminalOutputRequest,
         acp::TerminalOutputResponse,
         acp::CLIENT_METHOD_NAMES.terminal_output,
+        meta,
     );
     acp_define_request_response!(
         acp::ReleaseTerminalRequest,
         acp::ReleaseTerminalResponse,
         acp::CLIENT_METHOD_NAMES.terminal_release,
+        meta,
     );
     acp_define_request_response!(
         acp::WaitForTerminalExitRequest,
         acp::WaitForTerminalExitResponse,
         acp::CLIENT_METHOD_NAMES.terminal_wait_for_exit,
+        meta,
     );
     acp_define_request_response!(
         acp::KillTerminalRequest,
         acp::KillTerminalResponse,
         acp::CLIENT_METHOD_NAMES.terminal_kill,
+        meta,
     );
 
     /// ACP messages meant *for* the client.

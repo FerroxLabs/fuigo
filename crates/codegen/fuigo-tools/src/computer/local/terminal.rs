@@ -2876,6 +2876,17 @@ impl TerminalBackend for LocalTerminalBackend {
         reply_rx.await.ok().flatten()
     }
 
+    async fn live_task_count(&self) -> Option<usize> {
+        // The terminal actor is in this process; no client is asked.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(TerminalCommand::ListTasks { reply: reply_tx })
+            .await
+            .ok()?;
+        let tasks = reply_rx.await.ok()?;
+        Some(tasks.iter().filter(|t| !t.completed).count())
+    }
+
     async fn list_tasks(&self) -> Vec<TaskSnapshot> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self

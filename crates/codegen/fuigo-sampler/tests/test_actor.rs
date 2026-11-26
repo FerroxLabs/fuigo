@@ -1562,7 +1562,8 @@ async fn responses_doom_loop_does_not_resample_after_output_when_retry_only_befo
 // ---------------------------------------------------------------------------
 
 /// A reasoning model that streams only reasoning (no text, no tool call) on every attempt.
-/// On the default budget this used to resend the byte-identical request 14 more times over ~5 minutes; it must now fail within seconds after two resends.
+/// On the default budget this used to resend the byte-identical request 14 more times over ~5 minutes; it must now fail within seconds.
+/// Its replies repeat, so the second resend is the nudged one and a think-only reply to it ends the request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_reasoning_only_stream_fails_fast_after_the_empty_response_budget() {
     let counter = Arc::new(AtomicU32::new(0));
@@ -1618,7 +1619,7 @@ async fn responses_reasoning_only_stream_fails_fast_after_the_empty_response_bud
     assert_eq!(
         retrying,
         vec![(1, 3, "empty_response"), (2, 3, "empty_response")],
-        "two resends, announced against the one empty-response budget"
+        "a plain resend, then the nudged one as the last attempt"
     );
     match events.last().unwrap() {
         SamplingEvent::Failed { error, .. } => {
@@ -1633,7 +1634,7 @@ async fn responses_reasoning_only_stream_fails_fast_after_the_empty_response_bud
     assert_eq!(
         counter.load(Ordering::SeqCst),
         3,
-        "the original request plus exactly two resends"
+        "the original request, one plain resend and the nudged one"
     );
 }
 
@@ -1698,7 +1699,7 @@ async fn responses_reasoning_only_after_a_503_keeps_its_own_budget() {
             (1, 3, "empty_response"),
             (2, 3, "empty_response")
         ],
-        "the 503 retry, then the reasoning-only resends announced against their own budget"
+        "the 503 retry, then a plain think-only resend and the nudged one, on their own budget"
     );
     match events.last().unwrap() {
         SamplingEvent::Failed { error, .. } => assert_eq!(error.kind.as_str(), "empty_response"),
@@ -1707,7 +1708,7 @@ async fn responses_reasoning_only_after_a_503_keeps_its_own_budget() {
     assert_eq!(
         counter.load(Ordering::SeqCst),
         4,
-        "the 503, the reasoning-only reply, and its two resends"
+        "the 503, the reasoning-only reply, a plain resend and the nudged one"
     );
     assert!(
         elapsed < Duration::from_secs(10),
@@ -2359,7 +2360,7 @@ async fn ollama_think_only_chain_of_up_to_five_is_resent_unchanged_then_complete
     }
 }
 
-/// Six think-only replies in a row end as a think-only failure after exactly six attempts, not a generic empty one.
+/// Six think-only replies in a row, then a seventh to the nudged resend, end as a think-only failure, not a generic empty one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ollama_think_only_six_times_surfaces_think_only_after_six_attempts() {
     let (server, seen) = scripted_chat_server(think_only_chain(6)).await;
@@ -2376,7 +2377,11 @@ async fn ollama_think_only_six_times_surfaces_think_only_after_six_attempts() {
     let events = drain_until_terminal(&mut event_rx, Duration::from_secs(40)).await;
     server.shutdown();
 
-    assert_eq!(retrying_events(&events).len(), 5, "five resends");
+    assert_eq!(
+        retrying_events(&events).len(),
+        6,
+        "five resends and the nudged one"
+    );
     match events.last().unwrap() {
         SamplingEvent::Failed { error, .. } => {
             assert_eq!(error.kind.as_str(), "empty_response");
@@ -2387,7 +2392,7 @@ async fn ollama_think_only_six_times_surfaces_think_only_after_six_attempts() {
             );
             assert!(context.had_reasoning);
             assert_eq!(context.finish_reason.as_deref(), Some("stop"));
-            assert_eq!(context.attempts, Some(6));
+            assert_eq!(context.attempts, Some(7));
             assert!(
                 error.message.contains("think-only"),
                 "honest label: {}",
@@ -2396,9 +2401,170 @@ async fn ollama_think_only_six_times_surfaces_think_only_after_six_attempts() {
         }
         other => panic!("expected Failed, got {other:?}"),
     }
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen.len(), 6, "exactly six attempts");
-    assert!(seen.iter().all(|b| *b == seen[0]), "all resends unchanged");
+    assert_six_unchanged_then_one_nudge(&seen.lock().unwrap());
+}
+
+/// The words only the think-only nudge carries.
+const NUDGE_MARK: &str = "Reply to the user now";
+
+fn carries_nudge(body: &serde_json::Value) -> bool {
+    body.to_string().contains(NUDGE_MARK)
+}
+
+/// Run one request against `server` on the production budget and return its events and every request body.
+async fn think_only_run(
+    server: MockServer,
+    seen: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+) -> (Vec<SamplingEvent>, Vec<serde_json::Value>) {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        think_only_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    handle.submit(
+        RequestId::from("req-think-only-nudge"),
+        user_request("Make exactly two tool calls in order."),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(40)).await;
+    server.shutdown();
+    let seen = seen.lock().unwrap().clone();
+    (events, seen)
+}
+
+/// The six budgeted attempts are byte-identical; the one after them is the first request plus the nudge alone.
+fn assert_six_unchanged_then_one_nudge(seen: &[serde_json::Value]) {
+    assert_eq!(
+        seen.len(),
+        7,
+        "six budgeted attempts, then one nudged resend"
+    );
+    assert!(
+        seen[..6].iter().all(|b| *b == seen[0]),
+        "the six budgeted attempts stay byte-identical"
+    );
+    assert!(
+        !seen[..6].iter().any(carries_nudge),
+        "no nudge before the budget is spent"
+    );
+    let (first, last) = (messages(&seen[0]), messages(&seen[6]));
+    assert_eq!(last.len(), first.len() + 1, "the nudge adds one message");
+    assert_eq!(last[..first.len()], first[..], "and changes nothing else");
+    assert!(
+        carries_nudge(&last[first.len()]),
+        "the added message is the nudge"
+    );
+}
+
+/// det1: a deterministic model replays the same think-only reply to the same request, so unchanged resends cannot recover.
+/// After the six unchanged attempts, one resend that carries the nudge gets the planned tool calls in the same turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn six_think_only_replies_get_one_nudged_resend_that_completes() {
+    let mut bodies = think_only_chain(6);
+    bodies.push(B20_13_TOOLS.to_string());
+    let (server, seen) = scripted_chat_server(bodies).await;
+    let (events, seen) = think_only_run(server, seen).await;
+
+    match events.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            let a = response.assistant().expect("assistant");
+            assert_eq!(a.tool_calls.len(), 2, "the planned tool calls arrive");
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+    let retrying = retrying_events(&events);
+    assert_eq!(
+        retrying.len(),
+        6,
+        "five unchanged resends and the nudged one"
+    );
+    assert_eq!(
+        (retrying[5].0, retrying[5].1),
+        (6, 7),
+        "the nudged resend is announced as the last attempt"
+    );
+    assert_six_unchanged_then_one_nudge(&seen);
+}
+
+/// A stuck model replays the same think-only reply until it is told to answer. The second identical reply skips the
+/// plain resends left: the nudge goes out as resend 2 (attempt 3), not after six attempts, and gets the visible reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stuck_model_that_answers_only_when_nudged_is_nudged_on_resend_2() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_handler = Arc::clone(&seen);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let seen = Arc::clone(&seen_handler);
+            async move {
+                let reply = if carries_nudge(&body) {
+                    ollama_body(&[(
+                        json!({"role": "assistant", "content": "Done."}),
+                        Some("stop"),
+                    )])
+                } else {
+                    B20_12[0].to_string()
+                };
+                seen.lock().unwrap().push(body);
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    reply,
+                )
+            }
+        }),
+    );
+    let (events, seen) = think_only_run(MockServer::spawn(app).await, seen).await;
+
+    match events.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => {
+            let a = response.assistant().expect("assistant");
+            assert_eq!(a.content.as_ref(), "Done.");
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+    let retrying = retrying_events(&events);
+    let announced: Vec<(u32, u32)> = retrying.iter().map(|(a, m, _)| (*a, *m)).collect();
+    assert_eq!(
+        announced,
+        vec![(1, 6), (2, 3)],
+        "one plain resend, then the nudged one"
+    );
+    assert_eq!(
+        seen.len(),
+        3,
+        "two identical think-only replies, then the nudged request"
+    );
+    assert!(
+        seen[1] == seen[0] && !carries_nudge(&seen[1]),
+        "the first resend is plain"
+    );
+    let (first, last) = (messages(&seen[0]), messages(&seen[2]));
+    assert_eq!(last.len(), first.len() + 1, "the nudge adds one message");
+    assert_eq!(last[..first.len()], first[..], "and changes nothing else");
+    assert!(
+        carries_nudge(&last[first.len()]),
+        "the added message is the nudge"
+    );
+}
+
+/// The stuck model never answers: a think-only reply to the nudged resend ends the turn there, after three attempts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stuck_model_still_think_only_after_the_nudge_ends_after_three_attempts() {
+    let (server, seen) = scripted_chat_server(vec![B20_12[0].to_string()]).await;
+    let (events, seen) = think_only_run(server, seen).await;
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            let context = error.empty_response_context.as_ref().expect("context");
+            assert_eq!(
+                context.reason,
+                fuigo_sampling_types::EmptyReason::ReasoningOnly
+            );
+            assert_eq!(context.attempts, Some(3));
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(seen.len(), 3);
+    assert!(carries_nudge(&seen[2]) && !carries_nudge(&seen[1]));
 }
 
 /// A stop after the second think-only reply ends the turn during the resend wait: no third request is made.
@@ -2574,7 +2740,7 @@ async fn stop_during_the_second_think_only_resend_stream_makes_no_further_reques
 
 /// The extra think-only resends end at the 180 s window from the first think-only reply, end to end on a mocked clock.
 /// Resend #3 starts 120 s after the first think-only reply and is allowed; its reply is evaluated 190 s in, so the turn
-/// fails think-only after 4 requests instead of 6.
+/// spends the unchanged resends after 4 requests instead of 6; one nudged resend follows, then the think-only failure.
 #[tokio::test]
 async fn think_only_resends_stop_at_the_wall_cap_from_the_first_think_only_reply() {
     think_only_wall_cap_chain().await;
@@ -2634,10 +2800,16 @@ async fn think_only_wall_cap_chain() {
     }
     server.shutdown();
 
+    let retrying = retrying_events(&events);
     assert_eq!(
-        retrying_events(&events).len(),
-        3,
-        "resend #3 is inside the window"
+        retrying.len(),
+        4,
+        "resend #3 is inside the window, then the nudged one"
+    );
+    assert_eq!(
+        (retrying[3].0, retrying[3].1),
+        (4, 5),
+        "the nudged resend is the last attempt"
     );
     match events.last().unwrap() {
         SamplingEvent::Failed { error, .. } => {
@@ -2652,13 +2824,21 @@ async fn think_only_wall_cap_chain() {
                 context.reason,
                 fuigo_sampling_types::EmptyReason::ReasoningOnly
             );
-            assert_eq!(context.attempts, Some(4));
+            assert_eq!(context.attempts, Some(5));
         }
         other => panic!("expected Failed, got {other:?}"),
     }
     let seen = seen.lock().unwrap();
-    assert!(seen.len() < 6, "the window ends the chain before the cap");
-    assert_eq!(seen.len(), 4, "no resend after the window");
+    assert_eq!(
+        seen.len(),
+        5,
+        "no unchanged resend after the window, one nudged resend"
+    );
+    assert!(seen[..4].iter().all(|b| *b == seen[0] && !carries_nudge(b)));
+    assert!(
+        carries_nudge(&seen[4]),
+        "the last request carries the nudge"
+    );
 }
 
 /// An attempt that streamed visible text after its reasoning is a reply, never a think-only one: one request, no resend.
@@ -2935,7 +3115,7 @@ async fn in_max_retries_env_child(test: &str, value: &str) -> bool {
 }
 
 /// Under `FUIGO_MAX_RETRIES=3`, a think-only chain on Chat Completions still gets its own six attempts: six requests,
-/// resends announced 1/6..5/6, which the shell logs as `think-only resend attempt 2/6 .. 6/6`.
+/// resends announced 1/6..5/6, which the shell logs as `think-only resend attempt 2/6 .. 6/6`, then the nudged one (7/7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn think_only_chain_under_fuigo_max_retries_3_gets_its_own_six_attempts() {
     if !in_max_retries_env_child(
@@ -2962,9 +3142,12 @@ async fn think_only_chain_under_fuigo_max_retries_3_gets_its_own_six_attempts() 
 
     let retrying = retrying_events(&events);
     let announced: Vec<(u32, u32)> = retrying.iter().map(|(a, m, _)| (*a, *m)).collect();
-    assert_eq!(announced, vec![(1, 6), (2, 6), (3, 6), (4, 6), (5, 6)]);
+    assert_eq!(
+        announced,
+        vec![(1, 6), (2, 6), (3, 6), (4, 6), (5, 6), (6, 7)]
+    );
     // The shell's `shell.turn.think_only_resend` line is `attempt + 1`/`max_retries` of each Retrying
-    let last = retrying.last().expect("resends");
+    let last = &retrying[4];
     assert_eq!(
         format!(
             "think-only resend attempt {}/{} reason=think_only",
@@ -2977,11 +3160,11 @@ async fn think_only_chain_under_fuigo_max_retries_3_gets_its_own_six_attempts() 
         SamplingEvent::Failed { error, .. } => {
             assert!(error.message.contains("think-only"), "{}", error.message);
             let context = error.empty_response_context.as_ref().expect("context");
-            assert_eq!(context.attempts, Some(6));
+            assert_eq!(context.attempts, Some(7));
         }
         other => panic!("expected Failed, got {other:?}"),
     }
-    assert_eq!(seen.lock().unwrap().len(), 6, "six requests");
+    assert_six_unchanged_then_one_nudge(&seen.lock().unwrap());
 }
 
 /// Under `FUIGO_MAX_RETRIES=3`, a dead Router still ends in bounded time: a refused connection and a 5xx each stop at

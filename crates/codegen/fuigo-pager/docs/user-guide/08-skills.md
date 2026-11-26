@@ -206,6 +206,12 @@ The `--json` report includes the full detail for each skill: its `name`, `descri
 
 ---
 
+## Built-in Skills: review, ship, steward
+
+Fuigo ships three skills inside the binary and writes them to `~/.fuigo/bundled/skills/` when a session starts: `review`, `ship` and `steward` ([Review and Ship](04-slash-commands.md#review-and-ship)). They are bundled skills, so a local, repo or user skill with the same name replaces them; put per-repository watch instructions in `.fuigo/skills/steward/SKILL.md` (or `.claude/skills/steward/SKILL.md`) to override `/steward` for that project. Fuigo rewrites the bundled copies when a new version changes them, so edit an override, not the bundled file. `ship` and `steward` set `disable-model-invocation: true`: only a line you type starts them.
+
+---
+
 ## Bundled and Plugin Skills
 
 Fuigo distributes platform skills separately from your personal skills. Bundled skills are cached under `~/.fuigo/bundled/skills/`; Fuigo never writes them into `~/.fuigo/skills/`. A same-named local, repo, or user skill overrides the bundled copy. `fuigo inspect` labels each definition by its actual source. (A plugin skill of the same name does not override a native skill; it stays available under its qualified `plugin:name` form.)

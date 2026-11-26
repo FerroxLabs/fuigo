@@ -26,6 +26,30 @@ fn tool_overrides_capability() -> serde_json::Value {
     serde_json::to_value(TOOL_OVERRIDES_CAPABILITY)
         .expect("ToolOverridesCapability is always serializable")
 }
+/// `agentCapabilities._meta` of the `initialize` answer.
+pub(crate) fn agent_capabilities_meta() -> serde_json::Map<String, serde_json::Value> {
+    let serde_json::Value::Object(mut obj) = serde_json::json!({
+        "fuigo/fs_notify": true,
+        // Advertised so SDKs can warn when a registration depends on hook behavior this agent doesn't honor
+        "fuigo/hooks": {
+            "blockingEvents": crate::extensions::hooks::ADVERTISED_BLOCKING_EVENTS,
+            "decisions": crate::extensions::hooks::ADVERTISED_DECISIONS,
+            "stopSignals": crate::extensions::hooks::ADVERTISED_STOP_SIGNALS,
+        },
+        "fuigo/capabilities": fuigo_capabilities(),
+    }) else {
+        unreachable!("a json! object literal is always an Object")
+    };
+    // 1.0.48 prompt scope (design 1022-grokwarm A5): only once every agent-to-client route carries the origin-bound pair.
+    // A client that sees no key must not reuse this process across prompts.
+    if crate::session::prompt_scope::capability_advertised() {
+        obj.insert(
+            crate::session::prompt_scope::CAPABILITY_KEY.to_owned(),
+            serde_json::json!(1),
+        );
+    }
+    obj
+}
 /// `agentCapabilities._meta["fuigo/capabilities"]`. One entry per capability so later packets (Q5b) add a line.
 /// `retryDiscard` (P188) announces the `retry_state` discard signal (`discardEmitted`, `streamStartMs`).
 /// `authenticateApiKey` (P08) tells a client, before it authenticates, that `authenticate` accepts a key in
@@ -597,20 +621,7 @@ impl acp::Agent for MvpAgent {
                 .agent_capabilities(
                     acp::AgentCapabilities::new()
                         .load_session(true)
-                        .meta(
-                            serde_json::json!({
-                    "fuigo/fs_notify": true,
-                    // Advertised so SDKs can warn when a registration depends on hook behavior this agent doesn't honor
-                    "fuigo/hooks": {
-                        "blockingEvents": crate::extensions::hooks::ADVERTISED_BLOCKING_EVENTS,
-                        "decisions": crate::extensions::hooks::ADVERTISED_DECISIONS,
-                        "stopSignals": crate::extensions::hooks::ADVERTISED_STOP_SIGNALS,
-                    },
-                    "fuigo/capabilities": fuigo_capabilities(),
-                })
-                                .as_object()
-                                .cloned(),
-                        )
+                        .meta(Some(agent_capabilities_meta()))
                         .prompt_capabilities(
                             acp::PromptCapabilities::new().embedded_context(true),
                         )
@@ -1740,6 +1751,10 @@ impl acp::Agent for MvpAgent {
             if let Some(ref ctx) = cancellation_context {
                 payload["cancellationContext"] = ctx.clone();
             }
+            // Prompt scope (1.0.48): sent by the `session/prompt` handler, not the turn task: it names its own prompt.
+            let mut scope_meta = serde_json::Map::new();
+            crate::session::prompt_scope::PromptScope::client(&prompt_id).stamp(&mut scope_meta);
+            payload["_meta"] = serde_json::Value::Object(scope_meta);
             if let Ok(params) = serde_json::value::to_raw_value(&payload) {
                 self.gateway
                     .forward_fire_and_forget(

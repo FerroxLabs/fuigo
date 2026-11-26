@@ -886,7 +886,7 @@ pub enum SessionCommand {
     },
     /// Dispatch session_start hook using the actor's loaded HookRegistry.
     DispatchSessionStartHook {
-        /// "new" for brand new sessions, "load" for sessions loaded from disk.
+        /// "startup" for brand new sessions, "resume" for sessions loaded from disk (Claude Code's values).
         source: String,
     },
     /// Retrieve session context for enriching a feedback Slack notification.

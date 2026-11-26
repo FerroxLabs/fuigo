@@ -125,6 +125,8 @@ fn object_keys(v: &Value) -> Vec<String> {
         .as_object()
         .unwrap_or_else(|| panic!("expected a JSON object, got {v}"))
         .keys()
+        // The prompt-scope pair (1.0.48) rides every frame in `_meta`; these pins are about the payload.
+        .filter(|k| *k != "_meta")
         .cloned()
         .collect();
     keys.sort();
@@ -3873,7 +3875,11 @@ async fn u36_unset_wire() -> Value {
             name.to_owned(),
             json!({
                 "capabilities": result["agentCapabilities"]["_meta"]["fuigo/capabilities"],
-                "agentCapabilitiesMetaKeys": sorted_keys(&result["agentCapabilities"]["_meta"]),
+                // `fuigo/promptScope` (1.0.48) is additive, not part of the policy surface this golden pins.
+                "agentCapabilitiesMetaKeys": sorted_keys(&result["agentCapabilities"]["_meta"])
+                    .into_iter()
+                    .filter(|k| k != "fuigo/promptScope")
+                    .collect::<Vec<_>>(),
                 "initializeMetaKeys": sorted_keys(&result["_meta"]),
                 "sessionNewResultKeys": sorted_keys(new_result),
                 "sessionNewMetaKeys": sorted_keys(&new_result["_meta"]),

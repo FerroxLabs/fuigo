@@ -65,6 +65,7 @@ tempfile = { workspace = true }
 fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false }
 fuigo-tools = { workspace = true }
 fuigo-telemetry = { workspace = true }
+fuigo-acp-lib = { workspace = true }
 fuigo-workspace-types = { workspace = true }
 fuigo-tool-protocol = { workspace = true }
 fuigo-tool-runtime = { workspace = true }
