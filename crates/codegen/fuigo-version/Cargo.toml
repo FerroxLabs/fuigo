@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "fuigo-version"
-version = "1.0.48"
+version = "1.0.49"
 edition.workspace = true
 description = "Lockstepped fuigo CLI version."
 

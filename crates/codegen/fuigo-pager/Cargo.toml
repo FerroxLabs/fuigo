@@ -78,7 +78,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # Binary hardening: compile-time string obfuscation.
-# (cryptify / rustls / semver / tikv-jemallocator moved to the composition-root
+# (rustls / semver / tikv-jemallocator moved to the composition-root
 # binary `fuigo-pager-bin` with `main.rs`; this lib no longer references them.)
 obfstr = { workspace = true }
 

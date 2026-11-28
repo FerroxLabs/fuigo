@@ -768,8 +768,8 @@ mod local_binary_tests {
     }
 
     /// End-to-end freshness probe (ignored: it builds the whole pager). The resolved binary's
-    /// `--version` stamp must name the checked-out commit -- a binary left by another commit in
-    /// the same target dir fails it. Run (with `FUIGO_BINARY` and `CARGO_BIN_EXE_fuigo-pager`
+    /// `--version` stamp must name the checked-out source tree (`HEAD^{tree}`, as build.rs stamps
+    /// it) -- a binary left by another source tree in the same target dir fails it. Run (with `FUIGO_BINARY` and `CARGO_BIN_EXE_fuigo-pager`
     /// unset, or the probe bypasses the rebuild): `cargo test -p fuigo-test-support --lib
     /// env::local_binary_tests::resolved_binary_is_built_from_the_checkout -- --ignored --exact`
     /// and check that it reports `1 passed`.
@@ -784,7 +784,7 @@ mod local_binary_tests {
         }
         let head = Command::new("git")
             .current_dir(workspace_root())
-            .args(["rev-parse", "HEAD"])
+            .args(["rev-parse", "HEAD^{tree}"])
             .output()
             .expect("git rev-parse");
         assert!(head.status.success(), "not a git checkout");
@@ -799,14 +799,14 @@ mod local_binary_tests {
             .expect("run fuigo-pager --version");
         let stdout = String::from_utf8_lossy(&version.stdout);
         eprintln!(
-            "P69 probe: HEAD={head12} binary={} version={}",
+            "P69 probe: tree={head12} binary={} version={}",
             binary.display(),
             stdout.trim()
         );
         assert!(version.status.success(), "--version failed: {version:?}");
         assert!(
             stdout.contains(&format!("({head12})")),
-            "stale fuigo-pager: built from another commit (HEAD {head12}): {}",
+            "stale fuigo-pager: built from another source tree (tree {head12}): {}",
             stdout.trim()
         );
     }

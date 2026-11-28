@@ -62,7 +62,6 @@ fuigo-extra-ca = { workspace = true }
 
 # Binary hardening: compile-time string + control-flow obfuscation.
 obfstr = { workspace = true }
-cryptify = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 

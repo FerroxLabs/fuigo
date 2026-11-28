@@ -18,7 +18,7 @@ written. Three things derive from it, and all three are checked:
 | derivation | mechanism | what catches drift |
 |---|---|---|
 | `fuigo_version::VERSION` | that crate's own `CARGO_PKG_VERSION` | — |
-| the binary's `<version> (<commit>)` stamp | `fuigo-pager-bin/build.rs` reads the manifest above | `the_stamped_version_is_the_one_source_of_truth` |
+| the binary's `<version> (<source tree id>)` stamp | `fuigo-pager-bin/build.rs` reads the manifest above | `the_stamped_version_is_the_one_source_of_truth` |
 | the seven npm packages | `sync-version.js` | `npm run check-version`, `prepublishOnly` |
 
 **This section used to claim the same thing while it was false.** `build.rs`

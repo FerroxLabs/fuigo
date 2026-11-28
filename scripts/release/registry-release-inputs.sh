@@ -28,8 +28,9 @@
 #
 # Origin checks on top of that integrity match (audit S8-F7): the macOS and Windows executables
 # must carry the Developer ID / Authenticode identity (check-signed-binary.py), and the manifest's
-# sourceCommit is the commit stamp read from a registry binary, not this run's GITHUB_SHA, because an
-# earlier run may have built and published these bytes. FUIGO_ALLOW_UNSIGNED=1 skips the signature
+# sourceCommit is this run's commit only when a registry binary's stamp (the source TREE id) matches
+# this checkout's tree; otherwise it records the stamp, because an earlier run may have built and
+# published these bytes. FUIGO_ALLOW_UNSIGNED=1 skips the signature
 # identity check; it exists for the fixture tests only and the release workflow never sets it.
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -142,21 +143,22 @@ for p in $PLATFORMS ""; do
   esac
 done
 
-# The commit this release's bytes were built from, as stamped in a registry executable. The stamp
-# is 12 hex digits; this run's full GITHUB_SHA is recorded only when it starts with that stamp.
+# The source this release's bytes were built from, as stamped in a registry executable. The stamp is
+# the first 12 hex digits of the source tree id; this run's full GITHUB_SHA is recorded only when this
+# checkout's tree starts with that stamp.
 STAMP=
 if stamp_out=$("$BIN_OUT/fuigo-linux-x64/fuigo-pager" --version 2>/dev/null); then
   STAMP=$(printf '%s\n' "$stamp_out" | tr -d '\r' | sed -n 's/^fuigo [^ ]* (\([0-9a-f]\{12\}\))$/\1/p' | head -n 1)
 fi
 SOURCE_COMMIT=
 if [ -n "$STAMP" ]; then
-  case "${GITHUB_SHA:-}" in
-    "$STAMP"*) SOURCE_COMMIT=$GITHUB_SHA ;;
+  case "$(git -C "$SCRIPT_DIR" rev-parse 'HEAD^{tree}' 2>/dev/null)" in
+    "$STAMP"*) SOURCE_COMMIT=${GITHUB_SHA:-$(git -C "$SCRIPT_DIR" rev-parse HEAD)} ;;
     *) SOURCE_COMMIT=$STAMP
-       echo "::warning::the registry binaries are stamped $STAMP, not this run's commit; the manifest records the stamp" ;;
+       echo "::warning::the registry binaries are stamped $STAMP, not this run's source tree; the manifest records the stamp" ;;
   esac
 else
-  echo "::warning::could not read a commit stamp from the registry linux-x64 executable; the manifest records no sourceCommit"
+  echo "::warning::could not read a source stamp from the registry linux-x64 executable; the manifest records no sourceCommit"
 fi
 export SOURCE_COMMIT
 
