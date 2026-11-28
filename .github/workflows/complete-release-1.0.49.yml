@@ -1,0 +1,304 @@
+# One-off: finish the v1.0.49 release after its tag run (46119833375) published npm but failed
+# verify-published. The v1.0.49 verifier compared the binaries' --version stamp with GITHUB_SHA,
+# while 1.0.49 stamps the source tree id, so all six verify jobs failed and the GitHub Release
+# was skipped. This runs the tag's own verify and release steps unchanged, from the tag's
+# checkout, with FUIGO_EXPECTED_RELEASE_COMMIT set to the tag's tree. Nothing is rebuilt or
+# republished: the release assets come from the npm registry tarballs, as in release.yml.
+# A pull_request run proves the six verifies; only a workflow_dispatch creates the release.
+name: complete release v1.0.49
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/complete-release-1.0.49.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify npm ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, platform: darwin-arm64 }
+          - { runner: macos-15, platform: darwin-x64 }
+          - { runner: ubuntu-24.04, platform: linux-x64 }
+          - { runner: ubuntu-24.04-arm, platform: linux-arm64 }
+          - { runner: windows-latest, platform: win32-x64 }
+          - { runner: windows-11-arm, platform: win32-arm64 }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: v1.0.49
+      - name: Pin the tagged release commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "d98413671bbe4e1e8e392aed1025f2775cbe6917" ] || { echo "::error::v1.0.49 is not d98413671bbe4e1e8e392aed1025f2775cbe6917"; exit 1; }
+          # build.rs stamps the first 12 hex of the source tree id (1.0.49 on); the verifier checks that prefix.
+          echo "FUIGO_EXPECTED_RELEASE_COMMIT=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      # The publish job already waited for the platform packages, but each
+      # runner asks the registry afresh and `fuigo` itself took about 7 minutes
+      # to appear for 1.0.23. Wait (up to 2 hours, once a minute) until both
+      # names this runner installs resolve, so a slow registry is not reported
+      # as a broken package.
+      - name: Wait until the registry shows this version
+        shell: bash
+        run: |
+          set -uo pipefail
+          VERSION=$(node -p "require('./crates/codegen/fuigo-pager/npm/fuigo/package.json').version")
+          deadline=$(( $(date +%s) + 7200 ))
+          for name in "fuigo" "@fuigo/${{ matrix.platform }}"; do
+            ok=0
+            while :; do
+              if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+                echo "--- $name@$VERSION resolves"; ok=1; break
+              fi
+              [ "$(date +%s)" -lt "$deadline" ] || break
+              sleep 60
+            done
+            if [ "$ok" = 0 ]; then
+              echo "::error::$name@$VERSION did not become resolvable within 2 hours."
+              echo "::error::Check \`npm stage list\` first: if it lists the package, promote it; if it is empty, the registry is slow, so re-run this job."
+              exit 1
+            fi
+          done
+      - name: Verify registry package and native execution
+        shell: bash
+        run: |
+          node crates/codegen/fuigo-pager/npm/fuigo/scripts/verify-published-platform.js '${{ matrix.platform }}' \
+            --digest-out '${{ runner.temp }}/verified-${{ matrix.platform }}.json'
+
+      # Registry signatures and npm provenance attestations of what was just published (audit S8-F7). Installs
+      # the meta package (and this runner's platform package) with scripts off into a scratch project, then
+      # `npm audit signatures` checks every installed package against the registry's keys and its attestation.
+      # Linux x64 only: one check covers the published packages. This job only runs on a real release; nothing here publishes, tags or changes what was published.
+      - name: Verify registry signatures and provenance attestations
+        if: matrix.platform == 'linux-x64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./crates/codegen/fuigo-pager/npm/fuigo/package.json').version")
+          audit_dir="${{ runner.temp }}/audit-signatures-${{ matrix.platform }}"
+          mkdir -p "$audit_dir"
+          cd "$audit_dir"
+          npm install -g npm@12.2.3
+          npm --version
+          npm init -y >/dev/null
+          # The registry can lag a few minutes after publish (a 404 on a just-published version); retry, bounded.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if npm install --ignore-scripts --no-fund --no-audit "fuigo@$VERSION"; then break; fi
+            if [ "$attempt" = 10 ]; then echo "fuigo@$VERSION did not install after 10 attempts" >&2; exit 1; fi
+            sleep 30
+          done
+          # A just-published version can fail with EMISSINGSIGNATUREKEY while the registry catches up; retry only
+          # that error, bounded. Any other failure fails at once.
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if npm audit signatures >audit.log 2>&1; then cat audit.log; break; fi
+            cat audit.log
+            if ! grep -q EMISSINGSIGNATUREKEY audit.log || [ "$attempt" = 10 ]; then exit 1; fi
+            sleep 30
+          done
+
+      # The github-release job compares these digests with the release assets.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-${{ matrix.platform }}
+          path: ${{ runner.temp }}/verified-${{ matrix.platform }}.json
+          retention-days: 7
+
+  github-release:
+    name: GitHub Release
+    needs: verify
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      group: github-release-refs/tags/v1.0.49
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: v1.0.49
+      - name: Pin the tagged release commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "d98413671bbe4e1e8e392aed1025f2775cbe6917" ] || { echo "::error::v1.0.49 is not d98413671bbe4e1e8e392aed1025f2775cbe6917"; exit 1; }
+          # build.rs stamps the first 12 hex of the source tree id (1.0.49 on); the verifier checks that prefix.
+          echo "FUIGO_EXPECTED_RELEASE_COMMIT=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+
+      - name: Resolve version
+        id: v
+        env:
+          REF_NAME: v1.0.49
+        run: |
+          V=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
+          [ "$REF_NAME" = "v$V" ] || {
+            echo "::error::tag $REF_NAME does not match version $V"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      # Every asset is derived from the tarballs npm serves for this version,
+      # never from this run's build (finding RL-01). The publish job skips
+      # versions npm already has, so after a partial publish a re-run's build
+      # is not what npm ships; using the registry bytes keeps npm, the raw
+      # binaries and SHA256SUMS identical on every run, and they are the bytes
+      # verify-published executed.
+      - name: Lay out release assets from the npm registry
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          # sourceCommit must be the tagged commit, not this run's main commit.
+          GITHUB_SHA=$(git rev-parse HEAD) scripts/release/registry-release-inputs.sh "$VERSION" \
+            "$RUNNER_TEMP/registry-bin" "$RUNNER_TEMP/registry-npm"
+          got=$(jq -r .sourceCommit "$RUNNER_TEMP/registry-npm/release-manifest.json")
+          [ "$got" = "d98413671bbe4e1e8e392aed1025f2775cbe6917" ] || { echo "::error::release-manifest sourceCommit is $got, expected d98413671bbe4e1e8e392aed1025f2775cbe6917"; exit 1; }
+          scripts/release/github-release-assets.sh "$VERSION" \
+            "$RUNNER_TEMP/registry-bin" "$RUNNER_TEMP/registry-npm" "$RUNNER_TEMP/gh-release"
+          cat "$RUNNER_TEMP/gh-release/SHA256SUMS"
+
+      # What each verify-published job executed (tarball sha512, executable sha256) must be what
+      # this release ships. A mismatch means the registry served different bytes to the verifier
+      # than to this job; nothing is released.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: verified
+          pattern: verified-*
+          merge-multiple: true
+
+      - name: Compare verified digests with the release assets
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: node scripts/release/verify-release-digests.js "$VERSION" verified "$RUNNER_TEMP/gh-release"
+
+      - name: Create or complete the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.v.outputs.version }}
+          REPLACE: "false"
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          D="$RUNNER_TEMP/gh-release"
+
+          NOTES="docs/release-notes-$VERSION.md"
+          if [ ! -s "$NOTES" ]; then
+            NOTES="$RUNNER_TEMP/notes.md"
+            cat > "$NOTES" <<EOF
+          ## Fuigo $VERSION
+
+          Install or update: \`npm install -g fuigo@$VERSION\`
+
+          SHA256SUMS lists the sha256 of every asset.
+          EOF
+          fi
+
+          # Listed rather than fetched by tag: the by-tag endpoint does not
+          # return drafts, and a draft is what an interrupted create leaves.
+          gh api "repos/$REPO/releases?per_page=100" --paginate \
+            | jq -s --arg t "$TAG" '[.[][] | select(.tag_name == $t)]' > "$RUNNER_TEMP/existing.json"
+          n=$(jq length "$RUNNER_TEMP/existing.json")
+
+          if [ "$n" = 0 ]; then
+            flags=(--repo "$REPO" --verify-tag --title "Fuigo $VERSION" --notes-file "$NOTES")
+            case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+            echo "creating release $TAG"
+            gh release create "$TAG" "${flags[@]}" "$D"/*
+            exit 0
+          fi
+          if [ "$n" != 1 ]; then
+            echo "::error::$n releases exist for $TAG; delete the extras by hand, then re-run"
+            exit 1
+          fi
+
+          echo "release $TAG exists (draft: $(jq -r '.[0].draft' "$RUNNER_TEMP/existing.json")); reconciling assets"
+          missing=() differ=()
+          for f in "$D"/*; do
+            name=$(basename "$f")
+            want="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
+            have=$(jq -r --arg n "$name" \
+              '.[0].assets[] | select(.name == $n) | "\(.state) \(.digest // "none")"' "$RUNNER_TEMP/existing.json")
+            if [ -z "$have" ]; then
+              missing+=("$f")
+            elif [ "$have" = "uploaded $want" ]; then
+              echo "  $name: already uploaded, identical"
+            else
+              echo "  $name: remote is '$have', local is $want"
+              differ+=("$f")
+            fi
+          done
+          if [ "${#differ[@]}" -gt 0 ] && [ "$REPLACE" != "true" ]; then
+            echo "::error::${#differ[@]} asset(s) on $TAG differ from this build. Re-run via workflow_dispatch on the tag with replace_release_assets to replace them."
+            exit 1
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            gh release upload "$TAG" --repo "$REPO" "${missing[@]}"
+          fi
+          if [ "${#differ[@]}" -gt 0 ]; then
+            gh release upload "$TAG" --repo "$REPO" --clobber "${differ[@]}"
+          fi
+          if [ "$(jq -r '.[0].draft' "$RUNNER_TEMP/existing.json")" = true ]; then
+            gh release edit "$TAG" --repo "$REPO" --draft=false
+          fi
+
+      # Read the release back and run the installer's own two commands
+      # (fuigo-update/src/version.rs and auto_update.rs) against it.
+      - name: Verify the release as the gh-release installer sees it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          D="$RUNNER_TEMP/gh-release"
+          gh api "repos/$REPO/releases/tags/$TAG" > "$RUNNER_TEMP/release.json"
+          [ "$(jq -r .draft "$RUNNER_TEMP/release.json")" = false ] || {
+            echo "::error::$TAG is still a draft"; exit 1; }
+          count=0
+          for f in "$D"/*; do
+            count=$((count + 1))
+            name=$(basename "$f")
+            want="uploaded sha256:$(sha256sum "$f" | cut -d' ' -f1)"
+            have=$(jq -r --arg n "$name" \
+              '.assets[] | select(.name == $n) | "\(.state) \(.digest // "none")"' "$RUNNER_TEMP/release.json")
+            [ "$have" = "$want" ] || {
+              echo "::error::$name on $TAG is '$have', expected '$want'"; exit 1; }
+          done
+          echo "all $count assets present with matching sha256"
+
+          case "$VERSION" in
+            *-*) pre=() ;;
+            *) pre=(--exclude-pre-releases) ;;
+          esac
+          latest=$(gh release list --repo "$REPO" --limit 1 --exclude-drafts "${pre[@]}" \
+            --json tagName --jq '.[0].tagName')
+          echo "installer's latest query returns: $latest"
+          if [ "$latest" != "$TAG" ]; then
+            highest=$(gh release list --repo "$REPO" --limit 100 --exclude-drafts "${pre[@]}" \
+              --json tagName --jq '.[].tagName' | sort -V | tail -1)
+            if [ "$highest" = "$TAG" ]; then
+              echo "::error::installers would select $latest, not $TAG"; exit 1
+            fi
+            echo "::warning::$TAG is not the newest release ($highest is); installers select $latest"
+          fi
+
+          asset="fuigo-$VERSION-linux-x86_64"
+          gh release download "$TAG" --repo "$REPO" --pattern "$asset" --output "$RUNNER_TEMP/$asset" --clobber
+          cmp "$RUNNER_TEMP/$asset" "$D/$asset"
+          (cd "$RUNNER_TEMP" && grep "  $asset\$" "$D/SHA256SUMS" | sha256sum -c -)
