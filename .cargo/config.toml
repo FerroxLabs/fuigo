@@ -67,12 +67,16 @@ rustflags = [
 [target.x86_64-pc-windows-msvc]
 # /STACK: the main thread's stack reserve. The Windows default is 1 MiB, which a debug build of the pager overflows at
 # startup; 8 MiB matches the stack the session threads already get. Applies to every executable linked for this target.
-rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608"]
+# /Brepro: the PE TimeDateStamp and the PDB GUID become a hash of the output instead of the link time, so two builds of
+# the same source give the same bytes (without it the unsigned release exes differed in exactly those 24 bytes).
+rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608", "-C", "link-arg=/Brepro"]
 
 [target.aarch64-pc-windows-msvc]
 # /STACK: the main thread's stack reserve. The Windows default is 1 MiB, which a debug build of the pager overflows at
 # startup; 8 MiB matches the stack the session threads already get. Applies to every executable linked for this target.
-rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608"]
+# /Brepro: the PE TimeDateStamp and the PDB GUID become a hash of the output instead of the link time, so two builds of
+# the same source give the same bytes (without it the unsigned release exes differed in exactly those 24 bytes).
+rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608", "-C", "link-arg=/Brepro"]
 
 
 # jemalloc page size for Apple Silicon (macOS aarch64 uses 16KB pages = 2^14).

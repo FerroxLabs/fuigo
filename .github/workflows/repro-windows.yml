@@ -1,0 +1,199 @@
+# TEMPORARY proof (deleted after use): root cause of the win32-x64 /Brepro difference. Two identical x64 jobs
+# (cross-runner) each build the unsigned exe twice at the same path (in-job), and upload only a text report:
+# hashes, path strings, the decoded bytes of the differing blocks and short-name (8.3) listings. No binaries.
+name: repro windows
+
+# Push-triggered on these two temporary branches only: workflow_dispatch needs the file on main.
+on:
+  push:
+    branches: [proof/u50-brepro-a, proof/u50-brepro-b]
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: repro ${{ matrix.npm_platform }} rep${{ matrix.rep }}
+    runs-on: ${{ matrix.runner }}
+    # macos-15 release-dist builds take ~3.5-4.2 h (Nov 2026); 360 is GitHub's hard limit for hosted-runner jobs, so
+    # there is no headroom past it. If macOS passes ~5 h, add caching or split the build.
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-latest, target: x86_64-pc-windows-msvc, npm_platform: win32-x64, bin: fuigo-pager.exe, rep: 1}
+          - {runner: windows-latest, target: x86_64-pc-windows-msvc, npm_platform: win32-x64, bin: fuigo-pager.exe, rep: 2}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Present only to guarantee rustup exists on every image; windows-11-arm
+      # is new enough that its preinstalled tooling is not worth assuming.
+      # Deliberately no `targets:` input -- see the next step for why.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable (action default toolchain: stable)
+
+      # rust-toolchain.toml pins channel 1.94.0, and rustup honours that file
+      # for any cargo invoked inside the repo. So installing a target into
+      # `stable` -- which is what the action's `targets:` input does -- achieves
+      # nothing: cargo still runs 1.94.0, which does not have it. Not
+      # hypothetical; doing exactly that failed a probe with
+      #
+      #   error[E0463]: can't find crate for `core`
+      #   note: the `x86_64-apple-darwin` target may not be installed
+      #
+      # `rustup target add` run from inside the checkout resolves through
+      # rust-toolchain.toml and installs into the toolchain that actually
+      # builds. `rustup show` is printed so the log proves which one that was.
+      - name: Add target to the pinned toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add ${{ matrix.target }}
+          rustup target list --installed
+
+      # aws-lc-rs builds C, so cmake must exist. Probed 2026-09-01: present on
+      # every runner in this matrix (/usr/local/bin on Ubuntu, /opt/homebrew
+      # on macOS, C:\Program Files\CMake on Windows).
+      #
+      # This asserts rather than installs. `apt-get update` is a live network
+      # fetch from a mirror and a routine source of CI flakes, and installing
+      # would only add /usr/bin/cmake behind the image's newer /usr/local/bin
+      # copy on PATH -- a slower build with the same outcome. If a future image
+      # drops cmake, this fails in seconds with a legible message instead of
+      # 40 minutes later inside aws-lc-sys's build script.
+      - name: Assert cmake
+        shell: bash
+        run: |
+          command -v cmake || {
+            echo "::error::cmake missing on ${{ matrix.runner }} -- the image changed; add an install step"; exit 1; }
+          cmake --version | head -1
+
+      # protoc is a BUILD-TIME dependency and it is on none of the runners.
+      # fuigo-tools-api's build.rs calls fuigo_proto_build, which compiles
+      # proto/fuigo-tools.proto. Without protoc the whole matrix dies ~3
+      # minutes in with "failed to run custom build command for
+      # fuigo-tools-api" -- observed on macos-14 and ubuntu-24.04-arm alike.
+      #
+      # The repo does vendor `bin/protoc`, but that is a dotslash stub: it
+      # needs the `dotslash` launcher (absent here), and its platform table
+      # covers only macos-aarch64, linux-x86_64 and linux-aarch64 -- there is
+      # no Windows entry at all, so installing dotslash would still leave two
+      # targets broken. find_protoc() checks $PROTOC first, so this pins the
+      # same version the stub does (29.3) and points $PROTOC at it directly.
+      #
+      # The three unix digests are lifted from bin/protoc's own dotslash table,
+      # so CI installs byte-for-byte what local dev runs. The win64 digest was
+      # computed from the pinned release asset, which the stub does not cover.
+      - name: Install protoc 29.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=29.3
+          host="$(uname -s)-$(uname -m)"
+          case "$host" in
+            Darwin-arm64)   asset=osx-aarch_64   sha=2b8a3403cd097f95f3ba656e14b76c732b6b26d7f183330b11e36ef2bc028765 ;;
+            Linux-x86_64)   asset=linux-x86_64   sha=3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a ;;
+            Linux-aarch64)  asset=linux-aarch_64 sha=6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32 ;;
+            # git-bash reports x86_64 even on windows-11-arm, and win64 is the
+            # right asset for both Windows runners regardless: Windows-on-ARM
+            # runs x64 binaries, and protoc only has to run on the host.
+            MINGW*|MSYS*)   asset=win64          sha=57ea59e9f551ad8d71ffaa9b5cfbe0ca1f4e720972a1db7ec2d12ab44bff9383 ;;
+            *) echo "::error::no protoc mapping for host $host"; exit 1 ;;
+          esac
+
+          url="https://github.com/protocolbuffers/protobuf/releases/download/v$V/protoc-$V-$asset.zip"
+          echo "host=$host -> $url"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 15 --connect-timeout 30 --max-time 300 -o protoc.zip "$url"
+
+          # An unverified download that lands on PATH for a release build is a
+          # supply-chain hole; fail rather than trust the CDN.
+          if command -v sha256sum >/dev/null; then
+            echo "$sha  protoc.zip" | sha256sum -c -
+          else
+            echo "$sha  protoc.zip" | shasum -a 256 -c -
+          fi
+
+          mkdir -p "$RUNNER_TEMP/protoc"
+          if command -v unzip >/dev/null; then
+            unzip -q protoc.zip -d "$RUNNER_TEMP/protoc"
+          else
+            # Git-for-Windows does not ship unzip; the image always has PowerShell.
+            powershell -NoProfile -Command \
+              "Expand-Archive -Path protoc.zip -DestinationPath '$RUNNER_TEMP/protoc' -Force"
+          fi
+          rm -f protoc.zip
+
+          case "$host" in
+            MINGW*|MSYS*)
+              # Rust's Command::new cannot use an MSYS path like /d/a/_temp/...
+              echo "PROTOC=$(cygpath -w "$RUNNER_TEMP/protoc/bin/protoc.exe")" >> "$GITHUB_ENV"
+              "$RUNNER_TEMP/protoc/bin/protoc.exe" --version ;;
+            *)
+              chmod +x "$RUNNER_TEMP/protoc/bin/protoc"
+              echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+              "$RUNNER_TEMP/protoc/bin/protoc" --version ;;
+          esac
+
+      # FUIGO_VERSION marks the binary as a release build. Without it
+      # `fuigo_version::IS_DEV_BUILD` is true and the folder-trust gate
+      # (`folder_trust_inert()`) treats every clone as trusted, so repo-local
+      # MCP/LSP/hooks/permission policy, project instructions and project
+      # skills load ungated. 1.0.11 and 1.0.12 shipped unstamped. The value is
+      # the same one the smoke test below expects in `--version`.
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          FUIGO_VERSION=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
+          export FUIGO_VERSION
+          # macOS only: "packed" makes rustc run dsymutil itself right after the link, while the
+          # object files (which hold the DWARF) still exist, and leave <bin>.dSYM next to the
+          # binary. With the profile's "off" the DWARF stays in the discarded .o files and a later
+          # `dsymutil <bin>` finds nothing but compiler_builtins. Windows keeps its profile value.
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export CARGO_PROFILE_RELEASE_DIST_SPLIT_DEBUGINFO=packed
+          fi
+          cargo build --profile release-dist --target ${{ matrix.target }} -p fuigo-pager-bin
+
+      # Facts only (paths, 8.3 short names, aws-lc-sys build output); nothing secret is in this job's env.
+      - name: Short-name and path facts
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          echo "CARGO_HOME=${CARGO_HOME:-unset} TEMP=${TEMP:-} TMP=${TMP:-} USERPROFILE=${USERPROFILE:-} RUNNER_TEMP=$RUNNER_TEMP"
+          env | grep '~[0-9]' | cut -c1-200
+          fsutil 8dot3name query C: ; fsutil 8dot3name query D:
+          cmd //c "dir /x C:\\Users" | grep -i runner
+          cmd //c "dir /x /a %USERPROFILE%" | grep -i cargo
+          cmd //c "dir /x %USERPROFILE%\\.cargo\\registry\\src"
+          cmd //c "dir /x %USERPROFILE%\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f" | grep -i "aws\|~[0-9]" | head -80
+          B=target/${{ matrix.target }}/release-dist/build
+          for f in $B/aws-lc-sys-*/output $B/aws-lc-sys-*/stderr; do echo "== $f"; grep -i "warning\|~1\|Building\|flag" "$f" | head -60; done
+          echo "== files under aws-lc-sys build dirs that mention RUNNER~1:"; grep -rl 'RUNNER~1' $B/aws-lc-sys-*/ 2>/dev/null | head -20
+          grep -rho '[^ "]*RUNNER~1[^ "]*' $B/aws-lc-sys-*/ 2>/dev/null | sort | uniq -c | sort -rn | head -20
+
+      - name: Second build at the same path
+        shell: bash
+        run: |
+          set -euo pipefail
+          T="target/${{ matrix.target }}/release-dist"
+          mkdir -p "$RUNNER_TEMP/b1"; cp "$T/${{ matrix.bin }}" "$T"/*.pdb "$RUNNER_TEMP/b1/"
+          mv target "$RUNNER_TEMP/target1"
+          FUIGO_VERSION=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
+          export FUIGO_VERSION
+          cargo build --profile release-dist --target ${{ matrix.target }} -p fuigo-pager-bin
+
+      # Text only: hashes, decoded strings/bytes and a byte diff of the two in-job builds. The exe is not uploaded.
+      - name: Diagnose
+        shell: bash
+        run: |
+          set -euo pipefail
+          T="target/${{ matrix.target }}/release-dist"
+          python .github/repro-diag.py "$RUNNER_TEMP/b1/${{ matrix.bin }}" "$(ls "$RUNNER_TEMP"/b1/*.pdb | head -1)" \
+            "$T/${{ matrix.bin }}" "$(ls "$T"/*.pdb | head -1)" "$RUNNER_TEMP/repro-x64-rep${{ matrix.rep }}.txt" | grep -v '^\[known-block\|^\[blocks-exe1\]'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: repro-x64-rep${{ matrix.rep }}
+          path: ${{ runner.temp }}/repro-x64-rep${{ matrix.rep }}.txt
+          retention-days: 1
