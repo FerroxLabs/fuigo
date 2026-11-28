@@ -27,9 +27,14 @@ fn main() {
         println!("cargo:rerun-if-changed={path}");
     }
 
-    let commit = git_stdout(&["rev-parse", "HEAD"])
-        .map(|s| s.chars().take(12).collect::<String>())
+    // Stamp the TREE, not the commit: a release squash commit and its dry-run branch tip share a
+    // tree but not a HEAD, and the 12-char literal alters the machine code. FUIGO_BUILD_ID pins it.
+    println!("cargo:rerun-if-env-changed=FUIGO_BUILD_ID");
+    let commit = std::env::var("FUIGO_BUILD_ID")
+        .ok()
         .filter(|s| s.len() == 12)
+        .or_else(|| git_stdout(&["rev-parse", "HEAD^{tree}"]).map(|s| s.chars().take(12).collect()))
+        .filter(|s: &String| s.len() == 12)
         .unwrap_or_else(|| "unknown".to_string());
 
     // The version half of the stamp must be the SAME value `fuigo_version::VERSION`

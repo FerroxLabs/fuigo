@@ -3239,12 +3239,7 @@ async fn finish_update_on_exit(
 fn build_update_config() -> UpdateConfig {
     let environment = fuigo_shell::env::FuigoBuildEnvironment::from_flags(false, false);
     let mut config = UpdateConfig::from_environment(&environment);
-    cryptify::flow_stmt!({
-        {
-            config.deployment_key =
-                fuigo_shell::agent::config::EndpointsConfig::default().deployment_key;
-        }
-    });
+    config.deployment_key = fuigo_shell::agent::config::EndpointsConfig::default().deployment_key;
     config.npm_registry = std::env::var(obfstr::obfstr!("FUIGO_NPM_REGISTRY"))
         .ok()
         .or_else(fuigo_shell::util::config::load_npm_registry_sync);

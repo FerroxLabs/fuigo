@@ -119,28 +119,38 @@ refuses "refuses a tarball that does not match dist.integrity" "the registry say
 # sourceCommit is the stamp read from the binaries, not this run's commit.
 refuses "refuses unsigned macOS and Windows registry binaries" "not signed with the release identity" \
   env -u FUIGO_ALLOW_UNSIGNED "$HERE/registry-release-inputs.sh" "$VERSION" "$WORK/unsigned/bin" "$WORK/unsigned/npm"
-cp -R "$FX" "$WORK/registry-stamp"
+# The stamp is the source tree id: a binary stamped with this checkout's tree records this run's commit.
+TREE12=$(git -C "$HERE" rev-parse 'HEAD^{tree}' | cut -c1-12)
+for name in stamp tree; do
+stamp=aaaaaaaaaaaa; [ "$name" = tree ] && stamp=$TREE12
+cp -R "$FX" "$WORK/registry-$name"
 # shellcheck disable=SC2016 # JavaScript, not shell: the ${...} are template literals
 node -e '
   const fs = require("fs"), path = require("path"), zlib = require("zlib"), crypto = require("crypto");
   const {execFileSync} = require("child_process");
-  const [fx, version] = process.argv.slice(1);
+  const [fx, version, stamp] = process.argv.slice(1);
   const base = `fuigo-linux-x64-${version}`;
   const stage = path.join(fx, "stage", "package");
   fs.mkdirSync(path.join(stage, "bin"), {recursive: true});
   fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify({name: "@fuigo/linux-x64", version}));
   fs.writeFileSync(path.join(stage, "bin", "fuigo.br"),
-    zlib.brotliCompressSync(Buffer.from(`#!/bin/sh\necho "fuigo ${version} (aaaaaaaaaaaa)"\n`)));
+    zlib.brotliCompressSync(Buffer.from(`#!/bin/sh\necho "fuigo ${version} (${stamp})"\n`)));
   execFileSync("tar", ["-czf", path.join(fx, base + ".tgz"), "-C", path.dirname(stage), "package"]);
   fs.writeFileSync(path.join(fx, base + ".integrity"),
     "sha512-" + crypto.createHash("sha512").update(fs.readFileSync(path.join(fx, base + ".tgz"))).digest("base64"));
-' "$WORK/registry-stamp" "$VERSION"
-make_shim "$WORK/shim-stamp" "$WORK/registry-stamp"
+' "$WORK/registry-$name" "$VERSION" "$stamp"
+make_shim "$WORK/shim-$name" "$WORK/registry-$name"
+done
 check "layout with a stamped linux binary succeeds" \
   env PATH="$WORK/shim-stamp:$PATH" GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   "$HERE/registry-release-inputs.sh" "$VERSION" "$WORK/stamp/bin" "$WORK/stamp/npm"
 check "sourceCommit is the binary stamp, not this run's GITHUB_SHA" \
   test "$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).sourceCommit)' "$WORK/stamp/npm/release-manifest.json")" = aaaaaaaaaaaa
+check "a stamp matching this checkout's tree records this run's GITHUB_SHA" \
+  env PATH="$WORK/shim-tree:$PATH" GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$HERE/registry-release-inputs.sh" "$VERSION" "$WORK/tree/bin" "$WORK/tree/npm"
+check "sourceCommit is that GITHUB_SHA" \
+  test "$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).sourceCommit)' "$WORK/tree/npm/release-manifest.json")" = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 check "sourceCommit is null when no stamp can be read" \
   test "$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).sourceCommit)' "$WORK/ok/npm/release-manifest.json")" = null
 
@@ -173,9 +183,27 @@ rm "$WORK/verified/verified-win32-arm64.json"
 refuses "rejects a platform whose verifier never reported" "no verified digests for win32-arm64" \
   node "$HERE/verify-release-digests.js" "$VERSION" "$WORK/verified" "$WORK/ok/release"
 
+echo "smoke-version"
+ROOT=$(cd "$HERE/../.." && pwd)
+REAL=$(grep -m1 '^version' "$ROOT/crates/codegen/fuigo-version/Cargo.toml" | cut -d'"' -f2)
+TREE=$(git -C "$ROOT" rev-parse 'HEAD^{tree}')
+fake_bin() { printf '#!/bin/sh\necho "%s"\n' "$2" > "$1"; chmod +x "$1"; }
+fake_bin "$WORK/smoke-ok" "fuigo $REAL (${TREE:0:12})"
+fake_bin "$WORK/smoke-full" "fuigo $REAL ($TREE)"
+fake_bin "$WORK/smoke-commit" "fuigo $REAL ($(git -C "$ROOT" rev-parse HEAD | cut -c1-12))"
+# shellcheck disable=SC2016
+check "accepts a binary stamped with the 12-hex source tree id" \
+  sh -c 'cd "$1" && "$2" "$3"' _ "$ROOT" "$HERE/smoke-version.sh" "$WORK/smoke-ok"
+# shellcheck disable=SC2016
+refuses "rejects a binary stamped with the full 40-hex tree id" "binary identity mismatch" \
+  sh -c 'cd "$1" && "$2" "$3"' _ "$ROOT" "$HERE/smoke-version.sh" "$WORK/smoke-full"
+# shellcheck disable=SC2016
+refuses "rejects a binary stamped with the commit id" "binary identity mismatch" \
+  sh -c 'cd "$1" && "$2" "$3"' _ "$ROOT" "$HERE/smoke-version.sh" "$WORK/smoke-commit"
+
 echo "lint"
 if command -v shellcheck >/dev/null; then
-  check "shellcheck is clean" shellcheck "$HERE/registry-release-inputs.sh" "$HERE/github-release-assets.sh" "$HERE/test-release-scripts.sh"
+  check "shellcheck is clean" shellcheck "$HERE/registry-release-inputs.sh" "$HERE/github-release-assets.sh" "$HERE/smoke-version.sh" "$HERE/test-release-scripts.sh"
 else
   echo "  skip shellcheck (not installed)"
 fi

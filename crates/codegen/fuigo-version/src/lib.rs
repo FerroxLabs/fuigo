@@ -14,11 +14,11 @@ pub const VERSION: &str = match option_env!("FUIGO_VERSION") {
 /// The release pipeline always injects `FUIGO_VERSION`; without it the build is from source.
 pub const IS_DEV_BUILD: bool = option_env!("FUIGO_VERSION").is_none();
 
-/// Runtime-injected `"<version> (<shortcommit>)"` string.
-/// Only the release binary stamps the commit in its own build.rs and injects it here at startup, so the lib crates don't recompile on every commit.
+/// Runtime-injected `"<version> (<shorttree>)"` string.
+/// Only the release binary stamps the source tree id in its own build.rs and injects it here at startup, so the lib crates don't recompile on every commit.
 static FULL_VERSION: OnceLock<&'static str> = OnceLock::new();
 
-/// Inject the binary's stamped `"<version> (<shortcommit>)"` string.
+/// Inject the binary's stamped `"<version> (<shorttree>)"` string.
 /// Idempotent: the first set wins, repeats are ignored.
 pub fn set_full_version(v: &'static str) {
     let _ = FULL_VERSION.set(v);
